@@ -31,7 +31,11 @@
     "ports": "Escaneo de puertos",
     "speedtest": "Prueba de velocidad",
     "settings": "Ajustes",
-    "groups": { "network": "Red", "probes": "Sondas", "config": "Config" }
+    "groups": {
+      "network": "Red",
+      "probes": "Sondas",
+      "config": "Config"
+    }
   },
   "banners": {
     "update_icon_title": "Nueva versión",
@@ -176,7 +180,12 @@
     "remove": "Eliminar",
     "uptime_samples": "uptime · {n} muestras",
     "uptime_samples_failed": "uptime · {n} muestras · {f} fallidas",
-    "stats": { "avg": "avg", "p95": "p95", "min": "min", "max": "max" },
+    "stats": {
+      "avg": "avg",
+      "p95": "p95",
+      "min": "min",
+      "max": "max"
+    },
     "export": "↓ Informe SLA",
     "export_modal_title": "Exportar informe SLA",
     "export_select_all": "Seleccionar todo",
@@ -239,7 +248,8 @@
     "udp_ports": "Puertos UDP",
     "new_profile": "Nuevo perfil",
     "save": "Guardar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "no_open": "Ningún puerto abierto"
   },
   "speedtest": {
     "title": "Prueba de velocidad",

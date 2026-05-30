@@ -296,8 +296,14 @@ async fn cmd_start_ping(
 
 #[tauri::command]
 async fn cmd_stop_ping(ip: String, state: tauri::State<'_, SharedState>) -> Result<(), String> {
-    let mut map = state.ping_stop.lock().unwrap_or_else(|p| p.into_inner());
-    map.insert(ip, true);
+    {
+        let mut map = state.ping_stop.lock().unwrap_or_else(|p| p.into_inner());
+        map.insert(ip.clone(), true);
+    }
+    // Purge l'historique pour que cmd_get_monitoring_snapshot ne ré-injecte pas
+    // l'hôte au prochain (ré)hydratation du front (sinon il « réapparaît » après
+    // suppression du monitoring).
+    state.monitoring.clear_ip(&ip);
     Ok(())
 }
 

@@ -181,16 +181,21 @@
             {#if entry.tcpResults.length === 0 && entry.scanning}
               <div class="pending">{$_('port_scan.pending')}</div>
             {:else}
-              <div class="port-grid">
-                {#each entry.tcpResults as r}
-                  <div class="port-row" class:open={r.open}>
-                    <span class="dot" class:green={r.open}></span>
-                    <span class="port-num">{r.port}</span>
-                    <span class="service">{r.service}</span>
-                    <span class="status">{r.open ? $_('port_scan.state_open') : $_('port_scan.state_closed')}</span>
-                  </div>
-                {/each}
-              </div>
+              {@const openTcp = entry.tcpResults.filter(r => r.open)}
+              {#if openTcp.length === 0}
+                <div class="pending">{$_('port_scan.no_open')}</div>
+              {:else}
+                <div class="port-grid">
+                  {#each openTcp as r}
+                    <div class="port-row open">
+                      <span class="dot green"></span>
+                      <span class="port-num">{r.port}</span>
+                      <span class="service">{r.service}</span>
+                      <span class="status">{$_('port_scan.state_open')}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             {/if}
 
             <div class="section-title">
@@ -200,16 +205,21 @@
             {#if entry.udpResults.length === 0 && entry.scanning}
               <div class="pending">{$_('port_scan.pending')}</div>
             {:else}
-              <div class="port-grid">
-                {#each entry.udpResults as r}
-                  <div class="port-row" class:open={r.open}>
-                    <span class="dot" class:green={r.open}></span>
-                    <span class="port-num">{r.port}</span>
-                    <span class="service">{r.service}</span>
-                    <span class="status">{r.open ? $_('port_scan.state_open') : '—'}</span>
-                  </div>
-                {/each}
-              </div>
+              {@const openUdp = entry.udpResults.filter(r => r.open)}
+              {#if openUdp.length === 0}
+                <div class="pending">{$_('port_scan.no_open')}</div>
+              {:else}
+                <div class="port-grid">
+                  {#each openUdp as r}
+                    <div class="port-row open">
+                      <span class="dot green"></span>
+                      <span class="port-num">{r.port}</span>
+                      <span class="service">{r.service}</span>
+                      <span class="status">{$_('port_scan.state_open')}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             {/if}
           </div>
         {/if}

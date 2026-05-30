@@ -23,7 +23,19 @@ function createMonitoringStore() {
   let initPromise: Promise<void> | null = null;
   let tickUnlisten: UnlistenFn | null = null;
 
-  const record = (ip: string, alive: boolean, latency_ms: number | null, timestamp: number) =>
+  // Hôtes récemment supprimés : on ignore les ticks « en vol » qui arrivent
+  // juste après le stop (le backend peut émettre un dernier tick si le stop
+  // tombe pendant un ping déjà lancé), sinon record() recrée l'entrée et
+  // l'hôte « réapparaît » dans le monitoring après suppression.
+  const tombstones = new Map<string, number>(); // ip -> expiration (ms epoch)
+  const TOMBSTONE_MS = 3000;
+
+  const record = (ip: string, alive: boolean, latency_ms: number | null, timestamp: number) => {
+    const until = tombstones.get(ip);
+    if (until !== undefined) {
+      if (Date.now() < until) return;      // tick tardif → ignoré
+      tombstones.delete(ip);               // expiré → on nettoie
+    }
     update(map => {
       // Auto-enregistrement : quand un tick arrive pour une IP inconnue
       // (cas classique du client web qui se connecte alors qu'un monitoring
@@ -36,6 +48,7 @@ function createMonitoringStore() {
       map.set(ip, host);
       return new Map(map);
     });
+  };
 
   async function init() {
     if (initPromise) return initPromise;
@@ -81,10 +94,15 @@ function createMonitoringStore() {
     subscribe,
     init,
     addHost: (ip: string) => update(map => {
+      tombstones.delete(ip); // (ré)ajout explicite → on lève le tombstone
       if (!map.has(ip)) map.set(ip, { ip, current: null, history: [] });
       return new Map(map);
     }),
-    removeHost: (ip: string) => update(map => { map.delete(ip); return new Map(map); }),
+    removeHost: (ip: string) => update(map => {
+      tombstones.set(ip, Date.now() + TOMBSTONE_MS);
+      map.delete(ip);
+      return new Map(map);
+    }),
     record,
     // Pour le hot reload dev seulement — jamais appelé en prod.
     _teardown: () => {
