@@ -533,7 +533,11 @@ async fn cmd_run_speedtest(state: tauri::State<'_, SharedState>) -> Result<Speed
     };
     state.speedtest.mark_running();
     state.emit("speedtest:running", serde_json::json!({ "running": true }));
-    let res = run_speedtest(src, iface_for_cli).await;
+    let cancel = state.speedtest.cancel_handle();
+    let res = tokio::select! {
+        r = run_speedtest(src, iface_for_cli) => r,
+        _ = cancel.notified() => Err("speedtest.errors.cancelled".to_string()),
+    };
     match &res {
         Ok(r) => {
             state.speedtest.set(r.clone());
@@ -548,11 +552,22 @@ async fn cmd_run_speedtest(state: tauri::State<'_, SharedState>) -> Result<Speed
 }
 
 #[tauri::command]
+async fn cmd_cancel_speedtest(state: tauri::State<'_, SharedState>) -> Result<(), String> {
+    state.speedtest.request_cancel();
+    state.emit("speedtest:running", serde_json::json!({ "running": false }));
+    Ok(())
+}
+
+#[tauri::command]
 async fn cmd_run_iperf3(server: String, state: tauri::State<'_, SharedState>) -> Result<SpeedResult, String> {
     let src = resolve_src_strict(state.inner())?;
     state.speedtest.mark_running();
     state.emit("speedtest:running", serde_json::json!({ "running": true }));
-    let res = run_iperf3(&server, src).await;
+    let cancel = state.speedtest.cancel_handle();
+    let res = tokio::select! {
+        r = run_iperf3(&server, src) => r,
+        _ = cancel.notified() => Err("speedtest.errors.cancelled".to_string()),
+    };
     match &res {
         Ok(r) => {
             state.speedtest.set(r.clone());
@@ -782,6 +797,7 @@ pub fn run() {
             cmd_clear_portscan_entry,
             cmd_compute_sla,
             cmd_run_speedtest,
+            cmd_cancel_speedtest,
             cmd_run_iperf3,
             cmd_get_speedtest_snapshot,
             cmd_check_update,

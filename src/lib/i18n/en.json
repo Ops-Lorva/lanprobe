@@ -278,8 +278,11 @@
       "interface_unknown": "Interface \"{iface}\" is unknown to the system.",
       "network_unreachable": "Cannot reach the Ookla servers (no network?).",
       "no_servers": "No Ookla servers available.",
-      "unknown": "Test failed: {detail}"
-    }
+      "unknown": "Test failed: {detail}",
+      "cancelled": "Test cancelled"
+    },
+    "cancel": "Cancel",
+    "cancelling": "Cancelling…"
   },
   "settings": {
     "title": "Settings",
@@ -402,5 +405,9 @@
       "interval_unit": "min",
       "hint": "Automatically run probes at regular intervals. Results are exported to InfluxDB if enabled."
     }
+  },
+  "scheduler": {
+    "auto_run": "Auto-run",
+    "unit": "min (0 = off)"
   }
 }

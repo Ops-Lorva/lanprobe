@@ -4,6 +4,8 @@
   import { listen } from '@tauri-apps/api/event';
   import { _ } from 'svelte-i18n';
   import { settings } from '../stores/settings';
+  import { scheduler } from '../stores/scheduler';
+  import SchedulerControl from './SchedulerControl.svelte';
 
   function openUrl(url: string) {
     invoke('cmd_open_url', { url }).catch((e) => console.error('open_url', e));
@@ -28,7 +30,10 @@
   // dernier résultat entre desktop et clients web via `speedtest:result`.
   // Un test lancé depuis le desktop s'affiche en direct sur le web
   // (progress → result final) et réciproquement.
+  let cancelling = $state(false);
+
   onMount(() => {
+    scheduler.init();
     (async () => {
       try {
         const snap = await invoke<{ latest: SpeedResult | null; running: boolean }>('cmd_get_speedtest_snapshot');
@@ -53,8 +58,15 @@
     return () => { unlistens.forEach(p => p.then(fn => fn()).catch(() => {})); };
   });
 
+  async function cancelTest() {
+    cancelling = true;
+    try { await invoke('cmd_cancel_speedtest'); } catch (e) { console.error(e); }
+    running = false;
+    cancelling = false;
+  }
+
   async function runTest() {
-    running = true; error = '';
+    running = true; error = ''; cancelling = false;
     try {
       // On laisse le listener `speedtest:result` peupler current/history
       // (source unique de vérité, déclenché par le backend). Sans ça, on
@@ -68,7 +80,11 @@
       } else {
         await invoke('cmd_run_speedtest');
       }
-    } catch (e) { error = formatBackendError(e); running = false; }
+    } catch (e) {
+      // Annulation volontaire → pas de message d'erreur rouge.
+      error = String(e).includes('cancelled') ? '' : formatBackendError(e);
+      running = false;
+    }
   }
 
   // Le backend renvoie soit un message brut, soit une clé i18n au format
@@ -101,9 +117,16 @@
 <div class="page">
   <div class="header">
     <h1>{$_('speedtest.title')}</h1>
-    <button class="primary" onclick={runTest} disabled={running}>
-      {running ? $_('speedtest.running') : $_('speedtest.run')}
-    </button>
+    <div class="header-actions">
+      <SchedulerControl field="speedtest_interval_min" />
+      {#if running}
+        <button class="danger" onclick={cancelTest} disabled={cancelling}>
+          {cancelling ? $_('speedtest.cancelling') : $_('speedtest.cancel')}
+        </button>
+      {:else}
+        <button class="primary" onclick={runTest}>{$_('speedtest.run')}</button>
+      {/if}
+    </div>
   </div>
   {#if error}<div class="error">{error}</div>{/if}
 
@@ -111,6 +134,9 @@
     <div class="placeholder-card">
       <div class="spinner"></div>
       <div style="margin-top: 12px;">{$_('speedtest.measuring')}</div>
+      <button class="danger cancel-inline" onclick={cancelTest} disabled={cancelling}>
+        {cancelling ? $_('speedtest.cancelling') : $_('speedtest.cancel')}
+      </button>
     </div>
   {:else if current}
     <div class="result-card">
@@ -170,7 +196,10 @@
   .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
   h1 { font-size: 20px; font-weight: 700; }
   h2 { font-size: 16px; font-weight: 600; margin: 24px 0 12px; }
+  .header-actions { display: flex; align-items: center; gap: 10px; }
   button.primary { padding: 8px 18px; border-radius: 6px; background: var(--ep-accent); border: none; color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; }
+  button.danger { padding: 8px 18px; border-radius: 6px; background: var(--ep-danger); border: none; color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; }
+  .cancel-inline { margin-top: 16px; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .error { color: var(--ep-danger); font-size: 13px; margin-bottom: 12px; }
   .result-card {

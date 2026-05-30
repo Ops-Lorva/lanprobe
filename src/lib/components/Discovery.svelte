@@ -10,6 +10,7 @@
   import { portscanProfiles } from '../stores/portscanProfiles';
   import { monitoring } from '../stores/monitoring';
   import { selectedInterface } from '../stores/selectedInterface';
+  import SchedulerControl from './SchedulerControl.svelte';
 
   // L'état vit dans le store — persiste pendant toute la session même si on change de page
   let cidr = $state('');
@@ -28,6 +29,7 @@
   let unlistenDone: (() => void) | null = null;
 
   onMount(async () => {
+    scheduler.init();
     // On redétecte toujours au mount à partir de l'interface sélectionnée :
     // sur Windows, se reposer sur le cache du store pouvait laisser le CIDR
     // du vEthernet WSL (fallback route par défaut) alors que l'utilisateur
@@ -171,6 +173,7 @@
       {:else}
         <button class="primary" onclick={scan} disabled={detecting || !cidr}>{$_('discovery.scan')}</button>
       {/if}
+      <SchedulerControl field="discovery_interval_min" />
     </div>
   </div>
 

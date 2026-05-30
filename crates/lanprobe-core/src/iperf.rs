@@ -119,6 +119,7 @@ fn resolve_iperf_bin() -> PathBuf {
 async fn run_one(server: &str, src: Option<Ipv4Addr>, reverse: bool) -> Result<IperfJson, String> {
     let bin = resolve_iperf_bin();
     let mut cmd = async_cmd(&bin);
+    cmd.kill_on_drop(true); // annulation : drop du future → process iperf3 tué
     cmd.args(["-c", server, "-J", "-t", "10"]);
     if reverse { cmd.arg("-R"); }
     if let Some(s) = src {

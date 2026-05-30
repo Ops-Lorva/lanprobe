@@ -9,9 +9,7 @@
   import { loadServerMode, saveServerMode } from '../stores/serverMode';
   import { selectedInterface } from '../stores/selectedInterface';
   import { influxDb, type InfluxDbConfig } from '../stores/influxdb';
-  import { scheduler, type SchedulerConfig } from '../stores/scheduler';
-  import { discoveryStore } from '../stores/discovery';
-  import { portscan } from '../stores/portscan';
+  import { scheduler } from '../stores/scheduler';
 
   const langs: { value: Lang; labelKey: string }[] = [
     { value: 'en', labelKey: 'settings.language.english' },
@@ -51,13 +49,6 @@
     influxCfg = { ...$influxDb, v1: { ...$influxDb.v1 }, v2: { ...$influxDb.v2 } };
   });
 
-  // Scheduler config
-  let schedCfg = $state<SchedulerConfig>({ ...$scheduler, portscan_targets: [...($scheduler.portscan_targets ?? [])] });
-
-  $effect(() => {
-    schedCfg = { ...$scheduler, portscan_targets: [...($scheduler.portscan_targets ?? [])] };
-  });
-
   async function saveInflux() {
     await influxDb.save(influxCfg);
   }
@@ -78,12 +69,6 @@
       influxTestStatus = 'fail';
       influxTestError = String(e);
     }
-  }
-
-  async function saveSched() {
-    const cidr = get(discoveryStore).cidr || schedCfg.discovery_cidr;
-    const targets = [...get(portscan).keys()];
-    await scheduler.save({ ...schedCfg, discovery_cidr: cidr, portscan_targets: targets });
   }
 
   // Compte serveur (username/password)
@@ -590,36 +575,6 @@
     </section>
   </div>
 
-  <!-- Scheduler -->
-  <div class="group">
-    <section class="section">
-      <div class="section-head">{$_('settings.scheduler.title')}</div>
-
-      <div class="row-control">
-        <span class="row-label">{$_('settings.scheduler.speedtest_label')}</span>
-        <div style="display:flex;align-items:center;gap:6px;">
-          <input type="number" min="0" style="width:80px;" bind:value={schedCfg.speedtest_interval_min} onblur={saveSched} />
-          <span class="row-label">{$_('settings.scheduler.interval_unit')}</span>
-        </div>
-      </div>
-      <div class="row-control" style="margin-top: 6px;">
-        <span class="row-label">{$_('settings.scheduler.discovery_label')}</span>
-        <div style="display:flex;align-items:center;gap:6px;">
-          <input type="number" min="0" style="width:80px;" bind:value={schedCfg.discovery_interval_min} onblur={saveSched} />
-          <span class="row-label">{$_('settings.scheduler.interval_unit')}</span>
-        </div>
-      </div>
-      <div class="row-control" style="margin-top: 6px;">
-        <span class="row-label">{$_('settings.scheduler.portscan_label')}</span>
-        <div style="display:flex;align-items:center;gap:6px;">
-          <input type="number" min="0" style="width:80px;" bind:value={schedCfg.portscan_interval_min} onblur={saveSched} />
-          <span class="row-label">{$_('settings.scheduler.interval_unit')}</span>
-        </div>
-      </div>
-      <p class="hint">{$_('settings.scheduler.hint')}</p>
-    </section>
-  </div>
-
   <!-- À propos -->
   <div class="group">
   <section class="section" style="margin-bottom:0;">
@@ -717,8 +672,7 @@
   .row-label { font-size: 13px; font-weight: 600; }
   .row-control select,
   .row-control input[type="text"],
-  .row-control input[type="password"],
-  .row-control input[type="number"] {
+  .row-control input[type="password"] {
     background: var(--ep-bg-tertiary);
     border: 1px solid var(--ep-glass-border-strong);
     color: var(--ep-text-primary);

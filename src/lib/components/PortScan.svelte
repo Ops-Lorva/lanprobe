@@ -5,6 +5,7 @@
   import { portscanProfiles, type PortScanProfile } from '../stores/portscanProfiles';
   import { scheduler } from '../stores/scheduler';
   import { get } from 'svelte/store';
+  import SchedulerControl from './SchedulerControl.svelte';
 
   let newIp = $state('');
   let showManager = $state(false);
@@ -13,7 +14,7 @@
   let editTcpText = $state('');
   let editUdpText = $state('');
 
-  onMount(() => { portscanProfiles.init(); });
+  onMount(() => { portscanProfiles.init(); scheduler.init(); });
 
   let activeId = $state('builtin:common');
   portscanProfiles.active.subscribe(v => { activeId = v; });
@@ -124,6 +125,7 @@
       <button class="icon-btn" title={$_('port_scan.manage_profiles')} onclick={() => showManager = true}>⚙</button>
       <input bind:value={newIp} placeholder={$_('port_scan.placeholder')} onkeydown={(e) => e.key === 'Enter' && addHost()} />
       <button class="primary" onclick={addHost}>{$_('port_scan.add')}</button>
+      <SchedulerControl field="portscan_interval_min" />
     </div>
   </div>
 

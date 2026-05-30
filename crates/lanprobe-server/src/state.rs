@@ -210,9 +210,21 @@ pub type PortScanState = Arc<PortScanStateInner>;
 pub struct SpeedTestStateInner {
     latest: Mutex<Option<SpeedResult>>,
     running: Mutex<bool>,
+    cancel: Arc<tokio::sync::Notify>,
 }
 
 impl SpeedTestStateInner {
+    /// Handle à attendre dans un `tokio::select!` côté commande : quand il est
+    /// notifié, on abandonne le future du speedtest (le process est tué via
+    /// `kill_on_drop`).
+    pub fn cancel_handle(&self) -> Arc<tokio::sync::Notify> {
+        self.cancel.clone()
+    }
+    /// Demande l'annulation du test en cours.
+    pub fn request_cancel(&self) {
+        self.cancel.notify_waiters();
+        self.mark_stopped();
+    }
     pub fn set(&self, result: SpeedResult) {
         if let Ok(mut g) = self.latest.lock() {
             *g = Some(result);

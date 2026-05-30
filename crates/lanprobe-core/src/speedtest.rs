@@ -389,6 +389,9 @@ async fn run_ookla_cli(bind_arg: Option<&str>, bind_flag: &str, iface_for_err: O
     let bin = ensure_ookla_cli().await?;
 
     let mut cmd = async_cmd(&bin);
+    // Permet l'annulation : si le future est abandonné (tokio::select! côté
+    // serveur sur cmd_cancel_speedtest), le Child est droppé et le process tué.
+    cmd.kill_on_drop(true);
     cmd.args(["--format=json", "--accept-license", "--accept-gdpr"]);
     if let Some(arg) = bind_arg {
         // Sur Windows : `-i <ip>` (IP source, bind par adresse).

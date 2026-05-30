@@ -20,16 +20,23 @@ const DEFAULT_SCHEDULER: SchedulerConfig = {
 function createSchedulerStore() {
   const { subscribe, set } = writable<SchedulerConfig>({ ...DEFAULT_SCHEDULER, portscan_targets: [] });
 
+  // Idempotent : la config peut désormais être chargée depuis plusieurs
+  // composants (Discovery / PortScan / SpeedTest), on ne charge qu'une fois.
+  let initPromise: Promise<void> | null = null;
   async function init() {
-    const store = await getConfigStore();
-    const saved = await store.get<SchedulerConfig>('scheduler');
-    if (saved) {
-      set({
-        ...DEFAULT_SCHEDULER,
-        ...saved,
-        portscan_targets: Array.isArray(saved.portscan_targets) ? saved.portscan_targets : [],
-      });
-    }
+    if (initPromise) return initPromise;
+    initPromise = (async () => {
+      const store = await getConfigStore();
+      const saved = await store.get<SchedulerConfig>('scheduler');
+      if (saved) {
+        set({
+          ...DEFAULT_SCHEDULER,
+          ...saved,
+          portscan_targets: Array.isArray(saved.portscan_targets) ? saved.portscan_targets : [],
+        });
+      }
+    })();
+    return initPromise;
   }
 
   async function save(cfg: SchedulerConfig) {

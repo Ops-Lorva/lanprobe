@@ -278,8 +278,11 @@
       "interface_unknown": "L'interface « {iface} » est inconnue du système.",
       "network_unreachable": "Impossible de joindre les serveurs Ookla (pas de réseau ?).",
       "no_servers": "Aucun serveur Ookla disponible.",
-      "unknown": "Échec du test : {detail}"
-    }
+      "unknown": "Échec du test : {detail}",
+      "cancelled": "Test annulé"
+    },
+    "cancel": "Annuler",
+    "cancelling": "Annulation…"
   },
   "settings": {
     "title": "Paramètres",
@@ -402,5 +405,9 @@
       "interval_unit": "min",
       "hint": "Lance automatiquement des sondes à intervalles réguliers. Les résultats sont exportés vers InfluxDB si activé."
     }
+  },
+  "scheduler": {
+    "auto_run": "Exécution automatique",
+    "unit": "min (0 = off)"
   }
 }
