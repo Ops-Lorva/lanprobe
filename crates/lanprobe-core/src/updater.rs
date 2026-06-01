@@ -1,8 +1,8 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-const GITHUB_REPO: &str = "Benjamin-Chianese/lanprobe";
-const GITHUB_API: &str = "https://api.github.com/repos/Benjamin-Chianese/lanprobe";
+const GITHUB_REPO: &str = "Ops-Lorva/lanprobe";
+const GITHUB_API: &str = "https://api.github.com/repos/Ops-Lorva/lanprobe";
 
 #[derive(Debug, Serialize, Clone)]
 pub struct UpdateInfo {
