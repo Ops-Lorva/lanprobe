@@ -6,8 +6,8 @@ use std::process::Command;
 // officielle pour les utilisateurs finaux (repo public, pas de SSO/firewall
 // interne, moins anxiogène qu'un instance GitLab self-hosted). Les builds
 // GitLab continuent de pousser leurs assets sur cette release via un job CI.
-const GITHUB_REPO: &str = "Benjamin-Chianese/lanprobe";
-const GITHUB_API: &str = "https://api.github.com/repos/Benjamin-Chianese/lanprobe";
+const GITHUB_REPO: &str = "Ops-Lorva/lanprobe";
+const GITHUB_API: &str = "https://api.github.com/repos/Ops-Lorva/lanprobe";
 
 #[derive(Debug, Serialize, Clone)]
 pub struct UpdateInfo {
