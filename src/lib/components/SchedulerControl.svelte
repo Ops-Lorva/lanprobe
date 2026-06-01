@@ -11,6 +11,9 @@
     label?: string;
   } = $props();
 
+  // Intervalles proposés (minutes) ; 0 = désactivé (valeur par défaut).
+  const OPTIONS = [0, 5, 10, 15, 30, 60];
+
   let value = $state<number>(0);
 
   // Reflète la valeur du store (après chargement async de la config).
@@ -30,14 +33,11 @@
 <div class="sched" title={$_('scheduler.auto_run')}>
   <span class="sched-icon">⏱</span>
   <span class="sched-label">{label || $_('scheduler.auto_run')}</span>
-  <input
-    type="number"
-    min="0"
-    bind:value
-    onblur={save}
-    onkeydown={(e) => { if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur(); }}
-  />
-  <span class="sched-unit">{$_('scheduler.unit')}</span>
+  <select bind:value onchange={save}>
+    {#each OPTIONS as opt}
+      <option value={opt}>{opt === 0 ? $_('scheduler.off') : `${opt} min`}</option>
+    {/each}
+  </select>
 </div>
 
 <style>
@@ -49,11 +49,10 @@
   }
   .sched-icon { color: var(--ep-text-muted); }
   .sched-label { color: var(--ep-text-secondary); font-weight: 600; white-space: nowrap; }
-  .sched input {
-    width: 56px; background: var(--ep-bg-secondary); border: 1px solid var(--ep-border);
+  .sched select {
+    background: var(--ep-bg-secondary); border: 1px solid var(--ep-border);
     border-radius: 6px; padding: 3px 6px; color: var(--ep-text-primary);
-    font-size: 12px; font-weight: 600; text-align: center;
+    font-size: 12px; font-weight: 600; cursor: pointer;
   }
-  .sched input:focus { outline: none; border-color: var(--ep-accent); }
-  .sched-unit { color: var(--ep-text-muted); white-space: nowrap; }
+  .sched select:focus { outline: none; border-color: var(--ep-accent); }
 </style>
