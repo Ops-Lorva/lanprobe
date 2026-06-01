@@ -408,6 +408,7 @@
   },
   "scheduler": {
     "auto_run": "Auto-run",
-    "unit": "min (0 = off)"
+    "unit": "min (0 = off)",
+    "off": "Off"
   }
 }
