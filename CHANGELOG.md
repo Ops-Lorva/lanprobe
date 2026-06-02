@@ -6,6 +6,16 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [1.1.4] - 2026-06-01
+
+### English
+- Network discovery: each device now shows its hardware vendor under the MAC address, resolved offline from an embedded IEEE OUI database (no internet lookup).
+- UI: wide tables can now be scrolled horizontally on every layout, instead of being clipped.
+
+### Français
+- Découverte réseau : chaque appareil affiche désormais son fabricant sous l'adresse MAC, résolu hors-ligne depuis une base OUI IEEE embarquée (aucun appel internet).
+- UI : les tableaux larges peuvent maintenant être faits défiler horizontalement sur tous les layouts, au lieu d'être coupés.
+
 ## [1.1.3] - 2026-06-01
 
 ### English
