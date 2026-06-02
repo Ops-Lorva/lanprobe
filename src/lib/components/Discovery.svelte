@@ -51,8 +51,8 @@
     unlistenLatency = await listen<{ ip: string; latency_ms: number }>('discovery:host_latency', ({ payload }) => {
       discoveryStore.updateLatency(payload.ip, payload.latency_ms);
     });
-    unlistenMac = await listen<{ ip: string; mac: string }>('discovery:host_mac', ({ payload }) => {
-      discoveryStore.updateMac(payload.ip, payload.mac);
+    unlistenMac = await listen<{ ip: string; mac: string; vendor: string | null }>('discovery:host_mac', ({ payload }) => {
+      discoveryStore.updateMac(payload.ip, payload.mac, payload.vendor);
     });
     unlistenDone = await listen('discovery:done', () => {
       discoveryStore.setScanning(false);
@@ -191,7 +191,10 @@
           <tr class="host-row" oncontextmenu={(e) => openContextMenu(e, h.ip)}>
             <td class="mono">{h.ip}</td>
             <td class="secondary">{h.hostname ?? '—'}</td>
-            <td class="mono secondary">{h.mac ?? '—'}</td>
+            <td class="mono secondary mac-cell">
+              <span class="mac-addr">{h.mac ?? '—'}</span>
+              {#if h.vendor}<span class="vendor">{h.vendor}</span>{/if}
+            </td>
             <td class="mono">
               {#if h.latency_ms != null}
                 <span class="latency" class:fast={h.latency_ms < 5} class:ok={h.latency_ms >= 5 && h.latency_ms < 50}>{h.latency_ms}ms</span>
@@ -229,7 +232,7 @@
 </div>
 
 <style>
-  .page { padding: 24px; }
+  .page { padding: 24px; overflow-x: auto; }
   .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
   .title-row { display: flex; align-items: center; gap: 10px; }
   h1 { font-size: 20px; font-weight: 700; }
@@ -259,7 +262,7 @@
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .error { color: var(--ep-danger); font-size: 13px; margin-bottom: 12px; }
   .placeholder { background: var(--ep-glass-bg); border: 1px dashed var(--ep-glass-border); border-radius: var(--ep-radius-lg); padding: 40px; text-align: center; color: var(--ep-text-muted); font-size: 14px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--ep-glass-border); color: var(--ep-text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
   td { padding: 8px 12px; border-bottom: 1px solid var(--ep-glass-border); }
   .host-row:hover { background: var(--ep-glass-bg); }
@@ -269,6 +272,8 @@
   .actions-cell .act:hover { border-color: var(--ep-accent); color: var(--ep-accent); }
   .mono { font-family: var(--ep-font-mono); }
   .secondary { color: var(--ep-text-secondary); }
+  .mac-cell { display: flex; flex-direction: column; line-height: 1.25; }
+  .vendor { font-size: 10px; color: var(--ep-text-muted); }
   .latency { font-weight: 600; color: var(--ep-text-secondary); }
   .latency.fast { color: var(--ep-success); }
   .latency.ok { color: var(--ep-accent); }

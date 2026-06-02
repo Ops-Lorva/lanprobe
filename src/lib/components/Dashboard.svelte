@@ -297,6 +297,7 @@
             ip={h.ip}
             hostname={h.hostname}
             mac={h.mac}
+            vendor={h.vendor}
             latencyMs={h.latency_ms ?? null}
             history={[]}
           />

@@ -5,6 +5,7 @@ export interface DiscoveredHost {
   ip: string;
   hostname: string | null;
   mac: string | null;
+  vendor: string | null;
   latency_ms: number | null;
 }
 
@@ -35,6 +36,7 @@ function createDiscoveryStore() {
           ip: host.ip,
           hostname: host.hostname ?? existing?.hostname ?? null,
           mac: host.mac ?? existing?.mac ?? null,
+          vendor: host.vendor ?? existing?.vendor ?? null,
           latency_ms: host.latency_ms ?? existing?.latency_ms ?? null,
         });
         return { ...s, results };
@@ -49,14 +51,14 @@ function createDiscoveryStore() {
         return { ...s, results };
       });
     },
-    updateMac(ip: string, mac: string) {
+    updateMac(ip: string, mac: string, vendor: string | null = null) {
       update(s => {
         const existing = s.results.get(ip);
         const results = new Map(s.results);
         if (existing) {
-          results.set(ip, { ...existing, mac });
+          results.set(ip, { ...existing, mac, vendor: vendor ?? existing.vendor ?? null });
         } else {
-          results.set(ip, { ip, hostname: null, mac, latency_ms: null });
+          results.set(ip, { ip, hostname: null, mac, vendor, latency_ms: null });
         }
         return { ...s, results };
       });
@@ -78,6 +80,7 @@ function createDiscoveryStore() {
               ip: h.ip,
               hostname: h.hostname ?? existing?.hostname ?? null,
               mac: h.mac ?? existing?.mac ?? null,
+              vendor: h.vendor ?? existing?.vendor ?? null,
               latency_ms: h.latency_ms ?? existing?.latency_ms ?? null,
             });
           }

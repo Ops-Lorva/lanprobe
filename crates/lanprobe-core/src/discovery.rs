@@ -9,6 +9,7 @@ pub struct DiscoveredHost {
     pub ip: String,
     pub hostname: Option<String>,
     pub mac: Option<String>,
+    pub vendor: Option<String>,
     pub latency_ms: Option<u64>,
 }
 

@@ -6,12 +6,13 @@
     ip: string;
     hostname?: string | null;
     mac?: string | null;
+    vendor?: string | null;
     latencyMs?: number | null;
     history?: number[];
     onPorts?: (ip: string) => void;
     onPing?: (ip: string) => void;
   }
-  let { ip, hostname, mac, latencyMs, history = [], onPorts, onPing }: Props = $props();
+  let { ip, hostname, mac, vendor, latencyMs, history = [], onPorts, onPing }: Props = $props();
 
   type State = 'alive' | 'warn' | 'down';
   const state: State = $derived(
@@ -28,7 +29,10 @@
   <span class="col dot-col"><span class="dot" style:background={dotColor}></span></span>
   <span class="col ip">{ip}</span>
   <span class="col host">{hostname || $_('common.host.unknown_hostname')}</span>
-  <span class="col mac">{mac || $_('common.host.no_mac')}</span>
+  <span class="col mac">
+    <span class="mac-addr">{mac || $_('common.host.no_mac')}</span>
+    {#if vendor}<span class="mac-vendor">{vendor}</span>{/if}
+  </span>
   <span class="col rtt" class:ok={state === 'alive'} class:warn={state === 'warn'} class:err={state === 'down'}>
     {latencyMs != null ? `${latencyMs} ms` : '—'}
   </span>
@@ -59,7 +63,8 @@
   .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
   .ip { color: var(--ep-text-primary); }
   .host { color: var(--ep-text-secondary); }
-  .mac { color: var(--ep-text-muted); font-size: 9px; }
+  .mac { color: var(--ep-text-muted); font-size: 9px; display: flex; flex-direction: column; line-height: 1.2; }
+  .mac-vendor { color: var(--ep-text-muted); opacity: .8; }
   .rtt.ok { color: var(--ep-success); }
   .rtt.warn { color: var(--ep-warning); }
   .rtt.err { color: var(--ep-danger); }

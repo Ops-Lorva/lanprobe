@@ -136,7 +136,7 @@
 <style>
   .app { display: flex; height: 100vh; overflow: hidden; background: var(--ep-bg-primary); position: relative; }
   .app.layout-single, .app.layout-grouped { flex-direction: column; }
-  .main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .main-area { flex: 1; display: flex; flex-direction: column; overflow-y: hidden; overflow-x: auto; min-width: 0; }
   .content { flex: 1; overflow-y: auto; }
 
   /* ── Topbar (single + grouped) ─────────────────────── */
@@ -205,7 +205,7 @@
   .ico-btn:hover { background: var(--ep-accent-dim); border-color: var(--ep-accent-glow); color: var(--ep-accent-bright); }
 
   /* ── Single layout grid ─────────────────────────────── */
-  .grid-content { padding: 14px 16px; overflow: hidden; }
+  .grid-content { padding: 14px 16px; overflow: auto; }
   .dash-grid {
     display: grid;
     grid-template-columns: repeat(12, 1fr);
@@ -220,7 +220,7 @@
     min-width: 0;
     min-height: 0;
     overflow-y: auto;
-    overflow-x: hidden;
+    overflow-x: auto;
     transition: border-color 0.15s;
   }
   .cell:hover { border-color: var(--ep-glass-border-strong); }

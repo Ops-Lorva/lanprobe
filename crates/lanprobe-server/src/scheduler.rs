@@ -272,6 +272,7 @@ async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
                         ip: ip.clone(),
                         hostname: None,
                         mac: Some(mac.clone()),
+                        vendor: lanprobe_core::oui::vendor_for_mac(mac),
                         latency_ms: None,
                     };
                     state.discovery.upsert(host.clone());
@@ -314,6 +315,7 @@ async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
                                 ip: ip.clone(),
                                 hostname,
                                 mac: None,
+                                vendor: None,
                                 latency_ms: Some(lat),
                             };
                             discovery_c.upsert(host.clone());
@@ -354,7 +356,11 @@ async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
                     state.discovery.update_mac(ip, mac.clone());
                     let _ = state.events.send(crate::state::BroadcastEvent {
                         event: "discovery:host_mac".into(),
-                        payload: json!({ "ip": ip, "mac": mac }),
+                        payload: json!({
+                            "ip": ip,
+                            "mac": mac,
+                            "vendor": lanprobe_core::oui::vendor_for_mac(mac),
+                        }),
                     });
                 }
             }

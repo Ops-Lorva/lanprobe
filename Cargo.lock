@@ -2123,7 +2123,7 @@ dependencies = [
 
 [[package]]
 name = "lanprobe"
-version = "0.7.2"
+version = "0.0.0"
 dependencies = [
  "dirs-next",
  "dns-lookup",
@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "lanprobe-core"
-version = "0.7.2"
+version = "0.0.0"
 dependencies = [
  "dirs-next",
  "dns-lookup",
@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "lanprobe-server"
-version = "0.7.2"
+version = "0.0.0"
 dependencies = [
  "argon2",
  "axum",
@@ -2174,6 +2174,7 @@ dependencies = [
  "mime_guess",
  "rand 0.10.1",
  "rcgen",
+ "reqwest",
  "rust-embed",
  "rustls",
  "rustls-pemfile",

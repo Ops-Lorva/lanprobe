@@ -375,6 +375,7 @@ async fn cmd_scan_network(
                         ip: ip.clone(),
                         hostname: None,
                         mac: Some(mac.clone()),
+                        vendor: lanprobe_core::oui::vendor_for_mac(mac),
                         latency_ms: None,
                     };
                     shared.discovery.upsert(host.clone());
@@ -408,6 +409,7 @@ async fn cmd_scan_network(
                                 ip: ip.clone(),
                                 hostname,
                                 mac: None,
+                                vendor: None,
                                 latency_ms: Some(lat),
                             };
                             shared_c.discovery.upsert(host.clone());
@@ -444,7 +446,11 @@ async fn cmd_scan_network(
                     shared.discovery.update_mac(ip, mac.clone());
                     shared.emit(
                         "discovery:host_mac",
-                        serde_json::json!({ "ip": ip, "mac": mac }),
+                        serde_json::json!({
+                            "ip": ip,
+                            "mac": mac,
+                            "vendor": lanprobe_core::oui::vendor_for_mac(mac),
+                        }),
                     );
                 }
             }
