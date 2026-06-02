@@ -40,12 +40,12 @@ pub fn vendor_for_mac(mac: &str) -> Option<String> {
     }
     let mac48 = u64::from_str_radix(&hex[..12], 16).ok()?;
     let db = db();
-    let p36 = (mac48 >> 12) as u64;            // 36 bits de poids fort
-    if let Some(v) = db.p36.get(&p36) { return Some((*v).to_string()); }
-    let p28 = (mac48 >> 20) as u32;            // 28 bits
-    if let Some(v) = db.p28.get(&p28) { return Some((*v).to_string()); }
-    let p24 = (mac48 >> 24) as u32;            // 24 bits
-    if let Some(v) = db.p24.get(&p24) { return Some((*v).to_string()); }
+    let key36 = mac48 >> 12;                    // 36 bits de poids fort
+    if let Some(v) = db.p36.get(&key36) { return Some((*v).to_string()); }
+    let key28 = (mac48 >> 20) as u32;          // 28 bits
+    if let Some(v) = db.p28.get(&key28) { return Some((*v).to_string()); }
+    let key24 = (mac48 >> 24) as u32;          // 24 bits
+    if let Some(v) = db.p24.get(&key24) { return Some((*v).to_string()); }
     None
 }
 
@@ -72,5 +72,37 @@ mod tests {
         assert_eq!(vendor_for_mac("zz:zz:zz:zz:zz:zz"), None);
         assert_eq!(vendor_for_mac("02:00:00:00:00:01"), None);
         assert_eq!(vendor_for_mac("a4:5e"), None);
+    }
+
+    /// Vérifie que la règle « préfixe le plus long gagne » s'applique correctement.
+    ///
+    /// Données réelles (oui.tsv) :
+    ///   006967   24  IEEE Registration Authority
+    ///   0069670  28  Annapurna labs
+    ///   …        28  (0069671 … 006967E existent)
+    ///   006967F  28  (ABSENT du fichier)
+    ///
+    /// → 00:69:67:0A:xx:xx → clé 28 bits = 0069670 → "Annapurna labs"
+    /// → 00:69:67:FA:xx:xx → clé 28 bits = 006967F (absent) → repli 24 bits → "IEEE Registration Authority"
+    #[test]
+    fn longest_prefix_wins() {
+        // Le préfixe 28 bits 0069670 est présent : il doit primer sur le 24 bits.
+        let specific = vendor_for_mac("00:69:67:0A:BB:CC")
+            .expect("0069670 (28-bit) doit être résolu");
+        assert!(
+            specific.to_lowercase().contains("annapurna"),
+            "attendu 'Annapurna labs', obtenu: {specific}"
+        );
+
+        // Le préfixe 28 bits 006967F est absent : on doit retomber sur le 24 bits.
+        let fallback = vendor_for_mac("00:69:67:FA:BB:CC")
+            .expect("006967 (24-bit) doit être résolu en fallback");
+        assert!(
+            fallback.to_lowercase().contains("ieee"),
+            "attendu 'IEEE Registration Authority', obtenu: {fallback}"
+        );
+
+        // Les deux résultats doivent être différents.
+        assert_ne!(specific, fallback, "le 28 bits et le 24 bits fallback doivent différer");
     }
 }
