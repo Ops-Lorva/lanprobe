@@ -60,6 +60,9 @@ impl DiscoveryStateInner {
         if host.mac.is_some() {
             entry.mac = host.mac.clone();
         }
+        if host.vendor.is_some() {
+            entry.vendor = host.vendor.clone();
+        }
         if host.latency_ms.is_some() {
             entry.latency_ms = host.latency_ms;
         }
@@ -74,6 +77,7 @@ impl DiscoveryStateInner {
     pub fn update_mac(&self, ip: &str, mac: String) {
         if let Ok(mut g) = self.hosts.lock() {
             if let Some(h) = g.get_mut(ip) {
+                h.vendor = lanprobe_core::oui::vendor_for_mac(&mac);
                 h.mac = Some(mac);
             }
         }
