@@ -232,7 +232,7 @@
 </div>
 
 <style>
-  .page { padding: 24px; }
+  .page { padding: 24px; overflow-x: auto; }
   .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
   .title-row { display: flex; align-items: center; gap: 10px; }
   h1 { font-size: 20px; font-weight: 700; }
@@ -262,7 +262,7 @@
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .error { color: var(--ep-danger); font-size: 13px; margin-bottom: 12px; }
   .placeholder { background: var(--ep-glass-bg); border: 1px dashed var(--ep-glass-border); border-radius: var(--ep-radius-lg); padding: 40px; text-align: center; color: var(--ep-text-muted); font-size: 14px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--ep-glass-border); color: var(--ep-text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
   td { padding: 8px 12px; border-bottom: 1px solid var(--ep-glass-border); }
   .host-row:hover { background: var(--ep-glass-bg); }
