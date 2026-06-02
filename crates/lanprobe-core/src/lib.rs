@@ -7,6 +7,7 @@ pub mod configure;
 pub mod permissions;
 pub mod ping;
 pub mod discovery;
+pub mod oui;
 pub mod ports;
 pub mod sla;
 pub mod speedtest;
