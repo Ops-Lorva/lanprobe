@@ -231,6 +231,7 @@ async fn dispatch(cmd: &str, args: Value, state: &AppState) -> Result<Value, Str
                                 ip: ip.clone(),
                                 hostname: None,
                                 mac: Some(mac.clone()),
+                                vendor: lanprobe_core::oui::vendor_for_mac(mac),
                                 latency_ms: None,
                             };
                             discovery.upsert(host.clone());
@@ -262,6 +263,7 @@ async fn dispatch(cmd: &str, args: Value, state: &AppState) -> Result<Value, Str
                                         ip: ip.clone(),
                                         hostname,
                                         mac: None,
+                                        vendor: None,
                                         latency_ms: Some(lat),
                                     };
                                     discovery_c.upsert(host.clone());
@@ -293,7 +295,11 @@ async fn dispatch(cmd: &str, args: Value, state: &AppState) -> Result<Value, Str
                             discovery.update_mac(ip, mac.clone());
                             let _ = events.send(crate::state::BroadcastEvent {
                                 event: "discovery:host_mac".into(),
-                                payload: json!({ "ip": ip, "mac": mac }),
+                                payload: json!({
+                                    "ip": ip,
+                                    "mac": mac,
+                                    "vendor": lanprobe_core::oui::vendor_for_mac(mac),
+                                }),
                             });
                         }
                     }
