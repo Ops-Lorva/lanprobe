@@ -51,8 +51,8 @@
     unlistenLatency = await listen<{ ip: string; latency_ms: number }>('discovery:host_latency', ({ payload }) => {
       discoveryStore.updateLatency(payload.ip, payload.latency_ms);
     });
-    unlistenMac = await listen<{ ip: string; mac: string }>('discovery:host_mac', ({ payload }) => {
-      discoveryStore.updateMac(payload.ip, payload.mac);
+    unlistenMac = await listen<{ ip: string; mac: string; vendor: string | null }>('discovery:host_mac', ({ payload }) => {
+      discoveryStore.updateMac(payload.ip, payload.mac, payload.vendor);
     });
     unlistenDone = await listen('discovery:done', () => {
       discoveryStore.setScanning(false);
