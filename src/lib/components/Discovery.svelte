@@ -191,7 +191,10 @@
           <tr class="host-row" oncontextmenu={(e) => openContextMenu(e, h.ip)}>
             <td class="mono">{h.ip}</td>
             <td class="secondary">{h.hostname ?? '—'}</td>
-            <td class="mono secondary">{h.mac ?? '—'}</td>
+            <td class="mono secondary mac-cell">
+              <span class="mac-addr">{h.mac ?? '—'}</span>
+              {#if h.vendor}<span class="vendor">{h.vendor}</span>{/if}
+            </td>
             <td class="mono">
               {#if h.latency_ms != null}
                 <span class="latency" class:fast={h.latency_ms < 5} class:ok={h.latency_ms >= 5 && h.latency_ms < 50}>{h.latency_ms}ms</span>
@@ -269,6 +272,8 @@
   .actions-cell .act:hover { border-color: var(--ep-accent); color: var(--ep-accent); }
   .mono { font-family: var(--ep-font-mono); }
   .secondary { color: var(--ep-text-secondary); }
+  .mac-cell { display: flex; flex-direction: column; line-height: 1.25; }
+  .vendor { font-size: 10px; color: var(--ep-text-muted); }
   .latency { font-weight: 600; color: var(--ep-text-secondary); }
   .latency.fast { color: var(--ep-success); }
   .latency.ok { color: var(--ep-accent); }
