@@ -12,6 +12,7 @@
   import SetupBanner from '$lib/components/SetupBanner.svelte';
   import SectionAnchor from '$lib/components/SectionAnchor.svelte';
   import InternetIndicator from '$lib/components/InternetIndicator.svelte';
+  import LogoMark from '$lib/components/LogoMark.svelte';
   import { settings } from '$lib/stores/settings';
   import { internetStatus } from '$lib/stores/internetStatus';
   import { _ } from 'svelte-i18n';
@@ -67,7 +68,7 @@
       <SetupBanner />
       <UpdateBanner />
       <nav class="top-tabs">
-        <div class="brand"><div class="brand-mark">LP</div>LanProbe</div>
+        <div class="brand"><LogoMark size={22} />LanProbe</div>
         <div class="spacer"></div>
         <InternetIndicator variant="chip" />
         <button class="ico-btn" title={$_('nav.settings')} onclick={() => (settingsOpen = true)}>⚙</button>
@@ -90,7 +91,7 @@
       <SetupBanner />
       <UpdateBanner />
       <nav class="top-tabs">
-        <div class="brand"><div class="brand-mark">LP</div>LanProbe</div>
+        <div class="brand"><LogoMark size={22} />LanProbe</div>
         <div class="tabs">
           {#each groups as g}
             <button class="tab" class:active={currentGroup === g.id} onclick={() => (currentGroup = g.id)}>
@@ -159,21 +160,6 @@
     letter-spacing: .8px;
     color: var(--ep-text-primary);
   }
-  .brand-mark {
-    width: 22px;
-    height: 22px;
-    background: var(--ep-accent-grad);
-    border-radius: 5px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 8px;
-    font-weight: 900;
-    color: #fff;
-    letter-spacing: .3px;
-    flex-shrink: 0;
-  }
-
   /* Grouped tabs */
   .tabs { display: flex; gap: 3px; }
   .tab {

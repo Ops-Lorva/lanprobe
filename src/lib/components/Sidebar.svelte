@@ -2,6 +2,7 @@
   import { _ } from 'svelte-i18n';
   import Icons, { type IconName } from './Icons.svelte';
   import InternetIndicator from './InternetIndicator.svelte';
+  import LogoMark from './LogoMark.svelte';
 
   const { currentPage, onNavigate } = $props<{
     currentPage: string;
@@ -20,7 +21,7 @@
 
 <nav class="sidebar">
   <div class="logo">
-    <div class="logo-mark">LP</div>
+    <LogoMark size={24} />
     <span class="logo-text">LanProbe</span>
   </div>
 
@@ -74,20 +75,6 @@
     padding: 6px 8px 14px;
     border-bottom: 1px solid var(--ep-glass-border);
     margin-bottom: 6px;
-  }
-  .logo-mark {
-    width: 24px;
-    height: 24px;
-    background: var(--ep-accent-grad);
-    border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 9px;
-    font-weight: 900;
-    color: #fff;
-    letter-spacing: .5px;
-    flex-shrink: 0;
   }
   .logo-text {
     font-size: 12px;

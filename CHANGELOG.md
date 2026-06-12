@@ -6,6 +6,14 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [Unreleased]
+
+### English
+- Branding: new LanProbe logo — a radar-sweep mark in the app's indigo accent. Applied across the app UI (sidebar, top bars, login/setup screens), the favicon, and all desktop app icons.
+
+### Français
+- Identité : nouveau logo LanProbe — un radar (balayage) dans l'accent indigo de l'app. Appliqué dans toute l'UI (sidebar, barres du haut, écrans de connexion/configuration), le favicon et toutes les icônes desktop.
+
 ## [1.1.4] - 2026-06-01
 
 ### English

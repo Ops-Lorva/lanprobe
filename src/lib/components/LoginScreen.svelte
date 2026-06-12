@@ -1,4 +1,5 @@
 <script lang="ts">
+  import LogoMark from './LogoMark.svelte';
   const { onDone } = $props<{ onDone: () => void }>();
 
   let username = $state('');
@@ -29,7 +30,7 @@
 
 <div class="overlay">
   <form class="card" onsubmit={submit}>
-    <h1>LanProbe</h1>
+    <div class="brand-head"><LogoMark size={44} /><h1>LanProbe</h1></div>
     <p class="sub">Connexion</p>
     <label>
       Nom d'utilisateur
@@ -48,6 +49,7 @@
   .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--ep-bg-primary, #0b0d11); }
   .card { background: var(--ep-bg-secondary, #141821); border: 1px solid var(--ep-border, #232832); border-radius: 12px; padding: 32px; width: 340px; display: flex; flex-direction: column; gap: 14px; color: var(--ep-text-primary, #e6e9ef); }
   h1 { font-size: 22px; font-weight: 700; margin: 0; }
+  .brand-head { display: flex; align-items: center; gap: 12px; }
   .sub { font-size: 13px; color: var(--ep-text-secondary, #9aa2b1); margin: -4px 0 8px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ep-text-secondary, #9aa2b1); }
   input { background: var(--ep-bg-tertiary, #1b2029); border: 1px solid var(--ep-border, #232832); border-radius: 6px; padding: 9px 11px; color: var(--ep-text-primary, #e6e9ef); font-family: var(--ep-font-mono, monospace); font-size: 13px; }
