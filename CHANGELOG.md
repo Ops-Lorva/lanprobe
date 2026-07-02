@@ -8,6 +8,8 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-07-02
+
 ### English
 - Branding: new LanProbe logo — a radar-sweep mark in the app's indigo accent. Applied across the app UI (sidebar, top bars, login/setup screens), the favicon, and all desktop app icons.
 
