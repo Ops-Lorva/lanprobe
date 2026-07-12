@@ -4,6 +4,7 @@
 
   let username = $state('');
   let password = $state('');
+  let token = $state('');
   let busy = $state(false);
   let error = $state('');
 
@@ -12,12 +13,13 @@
     error = '';
     if (!username.trim()) { error = 'Nom d\'utilisateur requis'; return; }
     if (password.length < 8) { error = 'Mot de passe : 8 caractères minimum'; return; }
+    if (!token.trim()) { error = 'Token de setup requis'; return; }
     busy = true;
     try {
       const r = await fetch('/api/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username.trim(), password }),
+        body: JSON.stringify({ username: username.trim(), password, token: token.trim() }),
       });
       if (!r.ok) throw await r.text();
       // Enchaîne sur un login pour obtenir le cookie de session.
@@ -49,6 +51,11 @@
       Mot de passe
       <input type="password" bind:value={password} autocomplete="new-password" />
     </label>
+    <label>
+      Token de setup
+      <input type="text" bind:value={token} autocomplete="off" spellcheck="false" />
+      <span class="hint">Sur le serveur : <code>sudo cat /var/lib/lanprobe/setup-token</code> (ou <code>journalctl -u lanprobe-server</code>).</span>
+    </label>
     {#if error}<p class="error">{error}</p>{/if}
     <button type="submit" disabled={busy}>{busy ? 'Création…' : 'Créer le compte'}</button>
   </form>
@@ -61,6 +68,8 @@
   .brand-head { display: flex; align-items: center; gap: 12px; }
   .sub { font-size: 13px; color: var(--ep-text-secondary, #9aa2b1); margin: -4px 0 8px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ep-text-secondary, #9aa2b1); }
+  .hint { font-size: 11px; color: var(--ep-text-secondary, #9aa2b1); opacity: .8; }
+  .hint code { font-family: var(--ep-font-mono, monospace); background: var(--ep-bg-tertiary, #1b2029); padding: 1px 4px; border-radius: 3px; }
   input { background: var(--ep-bg-tertiary, #1b2029); border: 1px solid var(--ep-border, #232832); border-radius: 6px; padding: 9px 11px; color: var(--ep-text-primary, #e6e9ef); font-family: var(--ep-font-mono, monospace); font-size: 13px; }
   button { margin-top: 6px; padding: 10px 16px; border-radius: 6px; border: 1px solid var(--ep-accent, #5b8df0); background: var(--ep-accent, #5b8df0); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .6; cursor: default; }

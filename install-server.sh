@@ -114,6 +114,11 @@ if [[ -d /run/systemd/system ]]; then
   echo "  Status : sudo systemctl status ${SERVICE}"
   echo "  Logs   : sudo journalctl -u ${SERVICE} -f"
   echo "  Config : /var/lib/lanprobe/"
+  echo ""
+  echo "  First-time setup — the initial admin account is protected by a"
+  echo "  one-time setup token (regenerated on every start until an admin"
+  echo "  exists). Read it, then enter it in the web setup form:"
+  echo "    sudo cat /var/lib/lanprobe/setup-token"
 else
   echo ""
   echo "lanprobe-server ${INSTALL_VERSION} installed (no systemd detected)."
