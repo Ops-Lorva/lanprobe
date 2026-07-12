@@ -89,6 +89,24 @@ pub async fn start(cfg: StartConfig) -> Result<ServerHandle, String> {
         state
     };
 
+    // Tant qu'aucun admin n'existe, on génère un token de setup à haute
+    // entropie que `POST /api/setup` devra présenter. Ça ferme la fenêtre de
+    // course où n'importe qui sur le LAN pouvait devenir l'unique admin entre
+    // le `systemctl start` et le setup manuel de l'opérateur.
+    let token_path = auth::default_setup_token_path(&cfg.config_dir);
+    match state.auth.init_setup_token(&token_path) {
+        Ok(Some(token)) => {
+            tracing::warn!(
+                "aucun admin configuré — token de setup requis pour POST /api/setup.\n\
+                 Token : {token}\n\
+                 (aussi lisible dans {} — permissions 0600)",
+                token_path.display()
+            );
+        }
+        Ok(None) => {}
+        Err(e) => tracing::error!("impossible de générer le token de setup : {e}"),
+    }
+
     let influx_state = state.clone();
     tokio::spawn(crate::influxdb::run(influx_state));
     let sched_state = state.clone();

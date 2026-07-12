@@ -2,11 +2,35 @@ use std::net::Ipv4Addr;
 use super::proc::sync_cmd;
 
 /// Valide qu'une chaîne est une adresse IPv4 valide (ou vide pour les champs
-/// optionnels). Empêche l'injection de commandes dans les scripts netsh/nmcli.
+/// optionnels). Empêche l'injection de commandes via les champs IP dans les
+/// scripts netsh/nmcli. Le nom d'interface, lui, est validé séparément par
+/// `validate_interface`.
 fn validate_ipv4(val: &str, field: &str) -> Result<(), String> {
     if val.is_empty() { return Ok(()); }
     val.parse::<Ipv4Addr>()
         .map_err(|_| format!("'{field}' n'est pas une adresse IPv4 valide : {val}"))?;
+    Ok(())
+}
+
+/// Valide un nom d'interface avant de l'interpoler dans un script exécuté en
+/// élévation (le `.bat` netsh sous Windows). Allowlist stricte : lettres,
+/// chiffres, espaces, tirets et parenthèses — ce qui couvre les noms Windows
+/// réels ("Ethernet", "Wi-Fi 2", "Ethernet (2)") tout en rejetant les
+/// métacaractères batch (guillemets, `&`, `|`, `%`, `^`, `<`, `>`) qui
+/// permettraient une exécution de commande arbitraire en administrateur.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn validate_interface(interface: &str) -> Result<(), String> {
+    if interface.is_empty() {
+        return Err("le nom d'interface est vide".to_string());
+    }
+    let ok = interface
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '(' | ')'));
+    if !ok {
+        return Err(format!(
+            "nom d'interface invalide (caractères non autorisés) : {interface}"
+        ));
+    }
     Ok(())
 }
 
@@ -56,7 +80,9 @@ pub struct NetworkConfig {
 }
 
 pub fn apply_static(config: &NetworkConfig) -> Result<(), String> {
-    // Valide tous les champs avant d'insérer quoi que ce soit dans un script.
+    // Valide les adresses IPv4 avant de les insérer dans un script. Le nom
+    // d'interface est validé par `validate_interface` dans l'implémentation
+    // Windows, juste avant la construction du .bat exécuté en élévation.
     validate_ipv4(&config.ip, "ip")?;
     validate_ipv4(&config.subnet, "subnet")?;
     validate_ipv4(&config.gateway, "gateway")?;
@@ -87,6 +113,9 @@ pub fn apply_dhcp(interface: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn apply_static_windows(config: &NetworkConfig) -> Result<(), String> {
+    // Le nom d'interface est interpolé tel quel dans le .bat lancé en admin :
+    // on le valide AVANT de construire le script.
+    validate_interface(&config.interface)?;
     let mut script = String::from("@echo off\r\n");
     // Pose l'IP/mask. Si la gateway est renseignée, on l'ajoute avec une
     // métrique de 1 ; sinon on laisse netsh n'écrire que l'adresse.
@@ -127,6 +156,8 @@ fn apply_static_windows(config: &NetworkConfig) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn apply_dhcp_windows(interface: &str) -> Result<(), String> {
+    // Idem : valide le nom d'interface avant de l'injecter dans le .bat.
+    validate_interface(interface)?;
     let script = format!(
         "@echo off\r\n\
          netsh interface ip set address name=\"{0}\" dhcp\r\nif errorlevel 1 exit /b 1\r\n\
@@ -298,5 +329,29 @@ mod tests {
     #[test]
     fn test_mask_to_cidr_16() {
         assert_eq!(mask_to_cidr("255.255.0.0"), 16);
+    }
+
+    #[test]
+    fn validate_interface_accepts_real_windows_names() {
+        for name in ["Ethernet", "Wi-Fi", "Wi-Fi 2", "Ethernet (2)", "Local Area Connection"] {
+            assert!(validate_interface(name).is_ok(), "devrait accepter : {name}");
+        }
+    }
+
+    #[test]
+    fn validate_interface_rejects_batch_metacharacters() {
+        for name in [
+            "Ethernet\" & calc.exe",
+            "Wi-Fi\"",
+            "eth&whoami",
+            "a|b",
+            "%PATH%",
+            "a^b",
+            "a<b",
+            "a>b",
+            "",
+        ] {
+            assert!(validate_interface(name).is_err(), "devrait rejeter : {name:?}");
+        }
     }
 }

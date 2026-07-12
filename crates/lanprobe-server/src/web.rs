@@ -65,13 +65,27 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> Json<Statu
 struct SetupBody {
     username: String,
     password: String,
+    /// Token de setup généré au démarrage (fichier `setup-token` du config
+    /// dir, visible aussi via `journalctl`). Peut aussi arriver via l'en-tête
+    /// `X-Setup-Token` — le champ body a la priorité s'il est renseigné.
+    #[serde(default)]
+    token: String,
 }
 
-async fn setup(State(state): State<AppState>, Json(body): Json<SetupBody>) -> Response {
+async fn setup(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<SetupBody>) -> Response {
     if body.username.trim().is_empty() || body.password.len() < 8 {
         return (StatusCode::BAD_REQUEST, "username required, password ≥ 8 chars").into_response();
     }
-    match state.auth.initial_setup(body.username.trim(), &body.password) {
+    let token = if !body.token.is_empty() {
+        body.token.clone()
+    } else {
+        headers
+            .get("x-setup-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    match state.auth.initial_setup_with_token(&token, body.username.trim(), &body.password) {
         Ok(()) => (StatusCode::OK, json!({ "ok": true }).to_string()).into_response(),
         Err(e) => (StatusCode::CONFLICT, e).into_response(),
     }
