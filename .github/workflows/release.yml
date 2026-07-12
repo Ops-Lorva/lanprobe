@@ -81,11 +81,21 @@ jobs:
           cp "$DEB" "lanprobe_${TAG}_amd64.deb"
           echo "deb=lanprobe_${TAG}_amd64.deb" >> "$GITHUB_OUTPUT"
 
+      # Signature minisign de l'asset publié (vérifiée par l'updater avant de
+      # lancer l'installeur). Génère lanprobe_<TAG>_amd64.deb.sig.
+      - name: Sign artifact (minisign)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri signer sign "${{ steps.artifacts.outputs.deb }}"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
           name: linux
-          path: ${{ steps.artifacts.outputs.deb }}
+          path: |
+            ${{ steps.artifacts.outputs.deb }}
+            ${{ steps.artifacts.outputs.deb }}.sig
           retention-days: 1
 
   build-linux-server:
@@ -210,11 +220,21 @@ jobs:
           cp "$NSIS" "$DEST"
           echo "exe=$DEST" >> "$GITHUB_OUTPUT"
 
+      # Signature minisign de l'installeur (vérifiée par l'updater avant lancement).
+      - name: Sign artifact (minisign)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri signer sign "${{ steps.artifacts.outputs.exe }}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: windows
-          path: ${{ steps.artifacts.outputs.exe }}
+          path: |
+            ${{ steps.artifacts.outputs.exe }}
+            ${{ steps.artifacts.outputs.exe }}.sig
           retention-days: 1
 
   build-macos:
@@ -418,6 +438,15 @@ jobs:
           echo "pkg=$PKG" >> "$GITHUB_OUTPUT"
           echo "pkg_sha=${PKG}.sha256" >> "$GITHUB_OUTPUT"
 
+      # Signature minisign du .pkg (celui que l'updater télécharge et vérifie).
+      # Après notarisation/staple : le staple modifie le .pkg, on signe la
+      # version finale. Le DMG n'est pas signé ici — l'updater ne l'utilise pas.
+      - name: Sign artifact (minisign)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri signer sign "${{ steps.artifacts.outputs.pkg }}"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -426,6 +455,7 @@ jobs:
             ${{ steps.artifacts.outputs.dmg }}
             ${{ steps.artifacts.outputs.dmg_sha }}
             ${{ steps.artifacts.outputs.pkg }}
+            ${{ steps.artifacts.outputs.pkg }}.sig
             ${{ steps.artifacts.outputs.pkg_sha }}
           retention-days: 1
 
