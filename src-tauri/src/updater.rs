@@ -1,3 +1,5 @@
+use base64::Engine;
+use minisign_verify::{PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
@@ -8,6 +10,39 @@ use std::process::Command;
 // GitLab continuent de pousser leurs assets sur cette release via un job CI.
 const GITHUB_REPO: &str = "Ops-Lorva/lanprobe";
 const GITHUB_API: &str = "https://api.github.com/repos/Ops-Lorva/lanprobe";
+
+// Clé PUBLIQUE minisign de LanProbe (base64 du fichier .pub, 2 lignes).
+// La clé PRIVÉE correspondante vit uniquement dans ~/.tauri/lanprobe.key
+// (poste de release) et dans le secret CI TAURI_SIGNING_PRIVATE_KEY. Chaque
+// asset publié est signé avec elle ; l'updater refuse d'exécuter un installeur
+// dont la signature `.sig` ne correspond pas à cette clé. Paire DÉDIÉE à
+// LanProbe (jamais partagée avec lorva-drive / taskori-sync).
+const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMzRDY0NUJBMENBQUExRDcKUldUWG9hb011a1hXdzR0ZmtEV1VIUjVHQWdnNWhOR3kwdDdYaXRDSGJBa1poblIyTjl3YnNLZWcK";
+
+/// Vérifie une signature minisign produite par `tauri signer sign`.
+///
+/// - `data` : octets exacts de l'installeur téléchargé.
+/// - `sig_b64` : contenu BRUT du fichier `.sig` (déjà en base64, tel quel).
+/// - `pub_key_b64` : clé publique base64 (celle de tauri.conf.json / .pub).
+///
+/// Réplique la logique de `tauri-plugin-updater` : chaque valeur base64
+/// enveloppe le texte minisign (2 lignes pour la clé, 4 pour la signature).
+fn verify_signature(data: &[u8], sig_b64: &str, pub_key_b64: &str) -> Result<(), String> {
+    let pub_key_decoded = base64_to_string(pub_key_b64)?;
+    let public_key = PublicKey::decode(&pub_key_decoded).map_err(|e| e.to_string())?;
+    let signature_decoded = base64_to_string(sig_b64)?;
+    let signature = Signature::decode(&signature_decoded).map_err(|e| e.to_string())?;
+    public_key
+        .verify(data, &signature, true)
+        .map_err(|e| e.to_string())
+}
+
+fn base64_to_string(b64: &str) -> Result<String, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct UpdateInfo {
@@ -172,6 +207,25 @@ pub async fn apply_update_impl(url: String, asset_name: String) -> Result<String
     }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
 
+    // Vérification de signature AVANT toute exécution. La CI signe chaque asset
+    // avec la clé privée LanProbe ; l'asset `.sig` est publié à côté de
+    // l'installeur (même nom + `.sig`). Sans TLS-seul-vers-GitHub : un asset de
+    // release compromis (token fuité, compte pris) ne peut plus déclencher de
+    // RCE silencieuse, car la clé privée reste hors de GitHub. On échoue fermé :
+    // pas de `.sig` valide → pas de lancement d'installeur.
+    let sig_url = format!("{}.sig", url);
+    let sig_resp = client.get(&sig_url).send().await.map_err(|e| e.to_string())?;
+    if !sig_resp.status().is_success() {
+        return Err(format!(
+            "Signature introuvable ({}.sig) : HTTP {} — mise à jour refusée",
+            asset_name,
+            sig_resp.status()
+        ));
+    }
+    let sig_b64 = sig_resp.text().await.map_err(|e| e.to_string())?;
+    verify_signature(&bytes, &sig_b64, UPDATER_PUBKEY)
+        .map_err(|e| format!("Signature invalide, mise à jour refusée : {}", e))?;
+
     let tmp_dir = std::env::temp_dir().join("lanprobe-update");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
     let dest: PathBuf = tmp_dir.join(&asset_name);
@@ -256,4 +310,34 @@ fn launch_installer(path: &std::path::Path, name: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!("Unsupported macOS asset: {}", name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Clé de TEST jetable (générée par `tauri signer generate`, sans mot de
+    // passe) — n'a RIEN à voir avec la clé de prod embarquée dans UPDATER_PUBKEY.
+    const TEST_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1NEJBRENBMkI3NTYwNzYKUldSMllIVXJ5cTFMMVl0aWp0VHdKYUY2UkJvVkFsSWttUmQrYjJiRXV5VVExVnk0dmFmL0RWRlUK";
+    // Contenu d'un `.sig` produit par `tauri signer sign` sur les octets ci-dessous.
+    const TEST_SIG: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMllIVXJ5cTFMMVROQk9iRXpBU3RmU1lRVGorY0NUaE9NVmt1UDNSMTZ2SkQ5NXcrUDNiTERKaVQyd3VrWUh2NmdwWDB0WFZYWTFJWnhkdkh6VFdYNjJWb1JaVVZjcUFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzODcwMDQ4CWZpbGU6Zml4dHVyZS5iaW4KZ0VDd0gyZFhBTWNBajZUWjh1b05oUjVSQVptMUNzMHQwYTdTQk5zWkg3bk8vOVZsSWgrRmlYaURtMWYreXRHU1ZxS0NDTTN0aDZ3UUNpOGszYnVCQkE9PQo=";
+    const TEST_DATA: &[u8] = b"lanprobe-updater-signature-fixture-v1";
+
+    #[test]
+    fn verifies_a_valid_signature() {
+        assert!(verify_signature(TEST_DATA, TEST_SIG, TEST_PUBKEY).is_ok());
+    }
+
+    #[test]
+    fn rejects_tampered_payload() {
+        let mut tampered = TEST_DATA.to_vec();
+        tampered.push(b'!');
+        assert!(verify_signature(&tampered, TEST_SIG, TEST_PUBKEY).is_err());
+    }
+
+    #[test]
+    fn rejects_signature_from_another_key() {
+        // La clé de prod ne doit pas valider une signature faite avec la clé de test.
+        assert!(verify_signature(TEST_DATA, TEST_SIG, UPDATER_PUBKEY).is_err());
+    }
 }
