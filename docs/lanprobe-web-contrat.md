@@ -29,12 +29,37 @@ de séries temporelles. Le battement de cœur est ce qui distingue une sonde
 silencieuse d'une sonde absente. Sans lui, l'interface afficherait un parc vert
 pendant qu'une sonde est débranchée depuis trois jours.
 
-## 2. Identité d'une sonde
+## 2. Sites et identité d'une sonde
+
+### Sites
+
+Les sondes sont groupées par **site**, sur le modèle Ubiquiti : un seul niveau de
+regroupement, pas de hiérarchie client → site.
+
+En pratique le site correspond au client, et les sondes portent les lieux : un
+site « Durand » contenant les sondes « Paris », « Lyon », « Entrepôt ». Rien ne
+l'impose — le nom du site est libre — mais c'est la lecture qui marche quand on
+gère plusieurs clients depuis un seul hub.
+
+**Un seul bucket InfluxDB pour tous les sites**, le site étant un *tag* sur les
+points. Un bucket Influx porte avant tout une politique de rétention — ce n'est
+pas une frontière de sécurité exploitable ici, puisque les jetons de sonde sont
+en **écriture seule** et que le jeton de lecture ne quitte jamais le hub. Le
+contrôle d'accès est fait par le hub, en SQL, pas par le découpage Influx.
+
+Découper en un bucket par site imposerait un `union()` sur N buckets dès qu'on
+veut une vue « tous les sites », et rendrait les variables Grafana pénibles. La
+seule raison légitime d'y revenir serait une **rétention différente par site** —
+on ajouterait alors un bucket dédié à ce site sans rien casser. L'inverse
+(partir en buckets et vouloir revenir) serait une migration de données.
+
+### Identité d'une sonde
 
 | Champ | Rôle | Modifiable |
 |---|---|---|
 | `probe_id` | identité technique, UUIDv4, généré par le hub | non |
 | `name` | étiquette lisible, saisie par l'utilisateur | oui |
+| `site_id` | site d'appartenance | oui (déplacement) |
 | `token` | authentifie la sonde auprès du hub | rotation possible |
 
 Le `name` est **une étiquette, pas une identité**. Le renommer ne casse pas
@@ -42,8 +67,26 @@ l'historique : les points Influx sont tagués `probe_id`, et le hub résout le n
 à l'affichage. Un parc où l'on ne peut pas renommer une sonde sans perdre ses
 courbes est un parc que personne ne renomme.
 
-Le tag Influx `host` reste écrit pour compatibilité avec les tableaux de bord
-existants, mais `probe_id` est la clé de jointure.
+Le nom d'une sonde est unique **au sein d'un site**, pas globalement : deux sites
+ont chacun le droit d'avoir leur « Baie RDC ».
+
+### Tags écrits sur les points
+
+| Tag | Stabilité | À quoi il sert |
+|---|---|---|
+| `probe_id` | stable | clé de jointure — ne change jamais |
+| `site_id` | stable | filtrage par site, résiste au renommage |
+| `probe` | change au renommage | lisibilité directe dans Grafana |
+| `site` | change au renommage | lisibilité directe dans Grafana |
+| `host` | — | conservé pour les tableaux de bord existants |
+
+On écrit **à la fois l'identifiant et le nom**, en connaissance de cause : un
+renommage crée une nouvelle série pour les tags lisibles, et les points antérieurs
+gardent l'ancien nom. Le coût en cardinalité est négligeable (quelques renommages
+sur la vie d'un parc) et le bénéfice est réel : les jointures restent stables sur
+les identifiants, et quelqu'un qui branche Grafana directement sur le bucket lit
+des noms plutôt que des UUID. Interroger toujours sur `probe_id` / `site_id`
+quand on veut l'historique complet d'une sonde.
 
 ## 3. Endpoints du hub
 
@@ -66,15 +109,33 @@ Non rejouable : consommé au premier succès.
 ### `POST /api/login` → cookie de session `HttpOnly`
 ### `POST /api/logout`
 
+### `GET /api/sites` — authentification : session **ou** identifiants du compte
+La sonde l'appelle avant l'enrôlement pour proposer une liste déroulante plutôt
+qu'un champ libre — c'est ce qui évite qu'un « Durnad » se glisse dans le parc.
+```json
+[{ "site_id": "…", "name": "Durand", "probe_count": 3 }]
+```
+
+### `POST /api/sites` — `{ "name": "Durand" }` → `201`. `409` si le nom existe déjà.
+### `PATCH /api/sites/{id}` — renommage. Les mesures passées gardent l'ancien tag `site` mais restent jointes par `site_id`.
+
 ### `POST /api/probes/enroll` — authentification : identifiants du compte
 ```json
-{ "username": "admin", "password": "...", "name": "Baie RDC" }
+{ "username": "admin", "password": "...", "name": "Paris", "site": "Durand" }
 ```
+`site` est résolu par nom, insensible à la casse. S'il n'existe pas, le hub le
+crée et le signale par `site_created: true` — le champ existe pour que l'app
+affiche « nouveau site créé », faute de quoi une faute de frappe passerait
+inaperçue jusqu'à ce qu'on cherche une sonde dans le mauvais parc.
+
 → `201`
 ```json
 {
   "probe_id": "0c1e…",
-  "name": "Baie RDC",
+  "name": "Paris",
+  "site_id": "…",
+  "site": "Durand",
+  "site_created": false,
   "token": "…",
   "influx": {
     "url": "https://lanprobe-web.example.org:8086",
@@ -89,8 +150,9 @@ Non rejouable : consommé au premier succès.
 Le jeton Influx renvoyé est **restreint en écriture au seul bucket**. Une sonde
 compromise ne peut ni lire les mesures des autres, ni les effacer.
 
-Si `name` est déjà pris, le hub répond `409` — deux sondes nommées « Bureau »
-rendent l'interface inutilisable, autant le refuser tout de suite.
+Si `name` est déjà pris **dans ce site**, le hub répond `409` — deux sondes
+« Paris » chez Durand rendent l'interface inutilisable, autant le refuser tout de
+suite. Le même nom dans un autre site est parfaitement légitime.
 
 ### `POST /api/probes/{id}/heartbeat` — authentification : `Authorization: Bearer <token sonde>`
 ```json
@@ -107,10 +169,11 @@ rendent l'interface inutilisable, autant le refuser tout de suite.
 sans écrire est visible dans l'interface **avant** qu'on découvre le trou dans les
 graphes.
 
-### `GET /api/probes` — authentification : session
+### `GET /api/probes[?site=<site_id>]` — authentification : session
 ```json
 [{
-  "probe_id": "0c1e…", "name": "Baie RDC", "platform": "linux",
+  "probe_id": "0c1e…", "name": "Paris",
+  "site_id": "…", "site": "Durand", "platform": "linux",
   "version": "1.2.0", "last_seen": 1756339200, "status": "online",
   "buffered_points": 0, "created_at": 1756332000
 }]
@@ -124,7 +187,9 @@ graphes.
 Stocker un statut obligerait quelqu'un à le mettre à jour ; une valeur dérivée ne
 peut pas mentir sur sa propre fraîcheur.
 
-### `PATCH /api/probes/{id}` — `{ "name": "Nouveau nom" }`
+### `PATCH /api/probes/{id}` — `{ "name": "Nouveau nom", "site_id": "…" }`
+Les deux champs sont facultatifs. Changer `site_id` déplace la sonde d'un site à
+l'autre ; son historique la suit, puisqu'il est joint sur `probe_id`.
 ### `DELETE /api/probes/{id}` — révoque le jeton. **Ne supprime aucune mesure.**
 ### `GET /api/probes/{id}/metrics?measurement=&range=` — requête Flux proxifiée
 
@@ -142,9 +207,16 @@ CREATE TABLE users (
   created_at    INTEGER NOT NULL
 );
 
+CREATE TABLE sites (
+  site_id    TEXT PRIMARY KEY,          -- UUIDv4
+  name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE probes (
   probe_id        TEXT PRIMARY KEY,
-  name            TEXT NOT NULL UNIQUE,
+  site_id         TEXT NOT NULL REFERENCES sites(site_id),
+  name            TEXT NOT NULL,
   token_hash      TEXT NOT NULL,        -- argon2id : jamais le jeton en clair
   platform        TEXT,
   version         TEXT,
@@ -153,7 +225,17 @@ CREATE TABLE probes (
   created_at      INTEGER NOT NULL,
   revoked_at      INTEGER
 );
+
+-- Le nom est unique DANS un site, pas globalement.
+CREATE UNIQUE INDEX probes_site_name ON probes(site_id, name COLLATE NOCASE);
 ```
+
+`COLLATE NOCASE` sur les noms : « Durand » et « durand » sont le même site.
+Sans ça, un doublon de casse crée deux parcs distincts et personne ne comprend
+pourquoi la moitié des sondes a disparu.
+
+Supprimer un site n'est pas prévu tant qu'il porte des sondes — le hub répond
+`409`. Aucune suppression en cascade dans ce projet.
 
 Le jeton de sonde est haché comme un mot de passe. Une base volée ne donne pas
 le droit d'écrire au nom des sondes.
@@ -190,9 +272,22 @@ Dans `app_config.json`, section `hub`, chiffrée par le scellement existant
 (`secrets.rs`, marqueur `enc:v1:`) :
 
 ```json
-{ "url": "https://…", "probe_id": "…", "name": "…", "token": "enc:v1:…",
+{ "url": "https://…", "probe_id": "…", "name": "…",
+  "site_id": "…", "site": "…", "token": "enc:v1:…",
   "influx": { "url": "…", "org": "…", "bucket": "…", "token": "enc:v1:…" } }
 ```
+
+La sonde a besoin de `site_id` et `site` en local parce que **c'est elle qui
+écrit les tags** sur ses points. Après un renommage de site côté hub, elle
+récupère la nouvelle valeur dans la réponse au battement de cœur :
+
+```json
+{ "ok": true, "name": "Paris", "site_id": "…", "site": "Durand" }
+```
+
+Sans ce retour, une sonde continuerait d'écrire l'ancien nom indéfiniment après
+un renommage — et le tag lisible divergerait de l'interface, ce qui est pire que
+de ne pas l'avoir.
 
 Le mot de passe du compte n'est **jamais** écrit sur disque : il sert une fois,
 à l'enrôlement.
