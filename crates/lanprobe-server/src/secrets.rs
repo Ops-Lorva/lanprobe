@@ -135,6 +135,12 @@ pub fn default_key_path(config_dir: &Path) -> PathBuf {
     config_dir.join("secret.key")
 }
 
+/// `LANPROBE_SECRET_KEY` est globale au processus alors que les tests Rust
+/// tournent en parallèle : tout test qui la manipule — ou qui exige qu'elle
+/// soit absente — prend ce verrou.
+#[cfg(test)]
+pub(crate) static ENV_KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +253,7 @@ mod tests {
 
     #[test]
     fn env_key_takes_precedence_and_writes_nothing() {
+        let _guard = ENV_KEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tmp_dir("envkey");
         let key_path = default_key_path(&dir);
         let _ = std::fs::remove_file(&key_path);

@@ -8,6 +8,14 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 
 ## [Unreleased]
 
+### English
+- Security: InfluxDB credentials (v2 token, v1 password) are now encrypted at rest in `app_config.json` (AES-256-GCM, fresh nonce per write), and the file is `0600`. Non-secret fields stay readable. Existing cleartext configs are read as-is and encrypted on the next write. The key comes from `LANPROBE_SECRET_KEY` (base64, 32 bytes — nothing is then written to the volume) or from a `0600` `secret.key` in the config dir. With no usable key, the server refuses to write a secret instead of silently storing it in cleartext.
+- Docs: added a "Security model" section stating exactly what is protected and from what — passwords are hashed (argon2id) and never encrypted, where the encryption key lives and the limits of the default location, and that TLS beyond the LAN is the operator's reverse proxy job. Documented the setup token in the first-run steps.
+
+### Français
+- Sécurité : les identifiants InfluxDB (jeton v2, mot de passe v1) sont désormais chiffrés au repos dans `app_config.json` (AES-256-GCM, nonce tiré à chaque écriture), et le fichier est en `0600`. Les champs non secrets restent lisibles. Une config existante en clair est relue telle quelle puis chiffrée à la première écriture. La clé vient de `LANPROBE_SECRET_KEY` (base64, 32 octets — rien n'est alors écrit sur le volume) ou d'un `secret.key` en `0600` dans le config-dir. Sans clé utilisable, le serveur refuse d'écrire un secret au lieu de le stocker silencieusement en clair.
+- Docs : ajout d'une section « Modèle de sécurité » qui dit exactement ce qui est protégé et contre quoi — les mots de passe sont hachés (argon2id) et jamais chiffrés, où vit la clé de chiffrement et les limites de son emplacement par défaut, et que le TLS au-delà du LAN relève du reverse proxy de l'opérateur. Le token de setup est documenté dans les étapes de premier démarrage.
+
 ## [1.1.5] - 2026-07-02
 
 ### English

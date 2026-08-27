@@ -113,6 +113,15 @@ On first access the UI shows a **setup screen** where you create the admin usern
 https://<server-ip>:8443
 ```
 
+The setup screen also asks for a **setup token**, generated on first boot and readable on the server:
+
+```bash
+sudo cat /var/lib/lanprobe/setup-token
+# or: sudo journalctl -u lanprobe-server | grep -i token
+```
+
+> **Why a token?** Without it, anyone who reaches the instance between service start and your first login could claim the admin account. Once the account exists, the token is consumed, the setup route is closed **server-side** for good, and `/api/setup` answers `409` on every later attempt — there is no "re-run setup" path.
+
 > The server generates a self-signed TLS certificate on first boot. Your browser will show a security warning — accept the exception. The cert is stored in `/var/lib/lanprobe/`.
 
 #### 4 — Open the firewall (if needed)
@@ -156,6 +165,34 @@ sudo dpkg -i lanprobe-server_vX.Y.Z_amd64.deb
 ```bash
 sudo apt remove lanprobe-server
 ```
+
+#### 🔒 Security model — what is protected, and from what
+
+LanProbe is **self-hosted only**. There is no central service, no account directory and no relay: your account and your data live in *your* instance. That also means the security boundary is yours to set. Here is the exact measure, without overselling it.
+
+| Data | At rest | Notes |
+|---|---|---|
+| User passwords (`users.json`) | **Hashed**, argon2id + per-user salt | Never encrypted — a reversible password is a flaw, not a feature. File is `0600`. |
+| InfluxDB token / password (`app_config.json`) | **Encrypted**, AES-256-GCM, fresh nonce per write | File is `0600`. Non-secret fields (URL, org, bucket, username) stay readable so you can diagnose an instance. |
+| Session tokens | In memory only | 32 random bytes, 7-day TTL, `HttpOnly` + `SameSite=Strict` + `Secure` cookie. Lost on restart, by design. |
+
+**Where the encryption key lives — read this before trusting it.** By default the key is `secret.key` (`0600`) in the same `--config-dir` as `app_config.json`. Be clear-eyed about what that buys you: it protects a **copy of the config file alone** — a backup that leaks, an exported volume, a config pasted into a bug report. It does **not** protect against someone who already has the machine or the whole volume: they read both files.
+
+For a real gain, keep the key off the volume by passing it in the environment:
+
+```bash
+# 32 random bytes, base64
+openssl rand -base64 32
+
+# systemd drop-in, Docker secret, or your secret manager
+sudo systemctl edit lanprobe-server
+# [Service]
+# Environment=LANPROBE_SECRET_KEY=<base64-32-bytes>
+```
+
+When `LANPROBE_SECRET_KEY` is set, **no key file is ever written**. Keep a copy of that key: lose it and the stored InfluxDB credentials become unreadable and must be re-entered. If no usable key is available, the server **refuses to write a secret** rather than silently downgrading it to cleartext.
+
+**Transport.** The built-in HTTPS uses a **self-signed** certificate — enough for a LAN, not a substitute for a real one. If you expose the instance beyond your LAN, put it behind your own reverse proxy (Caddy, Traefik, nginx) and let that terminate TLS with a trusted certificate. LanProbe does not obtain or renew certificates for you.
 
 ---
 

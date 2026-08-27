@@ -113,6 +113,15 @@ Au premier accès, l'UI affiche un **écran de configuration** pour créer le co
 https://<ip-du-serveur>:8443
 ```
 
+L'écran demande aussi un **token de setup**, généré au premier démarrage et lisible sur le serveur :
+
+```bash
+sudo cat /var/lib/lanprobe/setup-token
+# ou : sudo journalctl -u lanprobe-server | grep -i token
+```
+
+> **Pourquoi un token ?** Sans lui, n'importe qui atteignant l'instance entre le démarrage du service et votre première connexion pourrait s'attribuer le compte admin. Une fois le compte créé, le token est consommé, la route d'installation est fermée **côté serveur** définitivement, et `/api/setup` répond `409` à toute tentative ultérieure — il n'existe aucun chemin pour « rejouer » l'installation.
+
 > Le serveur génère un certificat TLS auto-signé au premier démarrage. Le navigateur affichera un avertissement de sécurité — accepter l'exception. Le certificat est stocké dans `/var/lib/lanprobe/`.
 
 #### 4 — Ouvrir le pare-feu (si nécessaire)
@@ -156,6 +165,34 @@ sudo dpkg -i lanprobe-server_vX.Y.Z_amd64.deb
 ```bash
 sudo apt remove lanprobe-server
 ```
+
+#### 🔒 Modèle de sécurité — ce qui est protégé, et contre quoi
+
+LanProbe est **auto-hébergé uniquement**. Aucun service central, aucun annuaire de comptes, aucun relais : votre compte et vos données vivent dans *votre* instance. Cela veut dire aussi que la frontière de sécurité vous appartient. Voici la mesure exacte, sans la survendre.
+
+| Donnée | Au repos | Remarques |
+|---|---|---|
+| Mots de passe utilisateur (`users.json`) | **Hachés**, argon2id + sel par utilisateur | Jamais chiffrés — un mot de passe réversible est une faille, pas une fonctionnalité. Fichier en `0600`. |
+| Jeton / mot de passe InfluxDB (`app_config.json`) | **Chiffrés**, AES-256-GCM, nonce tiré à chaque écriture | Fichier en `0600`. Les champs non secrets (URL, org, bucket, identifiant) restent lisibles pour pouvoir diagnostiquer une instance. |
+| Jetons de session | En mémoire uniquement | 32 octets aléatoires, TTL 7 jours, cookie `HttpOnly` + `SameSite=Strict` + `Secure`. Perdus au redémarrage, volontairement. |
+
+**Où vit la clé de chiffrement — à lire avant de lui faire confiance.** Par défaut, la clé est un fichier `secret.key` (`0600`) posé dans le même `--config-dir` que `app_config.json`. Il faut être lucide sur ce que cela apporte : cela protège une **copie du seul fichier de config** — une sauvegarde qui fuit, un volume exporté, une config collée dans un ticket. Cela ne protège **pas** contre quelqu'un qui a déjà la machine ou le volume complet : il lit les deux fichiers.
+
+Pour un vrai gain, gardez la clé hors du volume en la passant par l'environnement :
+
+```bash
+# 32 octets aléatoires, en base64
+openssl rand -base64 32
+
+# drop-in systemd, secret Docker, ou votre gestionnaire de secrets
+sudo systemctl edit lanprobe-server
+# [Service]
+# Environment=LANPROBE_SECRET_KEY=<base64-32-octets>
+```
+
+Quand `LANPROBE_SECRET_KEY` est définie, **aucun fichier de clé n'est écrit**. Conservez une copie de cette clé : la perdre rend les identifiants InfluxDB stockés illisibles, il faudra les ressaisir. Si aucune clé utilisable n'est disponible, le serveur **refuse d'écrire un secret** plutôt que de le rétrograder silencieusement en clair.
+
+**Transport.** Le HTTPS intégré s'appuie sur un certificat **auto-signé** — suffisant sur un LAN, pas un substitut à un vrai certificat. Si vous exposez l'instance au-delà de votre LAN, placez-la derrière votre propre reverse proxy (Caddy, Traefik, nginx) et laissez-le terminer le TLS avec un certificat de confiance. LanProbe n'obtient ni ne renouvelle de certificat à votre place.
 
 ---
 
