@@ -1,0 +1,41 @@
+[package]
+name = "lanprobe-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LanProbe Web — hub auto-hébergé : comptes, sites, enrôlement et supervision des sondes"
+
+[lib]
+name = "lanprobe_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lanprobe-web"
+path = "src/main.rs"
+
+[dependencies]
+lanprobe-core = { path = "../lanprobe-core" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+cookie = { version = "0.18", features = ["percent-encode"] }
+
+# `bundled` : SQLite est compilé avec le binaire. Le conteneur n'a alors
+# aucune libsqlite3 système à fournir, et la version ne dépend pas de l'image
+# de base — un hub qui plante parce que Debian a reculé d'une mineure serait
+# indéfendable pour un produit qu'on demande à l'utilisateur d'auto-héberger.
+rusqlite = { version = "0.37", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
