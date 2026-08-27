@@ -299,18 +299,43 @@ de ne pas l'avoir.
 Le mot de passe du compte n'est **jamais** écrit sur disque : il sert une fois,
 à l'enrôlement.
 
-## 7. Configuration du hub (contrat avec le packaging)
+## 7. Configuration du hub
 
-Le binaire `lanprobe-web` accepte les mêmes options que `lanprobe-server` :
-`--host`, `--port`, `--config-dir`. Variables d'environnement :
+**Principe : on configure dans l'application, pas dans l'environnement.** Une
+valeur qui vit dans un `.env` demande d'éditer un fichier, de redémarrer le
+conteneur, et se perd à la première migration de machine. On a SQLite : les
+réglages y vivent, modifiables depuis l'interface, sauvegardés avec le reste.
 
-| Variable | Rôle |
+### Ce qui reste hors de la base — et pourquoi
+
+Seulement ce qui est nécessaire **pour atteindre l'interface**, sans quoi on ne
+pourrait rien configurer du tout :
+
+| | Rôle |
 |---|---|
-| `INFLUX_TOKEN` | jeton opérateur. **Ne sort jamais du hub.** |
-| `INFLUX_URL` | URL interne d'Influx, vue du conteneur (`https://127.0.0.1:8086`) |
-| `INFLUX_ORG`, `INFLUX_BUCKET` | défauts `lanprobe` / `lanprobe` |
-| `INFLUX_ADVERTISE_URL` | URL d'Influx **renvoyée aux sondes** à l'enrôlement |
-| `LANPROBE_WEB_HOST`, `LANPROBE_WEB_PORT`, `LANPROBE_WEB_CONFIG_DIR` | défauts `0.0.0.0`, `8443`, `/data/lanprobe` |
+| `--host`, `--port` | où écouter. Défauts `0.0.0.0`, `8443`. |
+| `--config-dir` | où vit la base. Défaut `/data/lanprobe`. |
+| `<config-dir>/influx-operator-token` | jeton opérateur Influx, **lu dans un fichier du volume**, pas dans l'environnement — il est généré au premier démarrage par l'entrypoint, ce n'est pas un réglage utilisateur. **Ne sort jamais du hub.** |
+
+Aucune variable d'environnement n'est requise. Celles qui existent (`INFLUX_URL`,
+`INFLUX_ORG`, `INFLUX_BUCKET`, `INFLUX_ADVERTISE_URL`) restent acceptées comme
+**valeurs initiales** au premier démarrage, pour qui préfère préconfigurer ; dès
+qu'un réglage est écrit en base, la base gagne.
+
+### Ce qui est réglable dans l'interface (table `settings`)
+
+| Clé | Défaut | Effet |
+|---|---|---|
+| `influx_url` | `https://127.0.0.1:8086` | où le hub joint Influx |
+| `influx_org`, `influx_bucket` | `lanprobe` | org et bucket |
+| `influx_advertise_url` | déduit | URL remise **aux sondes** (voir plus bas) |
+| `retention_days` | `0` (illimité) | rétention du bucket, appliquée via l'API Influx |
+| `heartbeat_interval_secs` | `60` | cadence demandée aux sondes |
+
+Changer `retention_days` applique la nouvelle rétention au bucket. **Réduire la
+rétention supprime des données** : l'interface doit le dire explicitement et
+demander confirmation, en nommant la durée qui sera perdue. Un réglage qui efface
+sans le dire est un piège.
 
 ### L'URL annoncée n'est pas l'URL interne
 
@@ -325,9 +350,9 @@ détection automatique n'est possible — la seule réponse honnête est de rend
 valeur réglable et vérifiable.
 
 **Ordre de résolution de l'URL annoncée :**
-1. valeur réglée **dans l'interface web** (table `settings`, clé
-   `influx_advertise_url`) — c'est elle qui gagne ;
-2. sinon `INFLUX_ADVERTISE_URL` ;
+1. valeur réglée **dans l'interface web** (`settings['influx_advertise_url']`) —
+   c'est elle qui gagne ;
+2. sinon `INFLUX_ADVERTISE_URL`, si fournie au premier démarrage ;
 3. sinon, l'hôte de l'en-tête `Host` de la requête d'enrôlement, avec le port
    Influx. La sonde vient de joindre le hub à cette adresse — Influx est sur la
    même machine, c'est le meilleur pari disponible ;
