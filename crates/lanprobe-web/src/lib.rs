@@ -9,3 +9,4 @@ pub mod auth;
 pub mod db;
 pub mod influx;
 pub mod probe;
+pub mod settings;

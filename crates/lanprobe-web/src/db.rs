@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -49,6 +49,16 @@ const MIGRATIONS: &[&str] = &[
     -- Le nom est unique DANS un site, pas globalement : deux clients ont
     -- chacun le droit d'avoir leur « Paris ».
     CREATE UNIQUE INDEX probes_site_name ON probes(site_id, name COLLATE NOCASE);
+    "#,
+    // v1 → v2 : réglages modifiables depuis l'interface. Ils priment sur
+    // l'environnement — une valeur qui vit dans un `.env` demande d'éditer un
+    // fichier, de redémarrer le conteneur, et se perd à la migration suivante.
+    r#"
+    CREATE TABLE settings (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
     "#,
 ];
 
@@ -203,6 +213,38 @@ impl Db {
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    // ── Réglages ───────────────────────────────────────────────────────────
+
+    pub fn get_setting(&self, key: &str) -> DbResult<Option<String>> {
+        let conn = self.lock()?;
+        let value: Option<String> = conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?;
+        // Une chaîne vide n'est pas un réglage : ce serait une valeur qui
+        // gagne la priorité sans rien valoir.
+        Ok(value.filter(|v| !v.trim().is_empty()))
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![key, value.trim(), now()],
+        )?;
+        Ok(())
+    }
+
+    /// Écrit `value` seulement si la clé n'a jamais été réglée. Sert à
+    /// l'amorçage depuis l'environnement au premier démarrage : ensuite, la
+    /// base gagne, et modifier la variable n'a plus d'effet.
+    pub fn seed_setting(&self, key: &str, value: &str) -> DbResult<()> {
+        if self.get_setting(key)?.is_some() {
+            return Ok(());
+        }
+        self.set_setting(key, value)
     }
 
     // ── Comptes ────────────────────────────────────────────────────────────
@@ -582,6 +624,60 @@ mod tests {
         assert_eq!(db.list_sites().unwrap()[0].site_id, site.site_id);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_v2_adds_settings_without_touching_existing_data() {
+        // Une base restée en v1 doit se hisser en v2 sans perdre son parc :
+        // c'est exactement ce que fait la mise à jour d'un conteneur déjà en
+        // service.
+        let dir = tmp_dir("v1-to-v2");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert!(db.table_exists("settings").unwrap());
+        assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_setting_round_trips_and_can_be_overwritten() {
+        let db = open_memory();
+        assert!(db.get_setting("influx_advertise_url").unwrap().is_none());
+
+        db.set_setting("influx_advertise_url", "https://a.example:8086").unwrap();
+        assert_eq!(
+            db.get_setting("influx_advertise_url").unwrap().as_deref(),
+            Some("https://a.example:8086")
+        );
+
+        db.set_setting("influx_advertise_url", "https://b.example:9086").unwrap();
+        assert_eq!(
+            db.get_setting("influx_advertise_url").unwrap().as_deref(),
+            Some("https://b.example:9086")
+        );
+    }
+
+    #[test]
+    fn clearing_a_setting_falls_back_to_absent() {
+        // Vider le réglage doit rendre la main à l'environnement, pas laisser
+        // une chaîne vide qui gagnerait la priorité en ne valant rien.
+        let db = open_memory();
+        db.set_setting("influx_advertise_url", "https://a.example:8086").unwrap();
+        db.set_setting("influx_advertise_url", "   ").unwrap();
+        assert!(db.get_setting("influx_advertise_url").unwrap().is_none());
     }
 
     // ── Comptes ────────────────────────────────────────────────────────────
