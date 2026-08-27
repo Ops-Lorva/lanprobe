@@ -28,17 +28,19 @@ pub struct ProbeInfluxSettings {
     pub tls_fingerprint_sha256: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct InfluxConfig {
-    /// URL vue par le hub, depuis l'intérieur du conteneur (`INFLUX_URL`).
-    pub url: String,
-    /// URL annoncée aux sondes (`INFLUX_ADVERTISE_URL`). Facultative : sans
-    /// elle on repart de l'en-tête `Host` de l'enrôlement.
-    pub advertise_url: Option<String>,
-    pub org: String,
-    pub bucket: String,
-    pub operator_token: String,
-}
+/// Nom du fichier du volume qui porte le jeton opérateur. Il est généré au
+/// premier démarrage par l'entrypoint : ce n'est pas un réglage utilisateur,
+/// il n'a donc rien à faire ni dans la base ni dans l'interface.
+pub const OPERATOR_TOKEN_FILE: &str = "influx-operator-token";
+
+/// Variable d'environnement acceptée en repli du fichier, pour un lancement
+/// à la main hors conteneur.
+pub const OPERATOR_TOKEN_ENV: &str = "INFLUX_TOKEN";
+
+/// Variable acceptée comme niveau de repli de l'URL annoncée. Elle n'est pas
+/// amorcée en base : la garder distincte permet de dire, au diagnostic, si la
+/// valeur vient de l'interface ou de l'environnement.
+pub const ADVERTISE_URL_ENV: &str = "INFLUX_ADVERTISE_URL";
 
 /// D'où vient l'URL annoncée à une sonde. Journalisé à chaque enrôlement :
 /// une sonde qui s'enrôle puis n'écrit jamais rien est la panne la plus
@@ -46,17 +48,27 @@ pub struct InfluxConfig {
 /// reçue, et pourquoi celle-là ».
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvertiseSource {
-    Configured,
-    RequestHost,
+    /// Réglée dans l'interface — c'est elle qui gagne.
+    Settings,
+    /// `INFLUX_ADVERTISE_URL`, pour qui préfère préconfigurer.
+    Env,
+    /// L'hôte par lequel la sonde vient de joindre le hub.
+    HostHeader,
+    /// Dernier recours : l'URL interne. Elle ne marchera probablement pas pour
+    /// la sonde, mais c'est journalisé — mieux vaut une URL fausse et tracée
+    /// qu'un champ vide qui fait échouer l'app à l'autre bout.
     InternalUrl,
 }
 
 impl AdvertiseSource {
+    /// Valeur telle qu'elle part sur le fil, pour que le diagnostic dise
+    /// **d'où vient** l'URL, pas seulement qu'elle est mauvaise.
     pub fn as_str(&self) -> &'static str {
         match self {
-            AdvertiseSource::Configured => "INFLUX_ADVERTISE_URL",
-            AdvertiseSource::RequestHost => "en-tête Host de l'enrôlement",
-            AdvertiseSource::InternalUrl => "INFLUX_URL (aucun Host exploitable)",
+            AdvertiseSource::Settings => "settings",
+            AdvertiseSource::Env => "env",
+            AdvertiseSource::HostHeader => "host_header",
+            AdvertiseSource::InternalUrl => "internal_url",
         }
     }
 }
@@ -68,7 +80,10 @@ pub struct InfluxIds {
 }
 
 pub struct Influx {
-    cfg: InfluxConfig,
+    settings: crate::settings::Settings,
+    /// Jeton opérateur, lu au démarrage dans le volume. Il ne va ni en base,
+    /// ni dans une réponse d'API, ni dans un log.
+    operator_token: String,
     http: reqwest::Client,
     /// `None` tant que le provisionnement n'a pas abouti. Le hub démarre sans
     /// Influx et réessaie : refuser de démarrer parce que la base de séries
@@ -80,7 +95,7 @@ pub struct Influx {
 }
 
 impl Influx {
-    pub fn new(cfg: InfluxConfig) -> Self {
+    pub fn new(settings: crate::settings::Settings, operator_token: String) -> Self {
         // Influx est servi en HTTPS avec un certificat auto-signé, sur la
         // machine même. Aucune autorité ne peut le valider : le hub accepte
         // le certificat pour ce saut local, et transmet son empreinte aux
@@ -91,7 +106,8 @@ impl Influx {
             .build()
             .unwrap_or_default();
         Self {
-            cfg,
+            settings,
+            operator_token,
             http,
             ids: Mutex::new(None),
             tls_fingerprint: Mutex::new(None),
@@ -99,24 +115,91 @@ impl Influx {
     }
 
     /// Résout l'URL d'Influx à annoncer à une sonde, et dit d'où elle vient.
+    ///
+    /// Un conteneur ne peut pas connaître son port publié : avec `-p
+    /// 9086:8086` le processus ne voit que `8086`. Aucune détection
+    /// automatique n'est possible, d'où ces trois niveaux — dont le premier
+    /// est réglable depuis l'interface, sans redémarrage.
+    ///
+    /// **Chemin unique** : l'enrôlement et le test de joignabilité passent
+    /// tous deux par ici. Deux chemins finiraient par diverger, et le test
+    /// validerait alors une URL que la sonde ne reçoit pas.
     pub fn resolve_advertise_url(&self, host_header: Option<&str>) -> (String, AdvertiseSource) {
-        if let Some(url) = self.cfg.advertise_url.as_deref().map(str::trim) {
+        if let Some(url) = self.settings.stored_advertise_url() {
+            return (
+                url.trim().trim_end_matches('/').to_string(),
+                AdvertiseSource::Settings,
+            );
+        }
+        if let Ok(url) = std::env::var(ADVERTISE_URL_ENV) {
+            let url = url.trim();
             if !url.is_empty() {
-                return (url.trim_end_matches('/').to_string(), AdvertiseSource::Configured);
+                return (url.trim_end_matches('/').to_string(), AdvertiseSource::Env);
             }
         }
-        let (scheme, _, port) = split_url(&self.cfg.url);
+        let internal = self.settings.influx_url();
+        let (scheme, _, port) = split_url(&internal);
         if let Some(host) = host_header.map(host_without_port).filter(|h| !h.is_empty()) {
             let port = port.map(|p| format!(":{p}")).unwrap_or_default();
-            return (format!("{scheme}://{host}{port}"), AdvertiseSource::RequestHost);
+            return (format!("{scheme}://{host}{port}"), AdvertiseSource::HostHeader);
         }
-        // Dernier recours : l'URL interne. Elle ne marchera probablement pas
-        // pour la sonde, mais c'est journalisé — mieux vaut une URL fausse et
-        // tracée qu'un champ vide qui fait planter l'app à l'autre bout.
         (
-            self.cfg.url.trim_end_matches('/').to_string(),
+            internal.trim_end_matches('/').to_string(),
             AdvertiseSource::InternalUrl,
         )
+    }
+
+    /// Tente de joindre `/health` à l'URL annoncée. Un échec est un résultat
+    /// de test, pas une panne du hub : la couche HTTP répond `200` avec
+    /// `reachable: false`. Timeout court — on diagnostique, on n'attend pas.
+    pub async fn check_reachable(&self, url: &str) -> bool {
+        let target = format!("{}/health", url.trim_end_matches('/'));
+        match self
+            .http
+            .get(&target)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Applique la rétention réglée au bucket. `0` = illimitée.
+    ///
+    /// ⚠️ Influx **efface** les points au-delà de la fenêtre. La confirmation
+    /// explicite est exigée en amont, par `Settings::put` — ce module ne fait
+    /// qu'exécuter une décision déjà prise.
+    pub async fn apply_retention(&self, days: i64) -> Result<(), String> {
+        let ids = self
+            .ids()
+            .ok_or_else(|| "InfluxDB pas encore provisionné".to_string())?;
+        let rules = if days > 0 {
+            serde_json::json!([{ "type": "expire", "everySeconds": days * 86_400 }])
+        } else {
+            serde_json::json!([])
+        };
+        self.send_json(
+            reqwest::Method::PATCH,
+            &format!("/api/v2/buckets/{}", ids.bucket_id),
+            None,
+            Some(serde_json::json!({ "retentionRules": rules })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Oublie ce qui a été déduit d'anciens réglages. Appelé quand l'org, le
+    /// bucket ou l'URL changent : garder l'ancien `bucket_id` frapperait des
+    /// jetons pour un bucket que l'opérateur vient d'abandonner.
+    pub fn invalidate(&self) {
+        if let Ok(mut guard) = self.ids.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.tls_fingerprint.lock() {
+            *guard = None;
+        }
     }
 
     pub fn tls_fingerprint(&self) -> Option<String> {
@@ -130,7 +213,7 @@ impl Influx {
         if let Some(cached) = self.tls_fingerprint() {
             return Ok(cached);
         }
-        let (scheme, host, port) = split_url(&self.cfg.url);
+        let (scheme, host, port) = split_url(&self.settings.influx_url());
         if scheme != "https" {
             return Ok(String::new());
         }
@@ -198,13 +281,13 @@ impl Influx {
     pub async fn query_flux(&self, flux: &str) -> Result<String, String> {
         let url = format!(
             "{}/api/v2/query?org={}",
-            self.cfg.url.trim_end_matches('/'),
-            urlencode(&self.cfg.org)
+            self.settings.influx_url().trim_end_matches('/'),
+            urlencode(&self.settings.influx_org())
         );
         let response = self
             .http
             .post(&url)
-            .header("Authorization", format!("Token {}", self.cfg.operator_token))
+            .header("Authorization", format!("Token {}", self.operator_token))
             .header("Content-Type", "application/vnd.flux")
             .header("Accept", "application/csv")
             .body(flux.to_string())
@@ -227,8 +310,8 @@ impl Influx {
         tracing::info!("URL Influx annoncée à la sonde : {url} (source : {})", source.as_str());
         ProbeInfluxSettings {
             url,
-            org: self.cfg.org.clone(),
-            bucket: self.cfg.bucket.clone(),
+            org: self.settings.influx_org(),
+            bucket: self.settings.influx_bucket(),
             token: token.to_string(),
             tls_fingerprint_sha256: self.tls_fingerprint().filter(|f| !f.is_empty()),
         }
@@ -238,7 +321,7 @@ impl Influx {
         let value = self
             .send_json(
                 reqwest::Method::GET,
-                &format!("/api/v2/orgs?org={}", urlencode(&self.cfg.org)),
+                &format!("/api/v2/orgs?org={}", urlencode(&self.settings.influx_org())),
                 Some(&[404]),
                 None,
             )
@@ -247,7 +330,7 @@ impl Influx {
     }
 
     async fn create_org(&self) -> Result<String, String> {
-        let body = serde_json::json!({ "name": self.cfg.org });
+        let body = serde_json::json!({ "name": self.settings.influx_org() });
         let value = self
             .send_json(reqwest::Method::POST, "/api/v2/orgs", None, Some(body))
             .await?;
@@ -264,7 +347,7 @@ impl Influx {
                 &format!(
                     "/api/v2/buckets?orgID={}&name={}",
                     urlencode(org_id),
-                    urlencode(&self.cfg.bucket)
+                    urlencode(&self.settings.influx_bucket())
                 ),
                 // Influx répond 404 sur un bucket absent selon les versions —
                 // c'est une absence, pas une panne.
@@ -278,7 +361,7 @@ impl Influx {
     async fn create_bucket(&self, org_id: &str) -> Result<String, String> {
         let body = serde_json::json!({
             "orgID": org_id,
-            "name": self.cfg.bucket,
+            "name": self.settings.influx_bucket(),
             // Rétention infinie par défaut : c'est à l'opérateur de décider
             // combien de temps il garde ses mesures, pas au hub de trancher
             // à sa place en effaçant.
@@ -302,11 +385,11 @@ impl Influx {
         tolerated: Option<&[u16]>,
         body: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
-        let url = format!("{}{}", self.cfg.url.trim_end_matches('/'), path);
+        let url = format!("{}{}", self.settings.influx_url().trim_end_matches('/'), path);
         let mut req = self
             .http
             .request(method, &url)
-            .header("Authorization", format!("Token {}", self.cfg.operator_token));
+            .header("Authorization", format!("Token {}", self.operator_token));
         if let Some(body) = body {
             req = req.json(&body);
         }
@@ -498,6 +581,29 @@ async fn capture_certificate_fingerprint(host: &str, port: u16) -> Result<String
         .ok_or_else(|| "aucun certificat présenté par InfluxDB".to_string())
 }
 
+/// Charge le jeton opérateur : le fichier du volume d'abord — chemin normal,
+/// écrit par l'entrypoint au premier démarrage — puis `INFLUX_TOKEN` en repli
+/// pour un lancement à la main hors conteneur.
+pub fn load_operator_token(config_dir: &std::path::Path) -> Result<String, String> {
+    let path = config_dir.join(OPERATOR_TOKEN_FILE);
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        let token = raw.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+    if let Ok(token) = std::env::var(OPERATOR_TOKEN_ENV) {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+    Err(format!(
+        "jeton opérateur InfluxDB introuvable — attendu dans {} ou dans {OPERATOR_TOKEN_ENV}",
+        path.display()
+    ))
+}
+
 fn first_id(list: &serde_json::Value) -> Option<String> {
     list.as_array()?
         .first()?
@@ -591,6 +697,12 @@ pub(crate) mod testing {
                     return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "").into_response();
                 }
 
+                // `/health` est public côté Influx : c'est précisément ce qui
+                // permet de vérifier l'URL annoncée sans distribuer de jeton.
+                if uri.path() == "/health" {
+                    return (axum::http::StatusCode::OK, "").into_response();
+                }
+
                 // Le jeton opérateur doit voyager en `Token <…>` — c'est le
                 // schéma d'Influx 2, `Bearer` n'est pas accepté partout.
                 if !auth.starts_with("Token ") {
@@ -621,6 +733,9 @@ pub(crate) mod testing {
                     ("GET", "/api/v2/buckets") => json(r#"{"buckets":[]}"#),
                     ("POST", "/api/v2/buckets") => {
                         guard.bucket_exists = true;
+                        json(r#"{"id":"bucket-1","name":"lanprobe","orgID":"org-1"}"#)
+                    }
+                    ("PATCH", p) if p.starts_with("/api/v2/buckets/") => {
                         json(r#"{"id":"bucket-1","name":"lanprobe","orgID":"org-1"}"#)
                     }
                     ("POST", "/api/v2/authorizations") => {
@@ -695,14 +810,20 @@ pub(crate) mod testing {
         (addr, expected)
     }
 
-    pub(crate) fn config(url: &str) -> InfluxConfig {
-        InfluxConfig {
-            url: url.to_string(),
-            advertise_url: None,
-            org: "lanprobe".into(),
-            bucket: "lanprobe".into(),
-            operator_token: "jeton-operateur-secret".into(),
-        }
+    pub(crate) const OPERATOR_TOKEN: &str = "jeton-operateur-secret";
+
+    /// Réglages neufs, en base mémoire, pointant sur `url`.
+    pub(crate) fn settings_for(url: &str) -> crate::settings::Settings {
+        let db = Arc::new(crate::db::Db::open_in_memory().unwrap());
+        let settings = crate::settings::Settings::new(db);
+        settings
+            .put(crate::settings::keys::INFLUX_URL, url, false)
+            .unwrap();
+        settings
+    }
+
+    pub(crate) fn influx_for(url: &str) -> Influx {
+        Influx::new(settings_for(url), OPERATOR_TOKEN.to_string())
     }
 }
 
@@ -711,10 +832,15 @@ mod tests {
     use super::testing::*;
     use super::*;
 
+    /// `INFLUX_ADVERTISE_URL` est globale au processus alors que les tests
+    /// Rust tournent en parallèle : tout test qui la lit ou l'écrit — ou qui
+    /// exige son absence — prend ce verrou.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn provisioning_creates_the_org_and_the_bucket_when_missing() {
         let fake = FakeInflux::start(false, false).await;
-        let influx = Influx::new(config(&fake.base_url));
+        let influx = influx_for(&fake.base_url);
 
         let ids = influx.ensure_provisioned().await.unwrap();
         assert_eq!(ids.org_id, "org-1");
@@ -733,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn provisioning_creates_nothing_when_everything_exists() {
         let fake = FakeInflux::start(true, true).await;
-        let influx = Influx::new(config(&fake.base_url));
+        let influx = influx_for(&fake.base_url);
 
         influx.ensure_provisioned().await.unwrap();
 
@@ -744,7 +870,7 @@ mod tests {
     #[tokio::test]
     async fn minting_yields_a_token_restricted_to_writing_the_bucket() {
         let fake = FakeInflux::start(true, true).await;
-        let influx = Influx::new(config(&fake.base_url));
+        let influx = influx_for(&fake.base_url);
         influx.ensure_provisioned().await.unwrap();
 
         let token = influx.mint_write_token("sonde Paris").await.unwrap();
@@ -774,7 +900,7 @@ mod tests {
     #[tokio::test]
     async fn minting_before_provisioning_fails_instead_of_guessing() {
         let fake = FakeInflux::start(true, true).await;
-        let influx = Influx::new(config(&fake.base_url));
+        let influx = influx_for(&fake.base_url);
 
         let err = influx.mint_write_token("sonde Paris").await.unwrap_err();
         assert!(err.contains("provision"), "message attendu explicite : {err}");
@@ -784,7 +910,7 @@ mod tests {
     async fn an_unreachable_influx_reports_an_error_without_panicking() {
         // Port fermé : c'est l'état normal des premières secondes d'un
         // `docker compose up`, le hub ne doit pas s'écrouler dessus.
-        let influx = Influx::new(config("http://127.0.0.1:1"));
+        let influx = influx_for("http://127.0.0.1:1");
         assert!(influx.ensure_provisioned().await.is_err());
         assert!(influx.ids().is_none(), "aucun identifiant ne doit être mémorisé");
     }
@@ -792,7 +918,7 @@ mod tests {
     #[tokio::test]
     async fn probe_settings_never_carry_the_operator_token() {
         let fake = FakeInflux::start(true, true).await;
-        let influx = Influx::new(config(&fake.base_url));
+        let influx = influx_for(&fake.base_url);
 
         let settings = influx.probe_settings("jeton-de-sonde", None);
         assert_eq!(settings.org, "lanprobe");
@@ -807,31 +933,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advertise_url_prefers_the_configured_value() {
-        let mut cfg = config("https://127.0.0.1:8086");
-        cfg.advertise_url = Some("https://hub.example.org:8086".into());
-        let influx = Influx::new(cfg);
+    async fn advertise_url_prefers_the_setting_over_everything_else() {
+        // Les trois sources définies en même temps : l'interface gagne.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let settings = settings_for("https://127.0.0.1:8086");
+        settings
+            .put(
+                crate::settings::keys::INFLUX_ADVERTISE_URL,
+                "https://regle-dans-l-app:9086",
+                false,
+            )
+            .unwrap();
+        // SAFETY : sérialisé par ENV_LOCK, restauré avant de rendre la main.
+        unsafe { std::env::set_var(ADVERTISE_URL_ENV, "https://depuis-env:8086") };
+        let influx = Influx::new(settings, OPERATOR_TOKEN.to_string());
 
         let (url, source) = influx.resolve_advertise_url(Some("autre-hote:8443"));
-        assert_eq!(url, "https://hub.example.org:8086");
-        assert_eq!(source, AdvertiseSource::Configured);
+        unsafe { std::env::remove_var(ADVERTISE_URL_ENV) };
+
+        assert_eq!(url, "https://regle-dans-l-app:9086");
+        assert_eq!(source, AdvertiseSource::Settings);
+        assert_eq!(source.as_str(), "settings");
+    }
+
+    #[tokio::test]
+    async fn advertise_url_uses_the_environment_when_no_setting_exists() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var(ADVERTISE_URL_ENV, "https://depuis-env:8086") };
+        let influx = influx_for("https://127.0.0.1:8086");
+
+        let (url, source) = influx.resolve_advertise_url(Some("autre-hote:8443"));
+        unsafe { std::env::remove_var(ADVERTISE_URL_ENV) };
+
+        assert_eq!(url, "https://depuis-env:8086");
+        assert_eq!(source.as_str(), "env");
     }
 
     #[tokio::test]
     async fn advertise_url_falls_back_to_the_request_host_with_the_influx_port() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var(ADVERTISE_URL_ENV) };
         // Sans variable, l'URL interne (127.0.0.1) ne veut rien dire pour une
         // sonde du LAN : on repart de l'hôte par lequel elle vient de joindre
         // le hub, en substituant le port d'Influx à celui du hub.
-        let influx = Influx::new(config("https://127.0.0.1:8086"));
+        let influx = influx_for("https://127.0.0.1:8086");
 
         let (url, source) = influx.resolve_advertise_url(Some("hub.example.org:8443"));
         assert_eq!(url, "https://hub.example.org:8086");
-        assert_eq!(source, AdvertiseSource::RequestHost);
+        assert_eq!(source, AdvertiseSource::HostHeader);
+        assert_eq!(source.as_str(), "host_header");
     }
 
     #[tokio::test]
     async fn advertise_url_falls_back_to_the_internal_url_without_a_host_header() {
-        let influx = Influx::new(config("https://127.0.0.1:8086"));
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var(ADVERTISE_URL_ENV) };
+        let influx = influx_for("https://127.0.0.1:8086");
 
         let (url, source) = influx.resolve_advertise_url(None);
         assert_eq!(url, "https://127.0.0.1:8086");
@@ -840,16 +997,102 @@ mod tests {
 
     #[tokio::test]
     async fn advertise_url_handles_an_ipv6_host_header() {
-        let influx = Influx::new(config("https://127.0.0.1:8086"));
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var(ADVERTISE_URL_ENV) };
+        let influx = influx_for("https://127.0.0.1:8086");
 
         let (url, _) = influx.resolve_advertise_url(Some("[2001:db8::1]:8443"));
         assert_eq!(url, "https://[2001:db8::1]:8086");
     }
 
     #[tokio::test]
+    async fn reachability_is_true_when_health_answers() {
+        let fake = FakeInflux::start(true, true).await;
+        let influx = influx_for(&fake.base_url);
+
+        assert!(influx.check_reachable(&fake.base_url).await);
+        assert!(
+            fake.calls().iter().any(|(m, p, _)| m == "GET" && p == "/health"),
+            "le test doit interroger /health : {:?}",
+            fake.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn reachability_is_false_on_a_closed_port_without_erroring() {
+        // Un échec de joignabilité est un résultat de test, pas une panne du
+        // hub : la fonction rend `false`, elle ne remonte pas d'erreur.
+        let influx = influx_for("http://127.0.0.1:1");
+        assert!(!influx.check_reachable("http://127.0.0.1:1").await);
+    }
+
+    #[tokio::test]
+    async fn applying_retention_patches_the_bucket_with_the_right_window() {
+        let fake = FakeInflux::start(true, true).await;
+        let influx = influx_for(&fake.base_url);
+        influx.ensure_provisioned().await.unwrap();
+
+        influx.apply_retention(30).await.unwrap();
+
+        let (_, path, body) = fake
+            .calls()
+            .into_iter()
+            .find(|(m, _, _)| m == "PATCH")
+            .expect("le bucket doit être modifié");
+        assert_eq!(path, "/api/v2/buckets/bucket-1");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["retentionRules"][0]["everySeconds"], 30 * 86_400);
+    }
+
+    #[tokio::test]
+    async fn unlimited_retention_clears_the_rules() {
+        let fake = FakeInflux::start(true, true).await;
+        let influx = influx_for(&fake.base_url);
+        influx.ensure_provisioned().await.unwrap();
+
+        influx.apply_retention(0).await.unwrap();
+
+        let (_, _, body) = fake.calls().into_iter().find(|(m, _, _)| m == "PATCH").unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            body["retentionRules"].as_array().unwrap().len(),
+            0,
+            "0 = illimité : aucune règle d'expiration"
+        );
+    }
+
+    #[test]
+    fn the_operator_token_is_read_from_the_volume_file() {
+        let dir = std::env::temp_dir().join(format!("lanprobe-web-optoken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(OPERATOR_TOKEN_FILE), "jeton-du-volume\n").unwrap();
+
+        assert_eq!(load_operator_token(&dir).unwrap(), "jeton-du-volume");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_operator_token_falls_back_to_the_environment() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("lanprobe-web-optoken-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(load_operator_token(&dir).is_err(), "sans fichier ni variable : erreur");
+
+        unsafe { std::env::set_var(OPERATOR_TOKEN_ENV, "jeton-depuis-env") };
+        let token = load_operator_token(&dir);
+        unsafe { std::env::remove_var(OPERATOR_TOKEN_ENV) };
+
+        assert_eq!(token.unwrap(), "jeton-depuis-env");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn tls_fingerprint_matches_the_certificate_presented_by_influx() {
         let (addr, expected) = start_self_signed_tls_server().await;
-        let influx = Influx::new(config(&format!("https://{addr}")));
+        let influx = influx_for(&format!("https://{addr}"));
 
         let fingerprint = influx.ensure_tls_fingerprint().await.unwrap();
         assert_eq!(fingerprint, expected);
@@ -865,7 +1108,7 @@ mod tests {
     #[tokio::test]
     async fn a_plain_http_influx_has_no_fingerprint_to_pin() {
         let fake = FakeInflux::start(true, true).await;
-        let influx = Influx::new(config(&fake.base_url));
+        let influx = influx_for(&fake.base_url);
 
         assert!(influx.ensure_tls_fingerprint().await.unwrap().is_empty());
         assert!(influx.tls_fingerprint().is_none());
@@ -883,7 +1126,7 @@ mod tests {
         // Les premières secondes d'un `docker compose up` : Influx répond 503.
         // Le hub doit démarrer quand même et réessayer.
         let fake = FakeInflux::start_flaky(true, true, 2).await;
-        let influx = std::sync::Arc::new(Influx::new(config(&fake.base_url)));
+        let influx = std::sync::Arc::new(influx_for(&fake.base_url));
         assert!(!influx.is_ready());
 
         run_provisioning(
@@ -904,7 +1147,7 @@ mod tests {
     #[tokio::test]
     async fn flux_queries_are_proxied_and_their_result_returned() {
         let fake = FakeInflux::start(true, true).await;
-        let influx = Influx::new(config(&fake.base_url));
+        let influx = influx_for(&fake.base_url);
         influx.ensure_provisioned().await.unwrap();
 
         let csv = influx.query_flux("from(bucket:\"lanprobe\")").await.unwrap();
