@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -58,6 +58,35 @@ const MIGRATIONS: &[&str] = &[
       key        TEXT PRIMARY KEY,
       value      TEXT NOT NULL,
       updated_at INTEGER NOT NULL
+    );
+    "#,
+    // v2 → v3 : codes d'enrôlement, rotation des jetons d'écriture, et suivi
+    // des jetons de lecture émis pour Grafana.
+    r#"
+    CREATE TABLE enroll_codes (
+      code_hash   TEXT PRIMARY KEY,
+      site_id     TEXT NOT NULL REFERENCES sites(site_id),
+      -- Renseigné pour un code de RÉ-enrôlement : il répare une sonde
+      -- existante au lieu d'en créer une nouvelle.
+      probe_id    TEXT REFERENCES probes(probe_id),
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER NOT NULL,
+      consumed_at INTEGER
+    );
+
+    ALTER TABLE probes ADD COLUMN influx_auth_id TEXT;
+    ALTER TABLE probes ADD COLUMN influx_token_version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE probes ADD COLUMN pending_influx_auth_id TEXT;
+    ALTER TABLE probes ADD COLUMN pending_influx_token TEXT;
+    ALTER TABLE probes ADD COLUMN pending_influx_token_version INTEGER;
+
+    -- On ne garde QUE l'identifiant d'autorisation : la valeur du jeton de
+    -- lecture est affichée une fois et n'est jamais conservée.
+    CREATE TABLE influx_read_tokens (
+      auth_id     TEXT PRIMARY KEY,
+      description TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      revoked_at  INTEGER
     );
     "#,
 ];
@@ -131,10 +160,47 @@ pub struct ProbeRecord {
     pub buffered_points: i64,
     pub created_at: i64,
     pub revoked_at: Option<i64>,
+    /// Autorisation Influx actuellement valide pour cette sonde.
+    pub influx_auth_id: Option<String>,
+    pub influx_token_version: i64,
+    pub pending_influx_auth_id: Option<String>,
+    /// Jeton d'écriture en attente de remise. C'est un **secret de relais** :
+    /// il n'est pas hachable puisqu'il doit être retransmis tel quel à la
+    /// sonde, il est en écriture seule sur un unique bucket, et il est effacé
+    /// dès que la sonde en accuse réception.
+    pub pending_influx_token: Option<String>,
+    pub pending_influx_token_version: Option<i64>,
 }
 
 const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash, p.platform, \
-                             p.version, p.last_seen, p.buffered_points, p.created_at, p.revoked_at";
+                             p.version, p.last_seen, p.buffered_points, p.created_at, p.revoked_at, \
+                             p.influx_auth_id, p.influx_token_version, p.pending_influx_auth_id, \
+                             p.pending_influx_token, p.pending_influx_token_version";
+
+#[derive(Debug, Clone)]
+pub struct EnrollCode {
+    /// Code en clair — la seule fois où il existe hors du navigateur.
+    pub code: String,
+    pub site_id: String,
+    pub probe_id: Option<String>,
+    pub expires_at: i64,
+}
+
+/// Ce qu'un code consommé donne le droit de faire.
+#[derive(Debug, Clone)]
+pub struct EnrollClaim {
+    pub site_id: String,
+    /// `Some` pour un code de ré-enrôlement : il répare cette sonde-là et ne
+    /// peut pas servir à en créer une autre.
+    pub probe_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadTokenRecord {
+    pub auth_id: String,
+    pub description: String,
+    pub created_at: i64,
+}
 
 fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
     Ok(ProbeRecord {
@@ -149,6 +215,11 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
         buffered_points: r.get(8)?,
         created_at: r.get(9)?,
         revoked_at: r.get(10)?,
+        influx_auth_id: r.get(11)?,
+        influx_token_version: r.get(12)?,
+        pending_influx_auth_id: r.get(13)?,
+        pending_influx_token: r.get(14)?,
+        pending_influx_token_version: r.get(15)?,
     })
 }
 
@@ -213,6 +284,93 @@ impl Db {
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    // ── Codes d'enrôlement ─────────────────────────────────────────────────
+
+    /// Émet un code court, à usage unique. `probe_id` renseigné en fait un
+    /// code de **ré-enrôlement** : il répare la sonde nommée au lieu d'en
+    /// créer une nouvelle.
+    ///
+    /// Taper l'identifiant et le mot de passe du compte admin sur chaque
+    /// machine sonde est pénible *et* dangereux — un poste compromis livrerait
+    /// l'accès à l'interface. Un code expiré ou consommé n'ouvre rien.
+    pub fn create_enroll_code(
+        &self,
+        site_id: &str,
+        probe_id: Option<&str>,
+        ttl_secs: i64,
+    ) -> DbResult<EnrollCode> {
+        let code = generate_enroll_code();
+        let code_hash = lanprobe_core::passwords::hash_password(&code)
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        let created_at = now();
+        let expires_at = created_at + ttl_secs;
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO enroll_codes (code_hash, site_id, probe_id, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![code_hash, site_id, probe_id, created_at, expires_at],
+            )?;
+        }
+        Ok(EnrollCode {
+            code,
+            site_id: site_id.to_string(),
+            probe_id: probe_id.map(str::to_string),
+            expires_at,
+        })
+    }
+
+    /// Consomme un code. Atomique : deux sondes lancées sur le même code, une
+    /// seule passe.
+    pub fn consume_enroll_code(&self, code: &str) -> DbResult<EnrollClaim> {
+        let mut conn = self.lock()?;
+        // `IMMEDIATE` prend le verrou d'écriture dès l'ouverture : la lecture
+        // des candidats et la marque de consommation ne peuvent pas être
+        // entrelacées avec celles d'une autre transaction.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let now = now();
+
+        // Le code est haché : on ne peut pas l'indexer, il faut vérifier les
+        // candidats vivants un par un. Ils se comptent sur les doigts d'une
+        // main — un code vit 15 minutes.
+        let candidates: Vec<(String, String, Option<String>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT code_hash, site_id, probe_id FROM enroll_codes
+                 WHERE consumed_at IS NULL AND expires_at > ?1",
+            )?;
+            let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (code_hash, site_id, probe_id) in candidates {
+            if lanprobe_core::passwords::verify_password(&code_hash, code).is_err() {
+                continue;
+            }
+            let changed = tx.execute(
+                "UPDATE enroll_codes SET consumed_at = ?2
+                 WHERE code_hash = ?1 AND consumed_at IS NULL",
+                rusqlite::params![code_hash, now],
+            )?;
+            if changed == 0 {
+                break;
+            }
+            tx.commit()?;
+            return Ok(EnrollClaim { site_id, probe_id });
+        }
+        Err(DbError::Unauthorized(
+            "code d'enrôlement inconnu, expiré ou déjà utilisé".into(),
+        ))
+    }
+
+    /// Empreintes stockées — sert aux tests à vérifier qu'aucun code en clair
+    /// ne touche la base.
+    pub fn enroll_code_hashes(&self) -> DbResult<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT code_hash FROM enroll_codes")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     // ── Réglages ───────────────────────────────────────────────────────────
@@ -531,6 +689,170 @@ impl Db {
         Ok(probe)
     }
 
+    /// Ré-enrôle une sonde existante : nouveau jeton de sonde, `revoked_at`
+    /// levé, tout le reste conservé. Le `probe_id` **doit** survivre — un
+    /// `DELETE` suivi d'un nouvel enrôlement créerait une seconde sonde et
+    /// couperait les courbes en deux à la date de l'incident.
+    pub fn reenroll_probe(&self, probe_id: &str) -> DbResult<(ProbeRecord, String)> {
+        let token = lanprobe_core::passwords::generate_token();
+        let token_hash = lanprobe_core::passwords::hash_password(&token)
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        {
+            let conn = self.lock()?;
+            let changed = conn.execute(
+                "UPDATE probes SET token_hash = ?2, revoked_at = NULL WHERE probe_id = ?1",
+                rusqlite::params![probe_id, token_hash],
+            )?;
+            if changed == 0 {
+                return Err(DbError::NotFound("sonde inconnue".into()));
+            }
+        }
+        Ok((self.get_probe(probe_id)?, token))
+    }
+
+    /// Enregistre l'autorisation Influx active d'une sonde, juste après
+    /// l'avoir frappée.
+    pub fn set_probe_influx_auth(&self, probe_id: &str, auth_id: &str) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE probes SET influx_auth_id = ?2 WHERE probe_id = ?1",
+            rusqlite::params![probe_id, auth_id],
+        )?;
+        Ok(())
+    }
+
+    /// Prépare une rotation : le nouveau jeton attend d'être remis, l'ancien
+    /// **reste actif**. Détruire avant l'accusé couperait toute sonde éteinte
+    /// au mauvais moment — elle se réveillerait avec un jeton mort et sans
+    /// moyen d'en obtenir un autre. Rend le numéro de version à annoncer.
+    pub fn stage_token_rotation(
+        &self,
+        probe_id: &str,
+        new_auth_id: &str,
+        new_token: &str,
+    ) -> DbResult<i64> {
+        let current = self.get_probe(probe_id)?;
+        let version = current.influx_token_version + 1;
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE probes SET pending_influx_auth_id = ?2,
+                    pending_influx_token = ?3,
+                    pending_influx_token_version = ?4
+             WHERE probe_id = ?1",
+            rusqlite::params![probe_id, new_auth_id, new_token, version],
+        )?;
+        Ok(version)
+    }
+
+    /// Enregistre l'accusé de réception de la sonde. Rend l'autorisation
+    /// désormais inutile, **à détruire dans Influx par l'appelant**. `None`
+    /// si la version accusée n'est pas celle qui attendait.
+    pub fn acknowledge_token_version(
+        &self,
+        probe_id: &str,
+        acknowledged: i64,
+    ) -> DbResult<Option<String>> {
+        let probe = self.get_probe(probe_id)?;
+        if probe.pending_influx_token_version != Some(acknowledged) {
+            return Ok(None);
+        }
+        let retired = probe.influx_auth_id.clone();
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE probes SET influx_auth_id = pending_influx_auth_id,
+                    influx_token_version = ?2,
+                    pending_influx_auth_id = NULL,
+                    pending_influx_token = NULL,
+                    pending_influx_token_version = NULL
+             WHERE probe_id = ?1",
+            rusqlite::params![probe_id, acknowledged],
+        )?;
+        Ok(retired)
+    }
+
+    /// Compromission : l'ancienne autorisation est retirée immédiatement, le
+    /// remplaçant attend le prochain contact. La sonde ne peut pas écrire
+    /// dans l'intervalle — c'est le comportement voulu. Son jeton **de
+    /// sonde** reste valide, sans quoi la réparation à distance serait
+    /// impossible.
+    pub fn replace_token_immediately(
+        &self,
+        probe_id: &str,
+        new_auth_id: &str,
+        new_token: &str,
+    ) -> DbResult<(Option<String>, i64)> {
+        let current = self.get_probe(probe_id)?;
+        let version = current.influx_token_version + 1;
+        let retired = current.influx_auth_id.clone();
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE probes SET influx_auth_id = NULL,
+                    pending_influx_auth_id = ?2,
+                    pending_influx_token = ?3,
+                    pending_influx_token_version = ?4
+             WHERE probe_id = ?1",
+            rusqlite::params![probe_id, new_auth_id, new_token, version],
+        )?;
+        Ok((retired, version))
+    }
+
+    // ── Jetons de lecture (Grafana) ────────────────────────────────────────
+
+    /// N'enregistre que l'identifiant d'autorisation : la valeur du jeton est
+    /// affichée une seule fois et n'est jamais conservée.
+    pub fn record_read_token(&self, auth_id: &str, description: &str) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO influx_read_tokens (auth_id, description, created_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![auth_id, description, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_read_tokens(&self) -> DbResult<Vec<ReadTokenRecord>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT auth_id, description, created_at FROM influx_read_tokens
+             WHERE revoked_at IS NULL ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ReadTokenRecord {
+                auth_id: r.get(0)?,
+                description: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Marque le jeton révoqué. La ligne reste : on doit pouvoir dire qu'un
+    /// jeton a existé et quand il a cessé de valoir.
+    pub fn revoke_read_token(&self, auth_id: &str) -> DbResult<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE influx_read_tokens SET revoked_at = ?2
+             WHERE auth_id = ?1 AND revoked_at IS NULL",
+            rusqlite::params![auth_id, now()],
+        )?;
+        if changed == 0 {
+            return Err(DbError::NotFound("jeton de lecture inconnu".into()));
+        }
+        Ok(())
+    }
+
+    pub fn read_token_revoked_at(&self, auth_id: &str) -> DbResult<Option<i64>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT revoked_at FROM influx_read_tokens WHERE auth_id = ?1",
+                [auth_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     pub fn record_heartbeat(
         &self,
         probe_id: &str,
@@ -568,6 +890,20 @@ fn migrate(conn: &Connection) -> DbResult<()> {
         conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
     }
     Ok(())
+}
+
+/// Code court en `XXXX-XXXX`, sur un alphabet sans `0`/`O` ni `1`/`I` — il
+/// est lu à voix haute et recopié à la main, une confusion de caractère se
+/// paie en enrôlement raté sans message utile.
+fn generate_enroll_code() -> String {
+    const ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    let mut bytes = [0u8; 8];
+    getrandom::getrandom(&mut bytes).expect("getrandom failed");
+    let chars: String = bytes
+        .iter()
+        .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
+        .collect();
+    format!("{}-{}", &chars[..4], &chars[4..])
 }
 
 pub fn now() -> i64 {
@@ -678,6 +1014,248 @@ mod tests {
         db.set_setting("influx_advertise_url", "https://a.example:8086").unwrap();
         db.set_setting("influx_advertise_url", "   ").unwrap();
         assert!(db.get_setting("influx_advertise_url").unwrap().is_none());
+    }
+
+    // ── Codes d'enrôlement ─────────────────────────────────────────────────
+
+    #[test]
+    fn an_enrollment_code_is_stored_hashed_only() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+
+        let code = db.create_enroll_code(&site.site_id, None, 900).unwrap();
+        assert!(code.code.len() >= 8, "code trop court : {}", code.code);
+
+        let stored = db.enroll_code_hashes().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert!(!stored[0].contains(&code.code), "le code en clair ne va pas en base");
+        assert!(stored[0].starts_with("$argon2id$"));
+    }
+
+    #[test]
+    fn an_enrollment_code_resolves_to_its_site_once() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let code = db.create_enroll_code(&site.site_id, None, 900).unwrap();
+
+        let claim = db.consume_enroll_code(&code.code).unwrap();
+        assert_eq!(claim.site_id, site.site_id);
+        assert!(claim.probe_id.is_none(), "code de site : aucune sonde visée");
+
+        // Usage unique : le rejeu ne doit rien ouvrir.
+        assert!(matches!(
+            db.consume_enroll_code(&code.code).unwrap_err(),
+            DbError::Unauthorized(_)
+        ));
+    }
+
+    #[test]
+    fn an_expired_enrollment_code_opens_nothing() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        // TTL négatif : déjà expiré à la seconde où il est créé.
+        let code = db.create_enroll_code(&site.site_id, None, -1).unwrap();
+
+        assert!(matches!(
+            db.consume_enroll_code(&code.code).unwrap_err(),
+            DbError::Unauthorized(_)
+        ));
+    }
+
+    #[test]
+    fn an_unknown_enrollment_code_opens_nothing() {
+        let db = open_memory();
+        db.create_site("Durand").unwrap();
+        assert!(matches!(
+            db.consume_enroll_code("XXXX-XXXX").unwrap_err(),
+            DbError::Unauthorized(_)
+        ));
+    }
+
+    #[test]
+    fn two_concurrent_uses_of_a_code_leave_exactly_one_winner() {
+        // Deux sondes lancées ensemble sur le même code : la consommation est
+        // atomique, une seule doit passer.
+        let db = std::sync::Arc::new(open_memory());
+        let site = db.create_site("Durand").unwrap();
+        let code = db.create_enroll_code(&site.site_id, None, 900).unwrap();
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let db = db.clone();
+                let code = code.code.clone();
+                std::thread::spawn(move || db.consume_enroll_code(&code).is_ok())
+            })
+            .collect();
+        let winners = handles.into_iter().filter(|_| true).fold(0, |acc, h| {
+            acc + i32::from(h.join().unwrap())
+        });
+
+        assert_eq!(winners, 1, "exactement une sonde doit obtenir le code");
+    }
+
+    #[test]
+    fn a_reenrollment_code_names_the_probe_it_repairs() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+
+        let code = db
+            .create_enroll_code(&site.site_id, Some(&probe.probe_id), 900)
+            .unwrap();
+        let claim = db.consume_enroll_code(&code.code).unwrap();
+
+        assert_eq!(claim.probe_id.as_deref(), Some(probe.probe_id.as_str()));
+        assert_eq!(claim.site_id, site.site_id);
+    }
+
+    #[test]
+    fn reenrolling_reuses_the_probe_id_and_its_history() {
+        // Un DELETE suivi d'un nouvel enrôlement créerait une seconde sonde et
+        // couperait les courbes en deux à la date de l'incident — précisément
+        // le moment où l'on veut comparer l'avant et l'après.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, first_token) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_probe_influx_auth(&probe.probe_id, "auth-v1").unwrap();
+        db.revoke_probe(&probe.probe_id).unwrap();
+
+        let (repaired, new_token) = db.reenroll_probe(&probe.probe_id).unwrap();
+
+        assert_eq!(repaired.probe_id, probe.probe_id, "le probe_id doit survivre");
+        assert_eq!(repaired.created_at, probe.created_at);
+        assert_eq!(repaired.site_id, site.site_id);
+        assert_eq!(repaired.name, "Paris");
+        assert!(repaired.revoked_at.is_none(), "la sonde redevient active");
+
+        assert_ne!(new_token, first_token);
+        assert!(
+            db.authenticate_probe(&probe.probe_id, &first_token).is_err(),
+            "l'ancien jeton de sonde ne doit plus valoir"
+        );
+        assert!(db.authenticate_probe(&probe.probe_id, &new_token).is_ok());
+    }
+
+    // ── Rotation des jetons d'écriture ─────────────────────────────────────
+
+    #[test]
+    fn a_rotation_keeps_the_old_token_until_the_probe_acknowledges() {
+        // Détruire avant l'accusé couperait toute sonde éteinte au mauvais
+        // moment : elle se réveillerait avec un jeton mort.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_probe_influx_auth(&probe.probe_id, "auth-v1").unwrap();
+
+        let version = db
+            .stage_token_rotation(&probe.probe_id, "auth-v2", "jeton-v2")
+            .unwrap();
+        assert_eq!(version, 2, "la version doit progresser");
+
+        let probe = db.get_probe(&probe.probe_id).unwrap();
+        assert_eq!(
+            probe.influx_auth_id.as_deref(),
+            Some("auth-v1"),
+            "l'ancien jeton doit rester actif tant qu'il n'y a pas d'accusé"
+        );
+        assert_eq!(probe.pending_influx_token.as_deref(), Some("jeton-v2"));
+    }
+
+    #[test]
+    fn acknowledging_the_new_version_retires_the_old_authorization() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_probe_influx_auth(&probe.probe_id, "auth-v1").unwrap();
+        let version = db
+            .stage_token_rotation(&probe.probe_id, "auth-v2", "jeton-v2")
+            .unwrap();
+
+        let retired = db.acknowledge_token_version(&probe.probe_id, version).unwrap();
+        assert_eq!(
+            retired.as_deref(),
+            Some("auth-v1"),
+            "l'appelant reçoit l'autorisation à détruire dans Influx"
+        );
+
+        let probe = db.get_probe(&probe.probe_id).unwrap();
+        assert_eq!(probe.influx_auth_id.as_deref(), Some("auth-v2"));
+        assert_eq!(probe.influx_token_version, 2);
+        assert!(
+            probe.pending_influx_token.is_none(),
+            "le jeton relayé est effacé de la base dès qu'il est accusé"
+        );
+    }
+
+    #[test]
+    fn acknowledging_a_stale_version_retires_nothing() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_probe_influx_auth(&probe.probe_id, "auth-v1").unwrap();
+        db.stage_token_rotation(&probe.probe_id, "auth-v2", "jeton-v2").unwrap();
+
+        // La sonde accuse encore l'ancienne version : rien ne doit bouger.
+        assert!(db.acknowledge_token_version(&probe.probe_id, 1).unwrap().is_none());
+        assert_eq!(
+            db.get_probe(&probe.probe_id).unwrap().influx_auth_id.as_deref(),
+            Some("auth-v1")
+        );
+    }
+
+    #[test]
+    fn an_immediate_revocation_retires_the_old_authorization_at_once() {
+        // Compromission : on coupe d'abord, on rétablit ensuite.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, hub_token) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_probe_influx_auth(&probe.probe_id, "auth-v1").unwrap();
+
+        let (retired, version) = db
+            .replace_token_immediately(&probe.probe_id, "auth-v2", "jeton-v2")
+            .unwrap();
+        assert_eq!(retired.as_deref(), Some("auth-v1"));
+        assert_eq!(version, 2);
+
+        let probe = db.get_probe(&probe.probe_id).unwrap();
+        assert!(
+            probe.influx_auth_id.is_none(),
+            "plus aucun jeton d'écriture actif avant le prochain contact"
+        );
+        assert_eq!(probe.pending_influx_token.as_deref(), Some("jeton-v2"));
+        assert!(
+            db.authenticate_probe(&probe.probe_id, &hub_token).is_ok(),
+            "le jeton de sonde reste valide : c'est ce qui permet la réparation à distance"
+        );
+    }
+
+    // ── Jetons de lecture ──────────────────────────────────────────────────
+
+    #[test]
+    fn read_tokens_are_tracked_by_id_never_by_value() {
+        let db = open_memory();
+        db.record_read_token("auth-lecture-1", "Grafana du bureau").unwrap();
+
+        let listed = db.list_read_tokens().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].auth_id, "auth-lecture-1");
+        assert_eq!(listed[0].description, "Grafana du bureau");
+
+        let rendered = serde_json::to_string(&listed).unwrap();
+        assert!(
+            !rendered.contains("\"token\""),
+            "aucune valeur de jeton n'est conservée : {rendered}"
+        );
+    }
+
+    #[test]
+    fn revoking_a_read_token_keeps_the_trace_of_its_existence() {
+        let db = open_memory();
+        db.record_read_token("auth-lecture-1", "Grafana").unwrap();
+        db.revoke_read_token("auth-lecture-1").unwrap();
+
+        assert!(db.list_read_tokens().unwrap().is_empty());
+        assert!(db.read_token_revoked_at("auth-lecture-1").unwrap().is_some());
     }
 
     // ── Comptes ────────────────────────────────────────────────────────────
