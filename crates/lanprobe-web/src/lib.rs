@@ -5,5 +5,6 @@
 //! de cœur, et proxifie les lectures pour que le jeton Influx de lecture ne
 //! quitte jamais le serveur.
 
+pub mod auth;
 pub mod db;
 pub mod probe;
