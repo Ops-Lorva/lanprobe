@@ -1,0 +1,53 @@
+# Hub LanProbe auto-hébergé — un seul conteneur (hub + InfluxDB embarqué).
+# Nous n'hébergeons rien : ce fichier est fait pour tourner chez vous, sans
+# rien d'autre à installer. `docker compose up -d` suffit.
+#
+# Après le premier démarrage, récupérez le jeton de configuration initial :
+#   docker compose logs lanprobe-web | grep -i "jeton de configuration"
+# (ou en anglais : "setup token")
+
+services:
+  lanprobe-web:
+    build: .
+    # Construisez votre propre image locale avec `build: .` (ci-dessus) tant
+    # qu'aucune image publiée n'existe. Une fois publiée sur un registre,
+    # remplacez par une version épinglée — jamais `:latest` :
+    #   image: ghcr.io/benjamin-chianese/lanprobe-web:1.2.0
+    container_name: lanprobe-web
+    restart: unless-stopped
+
+    environment:
+      # ⚠️ À RENSEIGNER : IP ou nom DNS de CETTE machine sur votre LAN, tel
+      # que vos sondes doivent le joindre. Sans cette variable, l'URL
+      # InfluxDB renvoyée aux sondes lors de l'enrôlement pointera vers une
+      # adresse interne au conteneur, injoignable depuis le reste du réseau.
+      LANPROBE_ADVERTISE_HOST: "192.168.1.10"
+
+      # Optionnel — valeurs par défaut déjà correctes pour un usage courant.
+      # INFLUX_ORG: "lanprobe"
+      # INFLUX_BUCKET: "lanprobe"
+
+    ports:
+      # Interface web du hub — HTTPS auto-signé par défaut (voir le README,
+      # section "Sécurité"). C'est ici que vous créez le compte admin et
+      # enrôlez vos sondes.
+      - "8443:8443"
+      # Écriture InfluxDB — exposé aux sondes du LAN. Ne pas exposer au-delà
+      # de votre réseau local sans un reverse proxy TLS de confiance devant.
+      - "8086:8086"
+
+    volumes:
+      # Comptes, jetons, base SQLite, certificat TLS du hub. Petit, change
+      # peu : à sauvegarder souvent et facilement (voir README).
+      - lanprobe_data:/data/lanprobe
+      # Séries temporelles InfluxDB. Peut grossir de plusieurs Go avec le
+      # temps : politique de sauvegarde volontairement séparée de la ligne
+      # au-dessus.
+      - influxdb_data:/data/influxdb
+
+    # Le HEALTHCHECK est défini dans l'image (il interroge réellement
+    # /api/status, pas seulement l'existence du processus).
+
+volumes:
+  lanprobe_data:
+  influxdb_data:
