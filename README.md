@@ -196,6 +196,48 @@ When `LANPROBE_SECRET_KEY` is set, **no key file is ever written**. Keep a copy 
 
 ---
 
+### 🐳 Self-hosted Web Hub (Docker) — for a fleet of probes
+
+🚧 **In development**, built against [`docs/lanprobe-web-contrat.md`](docs/lanprobe-web-contrat.md) — the Docker packaging below is built and tested; the hub binary and its web UI land in separate branches and are not merged yet.
+
+Got more than one probe? The hub is a **single Docker container** — the enrollment API and its own embedded InfluxDB — that your probes report to. **We host nothing**: it runs on a machine you control, end to end.
+
+#### Get started
+
+```bash
+git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
+# Edit LANPROBE_ADVERTISE_HOST in docker-compose.yml — set it to this
+# machine's LAN IP or hostname, the address your probes will use.
+docker compose up -d
+docker compose logs lanprobe-web | grep -i "setup token"
+```
+
+Open `https://<this-machine>:8443` (self-signed certificate — accept the browser warning, same as the headless server above) and use that setup token to create the admin account. It is consumed on first use and never shown again.
+
+#### Enroll a probe
+
+Point a probe (desktop app or `lanprobe-server`) at the hub's URL with your admin username and password. The hub hands back a probe-specific token and Influx write coordinates restricted to that one bucket — a compromised probe can write, but it can't read or erase anyone else's measurements. See the [interface contract](docs/lanprobe-web-contrat.md) for the exact exchange.
+
+#### Back up
+
+Two volumes, two different rhythms — never remove one without the other, they're two halves of the same state:
+
+| Volume | Contains | Backup cadence |
+|---|---|---|
+| `lanprobe_data` | Admin account, probe tokens (hashed), setup token, hub's TLS cert | Small — back up often, it's cheap |
+| `influxdb_data` | Time-series measurements | Can reach several GB — back up on whatever retention schedule suits your data |
+
+```bash
+docker compose stop lanprobe-web
+docker run --rm -v lanprobe_data:/from -v "$PWD":/to alpine tar czf /to/lanprobe_data.tar.gz -C /from .
+docker run --rm -v influxdb_data:/from -v "$PWD":/to alpine tar czf /to/influxdb_data.tar.gz -C /from .
+docker compose start lanprobe-web
+```
+
+> The container never deletes or overwrites its own data — not on restart, not on a half-finished setup. If InfluxDB and the hub's token ever get out of sync (an interrupted first boot), `docker logs lanprobe-web` explains exactly what happened and what to do; it never guesses on your behalf.
+
+---
+
 ### 🌐 Web Server Mode (desktop app)
 
 The desktop app can also act as a server — enable it from **Settings → Server Mode**. This streams live data from your desktop machine to any browser on the LAN without installing a separate package.
@@ -325,6 +367,7 @@ git tag v1.0.0 && git push origin v1.0.0
 - [x] i18n — English, French, Spanish
 - [x] macOS signed + notarized `.pkg` with sudoers provisioning
 - [x] 6 color palettes (dark + light)
+- [ ] Self-hosted Web Hub — Docker, embedded InfluxDB, multi-probe fleet enrollment
 
 ---
 

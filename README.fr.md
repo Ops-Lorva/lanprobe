@@ -196,6 +196,48 @@ Quand `LANPROBE_SECRET_KEY` est définie, **aucun fichier de clé n'est écrit**
 
 ---
 
+### 🐳 Hub web auto-hébergé (Docker) — pour un parc de sondes
+
+🚧 **En développement**, construit contre [`docs/lanprobe-web-contrat.md`](docs/lanprobe-web-contrat.md) — le packaging Docker ci-dessous est construit et testé ; le binaire du hub et son interface web arrivent par des branches séparées, pas encore fusionnées.
+
+Plusieurs sondes à superviser ? Le hub est **un seul conteneur Docker** — l'API d'enrôlement et son InfluxDB embarqué — auquel vos sondes remontent leurs mesures. **Nous n'hébergeons rien** : tout tourne sur une machine que vous contrôlez, de bout en bout.
+
+#### Mise en route
+
+```bash
+git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
+# Éditez LANPROBE_ADVERTISE_HOST dans docker-compose.yml — mettez l'IP ou
+# le nom LAN de cette machine, celui que vos sondes utiliseront.
+docker compose up -d
+docker compose logs lanprobe-web | grep -i "jeton de configuration"
+```
+
+Ouvrez `https://<cette-machine>:8443` (certificat auto-signé — acceptez l'avertissement du navigateur, comme pour le serveur headless ci-dessus) et utilisez ce jeton pour créer le compte admin. Il est consommé au premier usage et ne réapparaît jamais.
+
+#### Enrôler une sonde
+
+Pointez une sonde (application desktop ou `lanprobe-server`) vers l'URL du hub avec vos identifiants admin. Le hub renvoie un jeton propre à cette sonde et des coordonnées d'écriture InfluxDB restreintes à ce seul bucket — une sonde compromise peut écrire, mais ne peut ni lire ni effacer les mesures des autres. Voir le [contrat d'interface](docs/lanprobe-web-contrat.md) pour l'échange exact.
+
+#### Sauvegarder
+
+Deux volumes, deux rythmes différents — ne jamais en retirer un sans l'autre, ce sont les deux moitiés d'un même état :
+
+| Volume | Contient | Fréquence de sauvegarde |
+|---|---|---|
+| `lanprobe_data` | Compte admin, jetons des sondes (hachés), jeton de configuration, certificat TLS du hub | Petit — sauvegardez-le souvent, ça ne coûte rien |
+| `influxdb_data` | Mesures de séries temporelles | Peut atteindre plusieurs Go — sauvegardez selon la politique de rétention qui vous convient |
+
+```bash
+docker compose stop lanprobe-web
+docker run --rm -v lanprobe_data:/from -v "$PWD":/to alpine tar czf /to/lanprobe_data.tar.gz -C /from .
+docker run --rm -v influxdb_data:/from -v "$PWD":/to alpine tar czf /to/influxdb_data.tar.gz -C /from .
+docker compose start lanprobe-web
+```
+
+> Le conteneur ne supprime ni n'écrase jamais ses propres données — ni au redémarrage, ni sur une initialisation interrompue en cours de route. Si InfluxDB et le jeton du hub se désynchronisent (premier démarrage coupé net), `docker logs lanprobe-web` explique précisément ce qui s'est passé et quoi faire — il ne devine jamais à votre place.
+
+---
+
 ### 🌐 Mode serveur web (application desktop)
 
 L'application desktop peut également agir comme serveur — l'activer depuis **Paramètres → Mode serveur**. Cela diffuse les données en direct depuis votre machine desktop vers n'importe quel navigateur du LAN sans installer de paquet séparé.
@@ -325,6 +367,7 @@ git tag v1.0.0 && git push origin v1.0.0
 - [x] i18n — Anglais, Français, Espagnol
 - [x] `.pkg` macOS signé + notarisé avec provisionnement sudoers
 - [x] 6 palettes de couleurs (mode sombre + clair)
+- [ ] Hub web auto-hébergé — Docker, InfluxDB embarqué, enrôlement d'un parc de sondes
 
 ---
 
