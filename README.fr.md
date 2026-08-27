@@ -204,15 +204,17 @@ Plusieurs sondes à superviser ? Le hub est **un seul conteneur Docker** — l'A
 
 #### Mise en route
 
+Rien à éditer — on clone, on démarre, on ouvre le navigateur :
+
 ```bash
 git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
-# Éditez LANPROBE_ADVERTISE_HOST dans docker-compose.yml — mettez l'IP ou
-# le nom LAN de cette machine, celui que vos sondes utiliseront.
 docker compose up -d
 docker compose logs lanprobe-web | grep -i "jeton de configuration"
 ```
 
 Ouvrez `https://<cette-machine>:8443` (certificat auto-signé — acceptez l'avertissement du navigateur, comme pour le serveur headless ci-dessus) et utilisez ce jeton pour créer le compte admin. Il est consommé au premier usage et ne réapparaît jamais.
+
+**Tout le reste vit dans l'application, pas dans `docker-compose.yml`.** Une fois le compte admin créé, l'organisation Influx, le bucket, la rétention et l'URL annoncée aux sondes sont des réglages que vous changez depuis l'interface — ils vivent dans la base SQLite du hub, survivent à un redéploiement, et ne demandent jamais de toucher un fichier `.env` ni de redémarrer le conteneur. Le hub démarre déjà configuré contre l'InfluxDB qu'il vient d'initialiser ; un **bouton de test** existe à côté du réglage d'URL annoncée si vous remappez un jour le port publié et voulez vérifier que les sondes peuvent effectivement la joindre. Réduire la rétention efface les données au-delà de la nouvelle fenêtre — l'interface demande confirmation et nomme la quantité d'historique que vous vous apprêtez à perdre.
 
 #### Enrôler une sonde
 

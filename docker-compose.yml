@@ -16,16 +16,19 @@ services:
     container_name: lanprobe-web
     restart: unless-stopped
 
-    environment:
-      # ⚠️ À RENSEIGNER : IP ou nom DNS de CETTE machine sur votre LAN, tel
-      # que vos sondes doivent le joindre. Sans cette variable, l'URL
-      # InfluxDB renvoyée aux sondes lors de l'enrôlement pointera vers une
-      # adresse interne au conteneur, injoignable depuis le reste du réseau.
-      LANPROBE_ADVERTISE_HOST: "192.168.1.10"
-
-      # Optionnel — valeurs par défaut déjà correctes pour un usage courant.
-      # INFLUX_ORG: "lanprobe"
-      # INFLUX_BUCKET: "lanprobe"
+    # Aucune variable d'environnement n'est requise : `docker compose up`
+    # marche tel quel. Tout se règle ensuite dans l'interface (organisation,
+    # bucket, rétention, URL Influx annoncée aux sondes...) — voir le README.
+    #
+    # environment:
+    #   # Facultatif. Si connue à l'avance, l'IP ou le nom LAN de cette
+    #   # machine : ajouté au certificat TLS auto-signé d'InfluxDB (évite un
+    #   # avertissement de nom d'hôte en plus de celui, normal, du
+    #   # certificat auto-signé) et repris comme valeur initiale de l'URL
+    #   # Influx annoncée aux sondes. Sans elle, le hub déduit cette URL de
+    #   # la requête d'enrôlement, et elle reste modifiable dans l'interface
+    #   # à tout moment (avec un bouton de test).
+    #   LANPROBE_ADVERTISE_HOST: "192.168.1.10"
 
     ports:
       # Interface web du hub — HTTPS auto-signé par défaut (voir le README,

@@ -204,15 +204,17 @@ Got more than one probe? The hub is a **single Docker container** — the enroll
 
 #### Get started
 
+Nothing to edit — clone, start, and open the browser:
+
 ```bash
 git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
-# Edit LANPROBE_ADVERTISE_HOST in docker-compose.yml — set it to this
-# machine's LAN IP or hostname, the address your probes will use.
 docker compose up -d
 docker compose logs lanprobe-web | grep -i "setup token"
 ```
 
 Open `https://<this-machine>:8443` (self-signed certificate — accept the browser warning, same as the headless server above) and use that setup token to create the admin account. It is consumed on first use and never shown again.
+
+**Everything else lives in the app, not in `docker-compose.yml`.** Once the admin account exists, the Influx organization, bucket, retention, and the URL advertised to probes are all settings you change from the interface — they persist in the hub's own SQLite database, survive a redeploy, and never require touching a `.env` file or restarting the container. The hub already starts pre-configured against the InfluxDB it just initialized; there's a **test button** next to the advertised URL setting if you ever remap the published port and want to confirm probes can actually reach it. Lowering the retention setting deletes the data outside the new window — the UI asks for confirmation and names the amount of history you're about to lose.
 
 #### Enroll a probe
 

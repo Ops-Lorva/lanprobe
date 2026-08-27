@@ -6,7 +6,9 @@
 #      le process existe) ;
 #   3. initialiser InfluxDB (org, bucket, jeton opérateur) UNE SEULE FOIS,
 #      au tout premier démarrage — jamais ensuite, quoi qu'il arrive ;
-#   4. démarrer le hub avec le jeton opérateur en variable d'environnement ;
+#   4. démarrer le hub — qui lit lui-même le jeton opérateur dans le volume,
+#      voir le contrat §7 ("on configure dans l'application, pas dans
+#      l'environnement") ;
 #   5. transmettre proprement les signaux d'arrêt aux deux processus, et
 #      arrêter l'un si l'autre meurt.
 #
@@ -34,6 +36,14 @@ log() { printf '[lanprobe-hub] %s\n' "$*" >&2; }
 # §1) : il lui faut donc son propre certificat, indépendant de celui du hub.
 # Vous pouvez fournir le vôtre en déposant cert.pem/key.pem dans ce dossier
 # avant le premier démarrage — ce script ne les touchera jamais s'ils existent.
+#
+# LANPROBE_ADVERTISE_HOST est entièrement optionnelle (contrat §7) : si vous
+# la fournissez, elle est ajoutée au SAN du certificat (pour éviter un
+# avertissement de nom d'hôte dans le navigateur en plus de l'avertissement
+# "auto-signé"), et reprise comme valeur initiale de l'URL Influx annoncée
+# aux sondes (étape 4). Sans elle, tout fonctionne quand même : le hub
+# déduit cette URL de l'en-tête Host à l'enrôlement, et elle reste
+# modifiable dans l'interface à tout moment.
 mkdir -p "$INFLUX_TLS_DIR"
 if [ ! -f "${INFLUX_TLS_DIR}/cert.pem" ] || [ ! -f "${INFLUX_TLS_DIR}/key.pem" ]; then
     log "Génération du certificat TLS auto-signé d'InfluxDB (premier démarrage)."
@@ -131,30 +141,31 @@ else
     log "InfluxDB déjà initialisé — jeton opérateur existant réutilisé."
 fi
 
-OPERATOR_TOKEN="$(cat "$INFLUX_TOKEN_FILE")"
-
 # ── 4. Démarrage du hub ──────────────────────────────────────────────────────
-# HYPOTHÈSE (crates/lanprobe-web n'existe pas encore dans ce worktree, voir
-# docs/lanprobe-web-contrat.md) : le binaire accepte les mêmes options que
-# lanprobe-server (--host/--port/--config-dir, cf.
-# crates/lanprobe-server/src/main.rs) et lit sa connexion InfluxDB depuis
-# l'environnement. Seul le nom INFLUX_TOKEN est imposé par la consigne de
-# packaging ; INFLUX_URL/INFLUX_ORG/INFLUX_BUCKET/INFLUX_ADVERTISE_URL sont une
-# convention proposée à faire valider avec l'auteur du hub après fusion.
-export INFLUX_TOKEN="$OPERATOR_TOKEN"
+# Contrat §7 : « on configure dans l'application, pas dans l'environnement ».
+# Le jeton opérateur N'EST PLUS exporté — le hub le lit lui-même dans
+# <config-dir>/influx-operator-token (écrit à l'étape 3 ci-dessus, avec les
+# mêmes permissions et la même écriture atomique qu'avant). Ce fichier ne
+# sort jamais de ce script.
+#
+# INFLUX_URL/INFLUX_ORG/INFLUX_BUCKET/INFLUX_ADVERTISE_URL restent acceptées
+# par le hub comme *valeurs initiales* au premier démarrage seulement (dès
+# qu'un réglage existe en base, la base gagne — contrat §7). On les fournit
+# quand même ici, sans que l'utilisateur n'ait rien à définir : ce sont
+# exactement les valeurs que l'étape 3 vient de créer dans InfluxDB, donc le
+# hub démarre déjà correctement configuré sans passage obligé par l'interface.
 export INFLUX_URL="https://127.0.0.1:${INFLUX_PORT}"
 export INFLUX_ORG
 export INFLUX_BUCKET
-# URL annoncée aux SONDES dans la réponse de /api/probes/enroll (contrat §3) —
-# doit être joignable depuis le LAN, pas seulement depuis le conteneur.
-# LANPROBE_ADVERTISE_HOST (IP ou nom DNS de la machine Docker) est donc requis
-# pour un enrôlement fonctionnel ; voir docker-compose.yml et le README.
+
+# LANPROBE_ADVERTISE_HOST est désormais optionnelle de bout en bout (contrat
+# §7, "L'URL annoncée n'est pas l'URL interne") : à défaut, le hub déduit
+# l'URL Influx à annoncer aux sondes depuis l'en-tête Host de la requête
+# d'enrôlement, et elle reste corrigeable dans l'interface à tout moment
+# (avec un bouton de test). On ne journalise donc plus d'avertissement si
+# elle est absente — ce n'est plus une anomalie, c'est le cas nominal.
 if [ -n "${LANPROBE_ADVERTISE_HOST:-}" ]; then
     export INFLUX_ADVERTISE_URL="https://${LANPROBE_ADVERTISE_HOST}:${INFLUX_PORT}"
-else
-    log "ATTENTION : LANPROBE_ADVERTISE_HOST n'est pas défini — l'URL InfluxDB"
-    log "renvoyée aux sondes lors de l'enrôlement risque d'être injoignable"
-    log "depuis le LAN. Définissez-la dans docker-compose.yml."
 fi
 
 lanprobe-web \
