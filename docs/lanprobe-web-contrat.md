@@ -228,6 +228,13 @@ CREATE TABLE probes (
 
 -- Le nom est unique DANS un site, pas globalement.
 CREATE UNIQUE INDEX probes_site_name ON probes(site_id, name COLLATE NOCASE);
+
+-- Réglages modifiables depuis l'interface, qui priment sur l'environnement.
+CREATE TABLE settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 ```
 
 `COLLATE NOCASE` sur les noms : « Durand » et « durand » sont le même site.
@@ -312,15 +319,42 @@ interne à l'enrôlement produirait une sonde qui s'enrôle avec succès puis
 n'écrit jamais rien — la panne la plus pénible à diagnostiquer, parce que tout
 paraît avoir marché.
 
+**Un conteneur ne peut pas connaître son port publié.** Avec `-p 9086:8086`, le
+processus ne voit que `8086` ; Docker ne lui communique jamais le `9086`. Aucune
+détection automatique n'est possible — la seule réponse honnête est de rendre la
+valeur réglable et vérifiable.
+
 **Ordre de résolution de l'URL annoncée :**
-1. `INFLUX_ADVERTISE_URL` si définie ;
-2. sinon, l'hôte de l'en-tête `Host` de la requête d'enrôlement, avec le port
+1. valeur réglée **dans l'interface web** (table `settings`, clé
+   `influx_advertise_url`) — c'est elle qui gagne ;
+2. sinon `INFLUX_ADVERTISE_URL` ;
+3. sinon, l'hôte de l'en-tête `Host` de la requête d'enrôlement, avec le port
    Influx. La sonde vient de joindre le hub à cette adresse — Influx est sur la
    même machine, c'est le meilleur pari disponible ;
-3. journaliser laquelle des deux a été retenue.
+4. journaliser laquelle des trois a été retenue.
 
 Le repli sur l'en-tête `Host` évite d'imposer une variable obligatoire à qui
-monte le conteneur : dans le cas courant, ça marche sans rien configurer.
+monte le conteneur : ports standards et pas de reverse proxy, ça marche sans
+rien régler. Les ports remappés se corrigent dans l'interface, sans redémarrage.
+
+### `POST /api/settings/influx-advertise/test` — authentification : session
+
+Le hub tente de joindre `/health` à l'URL annoncée et rend le verdict :
+
+```json
+{ "url": "https://192.168.1.10:9086", "reachable": true, "source": "settings" }
+```
+
+Sans ce test, une URL fausse produit exactement la panne qu'on cherche à éviter :
+une sonde qui s'enrôle, apparaît dans l'interface, et n'écrit rien. Avec lui,
+l'erreur est visible **avant** d'enrôler quoi que ce soit, à l'endroit où on la
+corrige. `source` vaut `settings`, `env` ou `host_header` — pour que le
+diagnostic dise d'où vient la valeur, pas seulement qu'elle est mauvaise.
+
+`GET`/`PUT /api/settings/influx-advertise` lisent et écrivent la valeur.
+L'écran d'enrôlement **affiche l'URL exacte** qui sera remise à la sonde : une
+valeur qu'on ne découvre qu'en lisant les logs est une valeur que personne ne
+vérifie.
 
 ### TLS auto-signé côté Influx
 
