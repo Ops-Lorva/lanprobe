@@ -228,10 +228,10 @@ async fn session_or_credentials(
     {
         return next.run(req).await;
     }
-    if let Some((username, password)) = basic_credentials(&headers) {
-        if state.db.verify_credentials(&username, &password).is_ok() {
-            return next.run(req).await;
-        }
+    if let Some((username, password)) = basic_credentials(&headers)
+        && state.db.verify_credentials(&username, &password).is_ok()
+    {
+        return next.run(req).await;
     }
     fail(StatusCode::UNAUTHORIZED, "session ou identifiants requis")
 }
@@ -614,10 +614,10 @@ async fn revoke_probe(State(state): State<AppState>, Path(id): Path<String>) -> 
     if let Err(e) = state.db.revoke_probe(&id) {
         return error_response(e);
     }
-    if let Some(auth_id) = probe.influx_auth_id {
-        if let Err(e) = state.influx.delete_authorization(&auth_id).await {
-            tracing::warn!("autorisation Influx {auth_id} non retirée : {e}");
-        }
+    if let Some(auth_id) = probe.influx_auth_id
+        && let Err(e) = state.influx.delete_authorization(&auth_id).await
+    {
+        tracing::warn!("autorisation Influx {auth_id} non retirée : {e}");
     }
     ok_json(json!({ "ok": true, "measurements_kept": true }))
 }
@@ -668,10 +668,10 @@ async fn revoke_token_now(State(state): State<AppState>, Path(id): Path<String>)
         Ok(pair) => pair,
         Err(e) => return error_response(e),
     };
-    if let Some(retired) = retired {
-        if let Err(e) = state.influx.delete_authorization(&retired).await {
-            tracing::warn!("autorisation Influx {retired} non retirée : {e}");
-        }
+    if let Some(retired) = retired
+        && let Err(e) = state.influx.delete_authorization(&retired).await
+    {
+        tracing::warn!("autorisation Influx {retired} non retirée : {e}");
     }
     ok_json(json!({
         "ok": true,
@@ -1716,6 +1716,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // Verrou tenu pendant les `await` : c'est voulu. Il protège une variable
+    // d'environnement, globale au processus — la relâcher plus tôt rouvrirait
+    // la course qu'il existe précisément pour fermer.
+    #[allow(clippy::await_holding_lock)]
     async fn the_tested_url_is_the_one_the_probe_receives() {
         // Deux chemins de résolution finiraient par diverger, et le test
         // validerait alors une URL que la sonde ne reçoit pas.
@@ -1807,8 +1811,8 @@ mod tests {
             ._fake
             .calls()
             .into_iter()
-            .filter(|(m, p, _)| m == "POST" && p.starts_with("/api/v2/authorizations"))
-            .next_back()
+            .rev()
+            .find(|(m, p, _)| m == "POST" && p.starts_with("/api/v2/authorizations"))
             .expect("une autorisation doit être demandée");
         let body: serde_json::Value = serde_json::from_str(&body).unwrap();
         let permissions = body["permissions"].as_array().unwrap();

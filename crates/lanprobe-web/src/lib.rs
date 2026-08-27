@@ -10,4 +10,5 @@ pub mod db;
 pub mod influx;
 pub mod probe;
 pub mod settings;
+pub mod tls;
 pub mod web;

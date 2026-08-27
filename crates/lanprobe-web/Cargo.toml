@@ -37,14 +37,18 @@ uuid = { version = "1", features = ["v4"] }
 # certificat de son pair, on refait le handshake nous-mêmes pour le capturer.
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
+# Le hub sert en HTTPS : sans TLS le cookie de session `Secure` ne serait
+# jamais renvoyé par le navigateur.
+rcgen = "0.13"
+rustls-pemfile = "2"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 ring = "0.17"
 base64 = "0.22"
 getrandom = "0.2"
 
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
-rcgen = "0.13"

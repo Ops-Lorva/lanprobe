@@ -164,10 +164,10 @@ impl Settings {
             ("INFLUX_ORG", keys::INFLUX_ORG),
             ("INFLUX_BUCKET", keys::INFLUX_BUCKET),
         ] {
-            if let Ok(value) = std::env::var(var) {
-                if !value.trim().is_empty() {
-                    self.db.seed_setting(key, value.trim())?;
-                }
+            if let Ok(value) = std::env::var(var)
+                && !value.trim().is_empty()
+            {
+                self.db.seed_setting(key, value.trim())?;
             }
         }
         Ok(())

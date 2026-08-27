@@ -2220,6 +2220,7 @@ name = "lanprobe-web"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "axum-server",
  "base64 0.22.1",
  "clap",
  "cookie",
@@ -2231,6 +2232,7 @@ dependencies = [
  "ring",
  "rusqlite",
  "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "tokio",
