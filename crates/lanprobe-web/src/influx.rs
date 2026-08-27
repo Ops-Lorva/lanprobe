@@ -73,6 +73,22 @@ impl AdvertiseSource {
     }
 }
 
+/// Jeton frappé : sa valeur, rendue **une seule fois**, et l'identifiant
+/// d'autorisation, seul élément que le hub conserve.
+#[derive(Debug, Clone)]
+pub struct MintedToken {
+    pub auth_id: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InfluxHealth {
+    pub status: String,
+    pub version: Option<String>,
+    pub bucket_bytes: Option<i64>,
+    pub series_count: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfluxIds {
     pub org_id: String,
@@ -251,7 +267,18 @@ impl Influx {
     }
 
     /// Frappe un jeton d'écriture restreint au seul bucket.
-    pub async fn mint_write_token(&self, description: &str) -> Result<String, String> {
+    pub async fn mint_write_token(&self, description: &str) -> Result<MintedToken, String> {
+        self.mint_token("write", description).await
+    }
+
+    /// Frappe un jeton **en lecture seule** sur le bucket, à coller dans
+    /// Grafana. Un jeton d'écriture distribué pour de la lecture serait un
+    /// joli trou : la portée est fixée ici, pas côté appelant.
+    pub async fn mint_read_token(&self, description: &str) -> Result<MintedToken, String> {
+        self.mint_token("read", description).await
+    }
+
+    async fn mint_token(&self, action: &str, description: &str) -> Result<MintedToken, String> {
         let ids = self
             .ids()
             .ok_or_else(|| "InfluxDB pas encore provisionné".to_string())?;
@@ -259,7 +286,7 @@ impl Influx {
             "orgID": ids.org_id,
             "description": description,
             "permissions": [{
-                "action": "write",
+                "action": action,
                 "resource": {
                     "type": "buckets",
                     "id": ids.bucket_id,
@@ -270,10 +297,80 @@ impl Influx {
         let value = self
             .send_json(reqwest::Method::POST, "/api/v2/authorizations", None, Some(body))
             .await?;
-        value["token"]
+        let token = value["token"]
             .as_str()
             .map(str::to_string)
-            .ok_or_else(|| "réponse d'autorisation Influx sans jeton".to_string())
+            .ok_or_else(|| "réponse d'autorisation Influx sans jeton".to_string())?;
+        Ok(MintedToken {
+            auth_id: value["id"].as_str().unwrap_or_default().to_string(),
+            token,
+        })
+    }
+
+    /// Détruit une autorisation. **Ne supprime aucune mesure** : une
+    /// autorisation est une clé, pas une donnée.
+    pub async fn delete_authorization(&self, auth_id: &str) -> Result<(), String> {
+        if auth_id.is_empty() {
+            return Ok(());
+        }
+        self.send_json(
+            reqwest::Method::DELETE,
+            &format!("/api/v2/authorizations/{}", urlencode(auth_id)),
+            // Déjà absente : le but est atteint, ce n'est pas une erreur.
+            Some(&[404]),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// État d'Influx tel qu'on l'affiche dans les réglages. Aucun jeton dans
+    /// cette structure : l'utilisateur doit pouvoir aller voir ses données
+    /// sans jamais avoir à administrer Influx.
+    pub async fn health(&self) -> InfluxHealth {
+        let url = format!("{}/health", self.settings.influx_url().trim_end_matches('/'));
+        let value = self
+            .http
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok();
+        let body: Option<serde_json::Value> = match value {
+            Some(response) if response.status().is_success() => response.json().await.ok(),
+            _ => None,
+        };
+        InfluxHealth {
+            status: body
+                .as_ref()
+                .and_then(|b| b["status"].as_str())
+                .unwrap_or("unreachable")
+                .to_string(),
+            version: body
+                .as_ref()
+                .and_then(|b| b["version"].as_str())
+                .map(str::to_string),
+            // Taille occupée et cardinalité demandent des requêtes au bucket
+            // `_monitoring`, que toutes les installations n'exposent pas. On
+            // préfère `null` à un chiffre inventé : une jauge fausse est pire
+            // qu'une jauge absente.
+            bucket_bytes: None,
+            series_count: self.series_count().await,
+        }
+    }
+
+    async fn series_count(&self) -> Option<i64> {
+        let bucket = self.settings.influx_bucket();
+        let flux = format!(
+            "import \"influxdata/influxdb/schema\"\n\
+             schema.measurements(bucket: \"{}\") |> count()",
+            bucket.replace('"', "")
+        );
+        let csv = self.query_flux(&flux).await.ok()?;
+        csv.lines()
+            .filter_map(|line| line.rsplit(',').next())
+            .filter_map(|cell| cell.trim().parse::<i64>().ok())
+            .next_back()
     }
 
     /// Proxifie une requête Flux. Le navigateur ne parle jamais directement à
@@ -635,6 +732,12 @@ pub(crate) mod testing {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// `INFLUX_ADVERTISE_URL` est globale au processus alors que les tests
+    /// Rust tournent en parallèle. Tout test qui la lit, l'écrit, ou exige son
+    /// absence prend ce verrou — y compris ceux des autres modules, sans quoi
+    /// la résolution de l'URL annoncée deviendrait un tirage au sort.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Ce qu'un faux Influx a vu passer. Les tests assertent sur les requêtes
     /// réellement émises — pas sur un mock qui se contenterait de dire oui.
     #[derive(Default)]
@@ -832,10 +935,6 @@ mod tests {
     use super::testing::*;
     use super::*;
 
-    /// `INFLUX_ADVERTISE_URL` est globale au processus alors que les tests
-    /// Rust tournent en parallèle : tout test qui la lit ou l'écrit — ou qui
-    /// exige son absence — prend ce verrou.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
     async fn provisioning_creates_the_org_and_the_bucket_when_missing() {
@@ -874,9 +973,10 @@ mod tests {
         influx.ensure_provisioned().await.unwrap();
 
         let token = influx.mint_write_token("sonde Paris").await.unwrap();
-        assert_eq!(token, "jeton-de-sonde-frappe");
+        assert_eq!(token.token, "jeton-de-sonde-frappe");
+        assert_eq!(token.auth_id, "auth-1", "l'identifiant permet de révoquer plus tard");
         assert_ne!(
-            token, "jeton-operateur-secret",
+            token.token, OPERATOR_TOKEN,
             "le jeton opérateur ne doit jamais être renvoyé à une sonde"
         );
 
