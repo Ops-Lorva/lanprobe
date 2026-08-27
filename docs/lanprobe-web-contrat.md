@@ -471,3 +471,30 @@ compromise qui reste valide tant que la machine volée ne rappelle pas —
 c'est-à-dire indéfiniment.
 
 Ni l'une ni l'autre ne supprime la moindre mesure.
+
+### Remise en service à distance
+
+Le cas réel : la sonde est à l'autre bout du pays et personne ne peut s'y rendre.
+
+**Clé d'écriture fuitée** — après `revoke-token`, le lien de la sonde avec le hub
+est **intact** : au battement de cœur suivant elle reçoit sa nouvelle clé et se
+remet à écrire. Aucune intervention, un trou d'un battement.
+
+**Machine compromise** — il ne faut surtout pas qu'elle se répare seule, c'est
+l'intérêt de la révoquer. Il faut donc une action humaine sur place, aussi légère
+que possible :
+
+### `POST /api/probes/{id}/reenroll-code` — authentification : session
+
+Émet un code d'enrôlement **rattaché à la sonde existante** (mêmes règles que
+`/api/enroll-codes` : 8 caractères, 15 minutes, usage unique). La personne sur
+place le saisit dans l'app — huit caractères dictés au téléphone, sans compte ni
+compréhension du système.
+
+La sonde revient avec **le même `probe_id`, donc tout son historique**. Un
+`DELETE` suivi d'un nouvel enrôlement aurait créé une seconde sonde et coupé les
+courbes en deux à la date de l'incident — précisément quand on veut comparer
+l'avant et l'après.
+
+Le ré-enrôlement remplace le jeton de sonde **et** le jeton d'écriture Influx :
+les identifiants de la machine compromise ne valent plus rien.
