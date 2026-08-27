@@ -6,3 +6,4 @@
 //! quitte jamais le serveur.
 
 pub mod db;
+pub mod probe;
