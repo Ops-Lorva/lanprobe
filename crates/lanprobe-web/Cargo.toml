@@ -33,9 +33,17 @@ cookie = { version = "0.18", features = ["percent-encode"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 
+# Empreinte du certificat auto-signé d'Influx : reqwest n'expose pas le
+# certificat de son pair, on refait le handshake nous-mêmes pour le capturer.
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+ring = "0.17"
+base64 = "0.22"
+
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
+rcgen = "0.13"

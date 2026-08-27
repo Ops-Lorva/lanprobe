@@ -21,19 +21,44 @@ pub struct ProbeInfluxSettings {
     pub org: String,
     pub bucket: String,
     pub token: String,
+    /// Empreinte du certificat auto-signé d'Influx, à épingler côté sonde.
+    /// Absente si Influx est servi en HTTP clair : il n'y a alors rien à
+    /// épingler, et un champ vide laisserait croire le contraire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_fingerprint_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct InfluxConfig {
-    /// URL vue par le hub (nom de service Docker, typiquement).
+    /// URL vue par le hub, depuis l'intérieur du conteneur (`INFLUX_URL`).
     pub url: String,
-    /// URL que les sondes doivent joindre depuis l'extérieur du réseau
-    /// Docker. Distincte de `url` : `http://influxdb:8086` ne veut rien dire
-    /// pour une sonde sur le LAN d'un client.
-    pub public_url: String,
+    /// URL annoncée aux sondes (`INFLUX_ADVERTISE_URL`). Facultative : sans
+    /// elle on repart de l'en-tête `Host` de l'enrôlement.
+    pub advertise_url: Option<String>,
     pub org: String,
     pub bucket: String,
     pub operator_token: String,
+}
+
+/// D'où vient l'URL annoncée à une sonde. Journalisé à chaque enrôlement :
+/// une sonde qui s'enrôle puis n'écrit jamais rien est la panne la plus
+/// pénible à diagnostiquer, et la première question est « quelle URL a-t-elle
+/// reçue, et pourquoi celle-là ».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertiseSource {
+    Configured,
+    RequestHost,
+    InternalUrl,
+}
+
+impl AdvertiseSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AdvertiseSource::Configured => "INFLUX_ADVERTISE_URL",
+            AdvertiseSource::RequestHost => "en-tête Host de l'enrôlement",
+            AdvertiseSource::InternalUrl => "INFLUX_URL (aucun Host exploitable)",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,15 +74,71 @@ pub struct Influx {
     /// Influx et réessaie : refuser de démarrer parce que la base de séries
     /// n'est pas encore prête rendrait le compose ingérable.
     ids: Mutex<Option<InfluxIds>>,
+    /// Empreinte du certificat d'Influx, calculée à la demande puis mise en
+    /// cache : un handshake par enrôlement serait du gaspillage.
+    tls_fingerprint: Mutex<Option<String>>,
 }
 
 impl Influx {
     pub fn new(cfg: InfluxConfig) -> Self {
+        // Influx est servi en HTTPS avec un certificat auto-signé, sur la
+        // machine même. Aucune autorité ne peut le valider : le hub accepte
+        // le certificat pour ce saut local, et transmet son empreinte aux
+        // sondes pour qu'elles l'épinglent — c'est là que se joue
+        // l'authentification du serveur, pas ici.
+        let http = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap_or_default();
         Self {
             cfg,
-            http: reqwest::Client::new(),
+            http,
             ids: Mutex::new(None),
+            tls_fingerprint: Mutex::new(None),
         }
+    }
+
+    /// Résout l'URL d'Influx à annoncer à une sonde, et dit d'où elle vient.
+    pub fn resolve_advertise_url(&self, host_header: Option<&str>) -> (String, AdvertiseSource) {
+        if let Some(url) = self.cfg.advertise_url.as_deref().map(str::trim) {
+            if !url.is_empty() {
+                return (url.trim_end_matches('/').to_string(), AdvertiseSource::Configured);
+            }
+        }
+        let (scheme, _, port) = split_url(&self.cfg.url);
+        if let Some(host) = host_header.map(host_without_port).filter(|h| !h.is_empty()) {
+            let port = port.map(|p| format!(":{p}")).unwrap_or_default();
+            return (format!("{scheme}://{host}{port}"), AdvertiseSource::RequestHost);
+        }
+        // Dernier recours : l'URL interne. Elle ne marchera probablement pas
+        // pour la sonde, mais c'est journalisé — mieux vaut une URL fausse et
+        // tracée qu'un champ vide qui fait planter l'app à l'autre bout.
+        (
+            self.cfg.url.trim_end_matches('/').to_string(),
+            AdvertiseSource::InternalUrl,
+        )
+    }
+
+    pub fn tls_fingerprint(&self) -> Option<String> {
+        self.tls_fingerprint.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Ouvre un handshake TLS vers Influx pour capturer l'empreinte SHA-256
+    /// du certificat qu'il présente. Rend une chaîne vide si Influx est servi
+    /// en HTTP clair : il n'y a alors rien à épingler.
+    pub async fn ensure_tls_fingerprint(&self) -> Result<String, String> {
+        if let Some(cached) = self.tls_fingerprint() {
+            return Ok(cached);
+        }
+        let (scheme, host, port) = split_url(&self.cfg.url);
+        if scheme != "https" {
+            return Ok(String::new());
+        }
+        let fingerprint = capture_certificate_fingerprint(&host, port.unwrap_or(443)).await?;
+        if let Ok(mut guard) = self.tls_fingerprint.lock() {
+            *guard = Some(fingerprint.clone());
+        }
+        Ok(fingerprint)
     }
 
     pub fn ids(&self) -> Option<InfluxIds> {
@@ -138,12 +219,18 @@ impl Influx {
         Ok(text)
     }
 
-    pub fn probe_settings(&self, token: &str) -> ProbeInfluxSettings {
+    /// Coordonnées à renvoyer à une sonde. `host_header` est celui de la
+    /// requête d'enrôlement — c'est l'adresse par laquelle la sonde vient de
+    /// joindre le hub, donc le meilleur pari sur l'adresse d'Influx.
+    pub fn probe_settings(&self, token: &str, host_header: Option<&str>) -> ProbeInfluxSettings {
+        let (url, source) = self.resolve_advertise_url(host_header);
+        tracing::info!("URL Influx annoncée à la sonde : {url} (source : {})", source.as_str());
         ProbeInfluxSettings {
-            url: self.cfg.public_url.clone(),
+            url,
             org: self.cfg.org.clone(),
             bucket: self.cfg.bucket.clone(),
             token: token.to_string(),
+            tls_fingerprint_sha256: self.tls_fingerprint().filter(|f| !f.is_empty()),
         }
     }
 
@@ -274,6 +361,141 @@ pub async fn run_provisioning(
             }
         }
     }
+}
+
+/// Découpe une URL en (schéma, hôte, port). Volontairement minimal : on ne
+/// traite que des URL qu'on a nous-même formées ou reçues d'une variable
+/// d'environnement, pas des URL arbitraires du web.
+fn split_url(url: &str) -> (String, String, Option<u16>) {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("http", url));
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    let host = host_without_port(authority);
+    // Le port suit le dernier `:`, mais seulement s'il est hors des crochets
+    // d'une adresse IPv6.
+    let port_part = match authority.rfind(']') {
+        Some(close) => authority[close + 1..].strip_prefix(':'),
+        None => authority.rsplit_once(':').map(|(_, p)| p),
+    };
+    let port = port_part
+        .and_then(|p| p.parse::<u16>().ok())
+        .or(match scheme {
+            "https" => Some(443),
+            "http" => Some(80),
+            _ => None,
+        });
+    (scheme.to_string(), host, port)
+}
+
+/// Retire le port d'une autorité HTTP, en préservant les crochets d'une
+/// adresse IPv6 littérale.
+fn host_without_port(authority: &str) -> String {
+    let authority = authority.trim();
+    if let Some(close) = authority.rfind(']') {
+        return authority[..=close].to_string();
+    }
+    match authority.rsplit_once(':') {
+        Some((host, _)) => host.to_string(),
+        None => authority.to_string(),
+    }
+}
+
+/// Empreinte SHA-256 d'un certificat, au format `AB:CD:…` — celui qu'affichent
+/// les navigateurs et `openssl x509 -fingerprint`, donc celui qu'un opérateur
+/// peut comparer à l'œil.
+fn fingerprint_of(cert: &rustls::pki_types::CertificateDer<'_>) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, cert.as_ref());
+    digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Ouvre un handshake TLS et capture le certificat présenté par le serveur.
+/// On ne le *valide* pas — il est auto-signé par construction ; on l'observe
+/// pour pouvoir le transmettre aux sondes qui, elles, l'épingleront.
+async fn capture_certificate_fingerprint(host: &str, port: u16) -> Result<String, String> {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct Capture {
+        seen: Mutex<Option<String>>,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    }
+
+    impl ServerCertVerifier for Capture {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            if let Ok(mut guard) = self.seen.lock() {
+                *guard = Some(fingerprint_of(end_entity));
+            }
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.provider.signature_verification_algorithms.supported_schemes()
+        }
+    }
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = Arc::new(Capture {
+        seen: Mutex::new(None),
+        provider: provider.clone(),
+    });
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier.clone())
+        .with_no_client_auth();
+
+    // Les crochets d'une IPv6 littérale ne font pas partie du nom.
+    let bare_host = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let server_name =
+        ServerName::try_from(bare_host.clone()).map_err(|e| format!("hôte Influx invalide : {e}"))?;
+
+    let stream = tokio::net::TcpStream::connect((bare_host.as_str(), port))
+        .await
+        .map_err(|e| format!("InfluxDB injoignable en TLS : {e}"))?;
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| format!("handshake TLS avec InfluxDB échoué : {e}"))?;
+
+    verifier
+        .seen
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(|| "aucun certificat présenté par InfluxDB".to_string())
 }
 
 fn first_id(list: &serde_json::Value) -> Option<String> {
@@ -432,10 +654,51 @@ pub(crate) mod testing {
         }
     }
 
+    /// Serveur TLS jetable présentant un certificat auto-signé, comme
+    /// l'Influx du conteneur. Rend son adresse et l'empreinte SHA-256
+    /// attendue du certificat.
+    pub(crate) async fn start_self_signed_tls_server() -> (std::net::SocketAddr, String) {
+        use rcgen::{CertificateParams, KeyPair};
+
+        let key_pair = KeyPair::generate().unwrap();
+        let params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+        let expected = super::fingerprint_of(&cert_der);
+
+        let key_der =
+            rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der()).unwrap();
+        // Provider explicite : `ring` et `aws-lc-rs` sont tous deux dans
+        // l'arbre (via reqwest), rustls refuse alors de choisir seul.
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                // Le handshake suffit : le hub ne veut que le certificat.
+                tokio::spawn(async move {
+                    let _ = acceptor.accept(stream).await;
+                });
+            }
+        });
+
+        (addr, expected)
+    }
+
     pub(crate) fn config(url: &str) -> InfluxConfig {
         InfluxConfig {
             url: url.to_string(),
-            public_url: "https://hub.example.org:8086".into(),
+            advertise_url: None,
             org: "lanprobe".into(),
             bucket: "lanprobe".into(),
             operator_token: "jeton-operateur-secret".into(),
@@ -527,12 +790,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_settings_expose_the_public_url_never_the_operator_token() {
+    async fn probe_settings_never_carry_the_operator_token() {
         let fake = FakeInflux::start(true, true).await;
         let influx = Influx::new(config(&fake.base_url));
 
-        let settings = influx.probe_settings("jeton-de-sonde");
-        assert_eq!(settings.url, "https://hub.example.org:8086");
+        let settings = influx.probe_settings("jeton-de-sonde", None);
         assert_eq!(settings.org, "lanprobe");
         assert_eq!(settings.bucket, "lanprobe");
         assert_eq!(settings.token, "jeton-de-sonde");
@@ -541,6 +803,78 @@ mod tests {
         assert!(
             !rendered.contains("jeton-operateur-secret"),
             "le jeton opérateur ne doit jamais être sérialisé : {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn advertise_url_prefers_the_configured_value() {
+        let mut cfg = config("https://127.0.0.1:8086");
+        cfg.advertise_url = Some("https://hub.example.org:8086".into());
+        let influx = Influx::new(cfg);
+
+        let (url, source) = influx.resolve_advertise_url(Some("autre-hote:8443"));
+        assert_eq!(url, "https://hub.example.org:8086");
+        assert_eq!(source, AdvertiseSource::Configured);
+    }
+
+    #[tokio::test]
+    async fn advertise_url_falls_back_to_the_request_host_with_the_influx_port() {
+        // Sans variable, l'URL interne (127.0.0.1) ne veut rien dire pour une
+        // sonde du LAN : on repart de l'hôte par lequel elle vient de joindre
+        // le hub, en substituant le port d'Influx à celui du hub.
+        let influx = Influx::new(config("https://127.0.0.1:8086"));
+
+        let (url, source) = influx.resolve_advertise_url(Some("hub.example.org:8443"));
+        assert_eq!(url, "https://hub.example.org:8086");
+        assert_eq!(source, AdvertiseSource::RequestHost);
+    }
+
+    #[tokio::test]
+    async fn advertise_url_falls_back_to_the_internal_url_without_a_host_header() {
+        let influx = Influx::new(config("https://127.0.0.1:8086"));
+
+        let (url, source) = influx.resolve_advertise_url(None);
+        assert_eq!(url, "https://127.0.0.1:8086");
+        assert_eq!(source, AdvertiseSource::InternalUrl);
+    }
+
+    #[tokio::test]
+    async fn advertise_url_handles_an_ipv6_host_header() {
+        let influx = Influx::new(config("https://127.0.0.1:8086"));
+
+        let (url, _) = influx.resolve_advertise_url(Some("[2001:db8::1]:8443"));
+        assert_eq!(url, "https://[2001:db8::1]:8086");
+    }
+
+    #[tokio::test]
+    async fn tls_fingerprint_matches_the_certificate_presented_by_influx() {
+        let (addr, expected) = start_self_signed_tls_server().await;
+        let influx = Influx::new(config(&format!("https://{addr}")));
+
+        let fingerprint = influx.ensure_tls_fingerprint().await.unwrap();
+        assert_eq!(fingerprint, expected);
+        assert!(
+            fingerprint.contains(':') && fingerprint.len() == 32 * 3 - 1,
+            "format AB:CD:… attendu : {fingerprint}"
+        );
+
+        // Mise en cache : la sonde suivante ne redéclenche pas de handshake.
+        assert_eq!(influx.tls_fingerprint().as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_plain_http_influx_has_no_fingerprint_to_pin() {
+        let fake = FakeInflux::start(true, true).await;
+        let influx = Influx::new(config(&fake.base_url));
+
+        assert!(influx.ensure_tls_fingerprint().await.unwrap().is_empty());
+        assert!(influx.tls_fingerprint().is_none());
+
+        let settings = influx.probe_settings("jeton-de-sonde", None);
+        let rendered = serde_json::to_string(&settings).unwrap();
+        assert!(
+            !rendered.contains("tls_fingerprint"),
+            "pas d'empreinte à épingler en HTTP clair : {rendered}"
         );
     }
 
