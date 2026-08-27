@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
+use lanprobe_core::passwords::{constant_time_eq, generate_token, hash_password, verify_password};
 use serde::{Deserialize, Serialize};
 
 const SESSION_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 7);
@@ -212,42 +211,6 @@ impl AuthStore {
         }
         Ok(())
     }
-}
-
-fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
-    // 16 bytes de salt brut → base64 via SaltString (argon2 0.5 ne prend pas
-    // directement rand 0.10 en entrée, on contourne avec getrandom).
-    let mut salt_bytes = [0u8; 16];
-    getrandom::getrandom(&mut salt_bytes).map_err(|_| argon2::password_hash::Error::Crypto)?;
-    let salt = SaltString::encode_b64(&salt_bytes)?;
-    let argon = Argon2::default();
-    let hash = argon.hash_password(password.as_bytes(), &salt)?;
-    Ok(hash.to_string())
-}
-
-fn verify_password(stored: &str, password: &str) -> Result<(), argon2::password_hash::Error> {
-    let parsed = PasswordHash::new(stored)?;
-    Argon2::default().verify_password(password.as_bytes(), &parsed)
-}
-
-/// Comparaison à temps constant — évite qu'un attaquant devine le token de
-/// setup octet par octet en mesurant le temps de réponse.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-fn generate_token() -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).expect("getrandom failed");
-    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 pub fn default_users_path(config_dir: &Path) -> PathBuf {

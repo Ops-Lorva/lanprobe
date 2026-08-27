@@ -2147,8 +2147,11 @@ dependencies = [
 name = "lanprobe-core"
 version = "0.0.0"
 dependencies = [
+ "argon2",
+ "base64 0.22.1",
  "dirs-next",
  "dns-lookup",
+ "getrandom 0.2.17",
  "ping-async",
  "rand 0.10.1",
  "reqwest",
@@ -2162,7 +2165,6 @@ dependencies = [
 name = "lanprobe-server"
 version = "0.0.0"
 dependencies = [
- "argon2",
  "axum",
  "axum-server",
  "base64 0.22.1",

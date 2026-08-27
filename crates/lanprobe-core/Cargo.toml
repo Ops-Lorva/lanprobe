@@ -15,5 +15,10 @@ rand = { workspace = true }
 ping-async = { workspace = true }
 dns-lookup = { workspace = true }
 
+# Hachage des secrets (module `passwords`, partagé avec le hub web)
+argon2 = "0.5"
+getrandom = "0.2"
+base64 = "0.22"
+
 [dev-dependencies]
 tokio-test = "0.4"
