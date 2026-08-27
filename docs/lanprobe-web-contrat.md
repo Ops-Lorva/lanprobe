@@ -119,10 +119,29 @@ qu'un champ libre — c'est ce qui évite qu'un « Durnad » se glisse dans le p
 ### `POST /api/sites` — `{ "name": "Durand" }` → `201`. `409` si le nom existe déjà.
 ### `PATCH /api/sites/{id}` — renommage. Les mesures passées gardent l'ancien tag `site` mais restent jointes par `site_id`.
 
-### `POST /api/probes/enroll` — authentification : identifiants du compte
+### `POST /api/enroll-codes` — authentification : session
+Génère un **code d'enrôlement court** (8 caractères, valable 15 minutes, à usage
+unique), affiché dans l'interface avec l'URL du hub :
+
+```json
+{ "code": "K7M2-4PQX", "site": "Durand", "expires_at": 1756340100 }
+```
+
+C'est le chemin **recommandé** pour enrôler une sonde : l'utilisateur colle une
+URL et un code, rien d'autre. Taper l'identifiant et le mot de passe du compte
+admin sur chaque machine sonde est à la fois pénible et une mauvaise idée — un
+poste compromis ne doit pas livrer les identifiants de l'interface. Un code
+expiré ou déjà consommé n'ouvre rien.
+
+### `POST /api/probes/enroll` — code d'enrôlement **ou** identifiants du compte
+```json
+{ "code": "K7M2-4PQX", "name": "Paris" }
+```
+ou, pour un usage scripté :
 ```json
 { "username": "admin", "password": "...", "name": "Paris", "site": "Durand" }
 ```
+Avec un code, le site vient du code ; il n'est pas à ressaisir.
 `site` est résolu par nom, insensible à la casse. S'il n'existe pas, le hub le
 crée et le signale par `site_created: true` — le champ existe pour que l'app
 affiche « nouveau site créé », faute de quoi une faute de frappe passerait
@@ -392,6 +411,63 @@ certificat. La réponse d'enrôlement inclut son empreinte :
             "tls_fingerprint_sha256": "AB:CD:…" }
 ```
 
+**Le hub calcule cette empreinte à partir du certificat présenté pendant le
+handshake TLS vers `influx_url`** — jamais en lisant un fichier sur disque. Le
+certificat d'Influx vit dans son propre volume, à un chemin qui ne regarde pas le
+hub : en dépendre coupleraient deux composants qui n'ont aucune raison de
+partager leur arborescence, et casserait le jour où Influx tourne ailleurs.
+Recalculée à chaque démarrage, mise en cache — un certificat renouvelé se
+propage aux sondes au battement de cœur suivant.
+
 Épingler l'empreinte vaut mieux que désactiver la vérification : on garde
 l'authentification du serveur sans exiger une autorité de certification que
 personne n'a dans un réseau local.
+
+## 8. Influx vu depuis les réglages
+
+L'utilisateur ne doit **jamais avoir à administrer Influx**. Le bucket et l'org
+sont créés au premier démarrage. Mais il doit pouvoir aller voir ses données —
+donc les réglages exposent, en lecture : URL, org, bucket, version, état de
+santé, taille occupée, et le nombre de séries.
+
+### `POST /api/influx/read-token` — authentification : session
+
+Génère un jeton **en lecture seule** sur le bucket, à coller dans Grafana.
+Affiché **une seule fois** — le hub n'en garde que l'identifiant, pour pouvoir le
+révoquer. Sans ce bouton, « voir ses données » s'arrête à savoir où elles sont.
+
+`GET /api/influx/read-tokens` liste les jetons émis (identifiant, description,
+date), `DELETE /api/influx/read-tokens/{id}` en révoque un.
+
+## 9. Rotation des jetons d'écriture
+
+**Il n'y a pas une clé de bucket : il y a une clé par sonde.** Une sonde
+compromise se révoque seule, les autres continuent d'écrire. Une clé partagée
+aurait imposé de redéployer tout le parc à la première machine volée.
+
+Deux actions distinctes, parce qu'elles ne répondent pas au même besoin :
+
+### `POST /api/probes/{id}/rotate` — hygiène
+
+1. le hub crée un nouveau jeton d'écriture et le stocke comme **en attente** ;
+2. la réponse au **battement de cœur suivant** le transporte, avec un numéro de
+   version : `{ "influx": { …, "token_version": 3 } }` ;
+3. la sonde renvoie `influx_token_version` dans ses battements suivants ;
+4. **c'est seulement à la réception de cet accusé** que le hub détruit l'ancien
+   jeton dans Influx.
+
+Détruire avant l'accusé couperait toute sonde éteinte au mauvais moment — elle
+se réveillerait avec un jeton mort et sans moyen d'en obtenir un autre.
+
+### `POST /api/probes/{id}/revoke-token` — compromission
+
+L'ancien jeton est détruit **immédiatement**, le nouveau attend le prochain
+contact. La sonde ne peut pas écrire dans l'intervalle : c'est le comportement
+voulu — quand une clé fuit, on coupe d'abord et on rétablit ensuite.
+
+L'interface doit présenter les deux avec leur conséquence écrite. Confondre les
+deux donnerait soit des sondes coupées par une rotation de routine, soit une clé
+compromise qui reste valide tant que la machine volée ne rappelle pas —
+c'est-à-dire indéfiniment.
+
+Ni l'une ni l'autre ne supprime la moindre mesure.
