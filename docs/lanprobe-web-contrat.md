@@ -291,3 +291,48 @@ de ne pas l'avoir.
 
 Le mot de passe du compte n'est **jamais** écrit sur disque : il sert une fois,
 à l'enrôlement.
+
+## 7. Configuration du hub (contrat avec le packaging)
+
+Le binaire `lanprobe-web` accepte les mêmes options que `lanprobe-server` :
+`--host`, `--port`, `--config-dir`. Variables d'environnement :
+
+| Variable | Rôle |
+|---|---|
+| `INFLUX_TOKEN` | jeton opérateur. **Ne sort jamais du hub.** |
+| `INFLUX_URL` | URL interne d'Influx, vue du conteneur (`https://127.0.0.1:8086`) |
+| `INFLUX_ORG`, `INFLUX_BUCKET` | défauts `lanprobe` / `lanprobe` |
+| `INFLUX_ADVERTISE_URL` | URL d'Influx **renvoyée aux sondes** à l'enrôlement |
+| `LANPROBE_WEB_HOST`, `LANPROBE_WEB_PORT`, `LANPROBE_WEB_CONFIG_DIR` | défauts `0.0.0.0`, `8443`, `/data/lanprobe` |
+
+### L'URL annoncée n'est pas l'URL interne
+
+Le hub joint Influx sur `127.0.0.1` ; une sonde sur le LAN, non. Renvoyer l'URL
+interne à l'enrôlement produirait une sonde qui s'enrôle avec succès puis
+n'écrit jamais rien — la panne la plus pénible à diagnostiquer, parce que tout
+paraît avoir marché.
+
+**Ordre de résolution de l'URL annoncée :**
+1. `INFLUX_ADVERTISE_URL` si définie ;
+2. sinon, l'hôte de l'en-tête `Host` de la requête d'enrôlement, avec le port
+   Influx. La sonde vient de joindre le hub à cette adresse — Influx est sur la
+   même machine, c'est le meilleur pari disponible ;
+3. journaliser laquelle des deux a été retenue.
+
+Le repli sur l'en-tête `Host` évite d'imposer une variable obligatoire à qui
+monte le conteneur : dans le cas courant, ça marche sans rien configurer.
+
+### TLS auto-signé côté Influx
+
+Influx est servi en HTTPS avec un certificat auto-signé généré au premier
+démarrage. La sonde doit donc pouvoir **épingler ou accepter explicitement** ce
+certificat. La réponse d'enrôlement inclut son empreinte :
+
+```json
+"influx": { "url": "…", "org": "…", "bucket": "…", "token": "…",
+            "tls_fingerprint_sha256": "AB:CD:…" }
+```
+
+Épingler l'empreinte vaut mieux que désactiver la vérification : on garde
+l'authentification du serveur sans exiger une autorité de certification que
+personne n'a dans un réseau local.
