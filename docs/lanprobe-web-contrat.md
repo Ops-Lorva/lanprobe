@@ -411,6 +411,14 @@ certificat. La réponse d'enrôlement inclut son empreinte :
             "tls_fingerprint_sha256": "AB:CD:…" }
 ```
 
+**Le hub calcule cette empreinte à partir du certificat présenté pendant le
+handshake TLS vers `influx_url`** — jamais en lisant un fichier sur disque. Le
+certificat d'Influx vit dans son propre volume, à un chemin qui ne regarde pas le
+hub : en dépendre coupleraient deux composants qui n'ont aucune raison de
+partager leur arborescence, et casserait le jour où Influx tourne ailleurs.
+Recalculée à chaque démarrage, mise en cache — un certificat renouvelé se
+propage aux sondes au battement de cœur suivant.
+
 Épingler l'empreinte vaut mieux que désactiver la vérification : on garde
 l'authentification du serveur sans exiger une autorité de certification que
 personne n'a dans un réseau local.
