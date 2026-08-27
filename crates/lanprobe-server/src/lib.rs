@@ -9,6 +9,7 @@ pub mod config;
 pub mod influxdb;
 pub mod routes;
 pub mod scheduler;
+pub mod secrets;
 pub mod state;
 pub mod tls;
 pub mod web;

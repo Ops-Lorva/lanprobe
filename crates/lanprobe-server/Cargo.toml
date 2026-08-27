@@ -39,6 +39,9 @@ rand = { workspace = true }
 getrandom = "0.2"
 base64 = "0.22"
 cookie = { version = "0.18", features = ["percent-encode"] }
+# AEAD pour le chiffrement au repos des secrets applicatifs (app_config.json).
+# `ring` est déjà dans l'arbre via rustls — pas de nouvelle dépendance réelle.
+ring = "0.17"
 
 # Self-signed TLS + protocol sniffing
 rcgen = "0.13"
