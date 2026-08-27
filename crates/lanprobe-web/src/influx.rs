@@ -300,15 +300,17 @@ fn urlencode(value: &str) -> String {
     out
 }
 
+/// Faux InfluxDB local, partagé par les tests de ce crate. Local et
+/// jetable : aucun test ne touche un Influx réel.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
     use std::sync::{Arc, Mutex};
 
     /// Ce qu'un faux Influx a vu passer. Les tests assertent sur les requêtes
     /// réellement émises — pas sur un mock qui se contenterait de dire oui.
     #[derive(Default)]
-    struct Seen {
+    pub(crate) struct Seen {
         calls: Vec<(String, String, String)>, // méthode, chemin+query, corps
         org_exists: bool,
         bucket_exists: bool,
@@ -317,17 +319,17 @@ mod tests {
         fail_next: u32,
     }
 
-    struct FakeInflux {
-        base_url: String,
+    pub(crate) struct FakeInflux {
+        pub(crate) base_url: String,
         seen: Arc<Mutex<Seen>>,
     }
 
     impl FakeInflux {
-        async fn start(org_exists: bool, bucket_exists: bool) -> Self {
+        pub(crate) async fn start(org_exists: bool, bucket_exists: bool) -> Self {
             Self::start_flaky(org_exists, bucket_exists, 0).await
         }
 
-        async fn start_flaky(org_exists: bool, bucket_exists: bool, fail_next: u32) -> Self {
+        pub(crate) async fn start_flaky(org_exists: bool, bucket_exists: bool, fail_next: u32) -> Self {
             use axum::{
                 body::Bytes,
                 extract::State,
@@ -425,12 +427,12 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> Vec<(String, String, String)> {
+        pub(crate) fn calls(&self) -> Vec<(String, String, String)> {
             self.seen.lock().unwrap().calls.clone()
         }
     }
 
-    fn config(url: &str) -> InfluxConfig {
+    pub(crate) fn config(url: &str) -> InfluxConfig {
         InfluxConfig {
             url: url.to_string(),
             public_url: "https://hub.example.org:8086".into(),
@@ -439,6 +441,12 @@ mod tests {
             operator_token: "jeton-operateur-secret".into(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::*;
+    use super::*;
 
     #[tokio::test]
     async fn provisioning_creates_the_org_and_the_bucket_when_missing() {
