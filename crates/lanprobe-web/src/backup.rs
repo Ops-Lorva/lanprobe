@@ -1027,6 +1027,16 @@ pub fn restore_influx(archive: &Path, target: &InfluxTarget) -> BackupResult<()>
 
 fn run_influx_restore(target: &InfluxTarget, dir: &Path) -> BackupResult<()> {
     let mut cmd = std::process::Command::new(&target.cli);
+    // ⚠️ La CLI Influx lit `INFLUX_ORG` / `INFLUX_BUCKET` dans l'environnement,
+    // et l'entrypoint du conteneur les exporte. Combinés à `--full`, elle
+    // refuse : « --full restore cannot be limited to a single org or bucket ».
+    // La restauration échouait donc systématiquement dans le conteneur, alors
+    // qu'elle passait partout où ces variables sont absentes — c'est
+    // exactement le genre de défaut qu'aucun test unitaire ne montre.
+    cmd.env_remove("INFLUX_ORG")
+        .env_remove("INFLUX_BUCKET")
+        .env_remove("INFLUX_BUCKET_ID")
+        .env_remove("INFLUX_ORG_ID");
     // `--full` : l'archive porte la sauvegarde complète de l'instance, et le
     // jeton opérateur restauré avec elle correspond à cet état-là. Restaurer
     // les deux séparément donnerait un hub qui ne sait plus parler à son
