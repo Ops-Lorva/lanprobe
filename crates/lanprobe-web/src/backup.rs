@@ -863,6 +863,19 @@ pub fn restore(req: RestoreRequest<'_>) -> BackupResult<RestoreReport> {
             // repassent par `influx restore`.
             continue;
         }
+        // ⚠️ Le jeton opérateur d'Influx **ne se restaure pas**.
+        //
+        // Celui de l'archive appartient à l'instance qui l'a produite. Depuis
+        // qu'on restaure le bucket seul, l'InfluxDB en place garde ses propres
+        // jetons : lui imposer celui de l'archive laisse un hub qui ne sait
+        // plus parler à sa propre base — vérifié, `401` sur toutes ses
+        // requêtes après une restauration pourtant réussie.
+        //
+        // Il reste dans l'archive : elle décrit un état complet, et il sert si
+        // quelqu'un restaure aussi le volume d'InfluxDB par ses propres moyens.
+        if target_name(&entry.path) == "influx-operator-token" {
+            continue;
+        }
         let from = staging.join(&entry.path);
         let to = req.config_dir.join(target_name(&entry.path));
         if let Some(parent) = to.parent() {
@@ -1506,9 +1519,14 @@ mod tests {
             std::fs::read(source.join("secret.key")).unwrap(),
             "secret.key doit être restauré à l'octet près"
         );
-        assert_eq!(
-            std::fs::read(target.join("influx-operator-token")).unwrap(),
-            b"jeton-operateur"
+        // ⚠️ Le jeton opérateur d'Influx n'est PAS restauré : celui de
+        // l'archive appartient à l'instance qui l'a produite. Depuis que la
+        // restauration vise le bucket seul, l'InfluxDB en place garde ses
+        // propres jetons — lui imposer celui de l'archive laissait un hub qui
+        // ne savait plus parler à sa propre base.
+        assert!(
+            !target.join("influx-operator-token").exists(),
+            "le jeton opérateur de l'archive ne doit pas écraser celui de l'instance"
         );
         assert!(target.join("hub-cert.pem").is_file());
         // Le rangement de l'archive ne doit pas déborder dans le volume.
