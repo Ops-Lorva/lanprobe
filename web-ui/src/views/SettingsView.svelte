@@ -1034,13 +1034,15 @@
     overflow-wrap: anywhere;
   }
 
+  /* Le bouton s'aligne sur le bord droit des cartes qu'il enregistre. Une
+     largeur maximale héritée d'une mise en page en colonne étroite le laissait
+     flotter au milieu du vide sur grand écran, loin de ce sur quoi il agit. */
   .save-row {
     display: flex;
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
     margin-top: 14px;
-    max-width: 760px;
   }
   .save-row button {
     margin-left: auto;
