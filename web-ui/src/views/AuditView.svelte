@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { _, locale } from 'svelte-i18n';
   import { api, ApiError, AUDIT_ACTIONS, type AuditEntry } from '$lib/api';
-  import { noteAdmin } from '$lib/session';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import { absoluteTime, relativeTime, now } from '$lib/time';
 
@@ -37,7 +36,6 @@
       onExpired();
       return '';
     }
-    if (e instanceof ApiError && e.isForbidden) noteAdmin(false);
     return e instanceof ApiError ? e.message : String(e);
   }
 
@@ -49,7 +47,6 @@
       const page = await api.audit({ limit: PAGE, actor, action });
       entries = page?.entries ?? [];
       nextBeforeId = page?.next_before_id ?? null;
-      noteAdmin(true);
     } catch (e) {
       const msg = handle(e);
       if (e instanceof ApiError && e.isForbidden) denied = msg;

@@ -1,9 +1,12 @@
 <script lang="ts">
   import { _ } from 'svelte-i18n';
-  import { api, ApiError, probeSession } from '$lib/api';
+  import { api, ApiError, whoami, type Identity } from '$lib/api';
   import AuthFrame from './AuthFrame.svelte';
 
-  const { onDone, notice = '' } = $props<{ onDone: () => void; notice?: string }>();
+  const { onDone, notice = '' } = $props<{
+    onDone: (who: Identity) => void;
+    notice?: string;
+  }>();
 
   let username = $state('');
   let password = $state('');
@@ -22,12 +25,16 @@
       // le navigateur le jette *sans rien dire* : la connexion réussit puis
       // chaque requête repart en 401. Sans cette vérification, l'utilisateur
       // ne voit qu'un « session expirée » qui désigne la mauvaise cause.
-      if (!(await probeSession())) {
+      //
+      // La même requête rend le rôle : on le transmet plutôt que de le
+      // redemander, et l'application démarre en le connaissant déjà.
+      const who = await whoami();
+      if (!who) {
         error = $_('auth.cookie_blocked');
         password = '';
         return;
       }
-      onDone();
+      onDone(who);
     } catch (err) {
       if (err instanceof ApiError && err.isNetwork) error = $_('auth.unreachable');
       // 401 sur un formulaire de connexion, c'est « mauvais identifiants » :

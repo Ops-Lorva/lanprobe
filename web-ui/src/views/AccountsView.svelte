@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { _, locale } from 'svelte-i18n';
   import { api, ApiError, type Account, type Role } from '$lib/api';
-  import { noteAdmin } from '$lib/session';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import RoleChoice from '$lib/components/RoleChoice.svelte';
@@ -28,7 +27,6 @@
       onExpired();
       return '';
     }
-    if (e instanceof ApiError && e.isForbidden) noteAdmin(false);
     return e instanceof ApiError ? e.message : String(e);
   }
 
@@ -39,7 +37,6 @@
     rowError = '';
     try {
       accounts = (await api.users()) ?? [];
-      noteAdmin(true);
     } catch (e) {
       const msg = handle(e);
       if (e instanceof ApiError && e.isForbidden) denied = msg;

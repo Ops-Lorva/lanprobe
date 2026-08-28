@@ -12,7 +12,7 @@
     type Subscriptions,
     type WebhookTemplate,
   } from '$lib/api';
-  import { isAdmin, noteAdmin } from '$lib/session';
+  import { isAdmin } from '$lib/session';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
 
@@ -133,11 +133,9 @@
       const s = await api.notifications();
       applyStatus(s);
       chLoaded = true;
-      noteAdmin(true);
     } catch (e) {
       const msg = handle(e);
       if (e instanceof ApiError && e.isForbidden) {
-        noteAdmin(false);
         chDenied = msg;
         // Le panneau est fermé pour de bon : on repart sur celui qui sert.
         tab = 'subs';
@@ -159,7 +157,7 @@
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     e.preventDefault();
     if (tab === 'subs') {
-      if ($isAdmin !== false) openChannels();
+      if ($isAdmin) openChannels();
     } else {
       tab = 'subs';
     }
@@ -359,8 +357,9 @@
   >
     {$_('notify.tab_subs')}
   </button>
-  <!-- Retiré une fois que le hub a répondu 403 : voir `$lib/session`. -->
-  {#if $isAdmin !== false}
+  <!-- Réservé à `admin` (contrat § 11) : le rôle est connu, on ne propose pas
+       un onglet dont on sait qu'il sera refusé. -->
+  {#if $isAdmin}
     <button
       class="tab"
       class:on={tab === 'channels'}

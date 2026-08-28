@@ -129,6 +129,19 @@ export const SETTINGS_DEFAULTS: HubSettings = {
 /** Ordonnés : `viewer < operator < admin`. */
 export type Role = 'admin' | 'operator' | 'viewer';
 
+/**
+ * Qui est connecté, tel que le hub le voit — `GET /api/me`, derrière le garde
+ * de session.
+ *
+ * Le rôle est relu par le hub à chaque requête (contrat § 11) : celui-ci est un
+ * instantané, pas un droit acquis. L'interface s'en sert pour ne pas proposer
+ * ce qui sera refusé — jamais pour décider si c'est permis.
+ */
+export interface Identity {
+  username: string;
+  role: Role;
+}
+
 /** Du plus puissant au moins puissant : c'est l'ordre dans lequel on choisit. */
 export const ROLES: Role[] = ['admin', 'operator', 'viewer'];
 
@@ -398,6 +411,9 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
 
+  /** Qui est connecté, et avec quel rôle. `401` si la session ne tient plus. */
+  me: () => request<Identity>('/api/me'),
+
   logout: () => request<unknown>('/api/logout', { method: 'POST' }),
 
   sites: () => request<Site[]>('/api/sites'),
@@ -623,16 +639,22 @@ export const api = {
 };
 
 /**
- * Le contrat ne prévoit pas de champ « authentifié » dans `/api/status` : la
- * seule façon conforme de savoir si la session tient est de demander une route
- * protégée et de regarder si elle répond 401.
+ * Qui est connecté, ou `null` si la session ne tient plus.
+ *
+ * `/api/status` est publique et ne dit rien de la session ; `/api/me` est la
+ * route qui répond aux deux questions d'un coup — « la session tient-elle ? »
+ * et « avec quel rôle ? ». Elle remplace l'ancien sondage de `/api/probes`, qui
+ * ne rendait que la première et faisait payer une liste de sondes pour l'avoir.
+ *
+ * Une erreur autre que `401` **remonte** : hub injoignable et session expirée
+ * n'appellent pas la même réponse, et confondre les deux enverrait à l'écran de
+ * connexion quelqu'un dont le réseau est simplement coupé.
  */
-export async function probeSession(): Promise<boolean> {
+export async function whoami(): Promise<Identity | null> {
   try {
-    await api.probes();
-    return true;
+    return await api.me();
   } catch (e) {
-    if (e instanceof ApiError && e.isUnauthorized) return false;
+    if (e instanceof ApiError && e.isExpired) return null;
     throw e;
   }
 }

@@ -41,10 +41,11 @@
     { id: 'settings', href: '#/settings', icon: 'settings', key: 'nav.settings' },
   ];
 
-  // Visibles tant que le hub n'a pas dit non. Voir `$lib/session` : il n'existe
-  // aucune route qui donne le rôle de la session, et sonder au démarrage
-  // déposerait au journal un refus que personne n'a provoqué.
-  const visible = $derived(items.filter((i) => !i.admin || $isAdmin !== false));
+  // Le rôle est connu avant le premier écran (`GET /api/me`) : une entrée
+  // réservée à `admin` n'apparaît donc jamais pour les autres, plutôt que
+  // d'apparaître puis de disparaître au premier refus. La protection, elle,
+  // reste côté serveur, route par route (contrat § 11).
+  const visible = $derived(items.filter((i) => !i.admin || $isAdmin));
 
   // C'est `main` qui défile désormais, pas le document : un changement d'écran
   // doit donc le remonter à la main, sinon on arrive au milieu de la fiche

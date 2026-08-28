@@ -1,61 +1,46 @@
-import { writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
+import type { Identity, Role } from './api';
 
 /**
- * Ce que la session a le droit de faire, tel qu'on l'a APPRIS.
+ * Qui est connecté, et avec quel rôle.
  *
- * ⚠️ Le hub n'expose aucune route qui dise « qui suis-je, et avec quel rôle ».
- * `GET /api/status` rend `needs_setup` et la version, `POST /api/login` rend
- * `{ ok: true }` : la session n'apporte donc pas son rôle avec elle.
+ * Le hub le dit lui-même : `GET /api/me` rend `{ username, role }` derrière le
+ * garde de session. Avant elle, l'interface apprenait son rôle **en se prenant
+ * un refus** — or le contrat § 11 impose qu'un refus écrive une ligne
+ * `access.denied` au journal. Chaque ouverture de session d'un observateur y
+ * déposait donc un refus que personne n'avait provoqué : exactement le bruit
+ * qui empêche de repérer, dans ce même journal, la série de refus qui compte.
  *
- * Sonder une route d'administration au démarrage donnerait la réponse, mais le
- * contrat § 11 impose qu'un refus écrive une ligne `access.denied` au journal.
- * Chaque ouverture de session d'un observateur y déposerait donc un refus que
- * personne n'a provoqué — exactement le bruit qui empêche de repérer, dans ce
- * même journal, la série de refus qui compte.
+ * **Rien n'est mis en cache.** La valeur est relue au démarrage et à chaque
+ * connexion. Un rôle gardé en `sessionStorage` survivrait à une rétrogradation
+ * et mentirait tant que l'onglet reste ouvert — alors que le hub, lui, relit le
+ * rôle à chaque requête.
  *
- * D'où ce modèle : on ne devine rien, on **retient ce que le hub a répondu**.
- * Les entrées d'administration sont visibles tant qu'on ne sait pas ; le
- * premier 403 les retire. Le refus qui en résulte a alors été provoqué par un
- * clic réel, et sa trace au journal est légitime.
- *
- * **Ce n'est pas une protection** : elle est côté serveur, route par route, et
- * elle existe déjà. Ceci n'est que du confort de navigation.
- *
- * `null` = pas encore su.
+ * ⚠️ **Ce n'est pas une protection.** Elle est côté serveur, route par route.
+ * Ici on masque seulement ce qui n'aboutirait pas : un onglet qu'un rôle ne
+ * peut pas utiliser ne s'affiche pas pour lui, et c'est tout ce que ça fait.
  */
-const KEY = 'lanprobe.hub.admin';
+export const identity = writable<Identity | null>(null);
 
-function remembered(): boolean | null {
-  try {
-    const v = sessionStorage.getItem(KEY);
-    return v === 'yes' ? true : v === 'no' ? false : null;
-  } catch {
-    return null;
-  }
-}
+/** `null` seulement avant la première réponse de `/api/me`. */
+export const role = derived(identity, ($i): Role | null => $i?.role ?? null);
 
-export const isAdmin = writable<boolean | null>(remembered());
+export const isAdmin = derived(identity, ($i) => $i?.role === 'admin');
 
 /**
- * Enregistre le verdict du hub. `sessionStorage` et non `localStorage` : une
- * promotion de rôle prend effet à la requête suivante côté serveur, un cache
- * qui survivrait à la fermeture du navigateur mentirait plus longtemps.
+ * `operator` **ou** `admin` : les rôles sont ordonnés (`viewer < operator <
+ * admin`), une route ouverte à `operator` l'est donc aussi à `admin`.
  */
-export function noteAdmin(value: boolean) {
-  isAdmin.set(value);
-  try {
-    sessionStorage.setItem(KEY, value ? 'yes' : 'no');
-  } catch {
-    /* navigation privée verrouillée : on garde la valeur en mémoire */
-  }
+export const canOperate = derived(
+  identity,
+  ($i) => $i?.role === 'admin' || $i?.role === 'operator',
+);
+
+export function setIdentity(who: Identity) {
+  identity.set(who);
 }
 
-/** À la déconnexion : le compte suivant n'a aucune raison d'hériter du verdict. */
-export function forgetAdmin() {
-  isAdmin.set(null);
-  try {
-    sessionStorage.removeItem(KEY);
-  } catch {
-    /* non bloquant */
-  }
+/** À la déconnexion : le compte suivant n'hérite de rien. */
+export function forgetIdentity() {
+  identity.set(null);
 }
