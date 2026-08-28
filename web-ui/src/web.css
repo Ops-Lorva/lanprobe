@@ -13,11 +13,18 @@
 /* 1 — Défilement.
    app.css verrouille `html, body { overflow: hidden }` : c'est correct pour une
    fenêtre d'application, faux pour une page web où le parc peut dépasser
-   l'écran. On rend le défilement vertical au document (barre d'outils mobile
-   correcte, `position: sticky` fonctionnel) et on interdit explicitement le
-   défilement horizontal, qui est toujours un bug de mise en page. */
-html,
-body {
+   l'écran. On rend le défilement vertical au document et on interdit
+   explicitement le défilement horizontal, qui est toujours un bug de mise en
+   page.
+
+   ⚠️ Ces règles ne portent QUE sur `html`. Posées aussi sur `body`, elles
+   faisaient du body une boîte de défilement à part entière : `html` ayant alors
+   un overflow explicite, la propagation vers la viewport ne part plus du body,
+   et cette boîte-là ne défile jamais puisque c'est la viewport qui bouge. Tout
+   `position: sticky` placé dedans cessait donc de coller — c'est ce qui
+   envoyait la barre latérale au milieu de la page. `body { overflow: visible }`
+   est explicite plutôt qu'omis : app.css impose `hidden`, il faut le défaire. */
+html {
   height: auto;
   min-height: 100%;
   overflow-y: auto;
@@ -26,6 +33,9 @@ body {
 }
 
 body {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
   -webkit-font-smoothing: antialiased;
 }
 

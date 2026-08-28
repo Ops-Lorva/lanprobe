@@ -22,6 +22,17 @@
     { id: 'enroll', href: '#/enroll', icon: 'scan' as const, key: 'nav.enroll' },
     { id: 'settings', href: '#/settings', icon: 'settings' as const, key: 'nav.settings' },
   ];
+
+  // C'est `main` qui défile désormais, pas le document : un changement d'écran
+  // doit donc le remonter à la main, sinon on arrive au milieu de la fiche
+  // suivante avec le défilement de la précédente.
+  let mainEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    void $route.name;
+    void $route.id;
+    mainEl?.scrollTo({ top: 0 });
+    window.scrollTo({ top: 0 });
+  });
 </script>
 
 <!--
@@ -59,7 +70,7 @@
     </div>
   </nav>
 
-  <main>
+  <main bind:this={mainEl}>
     {#if $route.name === 'probe'}
       <ProbeView id={$route.id} {onExpired} />
     {:else if $route.name === 'enroll'}
@@ -73,9 +84,15 @@
 </div>
 
 <style>
+  /* Sur grand écran, c'est le panneau de droite qui défile, pas la page : la
+     barre latérale n'est alors pas « collée », elle est structurellement hors
+     du flux défilant. Aucun `position: sticky` à faire fonctionner, donc rien
+     qui puisse se décoller — c'est le modèle des consoles denses (Proxmox,
+     Grafana) et le seul qui tienne dans tous les moteurs. */
   .shell {
     display: flex;
-    min-height: 100dvh;
+    height: 100dvh;
+    overflow: hidden;
     background: var(--ep-bg-primary);
   }
 
@@ -88,9 +105,8 @@
     flex-direction: column;
     padding: 10px 8px;
     gap: 2px;
-    position: sticky;
-    top: 0;
-    height: 100dvh;
+    height: 100%;
+    overflow-y: auto;
   }
 
   .logo {
@@ -176,16 +192,30 @@
   main {
     flex: 1;
     min-width: 0; /* sans ça, une cellule large pousse la page en défilement horizontal */
+    overflow-y: auto;
+    overflow-x: hidden;
     padding: 18px 20px 40px;
   }
 
+  /* Sous 900 px la barre devient horizontale : là, le document reprend le
+     défilement (la barre d'outils des navigateurs mobiles ne se replie que si
+     c'est la page qui bouge) et la barre colle en haut. */
   @media (max-width: 900px) {
     .shell {
       flex-direction: column;
+      height: auto;
+      min-height: 100dvh;
+      overflow: visible;
+    }
+    main {
+      overflow: visible;
     }
     .sidebar {
       width: auto;
       height: auto;
+      overflow: visible;
+      position: sticky;
+      top: 0;
       flex-direction: row;
       align-items: center;
       gap: 10px;
