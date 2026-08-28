@@ -840,14 +840,20 @@ async fn probe_metrics(
 fn series_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
     use std::collections::BTreeMap;
 
-    let mut series: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    // Colonnes de service d'Influx : tout le reste est une étiquette.
+    const INTERNAL: &[&str] = &[
+        "", "result", "table", "_start", "_stop", "_time", "_value", "_field", "_measurement",
+    ];
+
+    // Clé = (champ, étiquettes triées). Sans les étiquettes, deux IP surveillées
+    // en parallèle s'écrasaient dans une seule courbe : les points
+    // s'entrelaçaient et le graphe montrait une latence qui n'existe nulle part.
+    let mut series: BTreeMap<(String, Vec<(String, String)>), Vec<serde_json::Value>> =
+        BTreeMap::new();
     let mut cols: Option<Vec<String>> = None;
 
     for line in csv.lines() {
         let line = line.trim_end_matches('\r');
-        // Les lignes d'annotation (#datatype, #group, #default) ne portent pas
-        // de données ; une ligne vide sépare deux tables et remet l'en-tête à
-        // zéro — deux tables peuvent avoir des colonnes différentes.
         if line.starts_with('#') {
             continue;
         }
@@ -874,10 +880,9 @@ fn series_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
         // comme 0 dessinerait une chute qui n'a jamais eu lieu.
         //
         // Les booléens (`alive`, `icmp_ok`…) deviennent 1/0 : ce sont des
-        // séries qu'on veut tracer, et les laisser tomber au motif qu'elles ne
-        // sont pas numériques ferait disparaître l'information la plus utile —
-        // savoir si l'hôte répondait. Les champs texte (`state`) sont écartés :
-        // ils n'ont pas de représentation sur un axe.
+        // séries qu'on veut tracer, et savoir si l'hôte répondait est
+        // l'information la plus utile d'un ping. Les champs texte (`state`)
+        // sont écartés : ils n'ont pas de représentation sur un axe.
         let v = match value {
             "true" => 1.0,
             "false" => 0.0,
@@ -890,15 +895,60 @@ fn series_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
             continue;
         };
         let field = at("_field").unwrap_or("value").to_string();
+
+        // `probe_id` et `site_id` ne distinguent rien ici — la requête porte
+        // déjà sur une seule sonde. Les garder créerait une étiquette identique
+        // sur toutes les courbes, illisible dans une légende.
+        let mut tags: Vec<(String, String)> = header
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| {
+                !INTERNAL.contains(&name.as_str())
+                    && !matches!(name.as_str(), "probe_id" | "site_id" | "probe" | "site" | "host")
+            })
+            .filter_map(|(i, name)| {
+                cells
+                    .get(i)
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                    .map(|v| (name.clone(), v.to_string()))
+            })
+            .collect();
+        tags.sort();
+
         series
-            .entry(field)
+            .entry((field, tags))
             .or_default()
             .push(serde_json::json!({ "t": t, "v": v }));
     }
 
     series
         .into_iter()
-        .map(|(field, points)| serde_json::json!({ "field": field, "points": points }))
+        .map(|((field, tags), points)| {
+            // Le libellé porte ce qui distingue la courbe : « latency_ms »
+            // seule quand il n'y a qu'une cible, « latency_ms · 1.1.1.1 »
+            // quand plusieurs sont surveillées en parallèle.
+            let suffix = tags
+                .iter()
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let label = if suffix.is_empty() {
+                field.clone()
+            } else {
+                format!("{field} · {suffix}")
+            };
+            let tag_map: serde_json::Map<String, serde_json::Value> = tags
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
+            serde_json::json!({
+                "field": label,
+                "measure": field,
+                "tags": tag_map,
+                "points": points,
+            })
+        })
         .collect()
 }
 
