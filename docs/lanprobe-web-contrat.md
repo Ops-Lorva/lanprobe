@@ -182,7 +182,17 @@ suite. Le même nom dans un autre site est parfaitement légitime.
   "last_write_ok": true
 }
 ```
-→ `200 { "ok": true }`
+→ `200`
+```json
+{ "ok": true, "name": "Paris", "site_id": "…", "site": "Durand",
+  "heartbeat_interval_secs": 60 }
+```
+Et, quand une rotation de clé est en attente, la nouvelle clé d'écriture :
+`"influx": { …, "token_version": 3 }` (voir section 9).
+
+C'est la réponse au battement de cœur qui propage aux sondes tout changement
+décidé côté hub — renommage, changement de cadence, nouvelle clé. Une sonde
+n'interroge jamais le hub pour savoir si quelque chose a bougé.
 
 `buffered_points` remonte la profondeur du tampon local : une sonde qui accumule
 sans écrire est visible dans l'interface **avant** qu'on découvre le trou dans les
