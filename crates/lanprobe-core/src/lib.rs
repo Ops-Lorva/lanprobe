@@ -15,3 +15,4 @@ pub mod iperf;
 pub mod internet;
 pub mod public_ip;
 pub mod updater;
+pub mod passwords;

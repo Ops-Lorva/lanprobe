@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/lanprobe-core", "crates/lanprobe-server"]
+members = ["src-tauri", "crates/lanprobe-core", "crates/lanprobe-server", "crates/lanprobe-web"]
 
 [workspace.package]
 version = "0.0.0"
