@@ -35,6 +35,17 @@ struct Args {
     /// Volume du hub : base SQLite, certificat, jeton opérateur, token de setup.
     #[arg(long, env = "LANPROBE_WEB_CONFIG_DIR", default_value = "/data/lanprobe")]
     config_dir: PathBuf,
+
+    /// Volume des archives de sauvegarde. Monté sur `/backup` dans le
+    /// conteneur ; l'utilisateur le pointe où il veut depuis le compose.
+    #[arg(long, env = "LANPROBE_WEB_BACKUP_DIR", default_value = lanprobe_web::backup::DEFAULT_BACKUP_DIR)]
+    backup_dir: PathBuf,
+
+    /// CLI `influx`, présente dans l'image du hub. `influx backup` est le
+    /// seul moyen correct de sauvegarder InfluxDB — jamais une copie du
+    /// répertoire `engine`.
+    #[arg(long, env = "LANPROBE_INFLUX_CLI", default_value = "influx")]
+    influx_cli: PathBuf,
 }
 
 #[tokio::main]
@@ -135,6 +146,9 @@ async fn main() -> Result<(), String> {
         influx,
         notifier,
         tls: args.tls,
+        config_dir: args.config_dir.clone(),
+        backup_dir: args.backup_dir.clone(),
+        influx_cli: args.influx_cli.clone(),
     };
     let router = web::build_router(state);
 
