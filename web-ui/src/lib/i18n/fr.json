@@ -429,5 +429,33 @@
     "disable_keeps": "Il n'est pas supprimé : le journal d'audit nomme ce compte, et ses actions passées y restent lisibles. Réactivable à tout moment.",
     "disable_confirm": "Désactiver",
     "disabling": "Désactivation…"
+  },
+  "audit": {
+    "title": "Journal d'audit",
+    "loaded": "{n, plural, =0 {aucune entrée} one {# entrée chargée} other {# entrées chargées}}",
+    "failures": "dont {n} en échec",
+    "refresh": "Rafraîchir",
+    "error_title": "Journal indisponible",
+    "filter_actor": "Acteur",
+    "filter_actor_placeholder": "admin",
+    "filter_action": "Action",
+    "filter_all_actions": "Toutes les actions",
+    "apply": "Filtrer",
+    "clear": "Tout afficher",
+    "empty_title": "Journal vide",
+    "empty_body": "Le hub y écrit chaque connexion, chaque enrôlement et chaque réglage, réussi ou non. Rien n'y a encore été inscrit.",
+    "empty_filtered_title": "Aucune entrée pour ces filtres",
+    "empty_filtered_body": "L'acteur ou l'action demandée n'apparaît pas dans le journal.",
+    "col_when": "Quand",
+    "col_actor": "Acteur",
+    "col_action": "Action",
+    "col_target": "Cible",
+    "col_outcome": "Résultat",
+    "anonymous": "anonyme",
+    "success": "Succès",
+    "failure": "Échec",
+    "load_more": "Charger la suite",
+    "loading_more": "Chargement…",
+    "end": "Début du journal atteint."
   }
 }

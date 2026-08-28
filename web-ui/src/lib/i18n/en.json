@@ -429,5 +429,33 @@
     "disable_keeps": "It is not deleted: the audit log names this account, and its past actions stay readable there. Re-enable it at any time.",
     "disable_confirm": "Disable",
     "disabling": "Disabling…"
+  },
+  "audit": {
+    "title": "Audit log",
+    "loaded": "{n, plural, =0 {no entries} one {# entry loaded} other {# entries loaded}}",
+    "failures": "{n} failed",
+    "refresh": "Refresh",
+    "error_title": "Audit log unavailable",
+    "filter_actor": "Actor",
+    "filter_actor_placeholder": "admin",
+    "filter_action": "Action",
+    "filter_all_actions": "All actions",
+    "apply": "Filter",
+    "clear": "Show all",
+    "empty_title": "Empty log",
+    "empty_body": "The hub records every sign-in, enrolment and settings change here, successful or not. Nothing has been written yet.",
+    "empty_filtered_title": "No entry for these filters",
+    "empty_filtered_body": "That actor or action does not appear in the log.",
+    "col_when": "When",
+    "col_actor": "Actor",
+    "col_action": "Action",
+    "col_target": "Target",
+    "col_outcome": "Outcome",
+    "anonymous": "anonymous",
+    "success": "Success",
+    "failure": "Failed",
+    "load_more": "Load older",
+    "loading_more": "Loading…",
+    "end": "Start of the log reached."
   }
 }
