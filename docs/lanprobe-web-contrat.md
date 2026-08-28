@@ -569,3 +569,93 @@ client ou à un collègue sans qu'un clic révoque une sonde.
 
 L'application des rôles se fait **côté serveur**, route par route. Une interface
 qui se contente de masquer les boutons ne protège rien.
+
+## 12. Inventaire réseau — le détail va en SQLite, pas dans Influx
+
+Validé avec le propriétaire : il veut **le détail complet** des scans de ports,
+des machines découvertes et des speedtests, pas seulement des compteurs.
+
+### Pourquoi pas InfluxDB
+
+Un scan de ports n'est pas une métrique, c'est **un inventaire daté**. Une
+latence est une valeur par instant — Influx est fait pour ça. « Le port 22 est
+ouvert sur 192.168.1.5 » est un fait, pas une mesure.
+
+Et le ranger dans Influx casse à l'échelle. Influx crée une série par
+combinaison d'étiquettes : avec `ip` + `port`, un scan d'un /24 dont chaque
+machine expose une vingtaine de ports fabrique **~5 000 séries pour un seul site
+et un seul scan**. Multiplié par les sites et par les machines qui changent
+d'adresse au fil des mois, la base ralentit puis sature. C'est le mode de panne
+classique d'InfluxDB, et il ne se voit pas avant qu'il soit trop tard.
+
+### Répartition
+
+```
+Influx  → ce qui varie en continu : latence, débits, disponibilité, état internet
+SQLite  → ce qui est un inventaire : ports ouverts, hôtes découverts,
+          adresses MAC, constructeurs, noms d'hôte, résultats de speedtest
+```
+
+Le compteur reste dans Influx pour la courbe (« 3 ports ouverts hier, 7
+aujourd'hui ») ; le détail est à un clic derrière. Et « toutes les machines avec
+le 3389 ouvert, tous sites confondus » devient une requête SQL triviale, là où
+elle serait une horreur en Flux.
+
+### Schéma
+
+```sql
+CREATE TABLE scans (               -- une exécution
+  scan_id    TEXT PRIMARY KEY,
+  probe_id   TEXT NOT NULL REFERENCES probes(probe_id),
+  kind       TEXT NOT NULL,        -- 'ports' | 'discovery' | 'speedtest'
+  started_at INTEGER NOT NULL,
+  cidr       TEXT
+);
+
+CREATE TABLE scan_hosts (          -- une machine vue lors d'un scan
+  scan_id  TEXT NOT NULL REFERENCES scans(scan_id),
+  ip       TEXT NOT NULL,
+  hostname TEXT, mac TEXT, vendor TEXT, latency_ms INTEGER,
+  PRIMARY KEY (scan_id, ip)
+);
+
+CREATE TABLE scan_ports (          -- un port ouvert
+  scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+  ip      TEXT NOT NULL,
+  port    INTEGER NOT NULL,
+  proto   TEXT NOT NULL,           -- 'tcp' | 'udp'
+  service TEXT,
+  PRIMARY KEY (scan_id, ip, port, proto)
+);
+
+CREATE TABLE speedtests (
+  scan_id       TEXT PRIMARY KEY REFERENCES scans(scan_id),
+  engine        TEXT, server_name TEXT,
+  download_mbps REAL, upload_mbps REAL,
+  latency_ms    INTEGER, jitter_ms REAL
+);
+
+CREATE INDEX scan_ports_lookup ON scan_ports(port, proto);
+CREATE INDEX scan_hosts_ip     ON scan_hosts(ip);
+```
+
+On enregistre **un scan par exécution**, jamais un état courant écrasé : c'est ce
+qui permet de répondre à « quels ports étaient ouverts le 12 mars » et « quelle
+machine est apparue cette semaine ». Un inventaire sans historique ne répond
+qu'au présent, qu'on pouvait déjà observer.
+
+### `POST /api/probes/{id}/scans` — authentification : jeton de sonde
+
+Troisième flux, en plus de l'écriture Influx et du battement de cœur. La sonde
+publie le résultat complet d'un scan. Corps : `kind`, `started_at`, `cidr`, la
+liste des hôtes et de leurs ports ouverts, ou le résultat de speedtest.
+
+Le hub **ne dérive pas** le compteur Influx de ce message : la sonde continue de
+l'écrire elle-même. Deux chemins pour la même valeur finiraient par diverger.
+
+### Purge
+
+L'inventaire grossit. Une rétention lui est propre (`settings['inventory_days']`,
+défaut `0` = illimité) — et comme pour la rétention Influx, **la réduire supprime
+des données** : même confirmation explicite exigée, côté serveur comme côté
+interface.
