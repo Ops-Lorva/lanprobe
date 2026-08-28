@@ -281,6 +281,46 @@ fn get_details_linux(name: &str) -> InterfaceDetails {
     d
 }
 
+/// Adresse locale de l'interface au format CIDR (« 10.6.8.42/24 »).
+///
+/// C'est la forme que la sonde remonte au hub : l'adresse seule ne dit pas
+/// quel réseau elle occupe, et deux sites en 192.168.1.x ne se distinguent
+/// que par leur préfixe.
+pub fn local_cidr(details: &InterfaceDetails) -> Option<String> {
+    let ip = details.ip.as_deref()?.trim();
+    if ip.is_empty() {
+        return None;
+    }
+    match details.subnet.as_deref().and_then(mask_to_prefix) {
+        Some(prefix) => Some(format!("{ip}/{prefix}")),
+        // Sans masque exploitable on rend l'adresse nue : inventer un /32
+        // ferait croire à un réseau point à point.
+        None => Some(ip.to_string()),
+    }
+}
+
+/// Longueur de préfixe d'un masque pointé. `None` si le masque n'en est pas
+/// un — les bits à 1 doivent être contigus et en tête.
+pub fn mask_to_prefix(mask: &str) -> Option<u32> {
+    let mut value: u32 = 0;
+    let mut octets = 0;
+    for part in mask.trim().split('.') {
+        let octet: u8 = part.parse().ok()?;
+        value = (value << 8) | octet as u32;
+        octets += 1;
+    }
+    if octets != 4 {
+        return None;
+    }
+    let ones = value.leading_ones();
+    // Un masque valide n'a plus aucun bit à 1 après sa tête contiguë.
+    let expected = if ones == 0 { 0 } else { !0u32 << (32 - ones) };
+    if value != expected {
+        return None;
+    }
+    Some(ones)
+}
+
 fn cidr_to_mask(prefix: u32) -> String {
     if prefix == 0 { return "0.0.0.0".to_string(); }
     if prefix > 32 { return "255.255.255.255".to_string(); }
@@ -306,5 +346,41 @@ mod tests {
     #[test]
     fn test_cidr_to_mask_16() {
         assert_eq!(cidr_to_mask(16), "255.255.0.0");
+    }
+
+    #[test]
+    fn local_cidr_combines_the_address_and_its_mask() {
+        let d = InterfaceDetails {
+            ip: Some("10.6.8.42".into()),
+            subnet: Some("255.255.255.0".into()),
+            ..Default::default()
+        };
+        assert_eq!(local_cidr(&d).as_deref(), Some("10.6.8.42/24"));
+    }
+
+    #[test]
+    fn local_cidr_without_a_usable_mask_gives_the_bare_address() {
+        // Mieux vaut une adresse sans préfixe qu'un /32 inventé : le
+        // masque manquant est une information, pas un défaut à combler.
+        let d = InterfaceDetails {
+            ip: Some("10.6.8.42".into()),
+            subnet: Some("pas un masque".into()),
+            ..Default::default()
+        };
+        assert_eq!(local_cidr(&d).as_deref(), Some("10.6.8.42"));
+    }
+
+    #[test]
+    fn local_cidr_of_an_interface_without_address_is_nothing() {
+        assert_eq!(local_cidr(&InterfaceDetails::default()), None);
+    }
+
+    #[test]
+    fn mask_to_prefix_rejects_a_non_contiguous_mask() {
+        // 255.0.255.0 n'est pas un masque : le laisser passer produirait un
+        // préfixe faux, plus difficile à repérer qu'une absence.
+        assert_eq!(mask_to_prefix("255.0.255.0"), None);
+        assert_eq!(mask_to_prefix("255.255.255.0"), Some(24));
+        assert_eq!(mask_to_prefix("0.0.0.0"), Some(0));
     }
 }
