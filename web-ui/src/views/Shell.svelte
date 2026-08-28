@@ -47,9 +47,12 @@
   let mainEl = $state<HTMLElement | null>(null);
   $effect(() => {
     void $route.name;
-    // Passer d'une sonde à l'autre change l'écran sans changer `name` : c'est
-    // l'identifiant qu'il faut lire pour que l'effet se redéclenche.
+    // Passer d'une sonde à l'autre — ou d'un onglet de Réglages à l'autre —
+    // change l'écran sans changer `name` : il faut lire ce qui, lui, change,
+    // sinon on arrive au milieu du panneau suivant avec le défilement du
+    // précédent.
     void ($route.name === 'probe' ? $route.id : '');
+    void ($route.name === 'settings' ? $route.tab : '');
     mainEl?.scrollTo({ top: 0 });
     window.scrollTo({ top: 0 });
   });
