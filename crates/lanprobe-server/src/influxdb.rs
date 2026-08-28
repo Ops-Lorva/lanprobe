@@ -79,6 +79,33 @@ struct InfluxClient {
 }
 
 impl InfluxClient {
+    /// Client visant le **hub** plutôt qu'InfluxDB.
+    ///
+    /// Quand la sonde est rattachée à un hub, elle ne touche plus à Influx :
+    /// elle envoie au hub, qui relaie. Une seule adresse, une seule
+    /// authentification, un seul certificat — et Influx n'a pas besoin d'être
+    /// joignable depuis le réseau de la sonde.
+    ///
+    /// L'export direct vers Influx reste entièrement fonctionnel pour qui
+    /// n'utilise pas de hub : on ajoute un chemin, on n'en retire pas.
+    async fn for_hub(hub_url: &str, probe_id: &str, token: &str, host_tag: String) -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                // Le hub peut porter un certificat auto-signé si l'utilisateur
+                // l'a choisi ; la vérification suit le même réglage que le
+                // reste du dialogue avec lui.
+                .build()
+                .unwrap_or_default(),
+            base_url: format!(
+                "{}/api/probes/{}/write",
+                hub_url.trim_end_matches('/'),
+                probe_id
+            ),
+            auth_header: Some(format!("Bearer {token}")),
+            host_tag,
+        }
+    }
+
     async fn new(cfg: &InfluxConfig) -> Self {
         let host_tag = resolve_host_tag_async(cfg).await;
 
@@ -132,7 +159,7 @@ impl InfluxClient {
         if status.is_success() {
             Ok(())
         } else {
-            Err(format!("InfluxDB write error: {}", status))
+            Err(format!("écriture refusée ({status})"))
         }
     }
 }
@@ -345,6 +372,69 @@ pub async fn test_connection(state: AppState) -> Result<(), String> {
     }
 }
 
+/// Construit le client visant le hub, si la sonde y est rattachée.
+async fn hub_client(state: &AppState, key: &crate::secrets::SecretKey) -> Option<InfluxClient> {
+    let cfg = crate::hub::load(state);
+    if !cfg.is_enrolled() {
+        return None;
+    }
+    let token = crate::secrets::open(key, &cfg.token).ok()?;
+    // Le tag lisible reste le nom donné à la sonde dans le hub : c'est celui
+    // que l'utilisateur reconnaîtra dans Grafana.
+    let host_tag = if cfg.name.is_empty() {
+        resolve_host_tag_async(&InfluxConfig::default()).await
+    } else {
+        cfg.name.clone()
+    };
+    tracing::info!("mesures envoyées au hub {} (sonde « {} »)", cfg.url, host_tag);
+    Some(InfluxClient::for_hub(&cfg.url, &cfg.probe_id, &token, host_tag).await)
+}
+
+/// Boucle d'envoi commune aux deux destinations.
+async fn run_with(
+    _state: AppState,
+    mut rx: tokio::sync::broadcast::Receiver<BroadcastEvent>,
+    client: InfluxClient,
+) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut buffer: Vec<String> = Vec::new();
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Ok(event) => {
+                    buffer.extend(event_to_points(&event, &client.host_tag));
+                    const MAX_BUFFER: usize = 10_000;
+                    if buffer.len() > MAX_BUFFER {
+                        let drop_count = buffer.len() - MAX_BUFFER;
+                        buffer.drain(0..drop_count);
+                        tracing::warn!("tampon plein : {drop_count} points les plus anciens abandonnés");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("bus saturé, {n} events perdus");
+                }
+            },
+            _ = ticker.tick() => {
+                if buffer.is_empty() { continue; }
+                let body = buffer.join("\n");
+                // ⚠️ On ne vide le tampon qu'APRÈS confirmation. Le vider
+                // avant l'écriture — ce que faisait la 1.1.5 — perd les points
+                // exactement pendant l'incident qu'on voudrait analyser.
+                match client.write(body).await {
+                    Ok(()) => buffer.clear(),
+                    Err(e) => tracing::warn!(
+                        "écriture échouée ({e}) — {} points conservés pour la prochaine tentative",
+                        buffer.len()
+                    ),
+                }
+            }
+        }
+    }
+}
+
 /// Tâche de fond — souscrit aux events et pousse les métriques vers
 /// InfluxDB. Bloque jusqu'à la fermeture du canal broadcast.
 ///
@@ -355,9 +445,19 @@ pub async fn test_connection(state: AppState) -> Result<(), String> {
 ///    on flushe toutes les secondes.
 /// 4. Sur `config:update`, on recharge. Si InfluxDB est désactivé, on vide
 ///    le buffer et on attend la réactivation.
-pub async fn run(state: AppState) {
+pub async fn run(state: AppState, key: Option<crate::secrets::SecretKey>) {
     // 1. S'abonner avant de lire la config.
     let mut rx = state.events.subscribe();
+
+    // Rattachée à un hub : c'est lui qui reçoit les mesures, et il n'y a rien
+    // d'autre à configurer. Ce chemin court-circuite l'export direct, qui
+    // reste disponible pour qui n'utilise pas de hub.
+    if let Some(key) = key.as_ref() {
+        if let Some(client) = hub_client(&state, key).await {
+            run_with(state, rx, client).await;
+            return;
+        }
+    }
 
     // 2. Charger la config initiale.
     let mut cfg = load_config(&state);

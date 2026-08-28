@@ -110,7 +110,7 @@ pub async fn start(cfg: StartConfig) -> Result<ServerHandle, String> {
     }
 
     let influx_state = state.clone();
-    tokio::spawn(crate::influxdb::run(influx_state));
+    tokio::spawn(crate::influxdb::run(influx_state, secrets::load_or_create_key(&cfg.config_dir).ok()));
     let sched_state = state.clone();
     tokio::spawn(crate::scheduler::run(sched_state));
 
