@@ -509,7 +509,20 @@ l'avant et l'après.
 Le ré-enrôlement remplace le jeton de sonde **et** le jeton d'écriture Influx :
 les identifiants de la machine compromise ne valent plus rien.
 
-## 10. Phase 2 — piloter une sonde à distance (non implémenté)
+## 10. Tunnel inversé — ABANDONNÉ
+
+⚠️ **Décision du propriétaire, 2026-08-28 : on ne le construit pas.** Il ne veut
+pas l'interface de la sonde dans le hub, seulement pouvoir la piloter — ce que
+la file de commandes (§14) fait sans ouvrir de canal permanent.
+
+C'est aussi le meilleur choix côté sécurité : le tunnel aurait fait du hub une
+machine capable d'atteindre l'intérieur de chaque réseau client en permanence.
+La file de commandes ne fait rien tant que personne ne demande rien.
+
+Ce qui suit est conservé pour mémoire, au cas où le besoin d'une interface
+temps réel réapparaîtrait.
+
+### Ancienne étude
 
 Objectif : cliquer sur une sonde dans le parc et **piloter la vraie LanProbe du
 site** — scan, ports, speedtest — depuis le navigateur, sans VPN ni port ouvert
