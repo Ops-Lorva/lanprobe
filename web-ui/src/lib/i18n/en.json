@@ -111,13 +111,7 @@
     "retention_lead": "How long InfluxDB keeps measurements before erasing them. It is the only setting on this screen that deletes data.",
     "tab_general": "General",
     "device_title": "This device",
-    "device_note": "Language and theme apply to this browser only.",
-    "hub_url_title": "Public hub address",
-    "hub_url_label": "Hub address",
-    "hub_url_placeholder": "e.g. https://lanprobe.example.com",
-    "hub_url_hint": "This is the address probes use to reach the hub and send it their measurements.",
-    "invalid_hub_url": "Enter an absolute URL, with scheme and host: https://lanprobe.example.com.",
-    "influx_url_readonly": "Read-only. Useful for connecting Grafana, with a token from the “Your data” tab."
+    "device_note": "Language and theme apply to this browser only."
   },
   "nav": {
     "fleet": "Fleet",

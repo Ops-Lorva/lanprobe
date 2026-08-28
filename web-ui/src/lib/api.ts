@@ -95,35 +95,21 @@ export interface AdvertiseTest {
 
 /** Table `settings` du hub (contrat § 7). Tout est réglable dans l'interface. */
 export interface HubSettings {
-  /**
-   * Adresse publique du hub — le SEUL réglage d'adresse depuis que les sondes
-   * écrivent au hub plutôt qu'à Influx. C'est elle que les sondes utilisent.
-   * URL absolue, schéma et hôte exigés côté serveur.
-   */
-  hub_public_url: string;
-  /**
-   * Adresse d'Influx vue du hub. **Lecture seule dans l'interface** : plus
-   * aucune sonde ne la reçoit, elle ne sert qu'à brancher Grafana.
-   */
   influx_url: string;
   influx_org: string;
   influx_bucket: string;
-  /**
-   * @deprecated Les sondes n'écrivent plus dans Influx : le hub relaie. Le
-   * champ subsiste dans les réponses des hubs existants, l'interface ne
-   * l'affiche plus et ne l'envoie plus.
-   */
-  influx_advertise_url?: string | null;
+  /** `null` = laissé à la déduction du hub. */
+  influx_advertise_url: string | null;
   /** 0 = rétention illimitée. */
   retention_days: number;
   heartbeat_interval_secs: number;
 }
 
 export const SETTINGS_DEFAULTS: HubSettings = {
-  hub_public_url: '',
   influx_url: 'https://127.0.0.1:8086',
   influx_org: 'lanprobe',
   influx_bucket: 'lanprobe',
+  influx_advertise_url: null,
   retention_days: 0,
   heartbeat_interval_secs: 60,
 };
