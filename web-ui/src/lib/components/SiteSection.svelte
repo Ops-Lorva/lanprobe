@@ -3,18 +3,31 @@
   import ProbeRow from './ProbeRow.svelte';
   import SiteHealth from './SiteHealth.svelte';
   import StateBlock from './StateBlock.svelte';
-  import { go } from '$lib/router';
+  import PendingEnrollRow from './PendingEnrollRow.svelte';
   import type { Probe, ProbeStatus } from '$lib/api';
+  import type { PendingRow } from '$lib/enroll';
 
   interface Props {
     siteId: string;
     siteName: string;
     probes: Probe[];
+    /** Emplacements réservés de ce site : codes d'enrôlement encore ouverts. */
+    pending: PendingRow[];
     now: number;
     expanded: boolean;
     ontoggle: () => void;
     onrename: () => void;
     onfocusSite: () => void;
+    /** Crée un code d'enrôlement POUR CE SITE : le site n'est jamais à choisir. */
+    onadd: () => void;
+    /** Génération en cours pour ce site : le « + » ne doit pas se cliquer deux fois. */
+    addBusy?: boolean;
+    /** Échec de la génération, montré à l'endroit du clic. */
+    addError?: string;
+    onregenerate: (row: PendingRow) => void;
+    onhidePending: (row: PendingRow) => void;
+    /** Clé de la ligne en attente dont la génération tourne. */
+    pendingBusyKey?: string | null;
     /** Vrai quand un filtre est actif : le vide « site sans sonde » ne s'applique plus. */
     filtered: boolean;
   }
@@ -22,11 +35,18 @@
     siteId,
     siteName,
     probes,
+    pending,
     now,
     expanded,
     ontoggle,
     onrename,
     onfocusSite,
+    onadd,
+    addBusy = false,
+    addError = '',
+    onregenerate,
+    onhidePending,
+    pendingBusyKey = null,
     filtered,
   }: Props = $props();
 
@@ -64,7 +84,7 @@
       <span class="nm">{siteName}</span>
     </button>
 
-    <SiteHealth {counts} siteName={siteName} {buffered} />
+    <SiteHealth {counts} siteName={siteName} {buffered} {onadd} addBusy={addBusy} />
 
     <div class="acts">
       <button
@@ -92,16 +112,30 @@
 
   {#if expanded}
     <div class="body" id={bodyId}>
-      {#if probes.length === 0 && !filtered}
+      <!--
+        Les attentes passent AVANT les sondes : on vient de cliquer sur « + »,
+        le code est ce qu'on cherche des yeux. Le chercher au bas d'une liste de
+        trente lignes serait le rater.
+      -->
+      {#if addError}
+        <p class="add-err" role="alert">{addError}</p>
+      {/if}
+      {#each pending as row (row.key)}
+        <PendingEnrollRow
+          {row}
+          busy={pendingBusyKey === row.key}
+          onregenerate={() => onregenerate(row)}
+          onhide={() => onhidePending(row)}
+        />
+      {/each}
+
+      {#if probes.length === 0 && pending.length === 0 && !filtered}
         <div class="empty">
           <StateBlock
             title={$_('fleet.empty_site_title')}
             body={$_('fleet.empty_site_body', { values: { name: siteName } })}
           >
-            <button
-              class="lp-btn primary"
-              onclick={() => go(`/enroll?site=${encodeURIComponent(siteName)}`)}
-            >
+            <button class="lp-btn primary" onclick={onadd}>
               {$_('fleet.empty_site_cta')}
             </button>
           </StateBlock>
@@ -198,5 +232,15 @@
   }
   .empty {
     padding: 12px;
+  }
+  /* L'échec est rendu dans le site où le clic a eu lieu : un bandeau global
+     obligerait à retrouver lequel des dix sites a refusé. */
+  .add-err {
+    margin: 10px 12px;
+    font-size: 11.5px;
+    color: var(--ep-danger);
+    border-left: 2px solid var(--ep-danger);
+    padding-left: 8px;
+    overflow-wrap: anywhere;
   }
 </style>

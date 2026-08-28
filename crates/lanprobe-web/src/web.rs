@@ -68,6 +68,7 @@ pub fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/sites", post(create_site))
         .route("/api/sites/{id}", patch(rename_site).delete(delete_site))
+        .route("/api/enroll-codes/pending", get(list_pending_codes))
         .route("/api/enroll-codes", post(create_enroll_code))
         .route("/api/probes", get(list_probes))
         .route("/api/probes/{id}", patch(update_probe).delete(revoke_probe))
@@ -1061,6 +1062,16 @@ async fn create_read_token(
 async fn list_read_tokens(State(state): State<AppState>) -> Response {
     match state.db.list_read_tokens() {
         Ok(tokens) => ok_json(serde_json::to_value(tokens).unwrap_or(serde_json::Value::Null)),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Les enrôlements encore ouverts, pour que l'interface les affiche comme des
+/// lignes en attente dans la liste des sondes du site, avec leur compte à
+/// rebours. Le code lui-même n'y figure pas : il est haché en base.
+async fn list_pending_codes(State(state): State<AppState>) -> Response {
+    match state.db.pending_enroll_codes(crate::db::now()) {
+        Ok(rows) => ok_json(serde_json::to_value(rows).unwrap_or(serde_json::Value::Null)),
         Err(e) => error_response(e),
     }
 }

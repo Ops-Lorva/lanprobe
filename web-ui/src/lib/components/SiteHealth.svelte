@@ -8,8 +8,11 @@
     siteName: string;
     /** Somme des points en tampon du site — un site peut être « tout vert » et bourré. */
     buffered?: number;
+    /** Enrôler une sonde DANS ce site. Absent = compteur seul. */
+    onadd?: () => void;
+    addBusy?: boolean;
   }
-  let { counts, siteName, buffered = 0 }: Props = $props();
+  let { counts, siteName, buffered = 0, onadd, addBusy = false }: Props = $props();
 
   const total = $derived(counts.online + counts.stale + counts.offline);
 
@@ -48,22 +51,21 @@
   </div>
 
   <div class="counters">
-    {#if total === 0}
-      <span class="muted">{$_('site.probe_count', { values: { n: 0 } })}</span>
-    {:else if counts.offline === 0 && counts.stale === 0}
-      <span class="ok"><StatusMark status="online" size={10} withLabel={false} /></span>
-      <span class="ok-txt">{$_('fleet.site_healthy')}</span>
-      <span class="muted">· {$_('site.probe_count', { values: { n: total } })}</span>
-    {:else}
-      {#each order as s (s)}
-        {#if counts[s] > 0}
-          <span class="counter {s}">
-            <StatusMark status={s} size={10} withLabel={false} />
-            <span class="n lp-mono">{counts[s]}</span>
-            <span class="cap">{$_(`status.${s}`)}</span>
-          </span>
-        {/if}
-      {/each}
+    {#if total > 0}
+      {#if counts.offline === 0 && counts.stale === 0}
+        <span class="ok"><StatusMark status="online" size={10} withLabel={false} /></span>
+        <span class="ok-txt">{$_('fleet.site_healthy')}</span>
+      {:else}
+        {#each order as s (s)}
+          {#if counts[s] > 0}
+            <span class="counter {s}">
+              <StatusMark status={s} size={10} withLabel={false} />
+              <span class="n lp-mono">{counts[s]}</span>
+              <span class="cap">{$_(`status.${s}`)}</span>
+            </span>
+          {/if}
+        {/each}
+      {/if}
     {/if}
 
     {#if buffered > 0}
@@ -72,6 +74,39 @@
         <span class="cap">{$_('buffer.label')}</span>
       </span>
     {/if}
+
+    <!--
+      Le compteur est rendu dans tous les états, y compris quand le site est en
+      peine : c'est lui qui ancre le « + ». Un bouton d'ajout qui se déplacerait
+      selon la santé du site ne se viserait jamais deux fois au même endroit.
+    -->
+    <span class="tally">
+      {#if total > 0}<span class="sep" aria-hidden="true">·</span>{/if}
+      <span class="muted">{$_('site.probe_count', { values: { n: total } })}</span>
+      {#if onadd}
+        <button
+          class="add"
+          class:busy={addBusy}
+          onclick={onadd}
+          disabled={addBusy}
+          title={$_('fleet.site_add', { values: { name: siteName } })}
+          aria-label={$_('fleet.site_add', { values: { name: siteName } })}
+        >
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.9"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M8 3.5v9M3.5 8h9" />
+          </svg>
+        </button>
+      {/if}
+    </span>
   </div>
 </div>
 
@@ -152,5 +187,59 @@
   .buffered .cap {
     color: var(--ep-warning);
     font-weight: 600;
+  }
+
+  /* Compteur et « + » forment un bloc insécable : ils se lisent comme une
+     phrase — « 3 sondes, en ajouter une » — et ne se séparent pas au retour
+     à la ligne des compteurs. */
+  .tally {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .sep {
+    color: var(--ep-text-dim);
+  }
+  /*
+    Le « + » reste plein contraste, contrairement aux actions du site qui
+    s'estompent au repos : ajouter une sonde est la raison pour laquelle on
+    ouvre cet écran, pas une action de maintenance qu'on cherche.
+  */
+  .add {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid var(--ep-accent-glow);
+    background: var(--ep-accent-dim);
+    color: var(--ep-accent-bright);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .add:hover {
+    border-color: var(--ep-accent);
+    background: color-mix(in srgb, var(--ep-accent) 22%, transparent);
+  }
+  .add:focus-visible {
+    outline: 2px solid var(--ep-accent);
+    outline-offset: 2px;
+  }
+  /* Générer un code est un aller-retour réseau : le bouton dit qu'il travaille,
+     sinon on reclique et on émet deux codes pour une seule sonde. */
+  .add.busy {
+    opacity: 0.55;
+    cursor: progress;
+  }
+  /* Au doigt, 24 px se rate : la cible passe à 32 px là où il n'y a pas de
+     survol pour rattraper une visée approximative. */
+  @media (hover: none) {
+    .add {
+      width: 32px;
+      height: 32px;
+    }
   }
 </style>

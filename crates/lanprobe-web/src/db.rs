@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -88,6 +88,15 @@ const MIGRATIONS: &[&str] = &[
       created_at  INTEGER NOT NULL,
       revoked_at  INTEGER
     );
+    "#,
+    // v3 → v4 : le code d'enrôlement en clair, le temps de sa validité.
+    //
+    // Compromis décidé par le propriétaire, en connaissance du risque : un code
+    // perdu au rechargement de la page obligeait à en regénérer un. Il vit donc
+    // en clair **pendant ses quinze minutes**, et est effacé dès qu'il est
+    // consommé ou expiré — le hachage reste la vérité pour l'authentification.
+    r#"
+    ALTER TABLE enroll_codes ADD COLUMN code_plain TEXT;
     "#,
 ];
 
@@ -184,6 +193,23 @@ pub struct EnrollCode {
     pub site_id: String,
     pub probe_id: Option<String>,
     pub expires_at: i64,
+}
+
+/// Un enrôlement en attente, tel que l'interface l'affiche dans la liste des
+/// sondes du site : une ligne fantôme avec son compte à rebours, remplacée par
+/// la vraie sonde dès qu'une machine consomme le code.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingEnrollCode {
+    pub site_id: String,
+    pub site: String,
+    /// Renseigné pour un ré-enrôlement : la ligne concerne une sonde existante.
+    pub probe_id: Option<String>,
+    pub probe: Option<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+    /// Le code en clair, tant qu'il est valide. `None` dès qu'il est consommé
+    /// ou expiré : il est alors effacé de la base, seul le haché subsiste.
+    pub code: Option<String>,
 }
 
 /// Ce qu'un code consommé donne le droit de faire.
@@ -309,9 +335,9 @@ impl Db {
         {
             let conn = self.lock()?;
             conn.execute(
-                "INSERT INTO enroll_codes (code_hash, site_id, probe_id, created_at, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![code_hash, site_id, probe_id, created_at, expires_at],
+                "INSERT INTO enroll_codes (code_hash, site_id, probe_id, created_at, expires_at, code_plain)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![code_hash, site_id, probe_id, created_at, expires_at, code],
             )?;
         }
         Ok(EnrollCode {
@@ -349,7 +375,7 @@ impl Db {
                 continue;
             }
             let changed = tx.execute(
-                "UPDATE enroll_codes SET consumed_at = ?2
+                "UPDATE enroll_codes SET code_plain = NULL, consumed_at = ?2
                  WHERE code_hash = ?1 AND consumed_at IS NULL",
                 rusqlite::params![code_hash, now],
             )?;
@@ -366,6 +392,46 @@ impl Db {
 
     /// Empreintes stockées — sert aux tests à vérifier qu'aucun code en clair
     /// ne touche la base.
+    /// Les codes encore ouverts : ni consommés, ni expirés.
+    ///
+    /// **Le code lui-même n'en fait pas partie** — il est stocké haché, comme
+    /// un mot de passe, et n'existe en clair qu'une fois, à sa création. Un
+    /// code perdu se regénère ; il ne se relit pas. C'est le prix de ne pas
+    /// laisser traîner en base de quoi enrôler une sonde.
+    pub fn pending_enroll_codes(&self, now: i64) -> DbResult<Vec<PendingEnrollCode>> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        // Le clair ne survit pas à l'expiration. On purge ici plutôt que par
+        // une tâche de fond : pas de minuterie à surveiller, et la purge est
+        // garantie d'avoir eu lieu avant qu'on puisse lire quoi que ce soit.
+        conn.execute(
+            "UPDATE enroll_codes SET code_plain = NULL
+             WHERE code_plain IS NOT NULL AND (expires_at <= ?1 OR consumed_at IS NOT NULL)",
+            [now],
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT c.site_id, s.name, c.probe_id, p.name, c.created_at, c.expires_at, c.code_plain
+             FROM enroll_codes c
+             JOIN sites s ON s.site_id = c.site_id
+             LEFT JOIN probes p ON p.probe_id = c.probe_id
+             WHERE c.consumed_at IS NULL AND c.expires_at > ?1
+             ORDER BY c.expires_at",
+        )?;
+        let rows = stmt
+            .query_map([now], |row| {
+                Ok(PendingEnrollCode {
+                    site_id: row.get(0)?,
+                    site: row.get(1)?,
+                    probe_id: row.get(2)?,
+                    probe: row.get(3)?,
+                    created_at: row.get(4)?,
+                    expires_at: row.get(5)?,
+                    code: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn enroll_code_hashes(&self) -> DbResult<Vec<String>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT code_hash FROM enroll_codes")?;
@@ -930,6 +996,53 @@ mod tests {
                 "la table {table} doit exister après migration"
             );
         }
+    }
+
+    #[test]
+    fn the_plaintext_code_dies_with_the_timer() {
+        let db = Db::open_in_memory().unwrap();
+        let site = db.create_site("Durand").unwrap();
+
+        let code = db.create_enroll_code(&site.site_id, None, 900).unwrap();
+        let pending = db.pending_enroll_codes(now()).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].code.as_deref(),
+            Some(code.code.as_str()),
+            "le code doit être lisible tant qu'il est valide"
+        );
+
+        // Consommé : le clair disparaît, le haché reste pour l'authentification.
+        db.consume_enroll_code(&code.code).unwrap();
+        assert!(
+            db.pending_enroll_codes(now()).unwrap().is_empty(),
+            "un code consommé ne figure plus dans les attentes"
+        );
+        assert!(
+            !db.enroll_code_hashes().unwrap().is_empty(),
+            "le haché survit : c'est lui qui empêche le rejeu"
+        );
+    }
+
+    #[test]
+    fn an_expired_code_is_stripped_of_its_plaintext() {
+        let db = Db::open_in_memory().unwrap();
+        let site = db.create_site("Durand").unwrap();
+        db.create_enroll_code(&site.site_id, None, -1).unwrap();
+
+        // La lecture purge : pas de minuterie à surveiller, et rien ne peut
+        // être lu avant que la purge ait eu lieu.
+        assert!(db.pending_enroll_codes(now()).unwrap().is_empty());
+
+        let conn = db.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM enroll_codes WHERE code_plain IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "aucun code en clair ne doit survivre à son délai");
     }
 
     #[test]

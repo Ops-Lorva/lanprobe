@@ -4,8 +4,8 @@
   import { fleet } from '$lib/fleet';
   import { flash } from '$lib/flash';
   import { now, relativeTime } from '$lib/time';
-  import { go } from '$lib/router';
   import { api, ApiError, type Probe, type ProbeStatus } from '$lib/api';
+  import { enrollments, pendingRows, pendingKey, type PendingRow } from '$lib/enroll';
   import FleetRail from '$lib/components/FleetRail.svelte';
   import SiteSection from '$lib/components/SiteSection.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
@@ -108,16 +108,107 @@
   const bufferingCount = $derived($fleet.probes.filter((p) => p.buffered_points > 0).length);
   const hasFilter = $derived(search.trim() !== '' || statusFilter !== 'all');
 
+  /** Attentes rangées par site : elles s'affichent dans la liste de leur site. */
+  const pendingBySite = $derived.by(() => {
+    const m = new Map<string, PendingRow[]>();
+    for (const r of $pendingRows) {
+      const list = m.get(r.site_id) ?? [];
+      list.push(r);
+      m.set(r.site_id, list);
+    }
+    return m;
+  });
+
   // ── Dépliage ─────────────────────────────────────────────────────────────
   let manual = $state<Record<string, boolean>>({});
 
   function isExpanded(siteId: string, probes: Probe[], siteCount: number) {
     if (siteId in manual) return manual[siteId];
+    // Une attente en cours ouvre toujours son site : un code qu'il faut
+    // déplier pour lire est un code qu'on croit perdu.
+    if ((pendingBySite.get(siteId)?.length ?? 0) > 0) return true;
     // Peu de sites : tout ouvert, on voit le parc d'un bloc.
     // Beaucoup de sites : seuls ceux qui demandent une action s'ouvrent, les
     // autres restent pliés — mais leur en-tête dit déjà comment ils vont.
     if (siteCount <= 3) return true;
     return probes.some((p) => p.status !== 'online' || p.buffered_points > 0);
+  }
+
+  // ── Enrôlement : le « + » du site crée le code, sur place ────────────────
+  // Aucune fenêtre, aucun formulaire : le site est déterminé par l'endroit du
+  // clic, et le code n'a rien d'autre à recevoir. Ce qui apparaît est une ligne
+  // dans la liste de ce site — un emplacement réservé, lisible au téléphone.
+  let addBusySite = $state<string | null>(null);
+  let addErrors = $state<Record<string, string>>({});
+  let pendingBusyKey = $state<string | null>(null);
+
+  async function addProbe(siteId: string, siteName: string) {
+    if (addBusySite) return;
+    addBusySite = siteId;
+    addErrors = { ...addErrors, [siteId]: '' };
+    try {
+      const created = await api.createEnrollCode(siteId);
+      enrollments.remember(
+        {
+          site_id: created.site_id ?? siteId,
+          site: created.site ?? siteName,
+          probe_id: null,
+          probe: null,
+          created_at: Math.floor(Date.now() / 1000),
+          expires_at: created.expires_at,
+        },
+        created.code,
+      );
+      // Le site s'ouvre, sinon le code atterrit dans une section repliée.
+      manual = { ...manual, [siteId]: true };
+      void enrollments.refresh(onExpired);
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      addErrors = {
+        ...addErrors,
+        [siteId]: e instanceof ApiError ? e.message : String(e),
+      };
+    } finally {
+      addBusySite = null;
+    }
+  }
+
+  /**
+   * Remplacer un code : nouvelle sonde → nouveau code de site ; réparation →
+   * code rattaché à la sonde, pour qu'elle revienne avec son historique.
+   */
+  async function regenerate(row: PendingRow) {
+    if (pendingBusyKey) return;
+    pendingBusyKey = row.key;
+    addErrors = { ...addErrors, [row.site_id]: '' };
+    try {
+      const created = row.probe_id
+        ? await api.reenrollCode(row.probe_id)
+        : await api.createEnrollCode(row.site_id);
+      const next = {
+        site_id: created.site_id ?? row.site_id,
+        site: created.site ?? row.site,
+        probe_id: row.probe_id,
+        probe: row.probe,
+        created_at: Math.floor(Date.now() / 1000),
+        expires_at: created.expires_at,
+      };
+      enrollments.remember(next, created.code);
+      // L'ancienne ligne sort de l'écran : on vient de demander à la remplacer,
+      // et deux emplacements réservés pour une seule machine se lisent comme
+      // deux sondes à installer. Son code n'est pas révoqué pour autant — il
+      // expire tout seul, personne ne l'a plus sous les yeux.
+      if (pendingKey(next) !== row.key) enrollments.hide(row.key);
+      void enrollments.refresh(onExpired);
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      addErrors = {
+        ...addErrors,
+        [row.site_id]: e instanceof ApiError ? e.message : String(e),
+      };
+    } finally {
+      pendingBusyKey = null;
+    }
   }
 
   // ── Sites : création / renommage ─────────────────────────────────────────
