@@ -55,13 +55,20 @@ function create() {
    * Un hub antérieur à cette route répond 404. Ce n'est pas une panne : les
    * attentes créées ici restent affichées, elles ne survivront simplement pas
    * au rechargement. Faire échouer le parc entier pour ça serait disproportionné.
+   *
+   * ⚠️ Un 403 non plus. `GET /api/enroll-codes/pending` exige `operator` — le
+   * code y figure en clair pendant sa validité. Un `viewer` reçoit donc un
+   * refus légitime sur cet appel-là, et le traiter comme une session expirée
+   * le renvoyait à l'écran de connexion À CHAQUE chargement du parc : le hub
+   * était inutilisable pour le seul rôle qui n'a que du parc à regarder. Seul
+   * un 401 dit que la session est tombée.
    */
   async function refresh(onExpired: () => void) {
     try {
       const rows = (await api.pendingEnrollCodes()) ?? [];
       update((s) => ({ ...s, server: rows, serverUnavailable: false }));
     } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      if (e instanceof ApiError && e.isExpired) return onExpired();
       update((s) => ({ ...s, server: [], serverUnavailable: true }));
     }
   }
