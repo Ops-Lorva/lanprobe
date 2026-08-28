@@ -139,7 +139,7 @@ struct EnrollResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct InfluxResponse {
+pub struct InfluxResponse {
     #[serde(default)]
     url: String,
     #[serde(default)]
