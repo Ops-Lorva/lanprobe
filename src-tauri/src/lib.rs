@@ -861,10 +861,15 @@ pub fn run() {
             if let Some(key) = key {
                 let status = std::sync::Arc::new(lanprobe_server::hub::WriteStatus::default());
                 let key_for_export = key.clone();
-                tauri::async_runtime::spawn(lanprobe_server::hub::run(hub_state, key, status));
+                tauri::async_runtime::spawn(lanprobe_server::hub::run(
+                    hub_state,
+                    key,
+                    status.clone(),
+                ));
                 tauri::async_runtime::spawn(lanprobe_server::influxdb::run(
                     export_state,
                     Some(key_for_export),
+                    Some(status),
                 ));
             } else {
                 eprintln!("clé de scellement indisponible — rattachement à un hub impossible");

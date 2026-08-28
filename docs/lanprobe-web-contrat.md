@@ -984,7 +984,7 @@ contrairement à Influx, joint en local sur un certificat auto-signé dont le hu
 accepter n'importe quel certificat livrerait le mot de passe au premier
 intermédiaire venu.
 
-## 15. Ce que la sonde raconte d'elle-même (non implémenté)
+## 15. Ce que la sonde raconte d'elle-même ✅ implémenté
 
 Le battement de cœur transporte, en plus de son état :
 
@@ -1007,3 +1007,31 @@ la met en cache et ne la rafraîchit **qu'au changement d'interface ou toutes le
 Le hub garde la **dernière valeur connue** avec sa date : une sonde hors ligne
 doit continuer d'afficher l'adresse qu'elle avait, pas un tiret. C'est justement
 quand elle ne répond plus qu'on veut savoir où elle était.
+
+### Champs ajoutés à `GET /api/probes`
+
+```json
+"public_ip": "88.120.0.1",      // null si inconnue
+"public_ip_at": 1756339200,     // date du CHANGEMENT, pas du dernier battement
+"interface": "en0",
+"local_ips": ["10.6.8.42/24"],  // toujours un tableau, [] si inconnu
+"gateway": "10.6.8.1"
+```
+
+Ces valeurs ne repassent **jamais** à vide une fois connues, quel que soit le
+statut de la sonde. Un changement d'IP publique produit une ligne d'audit
+`probe.public_ip_changed` avec l'ancienne et la nouvelle valeur.
+
+### État du rattachement, côté app — `cmd_hub_status`
+
+```json
+"state": "off" | "ok" | "degraded" | "broken",
+"last_beat_at": 1787914000,   // dernier battement RÉUSSI, conservé en panne
+"last_error": null,
+"buffered_points": 0
+```
+
+⚠️ **`degraded` et `broken` ne se confondent pas.** `degraded` se répare seul au
+retour du lien ; `broken` signifie que le hub a **refusé le jeton** — la sonde est
+révoquée et réessayer ne servira jamais à rien. Les mélanger laisserait attendre
+indéfiniment une reconnexion impossible.

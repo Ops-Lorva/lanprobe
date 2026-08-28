@@ -395,6 +395,7 @@ async fn run_with(
     _state: AppState,
     mut rx: tokio::sync::broadcast::Receiver<BroadcastEvent>,
     client: InfluxClient,
+    status: Option<std::sync::Arc<crate::hub::WriteStatus>>,
 ) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -423,12 +424,25 @@ async fn run_with(
                 // ⚠️ On ne vide le tampon qu'APRÈS confirmation. Le vider
                 // avant l'écriture — ce que faisait la 1.1.5 — perd les points
                 // exactement pendant l'incident qu'on voudrait analyser.
-                match client.write(body).await {
-                    Ok(()) => buffer.clear(),
-                    Err(e) => tracing::warn!(
-                        "écriture échouée ({e}) — {} points conservés pour la prochaine tentative",
-                        buffer.len()
-                    ),
+                let ok = match client.write(body).await {
+                    Ok(()) => {
+                        buffer.clear();
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "écriture échouée ({e}) — {} points conservés pour la prochaine tentative",
+                            buffer.len()
+                        );
+                        false
+                    }
+                };
+                // Remonter la profondeur du tampon : sans ça, l'app affiche
+                // « tout va bien » pendant qu'elle accumule sans rien livrer,
+                // et le hub reçoit un `buffered_points` figé à zéro qui ne
+                // signale jamais rien.
+                if let Some(status) = status.as_ref() {
+                    status.set(buffer.len(), ok);
                 }
             }
         }
@@ -445,7 +459,11 @@ async fn run_with(
 ///    on flushe toutes les secondes.
 /// 4. Sur `config:update`, on recharge. Si InfluxDB est désactivé, on vide
 ///    le buffer et on attend la réactivation.
-pub async fn run(state: AppState, key: Option<crate::secrets::SecretKey>) {
+pub async fn run(
+    state: AppState,
+    key: Option<crate::secrets::SecretKey>,
+    status: Option<std::sync::Arc<crate::hub::WriteStatus>>,
+) {
     // 1. S'abonner avant de lire la config.
     let mut rx = state.events.subscribe();
 
@@ -454,7 +472,7 @@ pub async fn run(state: AppState, key: Option<crate::secrets::SecretKey>) {
     // reste disponible pour qui n'utilise pas de hub.
     if let Some(key) = key.as_ref() {
         if let Some(client) = hub_client(&state, key).await {
-            run_with(state, rx, client).await;
+            run_with(state, rx, client, status).await;
             return;
         }
     }
