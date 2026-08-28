@@ -6,6 +6,7 @@
 pub mod assets;
 pub mod auth;
 pub mod config;
+pub mod export_buffer;
 pub mod influxdb;
 pub mod hub;
 pub mod routes;

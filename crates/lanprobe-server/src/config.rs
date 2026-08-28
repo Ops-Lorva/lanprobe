@@ -70,6 +70,16 @@ impl ConfigStore {
         }
     }
 
+    /// Répertoire qui porte la config — et, à côté, les états que le serveur
+    /// doit retrouver après un redémarrage (clé de scellement, tampon
+    /// d'export…).
+    pub fn dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    }
+
     pub fn get(&self) -> Value {
         self.data
             .lock()
@@ -198,6 +208,14 @@ mod tests {
             },
             "settings": { "theme": "dark" }
         })
+    }
+
+    #[test]
+    fn le_repertoire_est_celui_du_fichier_de_config() {
+        let _guard = crate::secrets::ENV_KEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tmp_dir("dir");
+        let store = ConfigStore::load(default_config_path(&dir));
+        assert_eq!(store.dir(), dir);
     }
 
     #[test]

@@ -30,15 +30,73 @@ pub fn parse_cidr(cidr: &str) -> Result<(u32, u32), String> {
 }
 
 
+/// L'interface par laquelle un scan doit voir le réseau.
+///
+/// Le nom sert à `ip neigh show dev …` et `arp -i …` ; l'IP sert à Windows,
+/// dont `arp -a` désigne les interfaces par leur adresse, pas par leur nom.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanInterface {
+    pub name: String,
+    pub ip: Option<Ipv4Addr>,
+}
+
+/// L'interface de scan correspondant au nom sélectionné dans l'UI, ou `None`
+/// quand aucune interface n'est imposée.
+pub fn scan_interface(selected: Option<&str>) -> Option<ScanInterface> {
+    let name = selected?;
+    Some(scan_interface_from(
+        name,
+        &crate::interfaces::get_interface_details(name),
+    ))
+}
+
+/// Sur macOS le nom sélectionné est un service networksetup (« Wi-Fi ») :
+/// `arp -i` et `ip neigh dev` attendent l'ifname système (« en0 »).
+fn scan_interface_from(
+    selected: &str,
+    details: &crate::interfaces::InterfaceDetails,
+) -> ScanInterface {
+    ScanInterface {
+        name: details
+            .bsd_name
+            .clone()
+            .unwrap_or_else(|| selected.to_string()),
+        ip: details.ip.as_deref().and_then(|s| s.parse().ok()),
+    }
+}
+
+/// Arguments de `ip neigh`, restreints à l'interface choisie.
+fn neigh_args(iface: Option<&ScanInterface>) -> Vec<&str> {
+    match iface {
+        Some(i) => vec!["neigh", "show", "dev", i.name.as_str()],
+        None => vec!["neigh", "show"],
+    }
+}
+
+/// Arguments de `arp` (BSD / net-tools), restreints à l'interface choisie.
+fn bsd_arp_args(iface: Option<&ScanInterface>) -> Vec<&str> {
+    match iface {
+        Some(i) => vec!["-an", "-i", i.name.as_str()],
+        None => vec!["-an"],
+    }
+}
+
 /// Lit la table ARP pour récupérer les hôtes déjà connus sur le réseau local.
 /// Retourne une map ip -> mac.
 ///
-/// - Windows : `arp -a`.
-/// - macOS   : `arp -a` (format `? (ip) at mac on en0`).
-/// - Linux   : `ip neigh show` (iproute2, toujours installé) avec fallback
-///   `arp -an` — le paquet `net-tools` n'est plus installé par défaut sur
-///   Debian/Ubuntu récents, donc `arp` peut être absent.
-pub async fn read_arp_table() -> HashMap<String, String> {
+/// **Toujours restreinte à l'interface choisie.** Un Wi-Fi de technicien en
+/// 192.168.1.0/24 et un VLAN client dans le même plan, c'est banal : sans
+/// filtre, le scan du VLAN affiche avec MAC et constructeur des machines que
+/// l'interface choisie n'a jamais vues, indiscernables des vrais hôtes.
+///
+/// - Windows : `arp -a`, filtré sur le bloc de l'IP de l'interface (`arp`
+///   n'accepte pas de nom d'interface, seulement l'adresse locale).
+/// - macOS   : `arp -an -i <iface>`, plus filtrage du `on <iface>` de la
+///   sortie — la restriction ne dépend donc pas du support de `-i`.
+/// - Linux   : `ip neigh show dev <iface>` (iproute2, toujours installé)
+///   avec repli `arp -an -i <iface>` — `net-tools` n'est plus installé par
+///   défaut sur Debian/Ubuntu récents, donc `arp` peut être absent.
+pub async fn read_arp_table(iface: Option<&ScanInterface>) -> HashMap<String, String> {
     let mut map = HashMap::new();
 
     #[cfg(target_os = "windows")]
@@ -46,51 +104,30 @@ pub async fn read_arp_table() -> HashMap<String, String> {
         let out = async_cmd("arp").arg("-a").output().await;
         if let Ok(o) = out {
             let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            for line in text.lines() {
-                // "  192.168.1.1   11-22-33-44-55-66   dynamic"
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 && parts[0].contains('.') && parts[1].contains('-') {
-                    map.insert(parts[0].to_string(), parts[1].replace('-', ":"));
-                }
-            }
+            parse_windows_arp(&text, &mut map, iface.and_then(|i| i.ip));
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        if let Ok(o) = async_cmd("arp").arg("-an").output().await {
+        if let Ok(o) = async_cmd("arp").args(bsd_arp_args(iface)).output().await {
             let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            parse_bsd_arp(&text, &mut map);
+            parse_bsd_arp(&text, &mut map, iface.map(|i| i.name.as_str()));
         }
     }
 
     #[cfg(target_os = "linux")]
     {
-        // `ip neigh show` — format : "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
-        if let Ok(o) = async_cmd("ip").args(["neigh", "show"]).output().await {
+        // `ip neigh show dev eth0` — format :
+        // "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+        if let Ok(o) = async_cmd("ip").args(neigh_args(iface)).output().await {
             let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            for line in text.lines() {
-                let mut ip: Option<&str> = None;
-                let mut mac: Option<&str> = None;
-                let mut parts = line.split_whitespace();
-                if let Some(first) = parts.next() {
-                    if first.contains('.') { ip = Some(first); }
-                }
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if let Some(idx) = parts.iter().position(|p| *p == "lladdr") {
-                    mac = parts.get(idx + 1).copied();
-                }
-                if let (Some(ip), Some(mac)) = (ip, mac) {
-                    if mac.contains(':') && mac.len() == 17 {
-                        map.insert(ip.to_string(), mac.to_string());
-                    }
-                }
-            }
+            parse_ip_neigh(&text, &mut map, iface.map(|i| i.name.as_str()));
         }
         if map.is_empty() {
-            if let Ok(o) = async_cmd("arp").arg("-an").output().await {
+            if let Ok(o) = async_cmd("arp").args(bsd_arp_args(iface)).output().await {
                 let text = String::from_utf8_lossy(&o.stdout).into_owned();
-                parse_bsd_arp(&text, &mut map);
+                parse_bsd_arp(&text, &mut map, iface.map(|i| i.name.as_str()));
             }
         }
     }
@@ -98,8 +135,66 @@ pub async fn read_arp_table() -> HashMap<String, String> {
     map
 }
 
-#[cfg(not(target_os = "windows"))]
-fn parse_bsd_arp(text: &str, map: &mut HashMap<String, String>) {
+/// Parse `ip neigh show`. Le filtre est redondant avec `dev <iface>` mais
+/// couvre les sorties où la restriction n'a pas été appliquée.
+#[allow(dead_code)]
+fn parse_ip_neigh(text: &str, map: &mut HashMap<String, String>, iface: Option<&str>) {
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let Some(ip) = parts.first().filter(|p| p.contains('.')) else { continue };
+        if let Some(want) = iface {
+            let dev = parts
+                .iter()
+                .position(|p| *p == "dev")
+                .and_then(|i| parts.get(i + 1));
+            if dev != Some(&want) {
+                continue;
+            }
+        }
+        let mac = parts
+            .iter()
+            .position(|p| *p == "lladdr")
+            .and_then(|i| parts.get(i + 1));
+        if let Some(mac) = mac {
+            if mac.contains(':') && mac.len() == 17 {
+                map.insert(ip.to_string(), mac.to_string());
+            }
+        }
+    }
+}
+
+/// Parse `arp -a` de Windows, bloc par bloc. Chaque bloc est introduit par
+/// `Interface: <ip locale> --- 0x…` : c'est le seul moyen de rattacher une
+/// entrée à une interface, `arp` ne prenant pas de nom d'interface.
+#[allow(dead_code)]
+fn parse_windows_arp(text: &str, map: &mut HashMap<String, String>, iface_ip: Option<Ipv4Addr>) {
+    let mut dans_le_bon_bloc = iface_ip.is_none();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Interface:") {
+            let bloc_ip = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<Ipv4Addr>().ok());
+            dans_le_bon_bloc = match iface_ip {
+                None => true,
+                Some(want) => bloc_ip == Some(want),
+            };
+            continue;
+        }
+        if !dans_le_bon_bloc {
+            continue;
+        }
+        // "  192.168.1.1   11-22-33-44-55-66   dynamic"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 && parts[0].contains('.') && parts[1].contains('-') {
+            map.insert(parts[0].to_string(), parts[1].replace('-', ":"));
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn parse_bsd_arp(text: &str, map: &mut HashMap<String, String>, iface: Option<&str>) {
     // Format BSD / macOS : "? (192.168.1.1) at 11:22:33:44:55:66 on en0 [ethernet]"
     for line in text.lines() {
         let Some(ip_start) = line.find('(') else { continue; };
@@ -118,6 +213,21 @@ fn parse_bsd_arp(text: &str, map: &mut HashMap<String, String>) {
                 None => break String::new(),
             }
         };
+        // `on <iface>` : on ne garde que les voisins vus par l'interface
+        // choisie, même si `arp -i` n'a pas restreint la sortie.
+        if let Some(want) = iface {
+            let mut reste = line[ip_end + 1..].split_whitespace();
+            let dev = loop {
+                match reste.next() {
+                    Some("on") => break reste.next(),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            };
+            if dev != Some(want) {
+                continue;
+            }
+        }
         if mac.contains(':') && mac != "(incomplete)" && mac.len() >= 11 {
             // Normalise en "aa:bb:cc:dd:ee:ff" — BSD arp raccourcit les octets
             // à 0 : "1:2:3:4:5:6" au lieu de "01:02:03:04:05:06".
@@ -293,5 +403,131 @@ mod tests {
     fn test_parse_cidr_invalid() {
         assert!(parse_cidr("not-a-cidr").is_err());
         assert!(parse_cidr("192.168.1.0/33").is_err());
+    }
+
+    #[test]
+    fn sans_interface_selectionnee_le_scan_n_est_pas_restreint() {
+        assert_eq!(scan_interface(None), None);
+    }
+
+    #[test]
+    fn le_scan_utilise_le_nom_bsd_car_c_est_lui_que_arp_connait() {
+        // Sur macOS l'interface sélectionnée est un service networksetup
+        // (« Wi-Fi ») ; `arp -i` attend « en0 ».
+        let details = crate::interfaces::InterfaceDetails {
+            name: "Wi-Fi".to_string(),
+            ip: Some("192.168.1.10".to_string()),
+            bsd_name: Some("en0".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            scan_interface_from("Wi-Fi", &details),
+            ScanInterface {
+                name: "en0".to_string(),
+                ip: Some(Ipv4Addr::new(192, 168, 1, 10)),
+            }
+        );
+    }
+
+    #[test]
+    fn sans_nom_bsd_le_scan_garde_le_nom_selectionne() {
+        let details = crate::interfaces::InterfaceDetails {
+            name: "eth0".to_string(),
+            ip: Some("10.0.30.12".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            scan_interface_from("eth0", &details),
+            ScanInterface {
+                name: "eth0".to_string(),
+                ip: Some(Ipv4Addr::new(10, 0, 30, 12)),
+            }
+        );
+    }
+
+    fn scope(name: &str) -> ScanInterface {
+        ScanInterface {
+            name: name.to_string(),
+            ip: Some(Ipv4Addr::new(192, 168, 1, 10)),
+        }
+    }
+
+    #[test]
+    fn ip_neigh_est_restreint_a_l_interface_choisie() {
+        assert_eq!(
+            neigh_args(Some(&scope("eth0"))),
+            vec!["neigh", "show", "dev", "eth0"]
+        );
+    }
+
+    #[test]
+    fn sans_interface_choisie_ip_neigh_voit_tout() {
+        assert_eq!(neigh_args(None), vec!["neigh", "show"]);
+    }
+
+    #[test]
+    fn arp_bsd_est_restreint_a_l_interface_choisie() {
+        assert_eq!(bsd_arp_args(Some(&scope("en0"))), vec!["-an", "-i", "en0"]);
+        assert_eq!(bsd_arp_args(None), vec!["-an"]);
+    }
+
+    #[test]
+    fn la_table_bsd_ecarte_les_voisins_d_une_autre_interface() {
+        // Le Wi-Fi du technicien et le VLAN client sont tous deux en
+        // 192.168.1.0/24 : sans filtre, les machines du Wi-Fi s'affichent
+        // comme des hôtes découverts du VLAN.
+        let text = "? (192.168.1.1) at 11:22:33:44:55:66 on en0 [ethernet]\n\
+                    ? (192.168.1.2) at aa:bb:cc:dd:ee:ff on en1 [ethernet]\n";
+        let mut map = HashMap::new();
+        parse_bsd_arp(text, &mut map, Some("en0"));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("192.168.1.1").map(String::as_str), Some("11:22:33:44:55:66"));
+    }
+
+    #[test]
+    fn sans_filtre_la_table_bsd_garde_toutes_les_interfaces() {
+        let text = "? (192.168.1.1) at 11:22:33:44:55:66 on en0 [ethernet]\n\
+                    ? (192.168.1.2) at aa:bb:cc:dd:ee:ff on en1 [ethernet]\n";
+        let mut map = HashMap::new();
+        parse_bsd_arp(text, &mut map, None);
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn ip_neigh_ecarte_les_voisins_d_une_autre_interface() {
+        // `ip neigh show dev eth0` filtre déjà côté noyau, mais le repli
+        // `arp -an` et les sorties non filtrées doivent l'être aussi.
+        let text = "192.168.1.1 dev eth0 lladdr 11:22:33:44:55:66 REACHABLE\n\
+                    192.168.1.2 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n";
+        let mut map = HashMap::new();
+        parse_ip_neigh(text, &mut map, Some("eth0"));
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("192.168.1.1"));
+    }
+
+    #[test]
+    fn la_table_windows_ne_garde_que_le_bloc_de_l_interface() {
+        // `arp -a` liste un bloc par interface, en tête son IP locale.
+        let text = "\r\nInterface: 192.168.1.10 --- 0x5\r\n\
+                    Internet Address      Physical Address      Type\r\n\
+                    192.168.1.1           11-22-33-44-55-66     dynamic\r\n\
+                    \r\nInterface: 10.0.0.5 --- 0x9\r\n\
+                    Internet Address      Physical Address      Type\r\n\
+                    192.168.1.2           aa-bb-cc-dd-ee-ff     dynamic\r\n";
+        let mut map = HashMap::new();
+        parse_windows_arp(text, &mut map, Some(Ipv4Addr::new(192, 168, 1, 10)));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("192.168.1.1").map(String::as_str), Some("11:22:33:44:55:66"));
+    }
+
+    #[test]
+    fn sans_filtre_la_table_windows_garde_tous_les_blocs() {
+        let text = "\r\nInterface: 192.168.1.10 --- 0x5\r\n\
+                    192.168.1.1           11-22-33-44-55-66     dynamic\r\n\
+                    \r\nInterface: 10.0.0.5 --- 0x9\r\n\
+                    192.168.1.2           aa-bb-cc-dd-ee-ff     dynamic\r\n";
+        let mut map = HashMap::new();
+        parse_windows_arp(text, &mut map, None);
+        assert_eq!(map.len(), 2);
     }
 }

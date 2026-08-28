@@ -5,7 +5,7 @@ use lanprobe_core::interfaces::{get_interface_details, list_interfaces, Interfac
 use lanprobe_core::configure::{apply_dhcp, apply_static, NetworkConfig};
 use lanprobe_core::permissions::{has_permissions, install_permissions};
 use lanprobe_core::ping::{self, ping_once};
-use lanprobe_core::discovery::{parse_cidr, get_hostname, read_arp_table, get_local_network_cidr, DiscoveredHost};
+use lanprobe_core::discovery::{parse_cidr, get_hostname, read_arp_table, scan_interface, get_local_network_cidr, DiscoveredHost};
 use lanprobe_core::ping::ping_once_fast_retry;
 use lanprobe_core::ports::{scan_ports, scan_udp_ports, PortResult};
 use lanprobe_core::sla::{compute_sla, PingSample, SlaStats};
@@ -357,10 +357,20 @@ async fn cmd_scan_network(
     }
     state.discovery.clear();
     let shared = state.inner().clone();
+    // Table ARP lue à travers l'interface choisie : deux réseaux dans le même
+    // plan d'adressage, et sans filtre les voisins de l'autre lien
+    // apparaissent comme des hôtes découverts.
+    let scan_iface = scan_interface(
+        state
+            .selected_interface
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_deref(),
+    );
 
     tokio::spawn(async move {
         let cancel = &shared.scan_cancel;
-        let arp_initial = read_arp_table().await;
+        let arp_initial = read_arp_table(scan_iface.as_ref()).await;
         if cancel.load(Ordering::SeqCst) {
             shared.emit("discovery:done", serde_json::Value::Null);
             return;
@@ -435,7 +445,7 @@ async fn cmd_scan_network(
             return;
         }
 
-        let arp_after = read_arp_table().await;
+        let arp_after = read_arp_table(scan_iface.as_ref()).await;
         for (ip, mac) in &arp_after {
             if arp_initial.contains_key(ip) { continue; }
             let ip_parsed: Option<u32> = ip.split('.').fold(Some(0u32), |acc, p| {

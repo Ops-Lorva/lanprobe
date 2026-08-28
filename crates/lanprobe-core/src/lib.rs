@@ -12,6 +12,7 @@ pub mod ports;
 pub mod sla;
 pub mod speedtest;
 pub mod iperf;
+pub mod resolver;
 pub mod internet;
 pub mod public_ip;
 pub mod updater;

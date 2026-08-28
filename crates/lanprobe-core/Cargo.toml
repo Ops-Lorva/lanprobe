@@ -22,6 +22,7 @@ base64 = "0.22"
 
 # AEAD du scellement au repos (module `secrets`, partagé lui aussi).
 ring = "0.17"
+hickory-resolver = "0.26"
 
 [dev-dependencies]
 tokio-test = "0.4"

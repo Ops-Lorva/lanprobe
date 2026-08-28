@@ -12,7 +12,8 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::Ordering;
 
 use lanprobe_core::discovery::{
-    get_hostname, get_local_network_cidr, parse_cidr, read_arp_table, DiscoveredHost,
+    get_hostname, get_local_network_cidr, parse_cidr, read_arp_table, scan_interface,
+    DiscoveredHost,
 };
 use lanprobe_core::interfaces::get_interface_details;
 use lanprobe_core::ports::scan_ports;
@@ -276,8 +277,11 @@ async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
         //   boucle pourrait avancer au tick suivant avant la fin du scan
         //   précédent et clobberer l'état partagé.
 
-        // Étape 1 : ARP initial.
-        let arp_initial = read_arp_table().await;
+        // Étape 1 : ARP initial, vu par l'interface choisie — une table ARP
+        // globale ferait passer les voisins d'un autre lien pour des hôtes du
+        // réseau planifié.
+        let scan_iface = scan_interface(get_selected_iface_name(&state).as_deref());
+        let arp_initial = read_arp_table(scan_iface.as_ref()).await;
         if state.scan_cancel.load(Ordering::SeqCst) {
             let _ = state.events.send(done_event(&effective_cidr, 0));
             state.scan_cancel.store(true, Ordering::SeqCst);
@@ -364,7 +368,7 @@ async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
         }
 
         // Étape 3 : ARP final pour récupérer les MACs des hôtes pingés.
-        let arp_after = read_arp_table().await;
+        let arp_after = read_arp_table(scan_iface.as_ref()).await;
         for (ip, mac) in &arp_after {
             if arp_initial.contains_key(ip) {
                 continue;

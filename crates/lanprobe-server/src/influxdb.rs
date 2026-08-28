@@ -10,6 +10,7 @@
 
 use base64::{engine::general_purpose::STANDARD as B64_STANDARD, Engine};
 
+use crate::export_buffer::{flush_once, Backoff, ExportBuffer, PointWriter};
 use crate::state::{AppState, BroadcastEvent};
 
 // ── Config structs ─────────────────────────────────────────────────────────
@@ -174,6 +175,12 @@ impl InfluxClient {
         } else {
             Err(format!("écriture refusée ({status})"))
         }
+    }
+}
+
+impl PointWriter for InfluxClient {
+    async fn write_points(&self, body: String) -> Result<(), String> {
+        self.write(body).await
     }
 }
 
@@ -412,60 +419,92 @@ async fn hub_client(state: &AppState, key: &crate::secrets::SecretKey) -> Option
     )
 }
 
+/// Le tampon n'est réécrit qu'une fois toutes les 10 s : réécrire 100 000
+/// lignes à chaque seconde coûterait plus cher que le service lui-même. Le
+/// prix de ce délai est un éventuel rejeu de quelques secondes déjà écrites
+/// après un arrêt brutal — sans conséquence, Influx écrasant un point de
+/// même mesure, mêmes tags et même horodatage.
+const PERSIST_EVERY_TICKS: u32 = 10;
+
+/// Horodatage courant en nanosecondes — même base que celle posée sur les
+/// points par `event_to_points`.
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
+fn persist_buffer(buffer: &mut ExportBuffer, ticks: &mut u32, force: bool) {
+    *ticks += 1;
+    if !buffer.is_dirty() || (!force && *ticks < PERSIST_EVERY_TICKS) {
+        return;
+    }
+    *ticks = 0;
+    if let Err(e) = buffer.persist() {
+        tracing::warn!("tampon d'export non persisté ({e}) — un redémarrage perdrait les points en attente");
+    }
+}
+
+/// Une seconde de la boucle d'envoi : tentative d'écriture, remontée d'état,
+/// et persistance périodique du tampon.
+async fn flush_tick(
+    client: &InfluxClient,
+    buffer: &mut ExportBuffer,
+    backoff: &mut Backoff,
+    status: Option<&std::sync::Arc<crate::hub::WriteStatus>>,
+    ticks: &mut u32,
+) {
+    // ⚠️ On ne vide le tampon qu'APRÈS confirmation. Le vider avant
+    // l'écriture — ce que faisait la 1.1.5 — perd les points exactement
+    // pendant l'incident qu'on voudrait analyser.
+    flush_once(client, buffer, backoff, std::time::Instant::now()).await;
+    // Remonter la profondeur du tampon : sans ça, l'app affiche « tout va
+    // bien » pendant qu'elle accumule sans rien livrer, et le hub reçoit un
+    // `buffered_points` figé à zéro qui ne signale jamais rien. Tant que le
+    // repli court, la dernière écriture est en échec : on ne prétend pas le
+    // contraire.
+    if let Some(status) = status {
+        status.set(buffer.len(), backoff.delay().is_zero());
+    }
+    persist_buffer(buffer, ticks, false);
+}
+
 /// Boucle d'envoi commune aux deux destinations.
 async fn run_with(
     _state: AppState,
     mut rx: tokio::sync::broadcast::Receiver<BroadcastEvent>,
     client: InfluxClient,
     status: Option<std::sync::Arc<crate::hub::WriteStatus>>,
+    mut buffer: ExportBuffer,
 ) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut buffer: Vec<String> = Vec::new();
+    let mut backoff = Backoff::new();
+    let mut ticks = 0u32;
 
     loop {
         tokio::select! {
             event = rx.recv() => match event {
                 Ok(event) => {
-                    buffer.extend(event_to_points(&event, &client.host_tag));
-                    const MAX_BUFFER: usize = 10_000;
-                    if buffer.len() > MAX_BUFFER {
-                        let drop_count = buffer.len() - MAX_BUFFER;
-                        buffer.drain(0..drop_count);
-                        tracing::warn!("tampon plein : {drop_count} points les plus anciens abandonnés");
+                    let now = now_ns();
+                    for line in event_to_points(&event, &client.host_tag) {
+                        buffer.push_at(line, now);
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // Arrêt propre : on ne part pas en laissant sur le disque
+                    // une photo périmée du tampon.
+                    persist_buffer(&mut buffer, &mut ticks, true);
+                    return;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("bus saturé, {n} events perdus");
                 }
             },
             _ = ticker.tick() => {
-                if buffer.is_empty() { continue; }
-                let body = buffer.join("\n");
-                // ⚠️ On ne vide le tampon qu'APRÈS confirmation. Le vider
-                // avant l'écriture — ce que faisait la 1.1.5 — perd les points
-                // exactement pendant l'incident qu'on voudrait analyser.
-                let ok = match client.write(body).await {
-                    Ok(()) => {
-                        buffer.clear();
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "écriture échouée ({e}) — {} points conservés pour la prochaine tentative",
-                            buffer.len()
-                        );
-                        false
-                    }
-                };
-                // Remonter la profondeur du tampon : sans ça, l'app affiche
-                // « tout va bien » pendant qu'elle accumule sans rien livrer,
-                // et le hub reçoit un `buffered_points` figé à zéro qui ne
-                // signale jamais rien.
-                if let Some(status) = status.as_ref() {
-                    status.set(buffer.len(), ok);
-                }
+                flush_tick(&client, &mut buffer, &mut backoff, status.as_ref(), &mut ticks).await;
             }
         }
     }
@@ -476,11 +515,12 @@ async fn run_with(
 ///
 /// Le flux de contrôle :
 /// 1. On souscrit AVANT de lire la config (évite de rater des events).
-/// 2. Si la config n'est pas prête, on attend un `config:update` valide.
-/// 3. On tourne ensuite dans une boucle select : on bufférise les points et
-///    on flushe toutes les secondes.
-/// 4. Sur `config:update`, on recharge. Si InfluxDB est désactivé, on vide
-///    le buffer et on attend la réactivation.
+/// 2. On reprend le tampon laissé par l'exécution précédente.
+/// 3. Si la config n'est pas prête, on attend un `config:update` valide.
+/// 4. On tourne ensuite dans une boucle select : on bufférise les points et
+///    on tente une écriture toutes les secondes, avec repli exponentiel.
+/// 5. Sur `config:update`, on recharge. Si InfluxDB est désactivé, on
+///    abandonne le tampon et on attend la réactivation.
 pub async fn run(
     state: AppState,
     key: Option<crate::secrets::SecretKey>,
@@ -489,20 +529,26 @@ pub async fn run(
     // 1. S'abonner avant de lire la config.
     let mut rx = state.events.subscribe();
 
+    // 2. Reprendre ce qu'une exécution précédente n'a pas pu livrer. Le
+    //    tampon survit à la coupure de courant : sinon, la panne efface la
+    //    trace de la panne.
+    let mut buffer = ExportBuffer::open_at(
+        ExportBuffer::default_path(&state.config.dir()),
+        now_ns(),
+    );
+
     // Rattachée à un hub : c'est lui qui reçoit les mesures, et il n'y a rien
     // d'autre à configurer. Ce chemin court-circuite l'export direct, qui
     // reste disponible pour qui n'utilise pas de hub.
     if let Some(key) = key.as_ref() {
         if let Some(client) = hub_client(&state, key).await {
-            run_with(state, rx, client, status).await;
+            run_with(state, rx, client, status, buffer).await;
             return;
         }
     }
 
-    // 2. Charger la config initiale.
+    // 3. Charger la config initiale et attendre qu'elle soit valide.
     let mut cfg = load_config(&state);
-
-    // 3. Attendre une config valide.
     while !cfg.is_ready() {
         match rx.recv().await {
             Ok(event) if event.event == "config:update" => {
@@ -519,11 +565,12 @@ pub async fn run(
     // 4. Construire le client.
     let mut client = InfluxClient::new(&cfg).await;
 
-    // 5. Ticker de flush à 1 s.
+    // 5. Ticker de flush à 1 s. Le repli, lui, espace les tentatives quand
+    //    la destination ne répond plus.
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    let mut buffer: Vec<String> = Vec::new();
+    let mut backoff = Backoff::new();
+    let mut ticks = 0u32;
 
     loop {
         tokio::select! {
@@ -534,11 +581,13 @@ pub async fn run(
                             let new_cfg = load_config(&state);
                             if new_cfg.is_ready() {
                                 client = InfluxClient::new(&new_cfg).await;
-                                cfg = new_cfg;
                             } else {
-                                // InfluxDB désactivé ou config incomplète →
-                                // vider le buffer et attendre la réactivation.
-                                buffer.clear();
+                                // InfluxDB désactivé ou config incomplète → on
+                                // abandonne le tampon (c'est une décision de
+                                // l'utilisateur, pas une panne) et on attend la
+                                // réactivation.
+                                buffer.discard_all();
+                                persist_buffer(&mut buffer, &mut ticks, true);
                                 cfg = new_cfg;
                                 while !cfg.is_ready() {
                                     match rx.recv().await {
@@ -555,30 +604,23 @@ pub async fn run(
                                 client = InfluxClient::new(&cfg).await;
                             }
                         } else {
-                            let points = event_to_points(&event, &client.host_tag);
-                            buffer.extend(points);
-                            const MAX_BUFFER: usize = 10_000;
-                            if buffer.len() > MAX_BUFFER {
-                                let drop_count = buffer.len() - MAX_BUFFER;
-                                buffer.drain(0..drop_count);
-                                tracing::warn!("InfluxDB: buffer overflow, dropped {} oldest points", drop_count);
+                            let now = now_ns();
+                            for line in event_to_points(&event, &client.host_tag) {
+                                buffer.push_at(line, now);
                             }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        persist_buffer(&mut buffer, &mut ticks, true);
+                        return;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("InfluxDB: broadcast lagged, {} events dropped", n);
                     }
                 }
             }
             _ = ticker.tick() => {
-                if !buffer.is_empty() {
-                    let body = buffer.join("\n");
-                    buffer.clear();
-                    if let Err(e) = client.write(body).await {
-                        tracing::warn!("InfluxDB write failed: {}", e);
-                    }
-                }
+                flush_tick(&client, &mut buffer, &mut backoff, status.as_ref(), &mut ticks).await;
             }
         }
     }
