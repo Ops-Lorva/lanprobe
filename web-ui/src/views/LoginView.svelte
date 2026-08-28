@@ -1,6 +1,6 @@
 <script lang="ts">
   import { _ } from 'svelte-i18n';
-  import { api, ApiError } from '$lib/api';
+  import { api, ApiError, probeSession } from '$lib/api';
   import AuthFrame from './AuthFrame.svelte';
 
   const { onDone, notice = '' } = $props<{ onDone: () => void; notice?: string }>();
@@ -16,6 +16,17 @@
     busy = true;
     try {
       await api.login(username.trim(), password);
+      // Le hub a authentifié et posé le cookie — encore faut-il que le
+      // navigateur l'ait accepté. Un cookie `Secure` laissé par une visite
+      // en HTTPS sur le même hôte empêche une page HTTP de le remplacer, et
+      // le navigateur le jette *sans rien dire* : la connexion réussit puis
+      // chaque requête repart en 401. Sans cette vérification, l'utilisateur
+      // ne voit qu'un « session expirée » qui désigne la mauvaise cause.
+      if (!(await probeSession())) {
+        error = $_('auth.cookie_blocked');
+        password = '';
+        return;
+      }
       onDone();
     } catch (err) {
       if (err instanceof ApiError && err.isNetwork) error = $_('auth.unreachable');
