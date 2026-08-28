@@ -69,6 +69,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/setup", post(setup))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
+        .route("/api/me", get(me))
         .route("/api/probes/enroll", post(enroll))
         .route("/api/probes/{id}/write", post(write_metrics))
         .route("/api/probes/{id}/heartbeat", post(heartbeat));
@@ -283,6 +284,17 @@ async fn login(
             error_response(e)
         }
     }
+}
+
+/// Qui est connecté, et avec quel rôle.
+///
+/// Sans cette route, l'interface ne peut ni savoir quels écrans montrer, ni
+/// marquer votre propre ligne dans la liste des comptes : elle apprenait son
+/// rôle en se prenant un refus, ce qui écrit une ligne d'audit à chaque
+/// ouverture de session — précisément le bruit qui empêche de repérer, dans
+/// ce même journal, la série de refus qui compte.
+async fn me(Extension(identity): Extension<Identity>) -> Response {
+    ok_json(json!({ "username": identity.username, "role": identity.role.as_str() }))
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {

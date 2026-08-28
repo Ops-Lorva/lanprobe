@@ -305,9 +305,16 @@ export class ApiError extends Error {
     this.name = 'ApiError';
   }
 
-  /** Session absente ou expirée → l'UI doit repasser par l'écran de connexion. */
+  /**
+   * Session absente ou expirée → repasser par l'écran de connexion.
+   *
+   * ⚠️ **401 seulement.** Un `403` n'est pas une session perdue : c'est un
+   * refus de rôle, et se reconnecter n'y changera rien. Les confondre
+   * éjectait un observateur vers la page de connexion dès qu'il ouvrait un
+   * écran réservé — en boucle, sans jamais lui dire pourquoi.
+   */
   get isUnauthorized() {
-    return this.status === 401 || this.status === 403;
+    return this.status === 401;
   }
 
   /** Session tombée. C'est le SEUL cas où se reconnecter change quelque chose. */
