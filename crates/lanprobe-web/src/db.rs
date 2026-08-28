@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -169,6 +169,31 @@ const MIGRATIONS: &[&str] = &[
       state    TEXT NOT NULL,          -- 'up' | 'down'
       since    INTEGER NOT NULL
     );
+    "#,
+    // v7 → v8 : ce que la sonde raconte d'elle-même (contrat, section 15).
+    //
+    // **Ajout de colonnes seul** — rien n'est réécrit, une base peuplée passe
+    // sans y toucher, et les sondes déjà enrôlées remplissent ces colonnes à
+    // leur premier battement.
+    //
+    // Aucune de ces valeurs n'est jamais remise à NULL : une sonde qui perd
+    // son accès internet bat sans IP publique, et afficher un tiret parce
+    // qu'elle ne répond plus effacerait l'information au moment exact où elle
+    // sert — quand un site tombe, savoir quelle adresse il avait est le
+    // premier élément de diagnostic.
+    //
+    // `public_ip_at` date le moment où l'adresse **a changé**, pas le dernier
+    // battement : « cette adresse depuis mardi » se lit, « vue il y a une
+    // minute » ne dit rien de plus que `last_seen`.
+    //
+    // `local_ips` est un tableau JSON : une machine multi-domiciliée en a
+    // plusieurs, et une colonne par adresse serait un plafond arbitraire.
+    r#"
+    ALTER TABLE probes ADD COLUMN public_ip    TEXT;
+    ALTER TABLE probes ADD COLUMN public_ip_at INTEGER;
+    ALTER TABLE probes ADD COLUMN interface    TEXT;
+    ALTER TABLE probes ADD COLUMN local_ips    TEXT;
+    ALTER TABLE probes ADD COLUMN gateway      TEXT;
     "#,
 ];
 
@@ -434,12 +459,47 @@ pub struct ProbeRecord {
     /// dès que la sonde en accuse réception.
     pub pending_influx_token: Option<String>,
     pub pending_influx_token_version: Option<i64>,
+    /// Dernière IP publique connue du site, et la date à laquelle elle a
+    /// changé. Conservées quand la sonde est hors ligne : c'est justement là
+    /// qu'on veut savoir où elle était.
+    pub public_ip: Option<String>,
+    pub public_ip_at: Option<i64>,
+    /// Interface par laquelle la sonde sort, telle qu'elle la nomme.
+    pub interface: Option<String>,
+    /// Adresses locales au format CIDR. Vide tant qu'aucun battement ne les a
+    /// portées — jamais vidée ensuite.
+    pub local_ips: Vec<String>,
+    pub gateway: Option<String>,
 }
 
 const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash, p.platform, \
                              p.version, p.last_seen, p.buffered_points, p.created_at, p.revoked_at, \
                              p.influx_auth_id, p.influx_token_version, p.pending_influx_auth_id, \
-                             p.pending_influx_token, p.pending_influx_token_version";
+                             p.pending_influx_token, p.pending_influx_token_version, \
+                             p.public_ip, p.public_ip_at, p.interface, p.local_ips, p.gateway";
+
+/// Ce qu'une sonde raconte de sa position réseau dans son battement.
+///
+/// Tout est facultatif : une sonde sans accès internet envoie son battement
+/// **sans** IP publique plutôt que d'échouer, et un champ absent ne doit
+/// jamais écraser ce que le hub savait déjà.
+#[derive(Debug, Clone, Default)]
+pub struct ProbeIdentity {
+    pub public_ip: Option<String>,
+    pub interface: Option<String>,
+    pub local_ips: Vec<String>,
+    pub gateway: Option<String>,
+}
+
+/// Bascule d'IP publique observée à un battement — changement d'opérateur,
+/// passage sur un lien de secours. C'est ce qui mérite une ligne d'audit ;
+/// une adresse inchangée n'en mérite aucune.
+#[derive(Debug, Clone)]
+pub struct PublicIpChange {
+    /// `None` la première fois que la sonde annonce une adresse.
+    pub previous: Option<String>,
+    pub current: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct EnrollCode {
@@ -505,6 +565,14 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
         pending_influx_auth_id: r.get(13)?,
         pending_influx_token: r.get(14)?,
         pending_influx_token_version: r.get(15)?,
+        public_ip: r.get(16)?,
+        public_ip_at: r.get(17)?,
+        interface: r.get(18)?,
+        local_ips: r
+            .get::<_, Option<String>>(19)?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default(),
+        gateway: r.get(20)?,
     })
 }
 
@@ -1523,27 +1591,82 @@ impl Db {
             .flatten())
     }
 
+    /// Enregistre un battement. Rend la bascule d'IP publique quand il y en a
+    /// une, pour que l'appelant en tire une ligne d'audit — et **seulement**
+    /// quand il y en a une : une ligne par battement noierait le journal.
     pub fn record_heartbeat(
         &self,
         probe_id: &str,
         version: Option<&str>,
         platform: Option<&str>,
         buffered_points: i64,
-    ) -> DbResult<()> {
+        identity: &ProbeIdentity,
+    ) -> DbResult<Option<PublicIpChange>> {
         let conn = self.lock()?;
-        // COALESCE : une sonde qui omet `version` ne doit pas effacer celle
-        // qu'elle avait annoncée au battement précédent.
+        // Sérialisé une fois : une liste vide vaut « je n'ai rien à dire »,
+        // pas « je n'ai plus d'adresse ».
+        let local_ips = if identity.local_ips.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&identity.local_ips).ok()
+        };
+        let previous: Option<String> = conn
+            .query_row(
+                "SELECT public_ip FROM probes WHERE probe_id = ?1",
+                [probe_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        // COALESCE : une sonde qui omet un champ ne doit pas effacer celui
+        // qu'elle avait annoncé au battement précédent. `public_ip_at` ne
+        // bouge qu'à un vrai changement — `IS NOT` compare aussi les NULL.
         let changed = conn.execute(
             "UPDATE probes SET last_seen = ?2,
                     version = COALESCE(?3, version),
                     platform = COALESCE(?4, platform),
-                    buffered_points = ?5
+                    buffered_points = ?5,
+                    public_ip = COALESCE(?6, public_ip),
+                    public_ip_at = CASE WHEN ?6 IS NOT NULL AND ?6 IS NOT public_ip
+                                        THEN ?2 ELSE public_ip_at END,
+                    interface = COALESCE(?7, interface),
+                    local_ips = COALESCE(?8, local_ips),
+                    gateway = COALESCE(?9, gateway)
              WHERE probe_id = ?1",
-            rusqlite::params![probe_id, now(), version, platform, buffered_points],
+            rusqlite::params![
+                probe_id,
+                now(),
+                version,
+                platform,
+                buffered_points,
+                identity.public_ip,
+                identity.interface,
+                local_ips,
+                identity.gateway,
+            ],
         )?;
         if changed == 0 {
             return Err(DbError::NotFound("sonde inconnue".into()));
         }
+        Ok(match &identity.public_ip {
+            Some(current) if Some(current) != previous.as_ref() => Some(PublicIpChange {
+                previous,
+                current: current.clone(),
+            }),
+            _ => None,
+        })
+    }
+
+    /// Recule le dernier battement d'une sonde. **Tests seulement** : aucun
+    /// chemin de production ne remonte le temps, un statut dérivé ne vaut que
+    /// si personne ne peut le maquiller.
+    #[cfg(test)]
+    pub fn backdate_last_seen(&self, probe_id: &str, at: i64) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE probes SET last_seen = ?2 WHERE probe_id = ?1",
+            rusqlite::params![probe_id, at],
+        )?;
         Ok(())
     }
 
@@ -2201,7 +2324,7 @@ mod tests {
         let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
         assert!(db.get_probe(&probe.probe_id).unwrap().last_seen.is_none());
 
-        db.record_heartbeat(&probe.probe_id, Some("1.2.0"), Some("linux"), 42)
+        db.record_heartbeat(&probe.probe_id, Some("1.2.0"), Some("linux"), 42, &ProbeIdentity::default())
             .unwrap();
 
         let seen = db.get_probe(&probe.probe_id).unwrap();
@@ -2799,6 +2922,155 @@ mod tests {
 
     /// Chaque test travaille dans son propre dossier — les tests Rust
     /// tournent en parallèle dans le même processus.
+    // ── Identité réseau remontée par la sonde ──────────────────────────
+
+    #[test]
+    fn migration_v8_adds_the_network_identity_to_a_populated_database() {
+        let dir = tmp_dir("v7-to-v8");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..7] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 7").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO probes (probe_id, site_id, name, token_hash, created_at)
+                 VALUES ('p-1', 's-1', 'Paris', 'x', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        // Le parc survit — une migration additive n'emporte rien.
+        let probe = db.get_probe("p-1").unwrap();
+        assert_eq!(probe.name, "Paris");
+        assert_eq!(probe.public_ip, None);
+        assert_eq!(probe.public_ip_at, None);
+        assert!(probe.local_ips.is_empty());
+
+        // Et rejouer l'ouverture ne casse rien.
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(db.get_probe("p-1").unwrap().name, "Paris");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_heartbeat_records_the_network_identity() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+
+        let identity = ProbeIdentity {
+            public_ip: Some("88.120.0.1".into()),
+            interface: Some("en0".into()),
+            local_ips: vec!["10.6.8.42/24".into()],
+            gateway: Some("10.6.8.1".into()),
+        };
+        let change = db
+            .record_heartbeat(&probe.probe_id, Some("1.2.0"), Some("linux"), 0, &identity)
+            .unwrap();
+
+        let seen = db.get_probe(&probe.probe_id).unwrap();
+        assert_eq!(seen.public_ip.as_deref(), Some("88.120.0.1"));
+        assert_eq!(seen.interface.as_deref(), Some("en0"));
+        assert_eq!(seen.local_ips, vec!["10.6.8.42/24".to_string()]);
+        assert_eq!(seen.gateway.as_deref(), Some("10.6.8.1"));
+        assert!(seen.public_ip_at.is_some(), "la date de l'adresse doit être posée");
+        let change = change.expect("la première adresse connue est un changement");
+        assert_eq!(change.previous, None);
+        assert_eq!(change.current, "88.120.0.1");
+    }
+
+    #[test]
+    fn a_probe_that_says_nothing_keeps_what_it_had_said() {
+        // Une sonde qui perd son accès internet bat quand même, sans IP
+        // publique. Remplacer la valeur connue par du vide effacerait
+        // l'information au moment exact où elle sert.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+
+        db.record_heartbeat(
+            &probe.probe_id,
+            None,
+            None,
+            0,
+            &ProbeIdentity {
+                public_ip: Some("88.120.0.1".into()),
+                interface: Some("en0".into()),
+                local_ips: vec!["10.6.8.42/24".into()],
+                gateway: Some("10.6.8.1".into()),
+            },
+        )
+        .unwrap();
+        let before = db.get_probe(&probe.probe_id).unwrap().public_ip_at;
+
+        let change = db
+            .record_heartbeat(&probe.probe_id, None, None, 7, &ProbeIdentity::default())
+            .unwrap();
+
+        let seen = db.get_probe(&probe.probe_id).unwrap();
+        assert_eq!(seen.public_ip.as_deref(), Some("88.120.0.1"));
+        assert_eq!(seen.interface.as_deref(), Some("en0"));
+        assert_eq!(seen.local_ips, vec!["10.6.8.42/24".to_string()]);
+        assert_eq!(seen.gateway.as_deref(), Some("10.6.8.1"));
+        assert_eq!(seen.public_ip_at, before, "une adresse inchangée ne se re-date pas");
+        assert_eq!(seen.buffered_points, 7, "le reste du battement est bien pris");
+        assert!(change.is_none(), "rien n'a changé, rien à signaler");
+    }
+
+    #[test]
+    fn only_a_real_change_of_public_ip_is_reported() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+
+        let first = ProbeIdentity {
+            public_ip: Some("88.120.0.1".into()),
+            ..Default::default()
+        };
+        assert!(db
+            .record_heartbeat(&probe.probe_id, None, None, 0, &first)
+            .unwrap()
+            .is_some());
+        // Le même battement, cent fois : aucun changement.
+        for _ in 0..3 {
+            assert!(
+                db.record_heartbeat(&probe.probe_id, None, None, 0, &first)
+                    .unwrap()
+                    .is_none(),
+                "une adresse identique n'est pas une bascule"
+            );
+        }
+
+        let change = db
+            .record_heartbeat(
+                &probe.probe_id,
+                None,
+                None,
+                0,
+                &ProbeIdentity {
+                    public_ip: Some("88.120.0.2".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .expect("une bascule d'opérateur doit se voir");
+        assert_eq!(change.previous.as_deref(), Some("88.120.0.1"));
+        assert_eq!(change.current, "88.120.0.2");
+    }
+
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("lanprobe-web-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

@@ -36,7 +36,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::Auth;
-use crate::db::{AuditFilter, Db, DbError, DbResult, Outcome, Role};
+use crate::db::{AuditFilter, Db, DbError, DbResult, Outcome, ProbeIdentity, Role};
 use crate::influx::Influx;
 use crate::probe::ProbeStatus;
 use crate::settings::Settings;
@@ -1346,6 +1346,18 @@ struct HeartbeatBody {
     /// l'accusé de réception qui autorise le hub à retirer l'ancien.
     #[serde(default)]
     influx_token_version: Option<i64>,
+    /// Identité réseau du site (contrat, section 15). Chaque champ est
+    /// facultatif : une sonde sans accès internet bat **sans** IP publique
+    /// plutôt que d'échouer, et un champ absent n'efface jamais ce que le hub
+    /// savait déjà.
+    #[serde(default)]
+    public_ip: Option<String>,
+    #[serde(default)]
+    interface: Option<String>,
+    #[serde(default)]
+    local_ips: Vec<String>,
+    #[serde(default)]
+    gateway: Option<String>,
 }
 
 /// Écriture des mesures, relayée vers Influx.
@@ -1395,13 +1407,37 @@ async fn heartbeat(
     };
     let _ = body.last_write_ok; // remonté par la sonde, exploité par l'interface
 
-    if let Err(e) = state.db.record_heartbeat(
+    let identity = ProbeIdentity {
+        public_ip: body.public_ip.filter(|v| !v.trim().is_empty()),
+        interface: body.interface.filter(|v| !v.trim().is_empty()),
+        local_ips: body.local_ips,
+        gateway: body.gateway.filter(|v| !v.trim().is_empty()),
+    };
+    let change = match state.db.record_heartbeat(
         &id,
         body.version.as_deref(),
         body.platform.as_deref(),
         body.buffered_points,
+        &identity,
     ) {
-        return error_response(e);
+        Ok(change) => change,
+        Err(e) => return error_response(e),
+    };
+
+    // Une bascule d'IP publique se voit dans le journal : c'est ainsi qu'on
+    // repère un passage sur un lien de secours ou un changement d'opérateur.
+    // **Au changement seulement** — une ligne par battement noierait tout le
+    // reste. L'acteur est la sonde elle-même, pas un opérateur.
+    if let Some(change) = change {
+        let previous = change.previous.as_deref().unwrap_or("(inconnue)");
+        audit(
+            &state,
+            None,
+            "probe.public_ip_changed",
+            Some(&id),
+            Outcome::Success,
+            Some(&format!("{previous} → {}", change.current)),
+        );
     }
 
     // Accusé de réception d'une rotation : c'est le seul moment où l'ancienne
@@ -1481,6 +1517,14 @@ async fn list_probes(State(state): State<AppState>, Query(filter): Query<ProbeFi
                         "buffered_points": p.buffered_points,
                         "created_at": p.created_at,
                         "revoked_at": p.revoked_at,
+                        // Dernière identité réseau connue. Jamais remise à
+                        // vide quand la sonde ne répond plus : c'est
+                        // précisément là qu'elle sert.
+                        "public_ip": p.public_ip,
+                        "public_ip_at": p.public_ip_at,
+                        "interface": p.interface,
+                        "local_ips": p.local_ips,
+                        "gateway": p.gateway,
                     })
                 })
                 .collect(),
@@ -2830,6 +2874,173 @@ mod tests {
         assert_eq!(body["name"], "Paris");
         assert_eq!(body["site"], "Durand");
         assert_eq!(body["heartbeat_interval_secs"], 60);
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_carries_the_network_identity_to_the_probe_list() {
+        // L'IP publique identifie le site d'un coup d'œil sur la ligne du
+        // parc ; l'interface et les adresses locales vont sur la fiche.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, _, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/heartbeat"),
+                    serde_json::json!({
+                        "version": "1.2.0",
+                        "platform": "linux",
+                        "public_ip": "88.120.0.1",
+                        "interface": "en0",
+                        "local_ips": ["10.6.8.42/24"],
+                        "gateway": "10.6.8.1"
+                    }),
+                ),
+                &token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let probe = &body[0];
+        assert_eq!(probe["public_ip"], "88.120.0.1");
+        assert_eq!(probe["interface"], "en0");
+        assert_eq!(probe["local_ips"][0], "10.6.8.42/24");
+        assert_eq!(probe["gateway"], "10.6.8.1");
+        assert!(
+            probe["public_ip_at"].is_i64(),
+            "la date de l'adresse doit sortir : {probe}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_without_a_public_ip_is_accepted_and_erases_nothing() {
+        // Une sonde qui perd son accès internet bat sans IP publique — c'est
+        // justement à ce moment-là qu'on veut savoir quelle adresse elle
+        // avait. Le hub ne remplace jamais une valeur connue par du vide.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        h.call(with_bearer(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/heartbeat"),
+                serde_json::json!({
+                    "public_ip": "88.120.0.1",
+                    "interface": "en0",
+                    "local_ips": ["10.6.8.42/24"],
+                    "gateway": "10.6.8.1"
+                }),
+            ),
+            &token,
+        ))
+        .await;
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/heartbeat"),
+                    serde_json::json!({ "buffered_points": 12 }),
+                ),
+                &token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "un battement sans IP publique reste valide : {body}");
+
+        let (_, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &session))
+            .await;
+        let probe = &body[0];
+        assert_eq!(probe["public_ip"], "88.120.0.1", "{probe}");
+        assert_eq!(probe["interface"], "en0");
+        assert_eq!(probe["local_ips"][0], "10.6.8.42/24");
+        assert_eq!(probe["gateway"], "10.6.8.1");
+        assert_eq!(probe["buffered_points"], 12);
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_goes_offline_keeps_its_last_known_address() {
+        // Afficher un tiret parce qu'elle ne répond plus perdrait
+        // l'information au moment exact où elle sert.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        h.call(with_bearer(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/heartbeat"),
+                serde_json::json!({ "public_ip": "88.120.0.1", "interface": "en0" }),
+            ),
+            &token,
+        ))
+        .await;
+
+        // On la fait taire depuis longtemps : le statut dérivé bascule, les
+        // valeurs restent.
+        h.state
+            .db
+            .backdate_last_seen(&probe_id, crate::db::now() - 3 * 24 * 3600)
+            .unwrap();
+
+        let (_, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &session))
+            .await;
+        let probe = &body[0];
+        assert_eq!(probe["status"], "offline", "{probe}");
+        assert_eq!(probe["public_ip"], "88.120.0.1");
+        assert_eq!(probe["interface"], "en0");
+    }
+
+    /// Un battement qui ne porte que son IP publique.
+    async fn beat_public_ip(h: &Harness, probe_id: &str, token: &str, ip: &str) {
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/heartbeat"),
+                    serde_json::json!({ "public_ip": ip }),
+                ),
+                token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn only_a_change_of_public_ip_writes_an_audit_line() {
+        // Une bascule sur un lien de secours doit se voir ; cent battements
+        // identiques ne doivent rien écrire, sinon plus personne ne lit le
+        // journal.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        beat_public_ip(&h, &probe_id, &token, "88.120.0.1").await;
+        beat_public_ip(&h, &probe_id, &token, "88.120.0.1").await;
+        beat_public_ip(&h, &probe_id, &token, "88.120.0.1").await;
+        let lines = h.audit(&session, "probe.public_ip_changed").await;
+        assert_eq!(
+            lines.len(),
+            1,
+            "la première adresse compte, les répétitions non : {lines:?}"
+        );
+
+        beat_public_ip(&h, &probe_id, &token, "88.120.0.2").await;
+        let lines = h.audit(&session, "probe.public_ip_changed").await;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let last = &lines[0];
+        assert_eq!(last["target"], probe_id);
+        let detail = last["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("88.120.0.1"), "l'ancienne adresse : {detail}");
+        assert!(detail.contains("88.120.0.2"), "la nouvelle adresse : {detail}");
     }
 
     #[tokio::test]

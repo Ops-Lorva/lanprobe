@@ -569,7 +569,7 @@ mod tests {
         let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
         db.set_notify_subscription("site", &site.site_id, Some(true))
             .unwrap();
-        db.record_heartbeat(&probe.probe_id, None, None, 0).unwrap();
+        db.record_heartbeat(&probe.probe_id, None, None, 0, &Default::default()).unwrap();
         let seen = db.get_probe(&probe.probe_id).unwrap().last_seen.unwrap();
         (db, probe.probe_id, seen)
     }
@@ -634,7 +634,7 @@ mod tests {
         evaluate(&db, seen, DELAY).unwrap();
         evaluate(&db, seen + DELAY + 1, DELAY).unwrap();
 
-        db.record_heartbeat(&probe_id, None, None, 0).unwrap();
+        db.record_heartbeat(&probe_id, None, None, 0, &Default::default()).unwrap();
         let back = db.get_probe(&probe_id).unwrap().last_seen.unwrap();
 
         let alerts = evaluate(&db, back, DELAY).unwrap();
@@ -653,7 +653,7 @@ mod tests {
         let db = Arc::new(Db::open_in_memory().unwrap());
         let site = db.create_site("Durand").unwrap();
         let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
-        db.record_heartbeat(&probe.probe_id, None, None, 0).unwrap();
+        db.record_heartbeat(&probe.probe_id, None, None, 0, &Default::default()).unwrap();
         let seen = db.get_probe(&probe.probe_id).unwrap().last_seen.unwrap();
 
         evaluate(&db, seen, DELAY).unwrap();
@@ -705,8 +705,8 @@ mod tests {
         let (lyon, _) = db.enroll_probe(&site.site_id, "Lyon").unwrap();
         db.set_notify_subscription("site", &site.site_id, Some(true))
             .unwrap();
-        db.record_heartbeat(&paris.probe_id, None, None, 0).unwrap();
-        db.record_heartbeat(&lyon.probe_id, None, None, 0).unwrap();
+        db.record_heartbeat(&paris.probe_id, None, None, 0, &Default::default()).unwrap();
+        db.record_heartbeat(&lyon.probe_id, None, None, 0, &Default::default()).unwrap();
         let seen = db.get_probe(&paris.probe_id).unwrap().last_seen.unwrap();
         evaluate(&db, seen, DELAY).unwrap();
 
