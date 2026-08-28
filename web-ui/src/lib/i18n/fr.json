@@ -16,7 +16,9 @@
     "theme_system": "Système",
     "theme_dark": "Sombre",
     "theme_light": "Clair",
-    "language": "Langue"
+    "language": "Langue",
+    "saving": "Enregistrement…",
+    "forbidden_title": "Réservé à l'administrateur"
   },
   "settings": {
     "title": "Réglages",
@@ -124,7 +126,10 @@
     "settings": "Réglages",
     "logout": "Se déconnecter",
     "version": "Hub {version}",
-    "menu": "Menu"
+    "menu": "Menu",
+    "notifications": "Notifications",
+    "accounts": "Comptes",
+    "audit": "Journal"
   },
   "setup": {
     "title": "Premier démarrage",

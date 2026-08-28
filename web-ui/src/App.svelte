@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { isLoading, _ } from 'svelte-i18n';
   import { api, ApiError, probeSession } from '$lib/api';
+  import { forgetAdmin } from '$lib/session';
   import SetupView from './views/SetupView.svelte';
   import LoginView from './views/LoginView.svelte';
   import Shell from './views/Shell.svelte';
@@ -47,6 +48,9 @@
       // Même si le hub refuse, on quitte l'écran : garder l'utilisateur devant
       // un parc auquel il n'a plus accès serait pire.
     }
+    // Le compte suivant n'a aucune raison d'hériter de ce qu'on avait appris
+    // des droits du précédent.
+    forgetAdmin();
     notice = '';
     phase = 'login';
   }

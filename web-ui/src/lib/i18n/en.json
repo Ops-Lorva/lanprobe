@@ -16,7 +16,9 @@
     "theme_system": "System",
     "theme_dark": "Dark",
     "theme_light": "Light",
-    "language": "Language"
+    "language": "Language",
+    "saving": "Saving…",
+    "forbidden_title": "Administrators only"
   },
   "settings": {
     "title": "Settings",
@@ -124,7 +126,10 @@
     "settings": "Settings",
     "logout": "Sign out",
     "version": "Hub {version}",
-    "menu": "Menu"
+    "menu": "Menu",
+    "notifications": "Notifications",
+    "accounts": "Accounts",
+    "audit": "Audit log"
   },
   "setup": {
     "title": "First run",

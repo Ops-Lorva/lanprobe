@@ -8,12 +8,21 @@ import { readable } from 'svelte/store';
  * d'une sonde reste malgré tout adressable — on peut coller `#/probes/0c1e…`
  * dans un ticket.
  */
-export type Route = { name: 'fleet' } | { name: 'probe'; id: string } | { name: 'settings' };
+export type Route =
+  | { name: 'fleet' }
+  | { name: 'probe'; id: string }
+  | { name: 'notifications' }
+  | { name: 'accounts' }
+  | { name: 'audit' }
+  | { name: 'settings' };
 
 export function parse(hash: string): Route {
   const path = hash.replace(/^#\/?/, '').split('?')[0];
   const parts = path.split('/').filter(Boolean);
   if (parts[0] === 'probes' && parts[1]) return { name: 'probe', id: decodeURIComponent(parts[1]) };
+  if (parts[0] === 'notifications') return { name: 'notifications' };
+  if (parts[0] === 'accounts') return { name: 'accounts' };
+  if (parts[0] === 'audit') return { name: 'audit' };
   if (parts[0] === 'settings') return { name: 'settings' };
   // `#/enroll` n'existe plus : l'enrôlement se fait sur la ligne du site, dans
   // le parc. Un ancien lien y retombe donc, plutôt que sur un écran vide.
