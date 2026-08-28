@@ -838,6 +838,9 @@ pub(crate) mod testing {
                         guard.bucket_exists = true;
                         json(r#"{"id":"bucket-1","name":"lanprobe","orgID":"org-1"}"#)
                     }
+                    ("DELETE", p) if p.starts_with("/api/v2/authorizations/") => {
+                        json(r#"{}"#)
+                    }
                     ("PATCH", p) if p.starts_with("/api/v2/buckets/") => {
                         json(r#"{"id":"bucket-1","name":"lanprobe","orgID":"org-1"}"#)
                     }

@@ -368,10 +368,21 @@ async fn enroll(
 
     // 2. La sonde : réparation d'une existante, ou création.
     let (probe, probe_token) = match repairing {
-        Some(probe_id) => match state.db.reenroll_probe(&probe_id) {
-            Ok(pair) => pair,
-            Err(e) => return error_response(e),
-        },
+        Some(probe_id) => {
+            // La machine compromise a gardé une copie de sa clé d'écriture :
+            // sans destruction, elle continuerait d'écrire dans le bucket
+            // après la réparation.
+            if let Ok(previous) = state.db.get_probe(&probe_id)
+                && let Some(auth_id) = previous.influx_auth_id
+                && let Err(e) = state.influx.delete_authorization(&auth_id).await
+            {
+                tracing::warn!("autorisation Influx {auth_id} non retirée : {e}");
+            }
+            match state.db.reenroll_probe(&probe_id) {
+                Ok(pair) => pair,
+                Err(e) => return error_response(e),
+            }
+        }
         None => match state.db.enroll_probe(&site.site_id, &body.name) {
             Ok(pair) => pair,
             Err(e) => return error_response(e),
@@ -1397,6 +1408,73 @@ mod tests {
             ))
             .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn reenrolling_also_retires_the_old_influx_write_token() {
+        // La machine compromise a gardé une copie de sa clé d'écriture : si on
+        // ne la détruit pas, elle continue d'écrire dans le bucket après le
+        // ré-enrôlement.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+        let old_auth = h
+            .state
+            .db
+            .get_probe(&probe_id)
+            .unwrap()
+            .influx_auth_id
+            .expect("l'enrôlement doit rattacher une autorisation");
+
+        let (_, code, _) = h
+            .call(with_cookie(
+                empty_request("POST", &format!("/api/probes/{probe_id}/reenroll-code")),
+                &session,
+            ))
+            .await;
+        h.call(json_request(
+            "POST",
+            "/api/probes/enroll",
+            serde_json::json!({ "code": code["code"], "name": "Paris" }),
+        ))
+        .await;
+
+        let deleted = h._fake.calls().into_iter().any(|(m, p, _)| {
+            m == "DELETE" && p == format!("/api/v2/authorizations/{old_auth}")
+        });
+        assert!(deleted, "l'ancienne autorisation Influx doit être détruite");
+    }
+
+    #[tokio::test]
+    async fn a_reenrollment_code_cannot_create_a_different_probe() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (_, code, _) = h
+            .call(with_cookie(
+                empty_request("POST", &format!("/api/probes/{probe_id}/reenroll-code")),
+                &session,
+            ))
+            .await;
+
+        // Un autre nom dans le corps ne doit pas ouvrir la création d'une
+        // seconde sonde : le code désigne une machine, pas un droit d'entrée.
+        let (status, body, _) = h
+            .call(json_request(
+                "POST",
+                "/api/probes/enroll",
+                serde_json::json!({ "code": code["code"], "name": "Machine-du-pirate" }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["probe_id"], probe_id);
+        assert_eq!(body["name"], "Paris", "le nom du corps est ignoré");
+        assert_eq!(
+            h.state.db.list_probes(None).unwrap().len(),
+            1,
+            "aucune seconde sonde ne doit apparaître"
+        );
     }
 
     // ── Battement de cœur ──────────────────────────────────────────────────
