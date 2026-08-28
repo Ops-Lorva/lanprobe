@@ -516,7 +516,7 @@
               {#each tokens as t (t.auth_id)}
                 <tr>
                   <td>{t.description || '—'}</td>
-                  <td class="lp-mono id">{t.id}</td>
+                  <td class="lp-mono id">{t.auth_id}</td>
                   <td class="lp-mono">{dateOnly(t.created_at, lang)}</td>
                   <td class="right">
                     <button class="lp-btn danger sm" onclick={() => (revokeToken = t)}>
