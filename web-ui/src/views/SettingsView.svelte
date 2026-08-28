@@ -200,23 +200,68 @@
 
   const dirty = $derived(Object.keys(patch).length > 0);
 
-  function validate(): string {
-    if (!influxUrl.trim() || !org.trim() || !bucket.trim()) return $_('settings.required');
+  // ── Onglets ──────────────────────────────────────────────────────────────
+  // Découpage par motif de visite, pas par type de champ. On vient ici pour
+  // l'une de ces quatre raisons, jamais pour deux à la fois :
+  //   « Sondes »       — ce que le hub raconte aux sondes (URL annoncée, cadence) ;
+  //   « InfluxDB »     — comment le hub joint la base, et comment elle est servie ;
+  //   « Vos données »  — ce qu'il y a dedans et qui a le droit de le lire ;
+  //   « Conservation » — le seul réglage qui détruit des mesures, donc isolé.
+  // Un seul bouton d'enregistrement pour l'ensemble : le contrat n'expose qu'un
+  // PATCH, le découper en quatre formulaires mentirait sur ce qui part au hub.
+  // La pastille sur un onglet dit où sont les modifications en attente — sans
+  // elle, on enregistrerait une valeur saisie sur un onglet qu'on ne voit plus.
+  type Tab = 'probes' | 'influx' | 'data' | 'retention';
+  const TABS: { id: Tab; key: string }[] = [
+    { id: 'probes', key: 'settings.tab_probes' },
+    { id: 'influx', key: 'settings.tab_influx' },
+    { id: 'data', key: 'settings.influx_state_title' },
+    { id: 'retention', key: 'settings.tab_retention' },
+  ];
+  let tab = $state<Tab>('probes');
+
+  const dirtyTabs = $derived<Record<Tab, boolean>>({
+    probes: 'influx_advertise_url' in patch || 'heartbeat_interval_secs' in patch,
+    influx: 'influx_url' in patch || 'influx_org' in patch || 'influx_bucket' in patch,
+    // Onglet en lecture seule : les jetons s'y créent et s'y révoquent tout de
+    // suite, rien n'y attend le bouton « Enregistrer ».
+    data: false,
+    retention: 'retention_days' in patch,
+  });
+
+  function onTabKey(e: KeyboardEvent) {
+    const i = TABS.findIndex((t) => t.id === tab);
+    if (e.key === 'ArrowRight') tab = TABS[(i + 1) % TABS.length].id;
+    else if (e.key === 'ArrowLeft') tab = TABS[(i - 1 + TABS.length) % TABS.length].id;
+    else return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement)
+      .querySelector<HTMLElement>(`[data-tab="${tab}"]`)
+      ?.focus();
+  }
+
+  /** Le message ET l'onglet où se trouve le champ fautif : une erreur sur un
+      onglet fermé serait invisible, donc incompréhensible. */
+  function validate(): { msg: string; tab: Tab } | null {
+    if (!influxUrl.trim() || !org.trim() || !bucket.trim())
+      return { msg: $_('settings.required'), tab: 'influx' };
     try {
       new URL(influxUrl.trim());
     } catch {
-      return $_('settings.invalid_url');
+      return { msg: $_('settings.invalid_url'), tab: 'influx' };
     }
     if (advertise.trim()) {
       try {
         new URL(advertise.trim());
       } catch {
-        return $_('settings.invalid_url');
+        return { msg: $_('settings.invalid_url'), tab: 'probes' };
       }
     }
-    if (!Number.isInteger(retentionNum) || retentionNum < 0) return $_('settings.invalid_retention');
-    if (!Number.isInteger(heartbeatNum) || heartbeatNum < 10) return $_('settings.invalid_heartbeat');
-    return '';
+    if (!Number.isInteger(retentionNum) || retentionNum < 0)
+      return { msg: $_('settings.invalid_retention'), tab: 'retention' };
+    if (!Number.isInteger(heartbeatNum) || heartbeatNum < 10)
+      return { msg: $_('settings.invalid_heartbeat'), tab: 'probes' };
+    return null;
   }
 
   let shrinkOpen = $state(false);
@@ -224,8 +269,12 @@
 
   function onSave() {
     notice = '';
-    fieldError = validate();
-    if (fieldError) return;
+    const bad = validate();
+    fieldError = bad?.msg ?? '';
+    if (bad) {
+      tab = bad.tab;
+      return;
+    }
     if (!dirty) {
       notice = $_('settings.no_change');
       return;
@@ -273,7 +322,31 @@
     <button class="lp-btn primary" onclick={load}>{$_('common.retry')}</button>
   </StateBlock>
 {:else}
-  <div class="cards">
+  <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+  <div class="tabs" role="tablist" aria-label={$_('settings.tabs_aria')} onkeydown={onTabKey}>
+    {#each TABS as t (t.id)}
+      <button
+        class="tab"
+        class:on={tab === t.id}
+        role="tab"
+        data-tab={t.id}
+        id="tab-{t.id}"
+        aria-selected={tab === t.id}
+        aria-controls="panel-{t.id}"
+        tabindex={tab === t.id ? 0 : -1}
+        onclick={() => (tab = t.id)}
+      >
+        {$_(t.key)}
+        {#if dirtyTabs[t.id]}
+          <span class="dot" title={$_('settings.tab_dirty')} aria-label={$_('settings.tab_dirty')}
+          ></span>
+        {/if}
+      </button>
+    {/each}
+  </div>
+
+  {#if tab === 'probes'}
+  <div class="cards" role="tabpanel" id="panel-probes" aria-labelledby="tab-probes" tabindex="-1">
     <!-- L'URL annoncée vient en premier : c'est celle qui casse le parc quand
          elle est fausse, et la seule qu'on puisse vérifier d'un bouton. -->
     <section class="card lp-card">
@@ -312,6 +385,20 @@
     </section>
 
     <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.section_probes')}</h2>
+      <label class="lp-field">
+        {$_('settings.heartbeat_label')}
+        <span class="unit-row">
+          <input class="lp-input num" type="number" min="10" step="1" bind:value={heartbeat} />
+          <span class="unit">{$_('settings.heartbeat_unit')}</span>
+        </span>
+        <span class="hint">{$_('settings.heartbeat_hint')}</span>
+      </label>
+    </section>
+  </div>
+  {:else if tab === 'influx'}
+  <div class="cards" role="tabpanel" id="panel-influx" aria-labelledby="tab-influx" tabindex="-1">
+    <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.section_influx')}</h2>
       <label class="lp-field">
         {$_('settings.influx_url_label')}
@@ -333,7 +420,9 @@
         {$_('settings.tls_body')}
       </p>
     </section>
-
+  </div>
+  {:else if tab === 'data'}
+  <div class="cards" role="tabpanel" id="panel-data" aria-labelledby="tab-data" tabindex="-1">
     <!--
       Influx en lecture seule. L'objectif n'est pas d'administrer la base, mais
       de savoir où sont ses mesures et si elles vont bien — sans jamais ouvrir
@@ -441,19 +530,15 @@
         {/if}
       </div>
     </section>
-
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.section_probes')}</h2>
-      <label class="lp-field">
-        {$_('settings.heartbeat_label')}
-        <span class="unit-row">
-          <input class="lp-input num" type="number" min="10" step="1" bind:value={heartbeat} />
-          <span class="unit">{$_('settings.heartbeat_unit')}</span>
-        </span>
-        <span class="hint">{$_('settings.heartbeat_hint')}</span>
-      </label>
-    </section>
-
+  </div>
+  {:else}
+  <div
+    class="cards"
+    role="tabpanel"
+    id="panel-retention"
+    aria-labelledby="tab-retention"
+    tabindex="-1"
+  >
     <section class="card lp-card" class:risky={isShrink}>
       <h2 class="lp-title">{$_('settings.section_retention')}</h2>
       <label class="lp-field">
@@ -489,6 +574,7 @@
       {/if}
     </section>
   </div>
+  {/if}
 
   <div class="save-row">
     {#if fieldError}<p class="err" role="alert">{fieldError}</p>{/if}
@@ -580,11 +666,60 @@
     margin: 6px 0 0;
   }
 
+  /* Onglets soulignés plutôt qu'en pastilles : le trait actif prolonge la ligne
+     qui sépare la barre du contenu, donc l'onglet et son panneau se lisent
+     comme une seule pièce. */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    flex-wrap: wrap;
+    border-bottom: 1px solid var(--ep-border);
+    margin-bottom: 14px;
+    max-width: 760px;
+  }
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    margin-bottom: -1px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--ep-text-secondary);
+    font-family: var(--ep-font-sans);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    border-radius: var(--ep-radius-sm) var(--ep-radius-sm) 0 0;
+  }
+  .tab:hover:not(.on) {
+    color: var(--ep-text-primary);
+    background: var(--ep-glass-bg-md);
+  }
+  .tab.on {
+    color: var(--ep-accent-bright);
+    border-bottom-color: var(--ep-accent);
+    font-weight: 600;
+  }
+  /* Une modification en attente sur un onglet fermé serait enregistrée sans
+     avoir été revue : la pastille dit où elle est. */
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--ep-warning);
+    flex-shrink: 0;
+  }
+
   .cards {
     display: flex;
     flex-direction: column;
     gap: 12px;
     max-width: 760px;
+  }
+  .cards:focus {
+    outline: none;
   }
   .card {
     padding: 16px;

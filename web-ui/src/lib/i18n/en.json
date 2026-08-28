@@ -110,7 +110,12 @@
     "tokens_revoking": "Revoking…",
     "tls_title": "Self-signed certificate",
     "tls_body": "Influx is served over HTTPS with a certificate generated on first start. Probes pin its fingerprint, handed over at enrolment: nothing to install on the monitored machine.",
-    "fix_cta": "Fix the URL"
+    "fix_cta": "Fix the URL",
+    "tabs_aria": "Settings sections",
+    "tab_probes": "Probes",
+    "tab_influx": "InfluxDB",
+    "tab_retention": "Retention",
+    "tab_dirty": "Unsaved changes in this tab."
   },
   "nav": {
     "fleet": "Fleet",
