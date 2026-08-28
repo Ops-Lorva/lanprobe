@@ -287,7 +287,9 @@
     "reenroll_keeps_body": "Its charts are not cut in two at the date of the incident — which is exactly when you want to compare before and after. Re-enrolment replaces both the probe token and its write key, so the compromised machine's credentials are worth nothing.",
     "which_title": "Leaked key, or compromised machine?",
     "which_leak": "The key leaked but the machine is sound: “Revoke immediately” is enough. The probe repairs itself on its next heartbeat, nobody needs to go on site.",
-    "which_host": "The machine itself is compromised: this needs a re-enrolment, so someone in front of the probe's screen."
+    "which_host": "The machine itself is compromised: this needs a re-enrolment, so someone in front of the probe's screen.",
+    "actions": "Actions",
+    "menu_probe": "This probe"
   },
   "charts": {
     "latency_title": "Latency of monitored hosts",

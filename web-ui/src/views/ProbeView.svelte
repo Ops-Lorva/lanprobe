@@ -25,6 +25,7 @@
   import ValueTable from '$lib/components/ValueTable.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import ActionMenu from '$lib/components/ActionMenu.svelte';
   import CodeDisplay from '$lib/components/CodeDisplay.svelte';
   import type { EnrollCode } from '$lib/api';
 
@@ -361,10 +362,107 @@
       </div>
     </div>
 
+    <!--
+      Toutes les actions de la fiche sont derrière un seul engrenage. Aucune
+      n'est courante — on vient ici pour lire des courbes, pas pour révoquer une
+      clé — et posées en clair dans la page elles étaient atteignables par un
+      simple défilement. Les explications ne disparaissent pas : chaque item
+      porte la sienne, en toutes lettres, avant le clic.
+    -->
     <div class="acts">
-      <button class="lp-btn sm" onclick={openMove}>{$_('probe.move')}</button>
+      <ActionMenu label={$_('probe.actions')}>
+        {#snippet children(close)}
+          <p class="mgroup">{$_('probe.menu_probe')}</p>
+          <button
+            class="mi"
+            role="menuitem"
+            onclick={() => {
+              close();
+              openMove();
+            }}
+          >
+            <span class="mi-label">{$_('probe.move')}</span>
+            <span class="mi-hint">{$_('probe.move_hint')}</span>
+          </button>
+
+          <p class="mgroup">{$_('probe.keys_title')}</p>
+          <p class="mintro">{$_('probe.keys_intro')}</p>
+
+          <button
+            class="mi"
+            role="menuitem"
+            disabled={rotateBusy}
+            onclick={() => {
+              close();
+              void rotate();
+            }}
+          >
+            <span class="mi-label">{rotateBusy ? $_('probe.rotating') : $_('probe.rotate')}</span>
+            <span class="mi-hint">{$_('probe.rotate_hint')}</span>
+          </button>
+
+          <button
+            class="mi accent"
+            role="menuitem"
+            disabled={reBusy}
+            onclick={() => {
+              close();
+              void reenroll();
+            }}
+          >
+            <span class="mi-label">
+              {reBusy ? $_('probe.reenroll_working') : $_('probe.reenroll')}
+            </span>
+            <span class="mi-hint">{$_('probe.reenroll_hint')}</span>
+          </button>
+
+          <div class="mdanger">
+            <button
+              class="mi danger"
+              role="menuitem"
+              onclick={() => {
+                close();
+                killOpen = true;
+              }}
+            >
+              <span class="mi-label">{$_('probe.revoke_now')}</span>
+              <span class="mi-hint">{$_('probe.revoke_now_hint')}</span>
+            </button>
+
+            <button
+              class="mi danger"
+              role="menuitem"
+              onclick={() => {
+                close();
+                revokeOpen = true;
+              }}
+            >
+              <span class="mi-label">{$_('revoke.action')}</span>
+              <span class="mi-hint">{$_('revoke.keeps_data')}</span>
+            </button>
+          </div>
+        {/snippet}
+      </ActionMenu>
     </div>
   </header>
+
+  <!--
+    Ce que les actions du menu ont laissé derrière elles. C'est un état de la
+    sonde, pas une commande : sa place est près de l'identité, avec l'alerte de
+    tampon, et non dans un bloc d'administration en bas de page.
+  -->
+  {#if pending}
+    <div class="pending" role="status">
+      <strong>{$_('probe.pending_title')}</strong>
+      <p>{$_('probe.pending_body')}</p>
+    </div>
+  {/if}
+  {#if killDone}
+    <p class="done" role="status">{killDone}</p>
+  {/if}
+  {#if keyError}
+    <p class="err top" role="alert">{keyError}</p>
+  {/if}
 
   <dl class="meta">
     <div><dt>{$_('probe.meta_id')}</dt><dd class="lp-mono id">{probe.probe_id}</dd></div>
@@ -478,71 +576,23 @@
     </ChartCard>
   </div>
 
-  <!--
-    Administration de la clé. Trois gestes qui ne se ressemblent pas : un bouton
-    neutre (rotation), un bouton d'accent (ré-enrôlement), et une zone encadrée
-    de rouge pour ce qui coupe. Quelqu'un qui vise mal ne coupe pas une sonde
-    par accident.
-  -->
-  <section class="keys">
-    <h2 class="lp-title">{$_('probe.keys_title')}</h2>
-    <p class="intro">{$_('probe.keys_intro')}</p>
-
-    {#if pending}
-      <div class="pending" role="status">
-        <strong>{$_('probe.pending_title')}</strong>
-        <p>{$_('probe.pending_body')}</p>
-      </div>
-    {/if}
-    {#if killDone}
-      <p class="done" role="status">{killDone}</p>
-    {/if}
-    {#if keyError}
-      <p class="err" role="alert">{keyError}</p>
-    {/if}
-
-    <div class="act-row">
-      <button class="lp-btn" onclick={rotate} disabled={rotateBusy}>
-        {rotateBusy ? $_('probe.rotating') : $_('probe.rotate')}
-      </button>
-      <p class="hint-long">{$_('probe.rotate_hint')}</p>
-    </div>
-
-    <div class="act-row">
-      <button class="lp-btn accent" onclick={reenroll} disabled={reBusy}>
-        {reBusy ? $_('probe.reenroll_working') : $_('probe.reenroll')}
-      </button>
-      <p class="hint-long">{$_('probe.reenroll_hint')}</p>
-    </div>
-
-    <div class="danger-zone">
-      <h3>{$_('probe.which_title')}</h3>
-      <ul>
-        <li>{$_('probe.which_leak')}</li>
-        <li>{$_('probe.which_host')}</li>
-      </ul>
-
-      <div class="act-row">
-        <button class="lp-btn danger" onclick={() => (killOpen = true)}>
-          {$_('probe.revoke_now')}
-        </button>
-        <p class="hint-long">{$_('probe.revoke_now_hint')}</p>
-      </div>
-
-      <div class="act-row">
-        <button class="lp-btn danger" onclick={() => (revokeOpen = true)}>
-          {$_('revoke.action')}
-        </button>
-        <p class="hint-long">{$_('revoke.keeps_data')}</p>
-      </div>
-    </div>
-  </section>
-
   <Modal
     open={killOpen}
     title={$_('probe.revoke_now_title', { values: { name: probe.name } })}
     onclose={() => (killOpen = false)}
   >
+    <!--
+      Le tri « fuite de clé ou machine compromise ? » est posé ici et pas
+      ailleurs : c'est le dernier instant où les deux issues sont encore
+      ouvertes. Quelqu'un qui reconnaît le second cas annule et ré-enrôle.
+    -->
+    <div class="triage">
+      <h3>{$_('probe.which_title')}</h3>
+      <ul>
+        <li>{$_('probe.which_leak')}</li>
+        <li>{$_('probe.which_host')}</li>
+      </ul>
+    </div>
     <p>{$_('probe.revoke_now_body')}</p>
     <p class="keep"><strong>{$_('probe.revoke_now_keeps')}</strong></p>
     {#snippet footer()}
@@ -793,44 +843,105 @@
     gap: 12px;
   }
 
-  .keys {
-    margin-top: 22px;
-    padding-top: 18px;
-    border-top: 1px solid var(--ep-border);
+  /* ── Contenu du menu d'actions ─────────────────────────────────────────────
+     Chaque item porte son libellé ET sa conséquence : le texte n'a pas été
+     raccourci en passant dans le menu, il a été rapproché du geste. Les trois
+     familles ne se ressemblent pas — neutre, accent, rouge — pour qu'un clic
+     mal visé ne coupe pas une sonde. */
+  .mgroup {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--ep-text-dim);
+    margin: 8px 8px 4px;
+  }
+  .mgroup:first-child {
+    margin-top: 4px;
+  }
+  .mintro {
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--ep-text-muted);
+    margin: 0 8px 6px;
+  }
+  .mi {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    max-width: 860px;
+    gap: 3px;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-left: 2px solid var(--ep-border-strong);
+    border-radius: var(--ep-radius-md);
+    background: transparent;
+    font-family: var(--ep-font-sans);
+    cursor: pointer;
   }
-  .intro {
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--ep-text-secondary);
-    margin: -6px 0 0;
-    max-width: 82ch;
+  .mi + .mi {
+    margin-top: 2px;
   }
-  /* Bouton à gauche, conséquence à droite : on ne clique jamais sans que la
-     phrase qui explique le geste soit sur la même ligne que le geste. */
-  .act-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 14px;
-    flex-wrap: wrap;
+  .mi:hover:not(:disabled) {
+    background: var(--ep-glass-bg-md);
   }
-  .act-row > :global(button) {
-    flex-shrink: 0;
-    min-width: 180px;
+  .mi:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
-  .hint-long {
-    flex: 1 1 280px;
+  .mi-label {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ep-text-primary);
+  }
+  .mi-hint {
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--ep-text-muted);
+  }
+  .mi.accent {
+    border-left-color: var(--ep-accent);
+  }
+  .mi.accent .mi-label {
+    color: var(--ep-accent-bright);
+  }
+  .mi.danger {
+    border-left-color: var(--ep-danger);
+  }
+  .mi.danger .mi-label {
+    color: var(--ep-danger);
+  }
+  /* Les deux gestes qui coupent sont séparés par un trait : le pouce ne glisse
+     pas d'une rotation de clé à une révocation. */
+  .mdanger {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid color-mix(in srgb, var(--ep-danger) 35%, var(--ep-border));
+  }
+
+  .triage {
+    border: 1px solid color-mix(in srgb, var(--ep-danger) 40%, var(--ep-border));
+    border-radius: var(--ep-radius-md);
+    padding: 11px 13px;
+  }
+  .triage h3 {
+    font-size: 12.5px;
+    font-weight: 700;
+    margin: 0 0 6px;
+    color: var(--ep-danger);
+  }
+  .triage ul {
+    margin: 0;
+    padding-left: 18px;
     font-size: 11.5px;
     line-height: 1.6;
-    color: var(--ep-text-muted);
-    margin: 0;
-    max-width: 78ch;
+    color: var(--ep-text-secondary);
+  }
+  .triage li + li {
+    margin-top: 4px;
   }
 
   .pending {
+    margin-bottom: 14px;
     border: 1px solid color-mix(in srgb, var(--ep-info) 50%, var(--ep-border));
     border-left-width: 3px;
     border-radius: var(--ep-radius-md);
@@ -851,34 +962,7 @@
   .done {
     font-size: 12px;
     color: var(--ep-success);
-    margin: 0;
-  }
-
-  .danger-zone {
-    border: 1px solid color-mix(in srgb, var(--ep-danger) 40%, var(--ep-border));
-    border-radius: var(--ep-radius-md);
-    padding: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin-top: 4px;
-  }
-  .danger-zone h3 {
-    font-size: 12.5px;
-    font-weight: 700;
-    margin: 0;
-    color: var(--ep-danger);
-  }
-  .danger-zone ul {
-    margin: 0;
-    padding-left: 18px;
-    font-size: 11.5px;
-    line-height: 1.65;
-    color: var(--ep-text-secondary);
-    max-width: 82ch;
-  }
-  .danger-zone li + li {
-    margin-top: 4px;
+    margin: 0 0 14px;
   }
 
   .err {
@@ -887,6 +971,9 @@
     margin: 6px 0 0;
     border-left: 2px solid var(--ep-danger);
     padding-left: 8px;
+  }
+  .err.top {
+    margin: 0 0 14px;
   }
   .keep {
     color: var(--ep-text-primary);

@@ -287,7 +287,9 @@
     "reenroll_keeps_body": "Ses courbes ne sont pas coupées en deux à la date de l'incident : c'est exactement le moment où l'on veut comparer l'avant et l'après. Le ré-enrôlement remplace le jeton de la sonde et sa clé d'écriture — les identifiants de la machine compromise ne valent plus rien.",
     "which_title": "Fuite de clé ou machine compromise ?",
     "which_leak": "La clé a fuité, la machine est saine : « Révoquer immédiatement » suffit. La sonde se répare seule à son prochain battement de cœur, personne n'a besoin d'intervenir sur place.",
-    "which_host": "La machine elle-même est compromise : il faut un ré-enrôlement, donc quelqu'un devant l'écran de la sonde."
+    "which_host": "La machine elle-même est compromise : il faut un ré-enrôlement, donc quelqu'un devant l'écran de la sonde.",
+    "actions": "Actions",
+    "menu_probe": "La sonde"
   },
   "charts": {
     "latency_title": "Latence des hôtes suivis",
