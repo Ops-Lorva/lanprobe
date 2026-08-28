@@ -8,9 +8,7 @@
   import FleetView from './FleetView.svelte';
   import ProbeView from './ProbeView.svelte';
   import SettingsView from './SettingsView.svelte';
-  import AccountsView from './AccountsView.svelte';
   import AuditView from './AuditView.svelte';
-  import NotificationsView from './NotificationsView.svelte';
 
   const { version, onExpired, logout } = $props<{
     version: string;
@@ -23,28 +21,24 @@
   // déjà connu. Une entrée de menu aurait ramené le choix du site que ce « + »
   // supprime.
   //
-  // Les cinq entrées sont ordonnées par portée, pas par fréquence : ce qu'on
-  // surveille (Parc), ce qui vient nous chercher (Notifications), qui a le
-  // droit et qui a fait quoi (Comptes, Journal), puis la configuration
-  // (Réglages), qui reste hors du chemin de mise en route — on y arrive quand
-  // quelque chose ne marche pas.
+  // Trois entrées, et une seule question à se poser pour chacune : est-ce un
+  // endroit où l'on VA, ou un endroit où l'on RÈGLE ?
   //
-  // Le journal a son entrée propre plutôt qu'un onglet dans un écran
-  // « Administration » : c'est ce qu'on ouvre sous pression pendant un
-  // incident, et c'est aussi l'intitulé par lequel on apprend que le hub en
-  // tient un.
+  //   Parc     — ce qu'on regarde ; l'écran par défaut.
+  //   Journal  — ce qu'on ouvre SOUS PRESSION, quand quelque chose vient de se
+  //              passer. Il garde son entrée propre pour deux raisons : sous un
+  //              onglet, il coûterait un geste de plus au pire moment ; et son
+  //              intitulé dans la barre est ce par quoi on apprend que le hub
+  //              tient un journal.
+  //   Réglages — tout ce qui se configure, Comptes et Notifications compris.
+  //              Ce sont des réglages : on y va pour préparer, jamais pour
+  //              constater.
   const items: { id: string; href: string; icon: HubIconName; key: string; admin?: true }[] = [
     { id: 'fleet', href: '#/', icon: 'server', key: 'nav.fleet' },
-    { id: 'notifications', href: '#/notifications', icon: 'bell', key: 'nav.notifications' },
-    { id: 'accounts', href: '#/accounts', icon: 'users', key: 'nav.accounts', admin: true },
     { id: 'audit', href: '#/audit', icon: 'journal', key: 'nav.audit', admin: true },
     { id: 'settings', href: '#/settings', icon: 'settings', key: 'nav.settings' },
   ];
 
-  // Le rôle est connu avant le premier écran (`GET /api/me`) : une entrée
-  // réservée à `admin` n'apparaît donc jamais pour les autres, plutôt que
-  // d'apparaître puis de disparaître au premier refus. La protection, elle,
-  // reste côté serveur, route par route (contrat § 11).
   const visible = $derived(items.filter((i) => !i.admin || $isAdmin));
 
   // C'est `main` qui défile désormais, pas le document : un changement d'écran
@@ -65,8 +59,8 @@
   Même ossature que l'app desktop : barre latérale de 168 px, logo en haut,
   réglages en bas. Elle devient une barre horizontale sous 900 px — une colonne
   de 168 px sur un téléphone coûterait le tiers de la largeur pour rien — puis
-  une rangée de pictogrammes seuls sous 620 px, où les cinq entrées tiennent
-  encore sur 390 px sans déborder.
+  une rangée de pictogrammes seuls sous 620 px, où les trois entrées tiennent
+  très largement sur 390 px.
 -->
 <div class="shell">
   <nav class="sidebar">
@@ -103,10 +97,6 @@
   <main bind:this={mainEl}>
     {#if $route.name === 'probe'}
       <ProbeView id={$route.id} {onExpired} />
-    {:else if $route.name === 'notifications'}
-      <NotificationsView {onExpired} />
-    {:else if $route.name === 'accounts'}
-      <AccountsView {onExpired} />
     {:else if $route.name === 'audit'}
       <AuditView {onExpired} />
     {:else if $route.name === 'settings'}

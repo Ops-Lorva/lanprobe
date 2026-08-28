@@ -192,6 +192,17 @@ body {
 .lp-input::placeholder {
   color: var(--ep-text-dim);
 }
+/* Un champ qu'on n'a pas le droit de modifier doit le dire AVANT qu'on tape
+   dedans : filet en pointillés et curseur barré. La valeur, elle, garde sa
+   couleur de lecture — c'est souvent elle qu'on est venu vérifier, la griser
+   la rendrait illisible pour rien. Pas d'`opacity` non plus : elle emporterait
+   le libellé avec le champ. */
+.lp-input:disabled {
+  border-style: dashed;
+  color: var(--ep-text-secondary);
+  cursor: not-allowed;
+}
+
 .lp-input:focus {
   outline: none;
   border-color: var(--ep-accent);

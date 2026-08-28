@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { _, locale } from 'svelte-i18n';
   import {
     api,
@@ -14,6 +15,10 @@
   import Modal from '$lib/components/Modal.svelte';
   import CopyLine from '$lib/components/CopyLine.svelte';
   import LangTheme from '$lib/components/LangTheme.svelte';
+  import AccountsView from './AccountsView.svelte';
+  import NotificationsView from './NotificationsView.svelte';
+  import { go, route, type SettingsTab } from '$lib/router';
+  import { canOperate, isAdmin } from '$lib/session';
   import { dateOnly, humanBytes } from '$lib/time';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
@@ -64,9 +69,13 @@
 
   onMount(() => {
     void load();
-    void runTest();
     void loadInflux();
-    void loadTokens();
+    // Ces deux-là ont un rôle minimum (contrat § 11) : le test d'URL annoncée
+    // demande `operator`, les jetons de lecture `admin`. Les appeler pour tout
+    // le monde déposait une ligne `access.denied` au journal à chaque visite
+    // d'un observateur — le bruit exact qui masque les refus qui comptent.
+    if (get(canOperate)) void runTest();
+    if (get(isAdmin)) void loadTokens();
   });
 
   // ── Influx en lecture seule (contrat § 8) ────────────────────────────────
@@ -229,22 +238,42 @@
   // PATCH, le découper en formulaires mentirait sur ce qui part au hub.
   // La pastille sur un onglet dit où sont les modifications en attente — sans
   // elle, on enregistrerait une valeur saisie sur un onglet qu'on ne voit plus.
-  type Tab = 'general' | 'storage';
-  const TABS: { id: Tab; key: string }[] = [
+  type Tab = SettingsTab;
+  const ALL_TABS: { id: Tab; key: string; admin?: true }[] = [
     { id: 'general', key: 'settings.tab_general' },
+    { id: 'alerts', key: 'settings.tab_alerts' },
     { id: 'storage', key: 'settings.tab_storage' },
+    { id: 'accounts', key: 'settings.tab_accounts', admin: true },
   ];
-  let tab = $state<Tab>('general');
+
+  // Un onglet qu'un rôle ne peut pas utiliser ne s'affiche pas pour lui — les
+  // comptes sont réservés à `admin` (contrat § 11). Ce n'est PAS la protection :
+  // elle est côté serveur, route par route. C'est du confort de navigation.
+  const TABS = $derived(ALL_TABS.filter((t) => !t.admin || $isAdmin));
+
+  // L'onglet vient de l'URL, pas d'un état local : « ouvre #/settings/storage »
+  // se dicte au téléphone, « le troisième onglet » non. Un onglet demandé mais
+  // indisponible retombe sur le premier plutôt que d'afficher un panneau que la
+  // rangée ne montre pas.
+  const asked = $derived($route.name === 'settings' ? $route.tab : 'general');
+  const tab = $derived<Tab>(TABS.some((t) => t.id === asked) ? asked : 'general');
+
+  function openTab(id: Tab) {
+    go(`#/settings/${id}`);
+  }
 
   const dirtyTabs = $derived<Record<Tab, boolean>>({
     // Langue et thème s'appliquent au clic et ne partent jamais au hub : rien à
-    // y enregistrer, donc jamais de pastille de leur fait.
+    // y enregistrer de leur fait.
     general: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
     storage:
       'influx_url' in patch ||
       'influx_org' in patch ||
       'influx_bucket' in patch ||
       'retention_days' in patch,
+    // Chaque geste s'y applique seul, rien n'y attend « Enregistrer ».
+    alerts: false,
+    accounts: false,
   });
 
   /**
@@ -256,13 +285,13 @@
 
   function onTabKey(e: KeyboardEvent) {
     const i = TABS.findIndex((t) => t.id === tab);
-    if (e.key === 'ArrowRight') tab = TABS[(i + 1) % TABS.length].id;
-    else if (e.key === 'ArrowLeft') tab = TABS[(i - 1 + TABS.length) % TABS.length].id;
+    let next: Tab;
+    if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length].id;
+    else if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length].id;
     else return;
     e.preventDefault();
-    (e.currentTarget as HTMLElement)
-      .querySelector<HTMLElement>(`[data-tab="${tab}"]`)
-      ?.focus();
+    openTab(next);
+    (e.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus();
   }
 
   /** Le message ET l'onglet où se trouve le champ fautif : une erreur sur un
@@ -297,7 +326,7 @@
     const bad = validate();
     fieldError = bad?.msg ?? '';
     if (bad) {
-      tab = bad.tab;
+      openTab(bad.tab);
       return;
     }
     if (!dirty) {
@@ -364,7 +393,7 @@
         aria-selected={tab === t.id}
         aria-controls="panel-{t.id}"
         tabindex={tab === t.id ? 0 : -1}
-        onclick={() => (tab = t.id)}
+        onclick={() => openTab(t.id)}
       >
         {$_(t.key)}
         {#if dirtyTabs[t.id]}
@@ -374,6 +403,14 @@
       </button>
     {/each}
   </div>
+
+  <!-- `GET /api/settings` est ouverte à `viewer`, son écriture est réservée à
+       `admin` (contrat § 11). On montre donc les valeurs — c'est souvent ce
+       qu'on vient vérifier — mais on dit tout de suite qu'elles ne partiront
+       pas, plutôt que de laisser saisir puis refuser. -->
+  {#if !$isAdmin && (tab === 'general' || tab === 'storage')}
+    <p class="readonly">{$_('settings.readonly_note')}</p>
+  {/if}
 
   {#if tab === 'general'}
   <div class="cards" role="tabpanel" id="panel-general" aria-labelledby="tab-general" tabindex="-1">
@@ -393,6 +430,7 @@
           placeholder="https://lanprobe.exemple.fr"
           spellcheck="false"
           autocomplete="off"
+          disabled={!$isAdmin}
         />
         <span class="hint">{$_('settings.hub_url_hint')}</span>
       </label>
@@ -403,7 +441,14 @@
       <label class="lp-field">
         {$_('settings.heartbeat_label')}
         <span class="unit-row">
-          <input class="lp-input num" type="number" min="10" step="1" bind:value={heartbeat} />
+          <input
+            class="lp-input num"
+            type="number"
+            min="10"
+            step="1"
+            bind:value={heartbeat}
+            disabled={!$isAdmin}
+          />
           <span class="unit">{$_('settings.heartbeat_unit')}</span>
         </span>
       </label>
@@ -426,6 +471,17 @@
       <h2 class="lp-title">{$_('settings.hub_version_title')}</h2>
       <p class="ro lp-mono">{$_('settings.hub_version', { values: { version: hubVersion } })}</p>
     </section>
+  </div>
+  {:else if tab === 'alerts'}
+  <div class="cards" role="tabpanel" id="panel-alerts" aria-labelledby="tab-alerts" tabindex="-1">
+    <!-- Écran d'origine repris tel quel, sans ses onglets internes : il devient
+         le contenu de celui-ci. Les abonnements se lisent dès `viewer`, les
+         canaux sont réservés à `admin` — le panneau s'en charge lui-même. -->
+    <NotificationsView {onExpired} />
+  </div>
+  {:else if tab === 'accounts'}
+  <div class="cards" role="tabpanel" id="panel-accounts" aria-labelledby="tab-accounts" tabindex="-1">
+    <AccountsView {onExpired} />
   </div>
   {:else if tab === 'storage'}
   <div class="cards" role="tabpanel" id="panel-storage" aria-labelledby="tab-storage" tabindex="-1">
@@ -484,11 +540,23 @@
       <div class="pair">
         <label class="lp-field">
           {$_('settings.org_label')}
-          <input class="lp-input" bind:value={org} spellcheck="false" autocomplete="off" />
+          <input
+            class="lp-input"
+            bind:value={org}
+            spellcheck="false"
+            autocomplete="off"
+            disabled={!$isAdmin}
+          />
         </label>
         <label class="lp-field">
           {$_('settings.bucket_label')}
-          <input class="lp-input" bind:value={bucket} spellcheck="false" autocomplete="off" />
+          <input
+            class="lp-input"
+            bind:value={bucket}
+            spellcheck="false"
+            autocomplete="off"
+            disabled={!$isAdmin}
+          />
         </label>
       </div>
     </section>
@@ -497,7 +565,9 @@
       Le jeton de lecture est ce qui fait sortir les mesures du hub : sa carte
       est distincte de l'état de la base parce qu'on ne vient pas ici pour la
       même raison — voir si Influx va bien, ou brancher un Grafana dessus.
+      Réservée à `admin` (contrat § 11), donc pas rendue pour les autres.
     -->
+    {#if $isAdmin}
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.tokens_title')}</h2>
       <p class="ro">
@@ -553,6 +623,7 @@
         </table>
       {/if}
     </section>
+    {/if}
 
     <!--
       La conservation appartient bien à InfluxDB — c'est la rétention du bucket,
@@ -575,7 +646,14 @@
         <label class="lp-field">
           {$_('settings.retention_label')}
           <span class="unit-row">
-            <input class="lp-input num" type="number" min="0" step="1" bind:value={retention} />
+            <input
+              class="lp-input num"
+              type="number"
+              min="0"
+              step="1"
+              bind:value={retention}
+              disabled={!$isAdmin}
+            />
             <span class="unit">{$_('settings.retention_unit')}</span>
           </span>
           <span class="hint">{$_('settings.retention_hint')}</span>
@@ -611,7 +689,7 @@
   <!-- Le bouton n'appartient qu'aux onglets qui portent des champs du hub. Sur
        les autres, il ne s'affiche que s'il reste une modification en attente
        ailleurs — sinon il disparaîtrait avec du travail non enregistré. -->
-  {#if dirty || savable}
+  {#if $isAdmin && (dirty || savable)}
     <div class="save-row">
       {#if fieldError}<p class="err" role="alert">{fieldError}</p>{/if}
       {#if notice}<p class="ok" role="status">{notice}</p>{/if}
@@ -732,6 +810,17 @@
     border-bottom-color: var(--ep-accent);
     font-weight: 600;
   }
+  /* Sous 520 px, la rangée occupe sa ligne à elle seule : on lui rend de la
+     place en resserrant les flancs plutôt que de la laisser se replier. Un
+     onglet passé à la ligne du dessous se lit comme s'il appartenait à une
+     autre famille — c'est précisément ce qu'un regroupement doit éviter. Le
+     pouce n'y perd rien, la hauteur de cible passe de 32 à 36 px. */
+  @media (max-width: 520px) {
+    .tab {
+      padding: 10px 8px;
+    }
+  }
+
   /* Une modification en attente sur un onglet fermé serait enregistrée sans
      avoir été revue : la pastille dit où elle est. */
   .dot {
@@ -740,6 +829,15 @@
     border-radius: 999px;
     background: var(--ep-warning);
     flex-shrink: 0;
+  }
+
+  .readonly {
+    font-size: 12px;
+    color: var(--ep-text-secondary);
+    border-left: 2px solid var(--ep-border);
+    padding-left: 10px;
+    margin: 0 0 12px;
+    max-width: 74ch;
   }
 
   .cards {

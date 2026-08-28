@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { _ } from 'svelte-i18n';
   import {
     api,
@@ -12,7 +13,7 @@
     type Subscriptions,
     type WebhookTemplate,
   } from '$lib/api';
-  import { isAdmin } from '$lib/session';
+  import { canOperate, isAdmin } from '$lib/session';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
 
@@ -31,12 +32,17 @@
     return e instanceof ApiError ? e.message : String(e);
   }
 
-  // Les abonnements s'ouvrent en premier : c'est le seul panneau que tout le
-  // monde peut lire (`viewer`), et l'ouvrir d'office évite qu'un observateur
-  // déclenche un refus — donc une ligne `access.denied` au journal — juste en
-  // cliquant sur « Notifications » dans la barre.
-  type Tab = 'subs' | 'channels';
-  let tab = $state<Tab>('subs');
+  // Plus d'onglets ici : cet écran EST devenu un onglet de Réglages, et des
+  // onglets dans un onglet obligent à retenir dans lequel des deux on se
+  // trouve. Les deux anciens panneaux deviennent deux groupes de cartes, dans
+  // l'ordre où la question se pose : quand alerter, où alerter, pour quelles
+  // sondes. La liste des sondes vient en dernier parce que c'est la seule dont
+  // la hauteur grandit avec le parc — tout ce qu'on placerait après elle
+  // s'éloignerait à mesure qu'on enrôle.
+  //
+  // Les canaux ne sont chargés QUE pour un `admin` : le contrat § 11 les lui
+  // réserve, et une requête refusée écrit une ligne `access.denied` au journal.
+  // Le rôle étant connu d'avance (`GET /api/me`), on ne la provoque plus.
 
   // ══ Abonnements ══════════════════════════════════════════════════════════
 
@@ -136,32 +142,16 @@
     } catch (e) {
       const msg = handle(e);
       if (e instanceof ApiError && e.isForbidden) {
+        // Ne devrait plus arriver : le rôle est connu avant l'affichage. Reste
+        // le cas d'une rétrogradation en cours de session — le hub relit le
+        // rôle à chaque requête, l'interface se contente de le dire.
         chDenied = msg;
-        // Le panneau est fermé pour de bon : on repart sur celui qui sert.
-        tab = 'subs';
       } else {
         chError = msg;
       }
     } finally {
       chLoading = false;
     }
-  }
-
-  function openChannels() {
-    tab = 'channels';
-    if (!chLoaded) void loadChannels();
-  }
-
-  /** Flèches gauche/droite entre onglets — même comportement que Réglages. */
-  function onTabKey(e: KeyboardEvent) {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-    e.preventDefault();
-    if (tab === 'subs') {
-      if ($isAdmin) openChannels();
-    } else {
-      tab = 'subs';
-    }
-    (e.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus();
   }
 
   // ── Délai avant alerte ───────────────────────────────────────────────────
@@ -329,378 +319,365 @@
     }
   }
 
-  onMount(loadSubs);
+  onMount(() => {
+    void loadSubs();
+    if (get(isAdmin)) void loadChannels();
+  });
 </script>
 
-<header class="head">
-  <h1>{$_('notify.title')}</h1>
-</header>
-
-<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-<div
-  class="tabs"
-  role="tablist"
-  tabindex="-1"
-  aria-label={$_('notify.tabs_aria')}
-  onkeydown={onTabKey}
->
-  <button
-    class="tab"
-    class:on={tab === 'subs'}
-    role="tab"
-    data-tab="subs"
-    id="tab-subs"
-    aria-selected={tab === 'subs'}
-    aria-controls="panel-subs"
-    tabindex={tab === 'subs' ? 0 : -1}
-    onclick={() => (tab = 'subs')}
-  >
-    {$_('notify.tab_subs')}
-  </button>
-  <!-- Réservé à `admin` (contrat § 11) : le rôle est connu, on ne propose pas
-       un onglet dont on sait qu'il sera refusé. -->
-  {#if $isAdmin}
-    <button
-      class="tab"
-      class:on={tab === 'channels'}
-      role="tab"
-      data-tab="channels"
-      id="tab-channels"
-      aria-selected={tab === 'channels'}
-      aria-controls="panel-channels"
-      tabindex={tab === 'channels' ? 0 : -1}
-      onclick={openChannels}
-    >
-      {$_('notify.tab_channels')}
-    </button>
-  {/if}
-</div>
-
-<!-- Le hub a refusé les canaux : on le dit une fois, au-dessus des onglets, et
-     pas au fond d'un panneau qui peut lui-même être vide. -->
+<!-- Le hub a refusé les canaux : on le dit une fois, en tête, et pas au fond
+     d'un groupe qui peut lui-même être vide. -->
 {#if chDenied}<p class="err top" role="alert">{chDenied}</p>{/if}
 
-{#if tab === 'subs'}
-  <div class="cards" role="tabpanel" id="panel-subs" aria-labelledby="tab-subs" tabindex="-1">
-    {#if subsLoading}
+<div class="cards">
+  <!--
+    Canaux et délai sont réservés à `admin` (contrat § 11). Le rôle étant connu
+    avant l'affichage, ce bloc n'est ni rendu ni chargé pour les autres : pas de
+    requête refusée, donc pas de ligne `access.denied` déposée au journal par
+    une simple visite.
+  -->
+  {#if $isAdmin}
+    {#if chLoading && !chLoaded}
       <StateBlock tone="loading" title={$_('common.loading')} />
-    {:else if !subs}
-      <StateBlock tone="error" title={$_('notify.error_title')} body={subsError}>
-        <button class="lp-btn primary" onclick={loadSubs}>{$_('common.retry')}</button>
+    {:else if chError && !status}
+      <StateBlock tone="error" title={$_('notify.error_title')} body={chError}>
+        <button class="lp-btn primary" onclick={loadChannels}>{$_('common.retry')}</button>
       </StateBlock>
-    {:else if groups.length === 0}
-      <StateBlock tone="empty" title={$_('notify.no_site_title')} body={$_('notify.no_site_body')}>
-        <a class="lp-btn primary" href="#/">{$_('notify.no_site_cta')}</a>
-      </StateBlock>
-    {:else}
-      {#if subsError}<p class="err" role="alert">{subsError}</p>{/if}
-
-      <p class="lead">{$_('notify.subs_lead', { values: { n: totalProbes } })}</p>
-
-      {#each groups as g (g.site_id)}
-        <section class="card lp-card">
-          <div class="site-head">
-            <h2 class="lp-title">{g.name}</h2>
-            <label class="switch">
-              <input
-                type="checkbox"
-                checked={g.enabled}
-                disabled={subsBusy === `site:${g.site_id}`}
-                onchange={(ev) =>
-                  setSub(
-                    'site',
-                    g.site_id,
-                    (ev.currentTarget as HTMLInputElement).checked,
-                    `site:${g.site_id}`,
-                  )}
-              />
-              <span>{$_('notify.site_alert')}</span>
-            </label>
-          </div>
-
-          {#if g.probes.length === 0}
-            <p class="muted">{$_('notify.site_no_probe')}</p>
-          {:else}
-            <div class="probes">
-              {#each g.probes as p (p.probe_id)}
-                <div class="prow">
-                  <span class="pname">{p.name}</span>
-
-                  <!--
-                    Liste déroulante et non trois boutons : la phrase entière
-                    tient dans une liste à n'importe quelle largeur, et sur un
-                    site de quarante sondes quarante segments côte à côte
-                    feraient un mur. « Comme le site » est l'option par défaut
-                    et la première : c'est l'état qu'on veut voir dominer.
-                  -->
-                  <select
-                    class="lp-input sel"
-                    value={excToValue(p.exception)}
-                    disabled={subsBusy === `probe:${p.probe_id}`}
-                    aria-label={$_('notify.probe_rule_for', { values: { name: p.name } })}
-                    onchange={(ev) =>
-                      setSub(
-                        'probe',
-                        p.probe_id,
-                        valueToExc((ev.currentTarget as HTMLSelectElement).value),
-                        `probe:${p.probe_id}`,
-                      )}
-                  >
-                    <option value="inherit">{$_('notify.rule_inherit')}</option>
-                    <option value="on">{$_('notify.rule_always')}</option>
-                    <option value="off">{$_('notify.rule_never')}</option>
-                  </select>
-
-                  <!--
-                    Ce qui s'applique VRAIMENT, tel que le hub l'a calculé. Sans
-                    cette colonne, « comme le site » n'apprend rien : il faut
-                    remonter au réglage du site pour savoir si la sonde alerte.
-                  -->
-                  <span class="eff" class:on={p.enabled}>
-                    {p.enabled ? $_('notify.eff_on') : $_('notify.eff_off')}
-                    {#if p.exception == null}
-                      <span class="from">{$_('notify.eff_from_site')}</span>
-                    {/if}
-                  </span>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </section>
-      {/each}
-    {/if}
-  </div>
-{:else if chLoading && !chLoaded}
-  <StateBlock tone="loading" title={$_('common.loading')} />
-{:else if chError && !status}
-  <StateBlock tone="error" title={$_('notify.error_title')} body={chError}>
-    <button class="lp-btn primary" onclick={loadChannels}>{$_('common.retry')}</button>
-  </StateBlock>
-{:else if status}
-  <div class="cards" role="tabpanel" id="panel-channels" aria-labelledby="tab-channels" tabindex="-1">
-    <!-- Délai avant alerte -->
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('notify.delay_title')}</h2>
-      <p class="sub">{$_('notify.delay_sub')}</p>
-      <div class="inline">
-        <label class="lp-field">
-          <span class="lp-sr">{$_('notify.delay_title')}</span>
-          <span class="unit-row">
-            <input class="lp-input num" type="number" min="1" step="1" bind:value={delay} />
-            <span class="unit">{$_('notify.delay_unit')}</span>
-            {#if delayHuman}<span class="unit">{delayHuman}</span>{/if}
-          </span>
-        </label>
-        <button
-          class="lp-btn primary"
-          onclick={saveDelay}
-          disabled={busy || delayNum === delaySaved}
-        >
-          {$_('common.save')}
-        </button>
-      </div>
-      {#if delayError}<p class="err" role="alert">{delayError}</p>{/if}
-      {#if delayNotice}<p class="ok" role="status">{delayNotice}</p>{/if}
-    </section>
-
-    <!-- Webhook -->
-    <section class="card lp-card">
-      <div class="ch-head">
-        <h2 class="lp-title">{$_('notify.webhook_title')}</h2>
-        {#if status.webhook.unreadable}
-          <span class="pill unreadable">{$_('notify.state_unreadable')}</span>
-        {:else if status.webhook.configured}
-          <span class="pill set">{$_('notify.state_configured')}</span>
-        {:else}
-          <span class="pill unset">{$_('notify.state_unset')}</span>
-        {/if}
-      </div>
-
-      {#if status.webhook.unreadable}
-        <!--
-          ⚠️ « Illisible » n'est PAS « jamais réglé ». Une valeur scellée existe,
-          la clé qui l'ouvre a disparu — volume restauré sans elle, typiquement.
-          Les confondre laisse chercher un oubli de configuration qui n'a jamais
-          eu lieu. Ce message garde ses mots : il dit quoi faire.
-        -->
-        <p class="warn">{$_('notify.unreadable_body')}</p>
-      {/if}
-
-      <label class="lp-field">
-        {$_('notify.webhook_template')}
-        <select class="lp-input sel" bind:value={hookTemplate}>
-          <option value="generic">{$_('notify.tpl_generic')}</option>
-          <option value="slack">Slack</option>
-          <option value="discord">Discord</option>
-        </select>
-      </label>
-
-      <label class="lp-field">
-        {$_('notify.webhook_url')}
-        <input
-          class="lp-input"
-          type="url"
-          bind:value={hookUrl}
-          spellcheck="false"
-          autocomplete="off"
-          placeholder={status.webhook.configured
-            ? $_('notify.webhook_url_keep')
-            : 'https://hooks.slack.com/services/…'}
-        />
-        <span class="hint">{$_('notify.webhook_url_hint')}</span>
-      </label>
-
-      {#if hookError}<p class="err" role="alert">{hookError}</p>{/if}
-      {#if hookNotice}<p class="ok" role="status">{hookNotice}</p>{/if}
-
-      <div class="row-btns">
-        {#if status.webhook.configured || status.webhook.unreadable}
-          <button class="lp-btn danger" onclick={() => (clearing = 'webhook')}>
-            {$_('notify.unconfigure')}
+    {:else if status}
+      <!-- Délai avant alerte -->
+      <section class="card lp-card">
+        <h2 class="lp-title">{$_('notify.delay_title')}</h2>
+        <p class="sub">{$_('notify.delay_sub')}</p>
+        <div class="inline">
+          <label class="lp-field">
+            <span class="lp-sr">{$_('notify.delay_title')}</span>
+            <span class="unit-row">
+              <input class="lp-input num" type="number" min="1" step="1" bind:value={delay} />
+              <span class="unit">{$_('notify.delay_unit')}</span>
+              {#if delayHuman}<span class="unit">{delayHuman}</span>{/if}
+            </span>
+          </label>
+          <button
+            class="lp-btn primary"
+            onclick={saveDelay}
+            disabled={busy || delayNum === delaySaved}
+          >
+            {$_('common.save')}
           </button>
-        {/if}
-        <button class="lp-btn primary" onclick={saveWebhook} disabled={busy}>
-          {busy ? $_('common.saving') : $_('common.save')}
-        </button>
-      </div>
-    </section>
+        </div>
+        {#if delayError}<p class="err" role="alert">{delayError}</p>{/if}
+        {#if delayNotice}<p class="ok" role="status">{delayNotice}</p>{/if}
+      </section>
 
-    <!-- SMTP -->
-    <section class="card lp-card">
-      <div class="ch-head">
-        <h2 class="lp-title">{$_('notify.smtp_title')}</h2>
-        {#if status.smtp.unreadable}
-          <span class="pill unreadable">{$_('notify.state_unreadable')}</span>
-        {:else if status.smtp.configured}
-          <span class="pill set">{$_('notify.state_configured')}</span>
-        {:else}
-          <span class="pill unset">{$_('notify.state_unset')}</span>
-        {/if}
+      <!--
+        Un intitulé de groupe et un filet, pas un titre de plus : les cartes
+        portent déjà leur nom, ce qu'il manque c'est de dire où commence la
+        série. Même forme que la séparation « Réglage destructif » de
+        Réglages — un seul motif pour « groupe de cartes » vaut mieux que
+        deux ; c'est la couleur, rouge là-bas, qui distingue l'avertissement.
+      -->
+      <div class="group">
+        <span class="group-title">{$_('notify.tab_channels')}</span>
+        <span class="group-rule" aria-hidden="true"></span>
       </div>
 
-      {#if status.smtp.unreadable}
-        <p class="warn">{$_('notify.unreadable_body')}</p>
-      {/if}
+      <!-- Webhook -->
+      <section class="card lp-card">
+        <div class="ch-head">
+          <h2 class="lp-title">{$_('notify.webhook_title')}</h2>
+          {#if status.webhook.unreadable}
+            <span class="pill unreadable">{$_('notify.state_unreadable')}</span>
+          {:else if status.webhook.configured}
+            <span class="pill set">{$_('notify.state_configured')}</span>
+          {:else}
+            <span class="pill unset">{$_('notify.state_unset')}</span>
+          {/if}
+        </div>
 
-      <div class="pair">
-        <label class="lp-field grow">
-          {$_('notify.smtp_host')}
-          <input class="lp-input" bind:value={host} spellcheck="false" autocomplete="off" />
-        </label>
+        {#if status.webhook.unreadable}
+          <!--
+            ⚠️ « Illisible » n'est PAS « jamais réglé ». Une valeur scellée existe,
+            la clé qui l'ouvre a disparu — volume restauré sans elle, typiquement.
+            Les confondre laisse chercher un oubli de configuration qui n'a jamais
+            eu lieu. Ce message garde ses mots : il dit quoi faire.
+          -->
+          <p class="warn">{$_('notify.unreadable_body')}</p>
+        {/if}
+
         <label class="lp-field">
-          {$_('notify.smtp_port')}
-          <input class="lp-input num" type="number" min="1" step="1" bind:value={port} />
-        </label>
-        <label class="lp-field">
-          {$_('notify.smtp_security')}
-          <select class="lp-input sel" bind:value={security}>
-            <option value="starttls">STARTTLS</option>
-            <option value="tls">TLS</option>
-            <option value="none">{$_('notify.sec_none')}</option>
+          {$_('notify.webhook_template')}
+          <select class="lp-input sel" bind:value={hookTemplate}>
+            <option value="generic">{$_('notify.tpl_generic')}</option>
+            <option value="slack">Slack</option>
+            <option value="discord">Discord</option>
           </select>
         </label>
-      </div>
 
-      <div class="pair">
-        <label class="lp-field grow">
-          {$_('notify.smtp_user')}
-          <input class="lp-input" bind:value={smtpUser} spellcheck="false" autocomplete="off" />
-        </label>
-        <label class="lp-field grow">
-          {$_('notify.smtp_password')}
+        <label class="lp-field">
+          {$_('notify.webhook_url')}
           <input
             class="lp-input"
-            type="password"
-            bind:value={smtpPassword}
-            disabled={dropPassword}
-            autocomplete="new-password"
-            placeholder={status.smtp.password_set ? $_('notify.smtp_password_keep') : ''}
-          />
-          {#if status.smtp.password_set}
-            <!--
-              ⚠️ Retirer le mot de passe est une action explicite, jamais un
-              effet de bord d'un champ laissé vide : l'API ne rend pas le mot de
-              passe, donc l'interface ne peut pas le remettre dans le champ, et
-              enregistrer une correction de port l'effacerait un jour sur deux.
-            -->
-            <label class="drop">
-              <input type="checkbox" bind:checked={dropPassword} />
-              <span>{$_('notify.smtp_password_drop')}</span>
-            </label>
-          {:else}
-            <span class="hint">{$_('notify.smtp_password_hint')}</span>
-          {/if}
-        </label>
-      </div>
-
-      <div class="pair">
-        <label class="lp-field grow">
-          {$_('notify.smtp_from')}
-          <input
-            class="lp-input"
-            type="email"
-            bind:value={mailFrom}
+            type="url"
+            bind:value={hookUrl}
             spellcheck="false"
             autocomplete="off"
+            placeholder={status.webhook.configured
+              ? $_('notify.webhook_url_keep')
+              : 'https://hooks.slack.com/services/…'}
           />
+          <span class="hint">{$_('notify.webhook_url_hint')}</span>
         </label>
-      </div>
 
-      <label class="lp-field">
-        {$_('notify.smtp_to')}
-        <textarea class="lp-input area" rows="3" bind:value={mailTo} spellcheck="false"></textarea>
-        <span class="hint">{$_('notify.smtp_to_hint')}</span>
-      </label>
+        {#if hookError}<p class="err" role="alert">{hookError}</p>{/if}
+        {#if hookNotice}<p class="ok" role="status">{hookNotice}</p>{/if}
 
-      {#if smtpError}<p class="err" role="alert">{smtpError}</p>{/if}
-      {#if smtpNotice}<p class="ok" role="status">{smtpNotice}</p>{/if}
-
-      <div class="row-btns">
-        {#if status.smtp.configured || status.smtp.unreadable}
-          <button class="lp-btn danger" onclick={() => (clearing = 'smtp')}>
-            {$_('notify.unconfigure')}
+        <div class="row-btns">
+          {#if status.webhook.configured || status.webhook.unreadable}
+            <button class="lp-btn danger" onclick={() => (clearing = 'webhook')}>
+              {$_('notify.unconfigure')}
+            </button>
+          {/if}
+          <button class="lp-btn primary" onclick={saveWebhook} disabled={busy}>
+            {busy ? $_('common.saving') : $_('common.save')}
           </button>
+        </div>
+      </section>
+
+      <!-- SMTP -->
+      <section class="card lp-card">
+        <div class="ch-head">
+          <h2 class="lp-title">{$_('notify.smtp_title')}</h2>
+          {#if status.smtp.unreadable}
+            <span class="pill unreadable">{$_('notify.state_unreadable')}</span>
+          {:else if status.smtp.configured}
+            <span class="pill set">{$_('notify.state_configured')}</span>
+          {:else}
+            <span class="pill unset">{$_('notify.state_unset')}</span>
+          {/if}
+        </div>
+
+        {#if status.smtp.unreadable}
+          <p class="warn">{$_('notify.unreadable_body')}</p>
         {/if}
-        <button class="lp-btn primary" onclick={saveSmtp} disabled={busy}>
-          {busy ? $_('common.saving') : $_('common.save')}
-        </button>
-      </div>
-    </section>
 
-    <!-- Test -->
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('notify.test_title')}</h2>
-      <p class="sub">{$_('notify.test_sub')}</p>
-      <div>
-        <button class="lp-btn accent" onclick={runTest} disabled={testing}>
-          {testing ? $_('notify.testing') : $_('notify.test_send')}
-        </button>
-      </div>
+        <div class="pair">
+          <label class="lp-field grow">
+            {$_('notify.smtp_host')}
+            <input class="lp-input" bind:value={host} spellcheck="false" autocomplete="off" />
+          </label>
+          <label class="lp-field">
+            {$_('notify.smtp_port')}
+            <input class="lp-input num" type="number" min="1" step="1" bind:value={port} />
+          </label>
+          <label class="lp-field">
+            {$_('notify.smtp_security')}
+            <select class="lp-input sel" bind:value={security}>
+              <option value="starttls">STARTTLS</option>
+              <option value="tls">TLS</option>
+              <option value="none">{$_('notify.sec_none')}</option>
+            </select>
+          </label>
+        </div>
 
-      {#if testError}<p class="err" role="alert">{testError}</p>{/if}
+        <div class="pair">
+          <label class="lp-field grow">
+            {$_('notify.smtp_user')}
+            <input class="lp-input" bind:value={smtpUser} spellcheck="false" autocomplete="off" />
+          </label>
+          <label class="lp-field grow">
+            {$_('notify.smtp_password')}
+            <input
+              class="lp-input"
+              type="password"
+              bind:value={smtpPassword}
+              disabled={dropPassword}
+              autocomplete="new-password"
+              placeholder={status.smtp.password_set ? $_('notify.smtp_password_keep') : ''}
+            />
+            {#if status.smtp.password_set}
+              <!--
+                ⚠️ Retirer le mot de passe est une action explicite, jamais un
+                effet de bord d'un champ laissé vide : l'API ne rend pas le mot de
+                passe, donc l'interface ne peut pas le remettre dans le champ, et
+                enregistrer une correction de port l'effacerait un jour sur deux.
+              -->
+              <label class="drop">
+                <input type="checkbox" bind:checked={dropPassword} />
+                <span>{$_('notify.smtp_password_drop')}</span>
+              </label>
+            {:else}
+              <span class="hint">{$_('notify.smtp_password_hint')}</span>
+            {/if}
+          </label>
+        </div>
 
-      {#if outcomes}
-        <!-- Verdict par canal : un canal en panne n'empêche pas l'autre, et
-             c'est le jour où l'un tombe qu'on a besoin de savoir lequel. -->
-        <ul class="verdicts">
-          {#each outcomes as o (o.channel)}
-            <li class:bad={o.attempted && !o.ok} class:good={o.attempted && o.ok}>
-              <span class="ch">{$_(`notify.channel_${o.channel}`)}</span>
-              {#if !o.attempted}
-                <span class="v">{$_('notify.test_skipped')}</span>
-              {:else if o.ok}
-                <span class="v">{$_('notify.test_ok')}</span>
-              {:else}
-                <span class="v">{$_('notify.test_failed')}</span>
-                {#if o.error}<span class="why">{o.error}</span>{/if}
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </section>
-  </div>
-{/if}
+        <div class="pair">
+          <label class="lp-field grow">
+            {$_('notify.smtp_from')}
+            <input
+              class="lp-input"
+              type="email"
+              bind:value={mailFrom}
+              spellcheck="false"
+              autocomplete="off"
+            />
+          </label>
+        </div>
+
+        <label class="lp-field">
+          {$_('notify.smtp_to')}
+          <textarea class="lp-input area" rows="3" bind:value={mailTo} spellcheck="false"></textarea>
+          <span class="hint">{$_('notify.smtp_to_hint')}</span>
+        </label>
+
+        {#if smtpError}<p class="err" role="alert">{smtpError}</p>{/if}
+        {#if smtpNotice}<p class="ok" role="status">{smtpNotice}</p>{/if}
+
+        <div class="row-btns">
+          {#if status.smtp.configured || status.smtp.unreadable}
+            <button class="lp-btn danger" onclick={() => (clearing = 'smtp')}>
+              {$_('notify.unconfigure')}
+            </button>
+          {/if}
+          <button class="lp-btn primary" onclick={saveSmtp} disabled={busy}>
+            {busy ? $_('common.saving') : $_('common.save')}
+          </button>
+        </div>
+      </section>
+
+      <!-- Test -->
+      <section class="card lp-card">
+        <h2 class="lp-title">{$_('notify.test_title')}</h2>
+        <p class="sub">{$_('notify.test_sub')}</p>
+        <div>
+          <button class="lp-btn accent" onclick={runTest} disabled={testing}>
+            {testing ? $_('notify.testing') : $_('notify.test_send')}
+          </button>
+        </div>
+
+        {#if testError}<p class="err" role="alert">{testError}</p>{/if}
+
+        {#if outcomes}
+          <!-- Verdict par canal : un canal en panne n'empêche pas l'autre, et
+               c'est le jour où l'un tombe qu'on a besoin de savoir lequel. -->
+          <ul class="verdicts">
+            {#each outcomes as o (o.channel)}
+              <li class:bad={o.attempted && !o.ok} class:good={o.attempted && o.ok}>
+                <span class="ch">{$_(`notify.channel_${o.channel}`)}</span>
+                {#if !o.attempted}
+                  <span class="v">{$_('notify.test_skipped')}</span>
+                {:else if o.ok}
+                  <span class="v">{$_('notify.test_ok')}</span>
+                {:else}
+                  <span class="v">{$_('notify.test_failed')}</span>
+                  {#if o.error}<span class="why">{o.error}</span>{/if}
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
+  {/if}
+
+  <!-- L'intitulé ne sert qu'à séparer deux groupes. Pour qui ne voit pas les
+       canaux, les abonnements sont tout le contenu de l'onglet : un titre qui
+       ne sépare rien n'annonce rien. -->
+  {#if $isAdmin}
+    <div class="group">
+      <span class="group-title">{$_('notify.tab_subs')}</span>
+      <span class="group-rule" aria-hidden="true"></span>
+    </div>
+  {/if}
+
+  {#if subsLoading}
+    <StateBlock tone="loading" title={$_('common.loading')} />
+  {:else if !subs}
+    <StateBlock tone="error" title={$_('notify.error_title')} body={subsError}>
+      <button class="lp-btn primary" onclick={loadSubs}>{$_('common.retry')}</button>
+    </StateBlock>
+  {:else if groups.length === 0}
+    <StateBlock tone="empty" title={$_('notify.no_site_title')} body={$_('notify.no_site_body')}>
+      <a class="lp-btn primary" href="#/">{$_('notify.no_site_cta')}</a>
+    </StateBlock>
+  {:else}
+    {#if subsError}<p class="err" role="alert">{subsError}</p>{/if}
+
+    <p class="lead">{$_('notify.subs_lead', { values: { n: totalProbes } })}</p>
+
+    {#each groups as g (g.site_id)}
+      <section class="card lp-card">
+        <div class="site-head">
+          <h2 class="lp-title">{g.name}</h2>
+          <label class="switch">
+            <input
+              type="checkbox"
+              checked={g.enabled}
+              disabled={!$canOperate || subsBusy === `site:${g.site_id}`}
+              onchange={(ev) =>
+                setSub(
+                  'site',
+                  g.site_id,
+                  (ev.currentTarget as HTMLInputElement).checked,
+                  `site:${g.site_id}`,
+                )}
+            />
+            <span>{$_('notify.site_alert')}</span>
+          </label>
+        </div>
+
+        {#if g.probes.length === 0}
+          <p class="muted">{$_('notify.site_no_probe')}</p>
+        {:else}
+          <div class="probes">
+            {#each g.probes as p (p.probe_id)}
+              <div class="prow">
+                <span class="pname">{p.name}</span>
+
+                <!--
+                  Liste déroulante et non trois boutons : la phrase entière
+                  tient dans une liste à n'importe quelle largeur, et sur un
+                  site de quarante sondes quarante segments côte à côte
+                  feraient un mur. « Comme le site » est l'option par défaut
+                  et la première : c'est l'état qu'on veut voir dominer.
+                -->
+                <select
+                  class="lp-input sel"
+                  value={excToValue(p.exception)}
+                  disabled={!$canOperate || subsBusy === `probe:${p.probe_id}`}
+                  aria-label={$_('notify.probe_rule_for', { values: { name: p.name } })}
+                  onchange={(ev) =>
+                    setSub(
+                      'probe',
+                      p.probe_id,
+                      valueToExc((ev.currentTarget as HTMLSelectElement).value),
+                      `probe:${p.probe_id}`,
+                    )}
+                >
+                  <option value="inherit">{$_('notify.rule_inherit')}</option>
+                  <option value="on">{$_('notify.rule_always')}</option>
+                  <option value="off">{$_('notify.rule_never')}</option>
+                </select>
+
+                <!--
+                  Ce qui s'applique VRAIMENT, tel que le hub l'a calculé. Sans
+                  cette colonne, « comme le site » n'apprend rien : il faut
+                  remonter au réglage du site pour savoir si la sonde alerte.
+                -->
+                <span class="eff" class:on={p.enabled}>
+                  {p.enabled ? $_('notify.eff_on') : $_('notify.eff_off')}
+                  {#if p.exception == null}
+                    <span class="from">{$_('notify.eff_from_site')}</span>
+                  {/if}
+                </span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </section>
+    {/each}
+  {/if}
+</div>
 
 <Modal
   open={clearing !== null}
@@ -719,47 +696,28 @@
 </Modal>
 
 <style>
-  .head {
-    margin-bottom: 14px;
-  }
-  h1 {
-    font-size: 20px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    margin: 0;
-  }
-
-  /* Même onglets soulignés que Réglages : le trait actif prolonge la ligne qui
-     sépare la barre du contenu, donc l'onglet et son panneau se lisent comme
-     une seule pièce. */
-  .tabs {
+  /* Intitulé de groupe : le même motif que la zone « Réglage destructif » de
+     Réglages — petite capitale et filet — mais en gris. La forme dit « une
+     série de cartes commence ici » ; c'est le rouge, là-bas, qui dit
+     « attention », pas la forme. */
+  .group {
     display: flex;
-    gap: 2px;
-    flex-wrap: wrap;
-    border-bottom: 1px solid var(--ep-border);
-    margin-bottom: 14px;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
   }
-  .tab {
-    padding: 8px 12px;
-    margin-bottom: -1px;
-    border: none;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--ep-text-secondary);
-    font-family: var(--ep-font-sans);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border-radius: var(--ep-radius-sm) var(--ep-radius-sm) 0 0;
+  .group-title {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    font-weight: 700;
+    color: var(--ep-text-dim);
+    flex-shrink: 0;
   }
-  .tab:hover:not(.on) {
-    color: var(--ep-text-primary);
-    background: var(--ep-glass-bg-md);
-  }
-  .tab.on {
-    color: var(--ep-accent-bright);
-    border-bottom-color: var(--ep-accent);
-    font-weight: 600;
+  .group-rule {
+    flex: 1;
+    height: 1px;
+    background: var(--ep-border);
   }
 
   .cards {
