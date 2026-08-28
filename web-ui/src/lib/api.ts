@@ -54,7 +54,8 @@ export interface InfluxInfo {
 }
 
 export interface ReadToken {
-  id: string;
+  /** Identifiant de l'autorisation Influx — le hub le nomme `auth_id`. */
+  auth_id: string;
   description: string;
   created_at: number;
 }
@@ -259,7 +260,7 @@ export const api = {
 
   /** La valeur du jeton n'est renvoyée qu'ici, une seule fois. */
   createReadToken: (description: string) =>
-    request<{ id: string; token: string; description?: string }>('/api/influx/read-token', {
+    request<{ auth_id: string; token: string; description?: string }>('/api/influx/read-token', {
       method: 'POST',
       body: JSON.stringify({ description }),
     }),

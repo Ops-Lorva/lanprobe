@@ -125,7 +125,7 @@
     if (!revokeToken) return;
     revokeBusy = true;
     try {
-      await api.revokeReadToken(revokeToken.id);
+      await api.revokeReadToken(revokeToken.auth_id);
       revokeToken = null;
       await loadTokens();
     } catch (e) {
@@ -513,7 +513,7 @@
               </tr>
             </thead>
             <tbody>
-              {#each tokens as t (t.id)}
+              {#each tokens as t (t.auth_id)}
                 <tr>
                   <td>{t.description || '—'}</td>
                   <td class="lp-mono id">{t.id}</td>
@@ -611,7 +611,7 @@
     onclose={() => (revokeToken = null)}
   >
     <p>{$_('settings.tokens_revoke_body')}</p>
-    <p class="lp-mono id">{revokeToken?.description || revokeToken?.id}</p>
+    <p class="lp-mono id">{revokeToken?.description || revokeToken?.auth_id}</p>
     {#snippet footer()}
       <button class="lp-btn" onclick={() => (revokeToken = null)}>{$_('common.cancel')}</button>
       <button class="lp-btn danger" onclick={confirmRevokeToken} disabled={revokeBusy}>
