@@ -7,6 +7,7 @@ pub mod assets;
 pub mod auth;
 pub mod config;
 pub mod influxdb;
+pub mod hub;
 pub mod routes;
 pub mod scheduler;
 pub mod secrets;

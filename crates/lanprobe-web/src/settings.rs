@@ -12,7 +12,6 @@
 //! **Aucun secret ici** : le jeton opérateur Influx vit dans un fichier du
 //! volume, pas en base, et n'est exposé par aucune route.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::db::{Db, DbError, DbResult};
@@ -84,21 +83,22 @@ impl Settings {
 
     /// Tous les réglages, valeurs effectives (défaut compris). Aucun secret
     /// n'y figure : la table `settings` n'en contient aucun, par construction.
-    pub fn all(&self) -> BTreeMap<String, String> {
-        let mut out = BTreeMap::new();
-        out.insert(keys::INFLUX_URL.into(), self.influx_url());
-        out.insert(keys::INFLUX_ORG.into(), self.influx_org());
-        out.insert(keys::INFLUX_BUCKET.into(), self.influx_bucket());
-        out.insert(
-            keys::INFLUX_ADVERTISE_URL.into(),
-            self.stored_advertise_url().unwrap_or_default(),
-        );
-        out.insert(keys::RETENTION_DAYS.into(), self.retention_days().to_string());
-        out.insert(
-            keys::HEARTBEAT_INTERVAL_SECS.into(),
-            self.heartbeat_interval_secs().to_string(),
-        );
-        out
+    ///
+    /// **Les types sont respectés** : les entiers sortent en nombres JSON, et
+    /// une URL annoncée non réglée sort en `null`, pas en chaîne vide. La base
+    /// stocke tout en texte, mais le laisser transparaître obligeait
+    /// l'interface à comparer `60` à `"60"` — jamais égaux, donc un formulaire
+    /// perpétuellement « modifié » dès l'ouverture, et un bouton
+    /// « Enregistrer » actif sans que personne n'ait rien touché.
+    pub fn all(&self) -> serde_json::Value {
+        serde_json::json!({
+            keys::INFLUX_URL: self.influx_url(),
+            keys::INFLUX_ORG: self.influx_org(),
+            keys::INFLUX_BUCKET: self.influx_bucket(),
+            keys::INFLUX_ADVERTISE_URL: self.stored_advertise_url(),
+            keys::RETENTION_DAYS: self.retention_days(),
+            keys::HEARTBEAT_INTERVAL_SECS: self.heartbeat_interval_secs(),
+        })
     }
 
     /// Écrit un réglage après validation. `confirm_data_loss` n'a d'effet que

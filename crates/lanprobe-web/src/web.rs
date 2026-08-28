@@ -919,7 +919,7 @@ fn flux_duration(value: &str) -> String {
 // ── Réglages ───────────────────────────────────────────────────────────────
 
 async fn get_settings(State(state): State<AppState>) -> Response {
-    ok_json(serde_json::to_value(state.settings.all()).unwrap_or(serde_json::Value::Null))
+    ok_json(state.settings.all())
 }
 
 async fn put_settings(
@@ -962,7 +962,7 @@ async fn put_settings(
             }
         });
     }
-    ok_json(serde_json::to_value(state.settings.all()).unwrap_or(serde_json::Value::Null))
+    ok_json(state.settings.all())
 }
 
 async fn get_advertise(State(state): State<AppState>, headers: HeaderMap) -> Response {
