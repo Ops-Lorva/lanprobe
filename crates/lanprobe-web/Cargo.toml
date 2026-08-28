@@ -42,6 +42,7 @@ uuid = { version = "1", features = ["v4"] }
 # certificat de son pair, on refait le handshake nous-mêmes pour le capturer.
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
+rustls-platform-verifier = "0.6"
 # Le hub sert en HTTPS : sans TLS le cookie de session `Secure` ne serait
 # jamais renvoyé par le navigateur.
 rcgen = "0.13"

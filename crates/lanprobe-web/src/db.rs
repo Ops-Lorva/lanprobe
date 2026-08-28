@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -130,6 +130,45 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX audit_log_at     ON audit_log(at DESC);
     CREATE INDEX audit_log_actor  ON audit_log(actor);
     CREATE INDEX audit_log_action ON audit_log(action);
+    "#,
+    // v6 → v7 : les notifications.
+    //
+    // `sealed_secrets` tient ce qui ne peut pas aller dans `settings` : mot de
+    // passe SMTP et URL de webhook, qui est elle-même un secret porteur. La
+    // section 7 du contrat pose que `settings` ne contient aucun secret et que
+    // `GET /api/settings` peut donc être rendue telle quelle — les y mettre
+    // aurait cassé les deux. Les valeurs sont scellées en AES-256-GCM
+    // (`enc:v1:`), et une valeur vide veut dire « non configuré » : rien ne se
+    // supprime, on désactive.
+    //
+    // `notify_subscriptions` porte l'activation par site, héritée par ses
+    // sondes, avec exception possible par sonde — `enabled` à NULL sur une
+    // sonde signifie « hérite du site ». Sans cet héritage on recocherait
+    // vingt cases à chaque nouveau client.
+    //
+    // `notify_states` retient l'état annoncé pour chaque sonde. C'est lui qui
+    // fait qu'on notifie des **transitions** et non des états : sans mémoire,
+    // un portable qu'on referme alerterait à chaque passage de la boucle, et
+    // trois alertes inutiles suffisent pour que plus personne ne les lise.
+    r#"
+    CREATE TABLE sealed_secrets (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE notify_subscriptions (
+      scope    TEXT NOT NULL,          -- 'site' | 'probe'
+      scope_id TEXT NOT NULL,
+      enabled  INTEGER,                -- NULL = hérite
+      PRIMARY KEY (scope, scope_id)
+    );
+
+    CREATE TABLE notify_states (
+      probe_id TEXT PRIMARY KEY REFERENCES probes(probe_id),
+      state    TEXT NOT NULL,          -- 'up' | 'down'
+      since    INTEGER NOT NULL
+    );
     "#,
 ];
 
@@ -294,7 +333,43 @@ impl Default for AuditFilter {
     }
 }
 
-/// Un compte, tel que l'interface l'affiche./// Un compte, tel que l'interface l'affiche. **Le hash du mot de passe n'en
+/// État d'alerte annoncé pour une sonde. On notifie les **transitions** de
+/// cet état, jamais l'état lui-même : « Paris est passée hors ligne », une
+/// fois, pas un rappel par minute tant qu'elle l'est.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertState {
+    Up,
+    Down,
+}
+
+impl AlertState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AlertState::Up => "up",
+            AlertState::Down => "down",
+        }
+    }
+
+    fn from_stored(value: &str) -> AlertState {
+        match value {
+            "down" => AlertState::Down,
+            _ => AlertState::Up,
+        }
+    }
+}
+
+/// Abonnement aux notifications, par site ou par sonde.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NotifySubscription {
+    /// `site` ou `probe`.
+    pub scope: String,
+    pub scope_id: String,
+    /// `None` sur une sonde = elle suit son site. Sur un site, `None` équivaut
+    /// à « pas d'alerte » — c'est le défaut.
+    pub enabled: Option<bool>,
+}
+
+/// Un compte, tel que l'interface l'affiche./// Un compte, tel que l'interface l'affiche./// Un compte, tel que l'interface l'affiche. **Le hash du mot de passe n'en
 /// fait pas partie** : aucune sérialisation ne l'expose.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UserRecord {
@@ -930,6 +1005,126 @@ impl Db {
             },
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ── Secrets scellés ────────────────────────────────────────────────────
+    //
+    // Ce que la table `settings` ne peut pas porter : mot de passe SMTP, URL
+    // de webhook. Le hub ne stocke ici que du chiffré (`enc:v1:`), et ne rend
+    // jamais ces valeurs par l'API — l'interface sait « configuré » ou « non
+    // configuré », plus un bouton de test.
+
+    pub fn get_sealed(&self, key: &str) -> DbResult<Option<String>> {
+        let conn = self.lock()?;
+        let value: Option<String> = conn
+            .query_row("SELECT value FROM sealed_secrets WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        // Une valeur vide veut dire « non configuré » : c'est ainsi qu'on
+        // désactive un canal sans supprimer de ligne.
+        Ok(value.filter(|v| !v.trim().is_empty()))
+    }
+
+    pub fn set_sealed(&self, key: &str, sealed: &str) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO sealed_secrets (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![key, sealed, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Désactive un canal. **Pas de `DELETE`** : la ligne reste, vidée, avec
+    /// la date à laquelle on l'a vidée.
+    pub fn clear_sealed(&self, key: &str) -> DbResult<()> {
+        self.set_sealed(key, "")
+    }
+
+    // ── Notifications : abonnements et états ───────────────────────────────
+
+    /// Active, désactive, ou remet à l'héritage (`None`). Aucune suppression :
+    /// « hérite » est une valeur, pas une absence de ligne.
+    pub fn set_notify_subscription(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        enabled: Option<bool>,
+    ) -> DbResult<()> {
+        if !matches!(scope, "site" | "probe") {
+            return Err(DbError::Conflict(format!(
+                "portée inconnue : {scope} (attendu : site ou probe)"
+            )));
+        }
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO notify_subscriptions (scope, scope_id, enabled) VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope, scope_id) DO UPDATE SET enabled = excluded.enabled",
+            rusqlite::params![scope, scope_id, enabled],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_notify_subscriptions(&self) -> DbResult<Vec<NotifySubscription>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT scope, scope_id, enabled FROM notify_subscriptions ORDER BY scope, scope_id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(NotifySubscription {
+                scope: r.get(0)?,
+                scope_id: r.get(1)?,
+                enabled: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// L'exception de la sonde gagne ; sinon elle suit son site ; sinon rien
+    /// n'alerte. Le défaut est le silence : une fonctionnalité de notification
+    /// qui parle avant qu'on le lui demande se fait couper le premier jour.
+    pub fn notify_enabled_for_probe(&self, probe_id: &str) -> DbResult<bool> {
+        let probe = self.get_probe(probe_id)?;
+        let conn = self.lock()?;
+        let resolve = |scope: &str, id: &str| -> DbResult<Option<bool>> {
+            Ok(conn
+                .query_row(
+                    "SELECT enabled FROM notify_subscriptions WHERE scope = ?1 AND scope_id = ?2",
+                    [scope, id],
+                    |r| r.get::<_, Option<bool>>(0),
+                )
+                .optional()?
+                .flatten())
+        };
+        if let Some(exception) = resolve("probe", probe_id)? {
+            return Ok(exception);
+        }
+        Ok(resolve("site", &probe.site_id)?.unwrap_or(false))
+    }
+
+    /// L'état annoncé pour une sonde, et depuis quand. `None` tant qu'on n'a
+    /// rien annoncé : c'est ce qui distingue « première évaluation » de
+    /// « toujours en ligne ».
+    pub fn notify_state(&self, probe_id: &str) -> DbResult<Option<(AlertState, i64)>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT state, since FROM notify_states WHERE probe_id = ?1",
+                [probe_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .map(|(state, since)| (AlertState::from_stored(&state), since)))
+    }
+
+    pub fn set_notify_state(&self, probe_id: &str, state: AlertState, since: i64) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO notify_states (probe_id, state, since) VALUES (?1, ?2, ?3)
+             ON CONFLICT(probe_id) DO UPDATE SET state = excluded.state, since = excluded.since",
+            rusqlite::params![probe_id, state.as_str(), since],
+        )?;
+        Ok(())
     }
 
     // ── Sites ──────────────────────────────────────────────────────────────
@@ -2455,6 +2650,149 @@ mod tests {
 
         let db = Db::open(&path).unwrap();
         assert_eq!(db.list_audit(&AuditFilter::default()).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Notifications : stockage ───────────────────────────────────────
+
+    #[test]
+    fn migration_v7_adds_the_notification_tables_to_an_existing_database() {
+        let dir = tmp_dir("v6-to-v7");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..6] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 6").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        for table in ["sealed_secrets", "notify_subscriptions", "notify_states"] {
+            assert!(db.table_exists(table).unwrap(), "{table} doit exister");
+        }
+        assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sealed_value_round_trips_and_is_never_stored_in_the_clear() {
+        let db = open_memory();
+        assert!(db.get_sealed("notify_webhook").unwrap().is_none());
+
+        db.set_sealed("notify_webhook", "enc:v1:AAAA").unwrap();
+        assert_eq!(db.get_sealed("notify_webhook").unwrap().as_deref(), Some("enc:v1:AAAA"));
+    }
+
+    #[test]
+    fn clearing_a_sealed_value_unconfigures_without_deleting_the_row() {
+        // Aucune suppression dans ce projet : désactiver un canal écrit une
+        // valeur vide, la ligne reste et sa date de mise à jour avec.
+        let db = open_memory();
+        db.set_sealed("notify_smtp", "enc:v1:AAAA").unwrap();
+
+        db.clear_sealed("notify_smtp").unwrap();
+
+        assert!(db.get_sealed("notify_smtp").unwrap().is_none());
+        let rows: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM sealed_secrets", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(rows, 1, "la ligne doit rester");
+    }
+
+    #[test]
+    fn a_probe_inherits_the_notification_setting_of_its_site() {
+        // Sinon on recoche vingt cases à chaque nouveau client.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        assert!(
+            !db.notify_enabled_for_probe(&probe.probe_id).unwrap(),
+            "par défaut, rien n'alerte"
+        );
+
+        db.set_notify_subscription("site", &site.site_id, Some(true)).unwrap();
+
+        assert!(db.notify_enabled_for_probe(&probe.probe_id).unwrap());
+    }
+
+    #[test]
+    fn a_probe_exception_overrides_its_site() {
+        // Le poste de test de la baie du client n'alerte pas, le reste si.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (paris, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        let (banc, _) = db.enroll_probe(&site.site_id, "Banc de test").unwrap();
+        db.set_notify_subscription("site", &site.site_id, Some(true)).unwrap();
+
+        db.set_notify_subscription("probe", &banc.probe_id, Some(false)).unwrap();
+
+        assert!(db.notify_enabled_for_probe(&paris.probe_id).unwrap());
+        assert!(!db.notify_enabled_for_probe(&banc.probe_id).unwrap());
+    }
+
+    #[test]
+    fn an_exception_can_also_switch_a_probe_on_in_a_silent_site() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_notify_subscription("site", &site.site_id, Some(false)).unwrap();
+
+        db.set_notify_subscription("probe", &probe.probe_id, Some(true)).unwrap();
+
+        assert!(db.notify_enabled_for_probe(&probe.probe_id).unwrap());
+    }
+
+    #[test]
+    fn clearing_an_exception_gives_the_probe_back_to_its_site() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_notify_subscription("site", &site.site_id, Some(true)).unwrap();
+        db.set_notify_subscription("probe", &probe.probe_id, Some(false)).unwrap();
+
+        // `None` n'efface pas la ligne : elle dit « hérite ».
+        db.set_notify_subscription("probe", &probe.probe_id, None).unwrap();
+
+        assert!(db.notify_enabled_for_probe(&probe.probe_id).unwrap());
+    }
+
+    #[test]
+    fn an_unknown_subscription_scope_is_refused() {
+        let db = open_memory();
+        let err = db.set_notify_subscription("planète", "x", Some(true)).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_alert_state_of_a_probe_is_remembered_across_restarts() {
+        // C'est ce qui empêche un redémarrage du hub de réannoncer une panne
+        // déjà annoncée.
+        let dir = tmp_dir("notify-state");
+        let path = dir.join("hub.sqlite");
+
+        let db = Db::open(&path).unwrap();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        assert!(db.notify_state(&probe.probe_id).unwrap().is_none());
+        db.set_notify_state(&probe.probe_id, AlertState::Down, 1_000).unwrap();
+        drop(db);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.notify_state(&probe.probe_id).unwrap(),
+            Some((AlertState::Down, 1_000))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

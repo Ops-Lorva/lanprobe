@@ -10,6 +10,7 @@ pub mod auth;
 pub mod db;
 pub mod influx;
 pub mod probe;
+pub mod secrets;
 pub mod settings;
 pub mod tls;
 pub mod web;

@@ -2236,6 +2236,7 @@ dependencies = [
  "rust-embed",
  "rustls",
  "rustls-pemfile",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "tokio",
