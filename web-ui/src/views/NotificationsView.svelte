@@ -154,6 +154,18 @@
     if (!chLoaded) void loadChannels();
   }
 
+  /** Flèches gauche/droite entre onglets — même comportement que Réglages. */
+  function onTabKey(e: KeyboardEvent) {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    e.preventDefault();
+    if (tab === 'subs') {
+      if ($isAdmin !== false) openChannels();
+    } else {
+      tab = 'subs';
+    }
+    (e.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus();
+  }
+
   // ── Délai avant alerte ───────────────────────────────────────────────────
   // Il vit dans `settings` et part par `PUT /api/settings`, mais il se règle
   // ici : c'est le paramètre qui décide si un portable qu'on referme réveille
@@ -326,12 +338,23 @@
   <h1>{$_('notify.title')}</h1>
 </header>
 
-<div class="tabs" role="tablist" aria-label={$_('notify.tabs_aria')}>
+<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+<div
+  class="tabs"
+  role="tablist"
+  tabindex="-1"
+  aria-label={$_('notify.tabs_aria')}
+  onkeydown={onTabKey}
+>
   <button
     class="tab"
     class:on={tab === 'subs'}
     role="tab"
+    data-tab="subs"
+    id="tab-subs"
     aria-selected={tab === 'subs'}
+    aria-controls="panel-subs"
+    tabindex={tab === 'subs' ? 0 : -1}
     onclick={() => (tab = 'subs')}
   >
     {$_('notify.tab_subs')}
@@ -342,7 +365,11 @@
       class="tab"
       class:on={tab === 'channels'}
       role="tab"
+      data-tab="channels"
+      id="tab-channels"
       aria-selected={tab === 'channels'}
+      aria-controls="panel-channels"
+      tabindex={tab === 'channels' ? 0 : -1}
       onclick={openChannels}
     >
       {$_('notify.tab_channels')}
@@ -355,7 +382,7 @@
 {#if chDenied}<p class="err top" role="alert">{chDenied}</p>{/if}
 
 {#if tab === 'subs'}
-  <div class="cards">
+  <div class="cards" role="tabpanel" id="panel-subs" aria-labelledby="tab-subs" tabindex="-1">
     {#if subsLoading}
       <StateBlock tone="loading" title={$_('common.loading')} />
     {:else if !subs}
@@ -451,7 +478,7 @@
     <button class="lp-btn primary" onclick={loadChannels}>{$_('common.retry')}</button>
   </StateBlock>
 {:else if status}
-  <div class="cards">
+  <div class="cards" role="tabpanel" id="panel-channels" aria-labelledby="tab-channels" tabindex="-1">
     <!-- Délai avant alerte -->
     <section class="card lp-card">
       <h2 class="lp-title">{$_('notify.delay_title')}</h2>
@@ -741,6 +768,9 @@
     flex-direction: column;
     gap: 12px;
     width: 100%;
+  }
+  .cards:focus {
+    outline: none;
   }
   .card {
     padding: 16px;
