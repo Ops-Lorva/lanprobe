@@ -824,23 +824,15 @@ pub fn restore(req: RestoreRequest<'_>) -> BackupResult<RestoreReport> {
         Some(aside)
     };
 
-    let mut restored = Vec::new();
-    for entry in &manifest.entries {
-        if entry.path.starts_with(INFLUX_PREFIX) {
-            // Les séries ne se posent pas dans le volume du hub : elles
-            // repassent par `influx restore`.
-            continue;
-        }
-        let from = staging.join(&entry.path);
-        let to = req.config_dir.join(target_name(&entry.path));
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        move_file(&from, &to)?;
-        restore_permissions(&to);
-        restored.push(target_name(&entry.path));
-    }
-
+    // ⚠️ Les mesures se restaurent AVANT d'écraser les fichiers du volume.
+    //
+    // `influx restore` s'authentifie auprès de l'instance **vivante**, avec le
+    // jeton opérateur qu'elle connaît aujourd'hui. Écraser
+    // `influx-operator-token` par celui de l'archive avant l'appel remplaçait
+    // ce jeton par un autre, que l'instance en place n'a jamais émis : la
+    // restauration échouait alors en 401, systématiquement, sur toute
+    // installation. Après `--full`, l'instance porte les jetons de l'archive —
+    // c'est à ce moment-là, et pas avant, que le fichier doit suivre.
     let (influx_restored, influx_error) = match (&req.influx, manifest.influx_included) {
         (Some(target), true) => match run_influx_restore(target, &staging.join("influx")) {
             Ok(()) => (true, None),
@@ -859,6 +851,25 @@ pub fn restore(req: RestoreRequest<'_>) -> BackupResult<RestoreReport> {
             Some("l'archive ne contient pas de sauvegarde InfluxDB".to_string()),
         ),
     };
+
+
+    let mut restored = Vec::new();
+    for entry in &manifest.entries {
+        if entry.path.starts_with(INFLUX_PREFIX) {
+            // Les séries ne se posent pas dans le volume du hub : elles
+            // repassent par `influx restore`.
+            continue;
+        }
+        let from = staging.join(&entry.path);
+        let to = req.config_dir.join(target_name(&entry.path));
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        move_file(&from, &to)?;
+        restore_permissions(&to);
+        restored.push(target_name(&entry.path));
+    }
+
 
     let _ = std::fs::remove_dir_all(&staging);
     restored.sort();

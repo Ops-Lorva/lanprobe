@@ -1050,3 +1050,22 @@ statut de la sonde. Un changement d'IP publique produit une ligne d'audit
 retour du lien ; `broken` signifie que le hub a **refusé le jeton** — la sonde est
 révoquée et réessayer ne servira jamais à rien. Les mélanger laisserait attendre
 indéfiniment une reconnexion impossible.
+
+## 16. Configuration des sondes remontée au hub (non implémenté)
+
+Demandé le 28/08 : le hub connaît l'identité d'une sonde, pas sa configuration.
+Si la machine meurt, on ré-enrôle et **on reconfigure tout de mémoire**.
+
+La sonde remonte donc, avec son battement de cœur : cibles surveillées, profils
+de scan de ports, interface sélectionnée, planification. Le hub les stocke, les
+inclut dans sa sauvegarde, et les **repose** à la sonde après un ré-enrôlement.
+
+Deux bénéfices distincts : une sonde devient **remplaçable**, et on voit d'un
+écran ce que chaque site surveille réellement.
+
+⚠️ **Sans les secrets.** La configuration d'une sonde peut contenir un mot de
+passe InfluxDB v1 ou un serveur iperf privé, scellés côté sonde. Ils ne montent
+pas : le hub reçoit la configuration expurgée, et la sonde garde les siens au
+retour. Remonter les secrets ferait du hub un dépôt de mots de passe de tous les
+sites, et de sa sauvegarde une cible autrement plus intéressante — pour un
+bénéfice nul, puisqu'une sonde ré-enrôlée peut les redemander à son opérateur.
