@@ -106,6 +106,23 @@
     }
   }
 
+  // Rattachement à un hub : visible seulement s'il y en a un. Le rattachement
+  // est optionnel, son absence n'est pas un défaut à signaler.
+  let hub = $state<{ state: string; url: string; buffered_points: number; last_error: string | null }>({
+    state: 'off', url: '', buffered_points: 0, last_error: null,
+  });
+  let hubTimer: ReturnType<typeof setInterval> | undefined;
+
+  async function refreshHub() {
+    try { hub = await invoke('cmd_hub_status'); } catch { /* optionnel */ }
+  }
+
+  onMount(() => {
+    refreshHub();
+    hubTimer = setInterval(refreshHub, 20000);
+  });
+  onDestroy(() => clearInterval(hubTimer));
+
   onMount(async () => {
     await profiles.init();
     interfaces = await invoke<string[]>('cmd_list_interfaces');
@@ -193,6 +210,23 @@
 <div class="page">
   <div class="page-header">
     <h1>{$_('dashboard.title')}</h1>
+    {#if hub.state !== 'off'}
+      <!-- Trois états, trois conduites différentes : `degraded` se répare seul
+           au retour du lien, `broken` jamais — le hub a refusé le jeton, il
+           faut ré-enrôler. Les confondre ferait attendre une reconnexion
+           impossible. -->
+      <span class="hub-pill" class:ok={hub.state === 'ok'}
+            class:warn={hub.state === 'degraded'} class:bad={hub.state === 'broken'}
+            title={hub.last_error ?? ''}>
+        <span class="dot" aria-hidden="true"></span>
+        <span class="hub-url">{hub.url}</span>
+        {#if hub.state === 'degraded' && hub.buffered_points > 0}
+          <span class="hub-buf">{$_('dashboard.hub_buffered', { values: { n: hub.buffered_points } })}</span>
+        {:else if hub.state === 'broken'}
+          <span class="hub-buf">{$_('dashboard.hub_broken')}</span>
+        {/if}
+      </span>
+    {/if}
     <button onclick={refresh} disabled={loading}>{loading ? '…' : $_('dashboard.refresh')}</button>
   </div>
 
@@ -309,6 +343,22 @@
 </div>
 
 <style>
+  .hub-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 10px; border-radius: 999px; font-size: 12px;
+    border: 1px solid var(--border, #333); margin-left: auto; margin-right: 10px;
+  }
+  .hub-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; flex: none; }
+  /* La forme double la couleur : un anneau et un disque barré restent
+     distincts en niveaux de gris, et pour un daltonien. */
+  .hub-pill.ok .dot { background: #22c55e; }
+  .hub-pill.warn .dot { background: #f59e0b; box-shadow: inset 0 0 0 2px rgba(0,0,0,.45); }
+  .hub-pill.bad .dot { background: #ef4444; box-shadow: inset 0 0 0 2px rgba(0,0,0,.45); }
+  .hub-pill.warn { border-color: #f59e0b; }
+  .hub-pill.bad { border-color: #ef4444; }
+  .hub-url { opacity: .8; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hub-buf { opacity: .9; font-variant-numeric: tabular-nums; }
+
   .page { padding: 24px; }
   .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
   h1 { font-size: 20px; font-weight: 700; }

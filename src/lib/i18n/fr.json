@@ -81,7 +81,9 @@
       "down": "éteints",
       "avg_rtt": "rtt moy",
       "throughput": "↓ / ↑"
-    }
+    },
+    "hub_buffered": "{n} mesures en attente",
+    "hub_broken": "sonde révoquée — ré-enrôler"
   },
   "discovery": {
     "title": "Network Discovery",

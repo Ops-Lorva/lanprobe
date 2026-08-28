@@ -81,7 +81,9 @@
       "down": "down",
       "avg_rtt": "avg rtt",
       "throughput": "↓ / ↑"
-    }
+    },
+    "hub_buffered": "{n} measurements pending",
+    "hub_broken": "probe revoked — re-enrol"
   },
   "discovery": {
     "title": "Network Discovery",

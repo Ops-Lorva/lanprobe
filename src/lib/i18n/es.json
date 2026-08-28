@@ -81,7 +81,9 @@
       "down": "caídos",
       "avg_rtt": "rtt med",
       "throughput": "↓ / ↑"
-    }
+    },
+    "hub_buffered": "{n} mediciones pendientes",
+    "hub_broken": "sonda revocada — reinscribir"
   },
   "discovery": {
     "title": "Descubrimiento de red",
