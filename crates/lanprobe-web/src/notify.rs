@@ -373,6 +373,26 @@ impl Notifier {
         })
     }
 
+    pub fn set_webhook(&self, cfg: &WebhookConfig) -> DbResult<()> {
+        self.secrets.put_json(keys::WEBHOOK, cfg)
+    }
+
+    pub fn set_smtp(&self, cfg: &SmtpConfig) -> DbResult<()> {
+        self.secrets.put_json(keys::SMTP, cfg)
+    }
+
+    /// Dé-configure un canal. **Aucune ligne n'est supprimée** : la valeur
+    /// scellée est remplacée par du vide, et sa date de mise à jour reste.
+    pub fn clear(&self, channel: &str) -> DbResult<()> {
+        match channel {
+            "smtp" => self.secrets.clear(keys::SMTP),
+            "webhook" => self.secrets.clear(keys::WEBHOOK),
+            other => Err(crate::db::DbError::NotFound(format!(
+                "canal inconnu : {other}"
+            ))),
+        }
+    }
+
     /// Envoie une alerte sur tous les canaux configurés.
     pub async fn dispatch(&self, alert: &Alert) -> Vec<ChannelOutcome> {
         let mut outcomes = Vec::with_capacity(2);
@@ -482,6 +502,57 @@ pub async fn run(notifier: Notifier, step: std::time::Duration) {
     loop {
         tokio::time::sleep(step).await;
         notifier.run_once(crate::db::now()).await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::sync::{Arc, Mutex};
+
+    /// Faux destinataire de webhook. Il garde les corps reçus : les tests
+    /// assertent sur ce qui est réellement parti.
+    pub(crate) struct FakeWebhook {
+        pub(crate) url: String,
+        seen: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl FakeWebhook {
+        pub(crate) async fn start() -> Self {
+            Self::start_with_status(axum::http::StatusCode::OK).await
+        }
+
+        pub(crate) async fn start_with_status(status: axum::http::StatusCode) -> Self {
+            use axum::{extract::State, routing::post, Json, Router};
+
+            let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+
+            async fn handle(
+                State((seen, status)): State<(Arc<Mutex<Vec<serde_json::Value>>>, axum::http::StatusCode)>,
+                Json(body): Json<serde_json::Value>,
+            ) -> axum::response::Response {
+                use axum::response::IntoResponse;
+                seen.lock().unwrap().push(body);
+                (status, "refusé par le salon").into_response()
+            }
+
+            let app = Router::new()
+                .route("/hook", post(handle))
+                .with_state((seen.clone(), status));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app.into_make_service()).await;
+            });
+
+            Self {
+                url: format!("http://{addr}/hook"),
+                seen,
+            }
+        }
+
+        pub(crate) fn received(&self) -> Vec<serde_json::Value> {
+            self.seen.lock().unwrap().clone()
+        }
     }
 }
 
@@ -725,5 +796,155 @@ mod tests {
         assert_eq!(payload["site"], "Durand");
         assert_eq!(payload["silence_secs"], 420);
         assert!(payload["message"].is_string());
+    }
+
+    // ── De la transition au canal ──────────────────────────────────────
+
+    use super::testing::FakeWebhook;
+
+    fn notifier_over(db: Arc<Db>) -> Notifier {
+        let secrets = Secrets::ephemeral(db.clone()).unwrap();
+        let settings = crate::settings::Settings::new(db.clone());
+        Notifier::new(db, secrets, settings)
+    }
+
+    #[tokio::test]
+    async fn a_transition_reaches_the_webhook_once_and_only_once() {
+        let (db, probe_id, seen) = parc();
+        let hook = FakeWebhook::start().await;
+        let notifier = notifier_over(db.clone());
+        notifier
+            .set_webhook(&WebhookConfig {
+                url: hook.url.clone(),
+                template: WebhookTemplate::Slack,
+            })
+            .unwrap();
+
+        // Premier tour : on mémorise l'état, rien ne part.
+        assert_eq!(notifier.run_once(seen).await, 0);
+        assert!(hook.received().is_empty());
+
+        assert_eq!(notifier.run_once(seen + DEFAULT_DELAY_SECS + 1).await, 1);
+        // Puis on se tait, quel que soit le nombre de tours.
+        for step in [2, 60, 600] {
+            assert_eq!(notifier.run_once(seen + DEFAULT_DELAY_SECS + step).await, 0);
+        }
+
+        let received = hook.received();
+        assert_eq!(received.len(), 1, "{received:?}");
+        assert!(
+            received[0]["text"].as_str().unwrap().contains("hors ligne"),
+            "{received:?}"
+        );
+        // Et le journal en garde trace, sans dire où c'est parti.
+        let lines = db
+            .list_audit(&crate::db::AuditFilter {
+                action: Some("probe.down".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].target.as_deref(), Some(probe_id.as_str()));
+        assert!(
+            !lines[0].detail.as_deref().unwrap_or_default().contains("http"),
+            "l'URL du webhook ne doit pas entrer au journal : {lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_webhook_that_refuses_is_reported_as_a_failure() {
+        let (db, _, seen) = parc();
+        let hook = FakeWebhook::start_with_status(axum::http::StatusCode::NOT_FOUND).await;
+        let notifier = notifier_over(db.clone());
+        notifier
+            .set_webhook(&WebhookConfig {
+                url: hook.url.clone(),
+                template: WebhookTemplate::Discord,
+            })
+            .unwrap();
+
+        notifier.run_once(seen).await;
+        notifier.run_once(seen + DEFAULT_DELAY_SECS + 1).await;
+
+        let lines = db
+            .list_audit(&crate::db::AuditFilter {
+                action: Some("probe.down".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(lines[0].outcome, crate::db::Outcome::Failure, "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn the_test_message_is_really_sent() {
+        // Une configuration qu'on ne peut pas essayer se découvre fausse le
+        // jour de la première panne.
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let hook = FakeWebhook::start().await;
+        let notifier = notifier_over(db);
+        notifier
+            .set_webhook(&WebhookConfig {
+                url: hook.url.clone(),
+                template: WebhookTemplate::Generic,
+            })
+            .unwrap();
+
+        let outcomes = notifier.send_test().await;
+        let webhook = outcomes.iter().find(|o| o.channel == "webhook").unwrap();
+        assert!(webhook.attempted && webhook.ok, "{outcomes:?}");
+        // SMTP n'est pas configuré : on ne prétend pas l'avoir essayé.
+        let smtp = outcomes.iter().find(|o| o.channel == "smtp").unwrap();
+        assert!(!smtp.attempted && !smtp.ok);
+
+        assert_eq!(hook.received().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_status_never_carries_the_url_nor_the_password() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let notifier = notifier_over(db);
+        notifier
+            .set_webhook(&WebhookConfig {
+                url: "https://hooks.example/T000/xoxb-secret".into(),
+                template: WebhookTemplate::Slack,
+            })
+            .unwrap();
+        notifier
+            .set_smtp(&SmtpConfig {
+                host: "smtp.example.org".into(),
+                port: 587,
+                security: SmtpSecurity::Starttls,
+                username: Some("hub".into()),
+                password: Some("mot-de-passe-smtp".into()),
+                from: "hub@example.org".into(),
+                to: vec!["ops@example.org".into()],
+            })
+            .unwrap();
+
+        let rendered = notifier.status().to_string();
+        assert!(!rendered.contains("xoxb-secret"), "{rendered}");
+        assert!(!rendered.contains("hooks.example"), "{rendered}");
+        assert!(!rendered.contains("mot-de-passe-smtp"), "{rendered}");
+        // Ce que l'interface a le droit de savoir.
+        assert!(rendered.contains("\"configured\":true"), "{rendered}");
+        assert!(rendered.contains("password_set"), "{rendered}");
+        assert!(rendered.contains("smtp.example.org"), "l'hôte n'est pas un secret");
+    }
+
+    #[tokio::test]
+    async fn unconfiguring_a_channel_silences_it_without_deleting_anything() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let notifier = notifier_over(db);
+        notifier
+            .set_webhook(&WebhookConfig {
+                url: "https://hooks.example/x".into(),
+                template: WebhookTemplate::Slack,
+            })
+            .unwrap();
+
+        notifier.clear("webhook").unwrap();
+
+        assert!(notifier.webhook_config().is_none());
+        assert_eq!(notifier.status()["webhook"]["configured"], false);
     }
 }

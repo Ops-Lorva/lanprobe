@@ -53,6 +53,9 @@ pub struct AppState {
     pub auth: Arc<Auth>,
     pub settings: Settings,
     pub influx: Arc<Influx>,
+    /// Alertes : évaluation des transitions et envoi sur les canaux. Ses
+    /// secrets sont scellés et ne sortent par aucune route.
+    pub notifier: crate::notify::Notifier,
     /// Vrai quand le hub termine lui-même le TLS. Faux quand il sert en clair
     /// derrière un reverse proxy — le cas courant en auto-hébergement.
     pub tls: bool,
@@ -90,7 +93,11 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/metrics", get(probe_metrics))
             .route("/api/settings", get(get_settings))
             .route("/api/settings/influx-advertise", get(get_advertise))
-            .route("/api/influx", get(influx_overview)),
+            .route("/api/influx", get(influx_overview))
+            .route(
+                "/api/notifications/subscriptions",
+                get(list_subscriptions),
+            ),
     );
 
     // Conduite du parc. `GET /api/enroll-codes/pending` en fait partie et non
@@ -108,7 +115,11 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/rotate", post(rotate_token))
             .route("/api/probes/{id}/revoke-token", post(revoke_token_now))
             .route("/api/probes/{id}/reenroll-code", post(create_reenroll_code))
-            .route("/api/settings/influx-advertise/test", post(test_advertise)),
+            .route("/api/settings/influx-advertise/test", post(test_advertise))
+            .route(
+                "/api/notifications/subscriptions",
+                put(put_subscription),
+            ),
     );
 
     // Administration : les comptes, les réglages, la rétention, le journal, et
@@ -126,7 +137,17 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/users", get(list_users).post(create_user))
             .route("/api/users/{username}", patch(update_user))
             .route("/api/users/{username}/password", post(reset_password))
-            .route("/api/audit", get(read_audit)),
+            .route("/api/audit", get(read_audit))
+            .route("/api/notifications", get(notifications))
+            .route(
+                "/api/notifications/webhook",
+                put(put_webhook).delete(clear_webhook),
+            )
+            .route(
+                "/api/notifications/smtp",
+                put(put_smtp).delete(clear_smtp),
+            )
+            .route("/api/notifications/test", post(test_notification)),
     );
 
     Router::new()
@@ -676,6 +697,311 @@ async fn read_audit(State(state): State<AppState>, Query(query): Query<AuditQuer
         }
         Err(e) => error_response(e),
     }
+}
+
+// ── Notifications ──────────────────────────────────────────────────────────
+//
+// **Les secrets ne ressortent jamais.** L'URL du webhook porte à elle seule le
+// droit d'écrire dans le salon, le mot de passe SMTP se passe de commentaire :
+// `GET /api/notifications` dit « configuré » ou « non configuré », et le
+// bouton de test envoie un vrai message — la seule vérification qui prouve
+// quelque chose.
+
+async fn notifications(State(state): State<AppState>) -> Response {
+    ok_json(state.notifier.status())
+}
+
+#[derive(Deserialize)]
+struct WebhookBody {
+    url: String,
+    #[serde(default)]
+    template: Option<String>,
+}
+
+async fn put_webhook(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Json(body): Json<WebhookBody>,
+) -> Response {
+    let template = match body.template.as_deref().unwrap_or("generic") {
+        "slack" => crate::notify::WebhookTemplate::Slack,
+        "discord" => crate::notify::WebhookTemplate::Discord,
+        "generic" => crate::notify::WebhookTemplate::Generic,
+        other => {
+            return fail(
+                StatusCode::BAD_REQUEST,
+                &format!("modèle inconnu : {other} (attendu : generic, slack ou discord)"),
+            )
+        }
+    };
+    if let Err(message) = validate_url(&body.url) {
+        return fail(StatusCode::BAD_REQUEST, &message);
+    }
+    let cfg = crate::notify::WebhookConfig {
+        url: body.url.trim().to_string(),
+        template,
+    };
+    // Le journal dit qu'on a configuré le canal et avec quel modèle. **Pas
+    // l'URL** : elle est le secret.
+    match audited(
+        &state,
+        Some(&actor.username),
+        "notify.webhook",
+        Some(template.as_str()),
+        state.notifier.set_webhook(&cfg),
+    ) {
+        Ok(()) => ok_json(state.notifier.status()),
+        Err(e) => error_response(e),
+    }
+}
+
+async fn clear_webhook(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
+    unconfigure(&state, &actor, "webhook").await
+}
+
+#[derive(Deserialize)]
+struct SmtpBody {
+    host: String,
+    port: u16,
+    #[serde(default)]
+    security: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    from: String,
+    to: Vec<String>,
+}
+
+async fn put_smtp(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Json(body): Json<SmtpBody>,
+) -> Response {
+    let security = match body.security.as_deref().unwrap_or("starttls") {
+        "none" => crate::notify::SmtpSecurity::None,
+        "starttls" => crate::notify::SmtpSecurity::Starttls,
+        "tls" => crate::notify::SmtpSecurity::Tls,
+        other => {
+            return fail(
+                StatusCode::BAD_REQUEST,
+                &format!("chiffrement inconnu : {other} (attendu : none, starttls ou tls)"),
+            )
+        }
+    };
+    let recipients: Vec<String> = body
+        .to
+        .iter()
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .collect();
+    // Refusé tout de suite plutôt qu'au premier incident : une configuration
+    // incomplète se découvrirait le jour où on compte sur elle.
+    if body.host.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "le serveur SMTP est requis");
+    }
+    if body.from.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "l'adresse d'expéditeur est requise");
+    }
+    if recipients.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "au moins un destinataire est requis");
+    }
+    if body.port == 0 {
+        return fail(StatusCode::BAD_REQUEST, "le port SMTP est requis");
+    }
+
+    let cfg = crate::notify::SmtpConfig {
+        host: body.host.trim().to_string(),
+        port: body.port,
+        security,
+        username: body.username.filter(|u| !u.trim().is_empty()),
+        password: body.password.filter(|p| !p.is_empty()),
+        from: body.from.trim().to_string(),
+        to: recipients,
+    };
+    // Le serveur et le port ne sont pas des secrets ; le mot de passe n'entre
+    // pas au journal.
+    let detail = format!("{}:{} ({})", cfg.host, cfg.port, security.as_str());
+    match audited(
+        &state,
+        Some(&actor.username),
+        "notify.smtp",
+        Some(&detail),
+        state.notifier.set_smtp(&cfg),
+    ) {
+        Ok(()) => ok_json(state.notifier.status()),
+        Err(e) => error_response(e),
+    }
+}
+
+async fn clear_smtp(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
+    unconfigure(&state, &actor, "smtp").await
+}
+
+/// Dé-configure un canal. **Rien n'est supprimé en base** : la valeur scellée
+/// est remplacée par du vide, la ligne et sa date restent.
+async fn unconfigure(state: &AppState, actor: &Identity, channel: &'static str) -> Response {
+    match audited(
+        state,
+        Some(&actor.username),
+        "notify.unconfigure",
+        Some(channel),
+        state.notifier.clear(channel),
+    ) {
+        Ok(()) => ok_json(state.notifier.status()),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Envoie un vrai message sur chaque canal configuré et rend le verdict de
+/// chacun. Un canal en panne n'empêche pas l'autre : c'est justement le jour
+/// où l'un tombe qu'on a besoin de l'autre.
+async fn test_notification(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
+    let outcomes = state.notifier.send_test().await;
+    let attempted = outcomes.iter().filter(|o| o.attempted).count();
+    let succeeded = outcomes.iter().filter(|o| o.attempted && o.ok).count();
+    audit(
+        &state,
+        Some(&actor.username),
+        "notify.test",
+        None,
+        if attempted > 0 && succeeded == attempted {
+            Outcome::Success
+        } else {
+            Outcome::Failure
+        },
+        Some(&format!("{succeeded}/{attempted} canal(aux)")),
+    );
+    ok_json(json!({
+        "channels": serde_json::to_value(&outcomes).unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+/// Les abonnements, **héritage déjà résolu**. Le refaire dans l'interface est
+/// exactement l'endroit où les deux se mettraient à diverger.
+async fn list_subscriptions(State(state): State<AppState>) -> Response {
+    let sites = match state.db.list_sites() {
+        Ok(sites) => sites,
+        Err(e) => return error_response(e),
+    };
+    let probes = match state.db.list_probes(None) {
+        Ok(probes) => probes,
+        Err(e) => return error_response(e),
+    };
+    let subscriptions = match state.db.list_notify_subscriptions() {
+        Ok(rows) => rows,
+        Err(e) => return error_response(e),
+    };
+    let stored = |scope: &str, id: &str| -> Option<bool> {
+        subscriptions
+            .iter()
+            .find(|s| s.scope == scope && s.scope_id == id)
+            .and_then(|s| s.enabled)
+    };
+
+    let sites: Vec<serde_json::Value> = sites
+        .iter()
+        .map(|site| {
+            json!({
+                "site_id": site.site_id,
+                "name": site.name,
+                "enabled": stored("site", &site.site_id).unwrap_or(false),
+            })
+        })
+        .collect();
+    let probes: Vec<serde_json::Value> = probes
+        .iter()
+        .map(|probe| {
+            let exception = stored("probe", &probe.probe_id);
+            json!({
+                "probe_id": probe.probe_id,
+                "name": probe.name,
+                "site_id": probe.site_id,
+                "site": probe.site_name,
+                // `exception` dit ce qui est réglé sur la sonde — `null` =
+                // elle suit son site. `enabled` dit ce qui s'applique.
+                "exception": exception,
+                "enabled": exception.unwrap_or_else(|| {
+                    stored("site", &probe.site_id).unwrap_or(false)
+                }),
+            })
+        })
+        .collect();
+
+    ok_json(json!({ "sites": sites, "probes": probes }))
+}
+
+#[derive(Deserialize)]
+struct SubscriptionBody {
+    scope: String,
+    scope_id: String,
+    /// `null` sur une sonde = elle revient à l'héritage de son site. Ce n'est
+    /// pas une suppression : la ligne reste, avec `enabled` à NULL.
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+async fn put_subscription(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Json(body): Json<SubscriptionBody>,
+) -> Response {
+    let detail = match body.enabled {
+        Some(true) => "activé",
+        Some(false) => "désactivé",
+        None => "hérite",
+    };
+    let target = format!("{}:{}", body.scope, body.scope_id);
+    let written = state
+        .db
+        .set_notify_subscription(&body.scope, &body.scope_id, body.enabled);
+    match &written {
+        Ok(()) => audit(
+            &state,
+            Some(&actor.username),
+            "notify.subscription",
+            Some(&target),
+            Outcome::Success,
+            Some(detail),
+        ),
+        Err(e) => audit(
+            &state,
+            Some(&actor.username),
+            "notify.subscription",
+            Some(&target),
+            Outcome::Failure,
+            Some(&e.to_string()),
+        ),
+    }
+    match written {
+        Ok(()) => ok_json(json!({ "ok": true })),
+        Err(e) => error_response(e),
+    }
+}
+
+/// URL absolue avec schéma et hôte. Une URL tronquée donnerait un canal qui
+/// paraît configuré et n'atteint rien.
+fn validate_url(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return Err("URL absolue attendue, avec son schéma (https://…)".into());
+    };
+    if !matches!(scheme, "http" | "https") {
+        return Err("schéma attendu : http ou https".into());
+    }
+    if rest.split(['/', '?']).next().unwrap_or("").trim().is_empty() {
+        return Err("l'URL doit comporter un hôte".into());
+    }
+    Ok(())
 }
 
 // ── Sites ──────────────────────────────────────────────────────────────────
@@ -1773,11 +2099,17 @@ mod tests {
             ));
             influx.ensure_provisioned().await.unwrap();
             let auth = std::sync::Arc::new(crate::auth::Auth::new(db.clone()));
+            // Clé de scellement tirée en mémoire : les tests n'ont pas de
+            // volume où poser un `secret.key`.
+            let secrets = crate::secrets::Secrets::ephemeral(db.clone()).unwrap();
+            let notifier =
+                crate::notify::Notifier::new(db.clone(), secrets, settings.clone());
             let state = AppState {
                 db,
                 auth,
                 settings,
                 influx,
+                notifier,
                 // Les tests jouent le cas courant : hub en clair derrière un
                 // proxy. Le cookie `Secure` est vérifié via `X-Forwarded-Proto`.
                 tls: false,
@@ -1860,7 +2192,18 @@ mod tests {
                     session,
                 ))
                 .await;
-            let site_id = site_json["site_id"].as_str().unwrap().to_string();
+            // Le site existe déjà quand on enrôle une seconde sonde chez le
+            // même client : la création répond 409, on retombe sur l'existant.
+            let site_id = match site_json["site_id"].as_str() {
+                Some(id) => id.to_string(),
+                None => self
+                    .state
+                    .db
+                    .find_site_by_name(site)
+                    .unwrap()
+                    .expect("le site doit exister")
+                    .site_id,
+            };
 
             let (_, code, _) = self
                 .call(with_cookie(
@@ -3564,5 +3907,363 @@ mod tests {
             !body.to_string().contains("un-autre-mot-de-passe"),
             "un mot de passe ne doit jamais entrer au journal"
         );
+    }
+
+    // ── Notifications ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn only_an_admin_configures_the_channels() {
+        let h = Harness::with_admin().await;
+        h.login().await;
+        h.user("olivier", Role::Operator).await;
+        let operator = h.login_as("olivier").await;
+
+        for (method, uri) in [
+            ("GET", "/api/notifications"),
+            ("DELETE", "/api/notifications/webhook"),
+        ] {
+            let (status, _, _) = h
+                .call(with_cookie(empty_request(method, uri), &operator))
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/webhook",
+                    serde_json::json!({ "url": "https://hooks.example/x", "template": "slack" }),
+                ),
+                &operator,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/notifications/test", serde_json::json!({})),
+                &operator,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn the_channels_are_configured_and_never_read_back() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/webhook",
+                    serde_json::json!({
+                        "url": "https://hooks.example/T000/xoxb-tres-secret",
+                        "template": "discord",
+                    }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/smtp",
+                    serde_json::json!({
+                        "host": "smtp.example.org",
+                        "port": 587,
+                        "security": "starttls",
+                        "username": "hub",
+                        "password": "mot-de-passe-tres-secret",
+                        "from": "hub@example.org",
+                        "to": ["ops@example.org"],
+                    }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/notifications"), &admin))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let rendered = body.to_string();
+        assert!(!rendered.contains("xoxb-tres-secret"), "{rendered}");
+        assert!(!rendered.contains("hooks.example"), "{rendered}");
+        assert!(!rendered.contains("mot-de-passe-tres-secret"), "{rendered}");
+        assert_eq!(body["webhook"]["configured"], true);
+        assert_eq!(body["webhook"]["template"], "discord");
+        assert_eq!(body["smtp"]["configured"], true);
+        assert_eq!(body["smtp"]["password_set"], true);
+        assert_eq!(body["delay_secs"], 300);
+
+        // Le journal non plus ne doit pas les porter.
+        let (_, audit, _) = h
+            .call(with_cookie(empty_request("GET", "/api/audit"), &admin))
+            .await;
+        let audit = audit.to_string();
+        assert!(!audit.contains("xoxb-tres-secret"), "{audit}");
+        assert!(!audit.contains("mot-de-passe-tres-secret"), "{audit}");
+        assert!(audit.contains("notify.webhook"), "{audit}");
+        assert!(audit.contains("notify.smtp"), "{audit}");
+    }
+
+    #[tokio::test]
+    async fn unconfiguring_a_channel_is_a_route_of_its_own() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/webhook",
+                serde_json::json!({ "url": "https://hooks.example/x", "template": "slack" }),
+            ),
+            &admin,
+        ))
+        .await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                empty_request("DELETE", "/api/notifications/webhook"),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/notifications"), &admin))
+            .await;
+        assert_eq!(body["webhook"]["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_channel_configuration_is_refused() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+
+        for (uri, body) in [
+            (
+                "/api/notifications/webhook",
+                serde_json::json!({ "url": "pas-une-url" }),
+            ),
+            (
+                "/api/notifications/smtp",
+                serde_json::json!({ "host": "", "port": 587, "from": "x@y", "to": ["a@b"] }),
+            ),
+            (
+                "/api/notifications/smtp",
+                serde_json::json!({ "host": "smtp.example.org", "port": 587, "from": "x@y", "to": [] }),
+            ),
+        ] {
+            let (status, _, _) = h
+                .call(with_cookie(json_request("PUT", uri, body.clone()), &admin))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_test_button_reports_each_channel_separately() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let hook = crate::notify::testing::FakeWebhook::start().await;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/webhook",
+                serde_json::json!({ "url": hook.url, "template": "slack" }),
+            ),
+            &admin,
+        ))
+        .await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/notifications/test", serde_json::json!({})),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let channels = body["channels"].as_array().unwrap();
+        let webhook = channels.iter().find(|c| c["channel"] == "webhook").unwrap();
+        assert_eq!(webhook["attempted"], true);
+        assert_eq!(webhook["ok"], true);
+        let smtp = channels.iter().find(|c| c["channel"] == "smtp").unwrap();
+        assert_eq!(smtp["attempted"], false, "on ne prétend pas avoir essayé");
+
+        assert_eq!(hook.received().len(), 1, "un vrai message doit partir");
+    }
+
+    #[tokio::test]
+    async fn the_subscription_view_resolves_the_inheritance_for_the_interface() {
+        // L'héritage est calculé côté serveur : le refaire en JavaScript est
+        // exactement l'endroit où les deux se mettraient à diverger.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let (paris, _) = h.enroll(&admin, "Durand", "Paris").await;
+        let (banc, _) = h.enroll(&admin, "Durand", "Banc de test").await;
+        let site_id = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/subscriptions",
+                serde_json::json!({ "scope": "site", "scope_id": site_id, "enabled": true }),
+            ),
+            &admin,
+        ))
+        .await;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/subscriptions",
+                serde_json::json!({ "scope": "probe", "scope_id": banc, "enabled": false }),
+            ),
+            &admin,
+        ))
+        .await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", "/api/notifications/subscriptions"),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let sites = body["sites"].as_array().unwrap();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0]["enabled"], true);
+
+        let probes = body["probes"].as_array().unwrap();
+        let paris_row = probes.iter().find(|p| p["probe_id"] == paris).unwrap();
+        assert_eq!(paris_row["enabled"], true, "Paris hérite de son site");
+        assert!(paris_row["exception"].is_null(), "sans exception");
+
+        let banc_row = probes.iter().find(|p| p["probe_id"] == banc).unwrap();
+        assert_eq!(banc_row["enabled"], false);
+        assert_eq!(banc_row["exception"], false, "l'exception est visible");
+    }
+
+    #[tokio::test]
+    async fn an_exception_can_be_given_back_to_its_site() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let (probe_id, _) = h.enroll(&admin, "Durand", "Paris").await;
+        let site_id = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/subscriptions",
+                serde_json::json!({ "scope": "site", "scope_id": site_id, "enabled": true }),
+            ),
+            &admin,
+        ))
+        .await;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/subscriptions",
+                serde_json::json!({ "scope": "probe", "scope_id": probe_id, "enabled": false }),
+            ),
+            &admin,
+        ))
+        .await;
+
+        // `enabled: null` veut dire « hérite ». Ce n'est pas une suppression.
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/subscriptions",
+                    serde_json::json!({ "scope": "probe", "scope_id": probe_id, "enabled": null }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(h.state.db.notify_enabled_for_probe(&probe_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_viewer_reads_the_subscriptions_but_does_not_change_them() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.enroll(&admin, "Durand", "Paris").await;
+        let site_id = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+        h.user("claire", Role::Viewer).await;
+        let viewer = h.login_as("claire").await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                empty_request("GET", "/api/notifications/subscriptions"),
+                &viewer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/subscriptions",
+                    serde_json::json!({ "scope": "site", "scope_id": site_id, "enabled": true }),
+                ),
+                &viewer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(h.state.db.list_notify_subscriptions().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_operator_toggles_a_site_and_it_is_recorded() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.enroll(&admin, "Durand", "Paris").await;
+        let site_id = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+        h.user("olivier", Role::Operator).await;
+        let operator = h.login_as("olivier").await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/subscriptions",
+                    serde_json::json!({ "scope": "site", "scope_id": site_id, "enabled": true }),
+                ),
+                &operator,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let entries = h.audit(&admin, "notify.subscription").await;
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0]["actor"], "olivier");
+    }
+
+    #[tokio::test]
+    async fn the_alert_delay_is_a_plain_setting() {
+        // Le seul réglage de notification qui n'est pas un secret.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/settings",
+                    serde_json::json!({ "notify_delay_secs": "600" }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["notify_delay_secs"], 600);
+        assert_eq!(h.state.settings.notify_delay_secs(), 600);
     }
 }
