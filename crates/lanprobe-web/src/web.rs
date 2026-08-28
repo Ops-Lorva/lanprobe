@@ -711,9 +711,14 @@ async fn notifications(State(state): State<AppState>) -> Response {
     ok_json(state.notifier.status())
 }
 
+/// `Option<Option<…>>` distingue **absent** de `null` : l'interface n'a jamais
+/// vu l'URL ni le mot de passe, les lui faire renvoyer pour corriger un port
+/// reviendrait à les effacer un jour sur deux. Absent = « ne touche pas »,
+/// `null` = « retire-le ».
 #[derive(Deserialize)]
 struct WebhookBody {
-    url: String,
+    #[serde(default)]
+    url: Option<String>,
     #[serde(default)]
     template: Option<String>,
 }
@@ -734,13 +739,25 @@ async fn put_webhook(
             )
         }
     };
-    if let Err(message) = validate_url(&body.url) {
-        return fail(StatusCode::BAD_REQUEST, &message);
-    }
-    let cfg = crate::notify::WebhookConfig {
-        url: body.url.trim().to_string(),
-        template,
+    let existing = state.notifier.webhook_config();
+    let url = match body.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        Some(url) => {
+            if let Err(message) = validate_url(url) {
+                return fail(StatusCode::BAD_REQUEST, &message);
+            }
+            url.to_string()
+        }
+        None => match existing.as_ref() {
+            Some(cfg) => cfg.url.clone(),
+            None => {
+                return fail(
+                    StatusCode::BAD_REQUEST,
+                    "l'URL du webhook est requise à la première configuration",
+                )
+            }
+        },
     };
+    let cfg = crate::notify::WebhookConfig { url, template };
     // Le journal dit qu'on a configuré le canal et avec quel modèle. **Pas
     // l'URL** : elle est le secret.
     match audited(
@@ -770,10 +787,21 @@ struct SmtpBody {
     security: Option<String>,
     #[serde(default)]
     username: Option<String>,
-    #[serde(default)]
-    password: Option<String>,
+    /// Absent = on garde celui qui est déjà scellé ; `null` = on le retire.
+    #[serde(default, deserialize_with = "present_even_if_null")]
+    password: Option<Option<String>>,
     from: String,
     to: Vec<String>,
+}
+
+/// Distingue « champ absent » de « champ à `null` ». Sans ça, serde rend
+/// `None` dans les deux cas, et l'interface — qui n'a jamais vu le mot de
+/// passe — l'effacerait à chaque correction de port.
+fn present_even_if_null<'de, D>(de: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
 }
 
 async fn put_smtp(
@@ -818,7 +846,13 @@ async fn put_smtp(
         port: body.port,
         security,
         username: body.username.filter(|u| !u.trim().is_empty()),
-        password: body.password.filter(|p| !p.is_empty()),
+        password: match body.password {
+            // Fourni : on prend ce qui est fourni, une chaîne vide valant
+            // « pas de mot de passe ».
+            Some(given) => given.filter(|p| !p.is_empty()),
+            // Absent : on garde celui qui est déjà scellé.
+            None => state.notifier.smtp_config().and_then(|c| c.password),
+        },
         from: body.from.trim().to_string(),
         to: recipients,
     };
@@ -4265,5 +4299,126 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["notify_delay_secs"], 600);
         assert_eq!(h.state.settings.notify_delay_secs(), 600);
+    }
+
+    #[tokio::test]
+    async fn editing_a_channel_does_not_wipe_the_secret_it_cannot_show() {
+        // L'interface n'a jamais vu le mot de passe ni l'URL : les lui faire
+        // renvoyer pour corriger un port reviendrait à les effacer un jour
+        // sur deux.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/smtp",
+                serde_json::json!({
+                    "host": "smtp.example.org", "port": 587,
+                    "password": "mot-de-passe-smtp",
+                    "from": "hub@example.org", "to": ["ops@example.org"],
+                }),
+            ),
+            &admin,
+        ))
+        .await;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/webhook",
+                serde_json::json!({ "url": "https://hooks.example/x", "template": "slack" }),
+            ),
+            &admin,
+        ))
+        .await;
+
+        // Second envoi sans le mot de passe, sans l'URL : on ne corrige que
+        // le port et le modèle.
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/smtp",
+                    serde_json::json!({
+                        "host": "smtp.example.org", "port": 2525,
+                        "from": "hub@example.org", "to": ["ops@example.org"],
+                    }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["smtp"]["port"], 2525);
+        assert_eq!(body["smtp"]["password_set"], true, "le mot de passe a été effacé");
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/webhook",
+                    serde_json::json!({ "template": "discord" }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["webhook"]["template"], "discord");
+        assert_eq!(
+            h.state.notifier.webhook_config().unwrap().url,
+            "https://hooks.example/x",
+            "l'URL a été perdue"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_null_does_remove_the_smtp_password() {
+        // Absent veut dire « ne touche pas » ; `null` veut dire « retire-le ».
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/smtp",
+                serde_json::json!({
+                    "host": "smtp.example.org", "port": 587,
+                    "password": "mot-de-passe-smtp",
+                    "from": "hub@example.org", "to": ["ops@example.org"],
+                }),
+            ),
+            &admin,
+        ))
+        .await;
+
+        let (_, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/smtp",
+                    serde_json::json!({
+                        "host": "smtp.example.org", "port": 587, "password": null,
+                        "from": "hub@example.org", "to": ["ops@example.org"],
+                    }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(body["smtp"]["password_set"], false);
+    }
+
+    #[tokio::test]
+    async fn a_webhook_without_url_and_without_history_is_refused() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/webhook",
+                    serde_json::json!({ "template": "slack" }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 }

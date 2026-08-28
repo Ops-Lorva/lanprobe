@@ -532,7 +532,7 @@ sonde**, révocable, et chaque session journalisée.
 
 À cadrer pour lui-même, pas à greffer.
 
-## 11. Audit et comptes (non implémenté)
+## 11. Audit et comptes
 
 ### Deux journaux, à ne pas confondre
 
@@ -569,6 +569,118 @@ client ou à un collègue sans qu'un clic révoque une sonde.
 
 L'application des rôles se fait **côté serveur**, route par route. Une interface
 qui se contente de masquer les boutons ne protège rien.
+
+### Rôle exigé par chaque route
+
+Trois groupes, appliqués par middleware après authentification. Les rôles sont
+ordonnés : `viewer < operator < admin`, et une route ouverte à `operator` est
+donc aussi ouverte à `admin`.
+
+| Route | Rôle | Note |
+|---|---|---|
+| `GET /api/status`, `POST /api/setup`, `POST /api/login`, `POST /api/logout` | — | authentification propre |
+| `POST /api/probes/enroll`, `.../write`, `.../heartbeat` | — | code d'enrôlement ou jeton de sonde |
+| `GET /api/sites` | `viewer` | accepte aussi les identifiants du compte (Basic) |
+| `GET /api/probes`, `GET /api/probes/{id}/metrics` | `viewer` | |
+| `GET /api/settings`, `GET /api/settings/influx-advertise`, `GET /api/influx` | `viewer` | aucune de ces réponses ne porte de secret |
+| `GET /api/notifications/subscriptions` | `viewer` | |
+| `POST /api/sites`, `PATCH`/`DELETE /api/sites/{id}` | `operator` | |
+| `POST /api/enroll-codes`, `GET /api/enroll-codes/pending` | `operator` | le code y figure **en clair** pendant sa validité |
+| `PATCH`/`DELETE /api/probes/{id}` | `operator` | |
+| `POST /api/probes/{id}/rotate`, `/revoke-token`, `/reenroll-code` | `operator` | |
+| `POST /api/settings/influx-advertise/test` | `operator` | émet une requête sortante |
+| `PUT /api/notifications/subscriptions` | `operator` | |
+| `PUT /api/settings`, `PUT /api/settings/influx-advertise` | `admin` | la rétention en fait partie |
+| `POST /api/influx/read-token`, `GET`/`DELETE /api/influx/read-tokens[/{id}]` | `admin` | un jeton qui quitte le hub |
+| `GET`/`POST /api/users`, `PATCH /api/users/{username}`, `POST /api/users/{username}/password` | `admin` | |
+| `GET /api/audit` | `admin` | |
+| `GET /api/notifications`, `PUT`/`DELETE /api/notifications/{smtp,webhook}`, `POST /api/notifications/test` | `admin` | |
+
+Un refus rend `403` avec `{ "error": "rôle insuffisant pour cette action" }`
+— et **écrit une ligne d'audit** `access.denied`. Un `401` renverrait à l'écran
+de connexion, où se reconnecter ne changerait rien.
+
+Le rôle est **relu à chaque requête**, jamais figé dans la session : une
+rétrogradation ou une désactivation prend effet tout de suite, y compris pour
+qui garde son onglet ouvert. Désactiver un compte invalide donc aussi ses
+sessions en cours.
+
+L'enrôlement par identifiants de compte (`POST /api/probes/enroll` avec
+`username`/`password`/`site`) vérifie lui aussi le rôle : `403` en dessous
+d'`operator`. Sans ce contrôle, le chemin scripté contournait tous les autres.
+
+### Comptes — `admin`
+
+**Aucune route ne supprime un compte.** On désactive : la ligne reste, parce
+que le journal d'audit la nomme. Trois refus (`409`) protègent le dernier
+accès : pas d'auto-rétrogradation, pas d'auto-désactivation, pas de
+désactivation ni de rétrogradation du dernier administrateur actif.
+
+```
+GET    /api/users
+       → [ { "username": "admin", "role": "admin",
+             "created_at": 1787788800, "disabled_at": null } ]
+
+POST   /api/users
+       { "username": "claire", "password": "…", "role": "viewer" }
+       → 201 { "username": "claire", "role": "viewer",
+               "created_at": …, "disabled_at": null }
+       400 rôle inconnu · 409 nom déjà pris · 409 mot de passe < 8 caractères
+
+PATCH  /api/users/{username}
+       { "role": "operator" }   et/ou   { "disabled": true }
+       → 200 <le compte, forme ci-dessus>
+       400 rôle inconnu · 404 compte inconnu · 409 dernier admin / soi-même
+
+POST   /api/users/{username}/password
+       { "password": "…" }  → 200 { "ok": true }
+       404 compte inconnu · 409 mot de passe < 8 caractères
+
+DELETE /api/users/{username} → 405, et il en sera toujours ainsi.
+```
+
+Le hash du mot de passe n'apparaît dans aucune réponse.
+
+### Journal d'audit — `admin`, lecture seule
+
+```
+GET /api/audit?limit=&before_id=&actor=&action=
+    → { "entries": [ { "id": 42, "at": 1787788800, "actor": "admin",
+                       "action": "probe.revoke", "target": "<probe_id>",
+                       "outcome": "success" | "failure",
+                       "detail": "…" | null } ],
+        "next_before_id": 37 | null }
+```
+
+`limit` vaut 100 par défaut, plafonné à 500. La pagination va à rebours :
+`before_id` reprend là où la page précédente s'est arrêtée. Un `OFFSET`
+rejouerait des lignes déjà vues dès qu'une ligne s'ajoute pendant la lecture.
+`next_before_id` n'est rendu que si la page est pleine — sinon l'interface
+afficherait un « suivant » qui ne mène à rien.
+
+`actor` vaut `null` pour une tentative anonyme : une connexion ratée sur un
+compte inexistant n'a pas d'acteur connu, et **la saisie n'est jamais
+recopiée** — ce champ reçoit un jour un mot de passe tapé dans la mauvaise
+case.
+
+**Aucune route ne supprime une ligne, et il n'y a pas de purge par
+ancienneté.** `DELETE /api/audit` rend `405`. Un journal qu'on peut nettoyer ne
+prouve rien, et quelques dizaines d'octets par geste d'opérateur ne justifient
+pas d'inventer un chemin d'effacement.
+
+Actions journalisées : `auth.setup`, `auth.login`, `auth.logout`,
+`access.denied`, `user.create`, `user.role`, `user.password`, `user.disable`,
+`user.enable`, `site.create`, `site.rename`, `site.delete`, `enroll.code`,
+`probe.enroll`, `probe.reenroll`, `probe.reenroll_code`, `probe.update`,
+`probe.revoke`, `probe.rotate`, `probe.revoke_token`, `settings.update`,
+`settings.retention`, `settings.advertise`, `influx.read_token.create`,
+`influx.read_token.revoke`, `notify.webhook`, `notify.smtp`,
+`notify.unconfigure`, `notify.subscription`, `notify.test`, `probe.down`,
+`probe.up`.
+
+**Jamais de secret dans une ligne.** Ni jeton de sonde, ni jeton de lecture, ni
+code d'enrôlement, ni mot de passe, ni URL de webhook. Les réglages, eux, y
+figurent en clair : la table `settings` n'en contient aucun, par construction.
 
 ## 12. Inventaire réseau — le détail va en SQLite, pas dans Influx
 
@@ -660,7 +772,7 @@ défaut `0` = illimité) — et comme pour la rétention Influx, **la réduire s
 des données** : même confirmation explicite exigée, côté serveur comme côté
 interface.
 
-## 13. Notifications (non implémenté)
+## 13. Notifications
 
 ### Deux canaux, pas cinq
 
@@ -701,3 +813,120 @@ Ils vivent dans un stockage scellé à part, chiffré par le mécanisme existant
 (`secrets.rs`, marqueur `enc:v1:`), **jamais renvoyé par l'API**. L'interface
 affiche « configuré » ou « non configuré », avec un bouton de test — jamais la
 valeur.
+
+### Ce que le hub expose
+
+Toutes ces routes sont réservées à `admin`, sauf les abonnements — `viewer` en
+lecture, `operator` en écriture, parce que régler l'alerte d'un site est une
+conduite de parc et non une administration du hub.
+
+```
+GET /api/notifications
+    → { "delay_secs": 300,
+        "smtp": { "configured": true, "host": "smtp.example.org", "port": 587,
+                  "security": "starttls", "username": "hub",
+                  "password_set": true, "from": "hub@…", "to": ["ops@…"] },
+        "webhook": { "configured": true, "template": "discord" } }
+```
+
+**Ni l'URL du webhook ni le mot de passe SMTP n'apparaissent** — jamais, sur
+aucune route. Les autres champs SMTP sont rendus parce qu'ils ne sont pas des
+secrets et qu'un formulaire d'édition qui les cacherait obligerait à tout
+retaper à chaque correction de port.
+
+Un canal non configuré rend `{ "configured": false, "unreadable": <bool> }`.
+`unreadable: true` veut dire qu'une valeur scellée existe mais ne s'ouvre plus
+— volume restauré sans son `secret.key`. L'interface doit le dire : « configuré
+mais illisible » n'est pas « jamais réglé », et la réponse n'est pas la même.
+
+```
+PUT    /api/notifications/webhook
+       { "url": "https://…", "template": "generic" | "slack" | "discord" }
+       → 200 <même corps que GET>   ·   400 URL ou modèle invalide
+
+PUT    /api/notifications/smtp
+       { "host": "smtp.example.org", "port": 587,
+         "security": "none" | "starttls" | "tls",
+         "username": "hub" | null, "password": "…" | null,
+         "from": "hub@example.org", "to": ["ops@example.org"] }
+       → 200 <même corps que GET>
+       400 serveur, expéditeur, port ou destinataire manquant, chiffrement inconnu
+
+DELETE /api/notifications/{webhook,smtp}
+       → 200 <même corps que GET>, canal dé-configuré.
+       Aucune ligne n'est supprimée : la valeur scellée est vidée.
+
+POST   /api/notifications/test
+       → { "channels": [ { "channel": "webhook", "attempted": true,
+                           "ok": false, "error": "le webhook a répondu 404 : …" },
+                         { "channel": "smtp", "attempted": false,
+                           "ok": false, "error": null } ] }
+```
+
+Le test envoie un **vrai** message sur chaque canal configuré. `attempted:
+false` veut dire « canal non configuré » : on ne prétend pas avoir essayé.
+
+`security` par défaut vaut `starttls`, `template` vaut `generic`.
+
+**Champ absent ≠ champ à `null`.** L'interface n'a jamais vu l'URL du webhook
+ni le mot de passe SMTP : les lui faire renvoyer pour corriger un port
+reviendrait à les effacer un jour sur deux. Omettre `password` ou `url` garde
+la valeur déjà scellée ; envoyer `null` (ou `""`) la retire. À la première
+configuration, `url` est obligatoire — il n'y a rien à conserver.
+
+```
+GET /api/notifications/subscriptions
+    → { "sites":  [ { "site_id": "…", "name": "Durand", "enabled": true } ],
+        "probes": [ { "probe_id": "…", "name": "Paris", "site_id": "…",
+                      "site": "Durand",
+                      "exception": null,   // ce qui est réglé SUR la sonde
+                      "enabled": true } ]  // ce qui s'applique
+      }
+
+PUT /api/notifications/subscriptions
+    { "scope": "site" | "probe", "scope_id": "…",
+      "enabled": true | false | null }
+    → 200 { "ok": true }   ·   409 portée inconnue
+```
+
+**L'héritage est résolu côté serveur.** `enabled` dit ce qui s'applique,
+`exception` dit ce qui est réglé sur la sonde — `null` signifie « suit son
+site ». Recalculer cette résolution dans l'interface est exactement l'endroit
+où les deux se mettraient à diverger.
+
+`enabled: null` sur une sonde la rend à son site. Ce n'est pas une suppression :
+la ligne reste, avec `enabled` à NULL.
+
+`delay_secs` se règle par `PUT /api/settings` sous la clé `notify_delay_secs` —
+c'est le seul réglage de notification qui n'est pas un secret, il a donc sa
+place dans `settings` comme les autres.
+
+### Ce que la boucle fait, et ce qu'elle ne fait pas
+
+Elle passe toutes les 30 secondes ; c'est `notify_delay_secs` qui décide de la
+réactivité, pas la cadence de la boucle. Une sonde est déclarée hors ligne
+quand son dernier battement remonte à plus que le délai.
+
+Trois cas se taisent volontairement :
+
+- une sonde **jamais vue** — on ne revient pas d'un état où l'on n'a jamais
+  été, et une machine enrôlée qu'on n'a pas encore branchée n'est pas une
+  panne ;
+- une sonde **révoquée** — elle a cessé d'émettre parce qu'on le lui a demandé ;
+- la **première évaluation** d'une sonde — activer les alertes ne rejoue pas
+  les pannes en cours. L'interface les montre déjà ; ce qu'on attend d'une
+  notification, c'est ce qui change après.
+
+Chaque transition émise écrit une ligne d'audit `probe.down` ou `probe.up`,
+dont le `detail` dit quels canaux ont abouti — jamais vers quelle adresse.
+
+### Limites assumées du client SMTP
+
+Écrit à la main (`smtp.rs`) : `EHLO`, `STARTTLS`, TLS implicite (465),
+`AUTH LOGIN` et `AUTH PLAIN`, plusieurs destinataires, corps UTF-8 en base64.
+Pas de pièce jointe, pas d'OAuth, pas de `DSN`, pas de pipelining. Le
+certificat du relais est vérifié contre le magasin de la plateforme —
+contrairement à Influx, joint en local sur un certificat auto-signé dont le hub
+épingle l'empreinte, un relais SMTP est une machine distante quelconque, et
+accepter n'importe quel certificat livrerait le mot de passe au premier
+intermédiaire venu.
