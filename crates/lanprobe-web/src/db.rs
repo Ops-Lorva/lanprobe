@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -106,6 +106,31 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE users ADD COLUMN disabled_at INTEGER;
     "#,
+    // v5 → v6 : le journal d'audit.
+    //
+    // **Ajout seul.** Aucune requête de ce fichier n'en supprime une ligne, et
+    // aucune route n'y mène : un journal qu'on peut nettoyer ne prouve rien.
+    // Pas de purge par ancienneté non plus — quelques dizaines d'octets par
+    // geste d'opérateur ne justifient pas d'inventer un chemin d'effacement.
+    //
+    // `actor` est nullable : une tentative de connexion sur un compte
+    // inexistant n'a pas d'acteur connu, et la laisser tomber pour cette
+    // raison effacerait précisément les lignes qui comptent.
+    r#"
+    CREATE TABLE audit_log (
+      id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      at      INTEGER NOT NULL,
+      actor   TEXT,
+      action  TEXT NOT NULL,
+      target  TEXT,
+      outcome TEXT NOT NULL,
+      detail  TEXT
+    );
+
+    CREATE INDEX audit_log_at     ON audit_log(at DESC);
+    CREATE INDEX audit_log_actor  ON audit_log(actor);
+    CREATE INDEX audit_log_action ON audit_log(action);
+    "#,
 ];
 
 /// Erreurs remontées jusqu'à la couche HTTP, qui les traduit en codes. Un
@@ -189,7 +214,81 @@ impl serde::Serialize for Role {
     }
 }
 
-/// Un compte, tel que l'interface l'affiche. **Le hash du mot de passe n'en
+/// Résultat d'une action journalisée. Les échecs comptent autant que les
+/// réussites : un journal qui n'enregistre que les succès ne montre jamais
+/// une tentative d'intrusion, il montre celui qui a fini par entrer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Success,
+    Failure,
+}
+
+impl Outcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Outcome::Success => "success",
+            Outcome::Failure => "failure",
+        }
+    }
+
+    fn from_stored(value: &str) -> Outcome {
+        match value {
+            "success" => Outcome::Success,
+            _ => Outcome::Failure,
+        }
+    }
+}
+
+impl serde::Serialize for Outcome {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+/// Une ligne du journal d'audit. **Jamais de secret ici** : ni jeton, ni mot
+/// de passe, ni code d'enrôlement. `detail` est une phrase courte destinée à
+/// être lue, pas un vidage de la requête.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub at: i64,
+    /// `None` pour une tentative anonyme — connexion sur un compte inconnu.
+    pub actor: Option<String>,
+    pub action: String,
+    pub target: Option<String>,
+    pub outcome: Outcome,
+    pub detail: Option<String>,
+}
+
+/// Plafond du nombre de lignes qu'une requête peut ramener. Le journal se lit
+/// par pages : une requête qui le viderait d'un coup ferait travailler le hub
+/// pour une page que personne ne lit jusqu'au bout.
+pub const AUDIT_MAX_LIMIT: i64 = 500;
+pub const AUDIT_DEFAULT_LIMIT: i64 = 100;
+
+#[derive(Debug, Clone)]
+pub struct AuditFilter {
+    pub limit: i64,
+    /// Pagination à rebours : la page suivante est « plus ancienne que cet
+    /// identifiant ». Un décalage par `OFFSET` glisserait à chaque ligne
+    /// ajoutée pendant la lecture, et rejouerait des lignes déjà vues.
+    pub before_id: Option<i64>,
+    pub actor: Option<String>,
+    pub action: Option<String>,
+}
+
+impl Default for AuditFilter {
+    fn default() -> Self {
+        Self {
+            limit: AUDIT_DEFAULT_LIMIT,
+            before_id: None,
+            actor: None,
+            action: None,
+        }
+    }
+}
+
+/// Un compte, tel que l'interface l'affiche./// Un compte, tel que l'interface l'affiche. **Le hash du mot de passe n'en
 /// fait pas partie** : aucune sérialisation ne l'expose.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UserRecord {
@@ -771,6 +870,60 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    // ── Journal d'audit ────────────────────────────────────────────────────
+
+    /// Ajoute une ligne. **Il n'existe aucune opération inverse** : pas de
+    /// suppression, pas de purge, pas même pour un administrateur.
+    ///
+    /// L'appelant est responsable de ne jamais passer de secret — `detail`
+    /// sert à dire « rétention portée à 90 jours », pas à recopier un corps
+    /// de requête.
+    pub fn record_audit(
+        &self,
+        actor: Option<&str>,
+        action: &str,
+        target: Option<&str>,
+        outcome: Outcome,
+        detail: Option<&str>,
+    ) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO audit_log (at, actor, action, target, outcome, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![now(), actor, action, target, outcome.as_str(), detail],
+        )?;
+        Ok(())
+    }
+
+    /// Les lignes, de la plus récente à la plus ancienne.
+    pub fn list_audit(&self, filter: &AuditFilter) -> DbResult<Vec<AuditEntry>> {
+        let limit = filter.limit.clamp(1, AUDIT_MAX_LIMIT);
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, at, actor, action, target, outcome, detail FROM audit_log
+             WHERE (?1 IS NULL OR id < ?1)
+               AND (?2 IS NULL OR actor = ?2)
+               AND (?3 IS NULL OR action = ?3)
+             ORDER BY id DESC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![filter.before_id, filter.actor, filter.action, limit],
+            |r| {
+                Ok(AuditEntry {
+                    id: r.get(0)?,
+                    at: r.get(1)?,
+                    actor: r.get(2)?,
+                    action: r.get(3)?,
+                    target: r.get(4)?,
+                    outcome: Outcome::from_stored(&r.get::<_, String>(5)?),
+                    detail: r.get(6)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     // ── Sites ──────────────────────────────────────────────────────────────
@@ -2119,6 +2272,184 @@ mod tests {
         for forbidden in ["hash", "password", "mot_de_passe"] {
             assert!(!rendered.contains(forbidden), "{forbidden} exposé : {rendered}");
         }
+    }
+
+    // ── Journal d'audit ────────────────────────────────────────────────
+
+    #[test]
+    fn migration_v6_adds_the_audit_log_to_an_existing_database() {
+        let dir = tmp_dir("v5-to-v6");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..5] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 5").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert!(db.table_exists("audit_log").unwrap());
+        assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_audit_line_carries_its_actor_action_target_and_outcome() {
+        let db = open_memory();
+        db.record_audit(Some("admin"), "probe.revoke", Some("p-1"), Outcome::Success, None)
+            .unwrap();
+
+        let entries = db.list_audit(&AuditFilter::default()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].actor.as_deref(), Some("admin"));
+        assert_eq!(entries[0].action, "probe.revoke");
+        assert_eq!(entries[0].target.as_deref(), Some("p-1"));
+        assert_eq!(entries[0].outcome, Outcome::Success);
+        assert!(entries[0].at > 0, "la ligne doit être datée");
+    }
+
+    #[test]
+    fn failures_are_recorded_as_much_as_successes() {
+        // Un journal qui n'enregistre que les succès ne montre jamais une
+        // tentative d'intrusion : il montre celui qui a fini par entrer.
+        let db = open_memory();
+        db.record_audit(Some("pirate"), "auth.login", None, Outcome::Failure, None)
+            .unwrap();
+        db.record_audit(Some("admin"), "auth.login", None, Outcome::Success, None)
+            .unwrap();
+
+        let entries = db.list_audit(&AuditFilter::default()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.outcome == Outcome::Failure));
+    }
+
+    #[test]
+    fn an_anonymous_attempt_is_recorded_without_an_actor() {
+        // Une tentative sur un compte inexistant n'a pas d'acteur connu ; la
+        // laisser tomber au motif qu'on ne sait pas qui c'était effacerait
+        // précisément les lignes qui comptent.
+        let db = open_memory();
+        db.record_audit(None, "auth.login", None, Outcome::Failure, Some("compte inconnu"))
+            .unwrap();
+
+        let entries = db.list_audit(&AuditFilter::default()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].actor.is_none());
+        assert_eq!(entries[0].detail.as_deref(), Some("compte inconnu"));
+    }
+
+    #[test]
+    fn audit_lines_come_back_newest_first_and_paginate_backwards() {
+        let db = open_memory();
+        for n in 0..5 {
+            db.record_audit(Some("admin"), &format!("action.{n}"), None, Outcome::Success, None)
+                .unwrap();
+        }
+
+        let page = db
+            .list_audit(&AuditFilter {
+                limit: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].action, "action.4", "la plus récente d'abord");
+        assert_eq!(page[1].action, "action.3");
+
+        let next = db
+            .list_audit(&AuditFilter {
+                limit: 2,
+                before_id: Some(page[1].id),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(next[0].action, "action.2");
+        assert_eq!(next[1].action, "action.1");
+    }
+
+    #[test]
+    fn the_audit_log_filters_by_actor_and_by_action() {
+        let db = open_memory();
+        db.record_audit(Some("admin"), "auth.login", None, Outcome::Success, None).unwrap();
+        db.record_audit(Some("claire"), "auth.login", None, Outcome::Failure, None).unwrap();
+        db.record_audit(Some("claire"), "probe.enroll", None, Outcome::Success, None).unwrap();
+
+        let by_actor = db
+            .list_audit(&AuditFilter {
+                actor: Some("claire".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(by_actor.len(), 2);
+
+        let by_action = db
+            .list_audit(&AuditFilter {
+                action: Some("auth.login".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(by_action.len(), 2);
+    }
+
+    #[test]
+    fn the_audit_limit_is_capped_so_one_request_cannot_drain_the_log() {
+        let db = open_memory();
+        for n in 0..3 {
+            db.record_audit(Some("admin"), &format!("a{n}"), None, Outcome::Success, None)
+                .unwrap();
+        }
+        let all = db
+            .list_audit(&AuditFilter {
+                limit: 100_000,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(all.len(), 3, "le plafond ne doit pas tronquer un journal court");
+        assert!(AUDIT_MAX_LIMIT <= 1000, "un plafond qui ne plafonne rien ne sert à rien");
+    }
+
+    #[test]
+    fn disabling_an_account_leaves_its_audit_trail_intact() {
+        // C'est la raison même pour laquelle on ne supprime pas un compte.
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+        db.record_audit(Some("claire"), "probe.revoke", Some("p-1"), Outcome::Success, None)
+            .unwrap();
+
+        db.set_user_disabled("admin", "claire", true).unwrap();
+
+        let entries = db
+            .list_audit(&AuditFilter {
+                actor: Some("claire".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(entries.len(), 1, "les lignes de l'acteur doivent rester");
+    }
+
+    #[test]
+    fn the_audit_log_survives_a_restart() {
+        let dir = tmp_dir("audit-restart");
+        let path = dir.join("hub.sqlite");
+
+        let db = Db::open(&path).unwrap();
+        db.record_audit(Some("admin"), "auth.login", None, Outcome::Success, None)
+            .unwrap();
+        drop(db);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.list_audit(&AuditFilter::default()).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Chaque test travaille dans son propre dossier — les tests Rust
