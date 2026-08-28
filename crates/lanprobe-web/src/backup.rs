@@ -568,6 +568,131 @@ fn parse_archive_name(file: &str) -> Option<(String, i64)> {
     Some((hub_version.to_string(), at))
 }
 
+// ── Déclenchement automatique ──────────────────────────────────────────────
+
+/// Instant de l'archive la plus récente, ou `None` s'il n'y en a aucune.
+///
+/// L'échéance se lit **dans les archives**, jamais depuis le démarrage du
+/// processus : un hub redémarré plus souvent que sa cadence ne sauvegarderait
+/// jamais, le compte à rebours repartant de zéro à chaque fois, et personne
+/// ne s'en apercevrait avant d'en avoir besoin.
+pub fn last_backup_at(backup_dir: &Path) -> Option<i64> {
+    list(backup_dir).ok()?.first().map(|a| a.created_at_unix)
+}
+
+/// Vrai s'il est temps de sauvegarder. Sans archive du tout, c'est tout de
+/// suite : attendre un jour entier laisserait la journée de configuration —
+/// celle où l'on crée les comptes et enrôle le parc — sans filet.
+pub fn is_due(last_backup: Option<i64>, now: i64, interval_hours: i64) -> bool {
+    if interval_hours <= 0 {
+        return false;
+    }
+    match last_backup {
+        None => true,
+        Some(last) => now - last >= interval_hours * 3600,
+    }
+}
+
+/// Boucle de sauvegarde planifiée.
+///
+/// C'est le mode de fonctionnement normal : personne ne doit avoir à penser à
+/// déclencher une sauvegarde. Le pas est court devant la cadence — c'est la
+/// cadence qui décide, pas le rythme de la boucle — pour qu'un changement de
+/// réglage prenne effet sans redémarrage.
+pub async fn run(scheduler: Scheduler, step: std::time::Duration) {
+    loop {
+        tokio::time::sleep(step).await;
+        scheduler.run_once().await;
+    }
+}
+
+/// Ce qu'il faut pour sauvegarder sans requête HTTP.
+#[derive(Clone)]
+pub struct Scheduler {
+    pub db: std::sync::Arc<Db>,
+    pub settings: crate::settings::Settings,
+    pub config_dir: PathBuf,
+    pub backup_dir: PathBuf,
+    pub influx: Option<InfluxTarget>,
+}
+
+impl Scheduler {
+    /// Sauvegarde si l'échéance est passée, puis applique la rétention.
+    /// Rend le nom de l'archive produite, le cas échéant.
+    pub async fn run_once(&self) -> Option<String> {
+        if !self.settings.backup_enabled() {
+            return None;
+        }
+        let interval = self.settings.backup_interval_hours();
+        let backup_dir = self.backup_dir.clone();
+        if !is_due(last_backup_at(&backup_dir), now(), interval) {
+            return None;
+        }
+
+        let (db, config_dir, influx, keep) = (
+            self.db.clone(),
+            self.config_dir.clone(),
+            self.influx.clone(),
+            self.settings.backup_keep_last(),
+        );
+        // La sauvegarde est du calcul synchrone qui dure : hors du fil
+        // asynchrone, sinon elle gèle le hub le temps de son VACUUM.
+        let outcome = tokio::task::spawn_blocking(move || {
+            let report = create(BackupRequest {
+                db: &db,
+                config_dir: &config_dir,
+                backup_dir: &backup_dir,
+                influx,
+                now: now(),
+            })?;
+            let removed = prune(&backup_dir, keep)?;
+            Ok::<_, BackupError>((report, removed))
+        })
+        .await;
+
+        match outcome {
+            Ok(Ok((report, removed))) => {
+                let removed = if removed.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} archive(s) retirée(s)", removed.len())
+                };
+                tracing::info!(
+                    "sauvegarde automatique : {} ({} octets){removed}",
+                    report.file,
+                    report.bytes
+                );
+                // Journalisée sans acteur : personne ne l'a demandée, c'est
+                // le hub. Une ligne d'audit reste due — c'est ce qui permet
+                // de constater après coup que les sauvegardes tournent.
+                let _ = self.db.record_audit(
+                    None,
+                    "backup.create",
+                    Some(&report.file),
+                    crate::db::Outcome::Success,
+                    Some("sauvegarde automatique"),
+                );
+                Some(report.file)
+            }
+            Ok(Err(e)) => {
+                tracing::error!("sauvegarde automatique en échec : {e}");
+                let _ = self.db.record_audit(
+                    None,
+                    "backup.create",
+                    None,
+                    crate::db::Outcome::Failure,
+                    Some(&e.to_string()),
+                );
+                None
+            }
+            Err(e) => {
+                tracing::error!("sauvegarde automatique interrompue : {e}");
+                None
+            }
+        }
+    }
+}
+
 // ── Lecture d'une archive ──────────────────────────────────────────────────
 
 /// Lit le manifeste sans rien extraire. C'est ce qui permet de refuser
@@ -839,6 +964,43 @@ fn check_sqlite(path: &Path, expected_schema: i64) -> BackupResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Restaure le seul volet InfluxDB d'une archive.
+///
+/// Séparé de `restore` parce que le jeton opérateur qu'il faut pour appeler
+/// `influx` est **lui-même dans l'archive** : sur un volume vierge — le cas
+/// d'une machine neuve, celui qui compte — on ne l'a qu'une fois les fichiers
+/// remis en place. La ligne de commande enchaîne donc les deux dans cet
+/// ordre ; l'API, qui tourne sur un hub déjà configuré, a déjà son jeton.
+pub fn restore_influx(archive: &Path, target: &InfluxTarget) -> BackupResult<()> {
+    let file = std::fs::File::open(archive)
+        .map_err(|e| BackupError::NotAnArchive(format!("{} : {e}", archive.display())))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| BackupError::NotAnArchive(format!("ZIP illisible ({e})")))?;
+    let manifest = read_manifest(&mut zip)?;
+    if !manifest.influx_included {
+        return Err(BackupError::Corrupt(
+            "l'archive ne contient pas de sauvegarde InfluxDB".into(),
+        ));
+    }
+
+    let staging = std::env::temp_dir().join(format!("lanprobe-influx-{}", now()));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)?;
+    let series = Manifest {
+        entries: manifest
+            .entries
+            .iter()
+            .filter(|e| e.path.starts_with(INFLUX_PREFIX))
+            .cloned()
+            .collect(),
+        ..manifest
+    };
+    let outcome = extract_and_verify(&mut zip, &series, &staging)
+        .and_then(|()| run_influx_restore(target, &staging.join("influx")));
+    let _ = std::fs::remove_dir_all(&staging);
+    outcome
 }
 
 fn run_influx_restore(target: &InfluxTarget, dir: &Path) -> BackupResult<()> {
@@ -1807,6 +1969,134 @@ mod tests {
         });
         assert!(second.is_err(), "la seconde ne doit pas écraser la première");
         assert_eq!(list(&backups).unwrap().len(), 1);
+    }
+
+    // ── Déclenchement automatique ──────────────────────────────────────────
+
+    #[test]
+    fn a_hub_that_never_backed_up_is_due_immediately() {
+        // Le cas qui compte : un hub installé et jamais sauvegardé. Attendre
+        // vingt-quatre heures avant la première archive laisserait la
+        // première journée — celle de la configuration — sans filet.
+        assert!(is_due(None, T0, 24));
+    }
+
+    #[test]
+    fn the_next_backup_is_due_one_interval_after_the_last_one() {
+        let last = Some(T0);
+        assert!(!is_due(last, T0, 24));
+        assert!(!is_due(last, T0 + 23 * 3600, 24));
+        assert!(is_due(last, T0 + 24 * 3600, 24));
+        assert!(is_due(last, T0 + 72 * 3600, 24));
+        // Une cadence courte se respecte aussi.
+        assert!(is_due(last, T0 + 6 * 3600, 6));
+        assert!(!is_due(last, T0 + 5 * 3600, 6));
+    }
+
+    #[test]
+    fn the_due_date_is_read_from_the_archives_not_from_the_uptime() {
+        // Sans cela, un hub redémarré toutes les six heures ne sauvegarderait
+        // jamais : le compte à rebours repartirait de zéro à chaque
+        // démarrage, et personne ne le verrait.
+        let dir = tmp_dir("echeance");
+        assert_eq!(last_backup_at(&dir), None);
+        std::fs::write(dir.join("lanprobe_backup_v1.0.0_2026.08.27_02.00.00.zip"), b"x").unwrap();
+        std::fs::write(dir.join("lanprobe_backup_v1.0.0_2026.08.28_02.00.00.zip"), b"x").unwrap();
+        let last = last_backup_at(&dir).unwrap();
+        assert_eq!(format_rfc3339(last), "2026-08-28T02:00:00Z");
+        assert!(!is_due(Some(last), last + 3600, 24));
+        assert!(is_due(Some(last), last + 25 * 3600, 24));
+    }
+
+    #[test]
+    fn a_non_positive_interval_never_triggers() {
+        // La cadence ne sert pas de bouton d'arrêt — `backup_enabled` est là
+        // pour ça — mais une valeur aberrante ne doit pas déclencher en
+        // boucle.
+        assert!(!is_due(None, T0, 0));
+        assert!(!is_due(Some(T0 - 10_000_000), T0, -1));
+    }
+
+    fn scheduler(config_dir: &Path, backup_dir: &Path) -> (Scheduler, std::sync::Arc<Db>) {
+        let db = std::sync::Arc::new(Db::open(&config_dir.join(DB_ENTRY)).unwrap());
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_site("Durand").unwrap();
+        let settings = crate::settings::Settings::new(db.clone());
+        (
+            Scheduler {
+                db: db.clone(),
+                settings,
+                config_dir: config_dir.to_path_buf(),
+                backup_dir: backup_dir.to_path_buf(),
+                influx: None,
+            },
+            db,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_backs_up_by_itself_and_stops_once_it_has() {
+        let dir = tmp_dir("planif");
+        let backups = dir.join("backup");
+        let (scheduler, db) = scheduler(&dir, &backups);
+
+        let file = scheduler
+            .run_once()
+            .await
+            .expect("un hub sans archive doit sauvegarder tout de suite");
+        assert!(file.starts_with("lanprobe_backup_v"));
+        assert_eq!(list(&backups).unwrap().len(), 1);
+
+        // Le tour suivant, l'échéance n'est pas passée : rien ne bouge.
+        assert!(scheduler.run_once().await.is_none());
+        assert_eq!(list(&backups).unwrap().len(), 1);
+
+        // Et la sauvegarde automatique laisse sa trace : c'est ce qui permet
+        // de constater après coup qu'elle tourne, sans acteur puisque
+        // personne ne l'a demandée.
+        let lines = db.list_audit(&AuditFilter::default()).unwrap();
+        let line = lines.iter().find(|e| e.action == "backup.create").unwrap();
+        assert!(line.actor.is_none());
+        assert_eq!(line.target.as_deref(), Some(file.as_str()));
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_obeys_the_off_switch() {
+        let dir = tmp_dir("planif-coupee");
+        let backups = dir.join("backup");
+        let (scheduler, _db) = scheduler(&dir, &backups);
+        scheduler
+            .settings
+            .put(crate::settings::keys::BACKUP_ENABLED, "false", false)
+            .unwrap();
+
+        assert!(scheduler.run_once().await.is_none());
+        assert!(list(&backups).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_applies_the_retention_it_is_given() {
+        let dir = tmp_dir("planif-retention");
+        let backups = dir.join("backup");
+        std::fs::create_dir_all(&backups).unwrap();
+        for day in 1..=4 {
+            std::fs::write(
+                backups.join(format!("lanprobe_backup_v1.0.0_2026.08.{day:02}_02.00.00.zip")),
+                b"x",
+            )
+            .unwrap();
+        }
+        let (scheduler, _db) = scheduler(&dir, &backups);
+        scheduler
+            .settings
+            .put(crate::settings::keys::BACKUP_KEEP_LAST, "2", true)
+            .unwrap();
+
+        scheduler.run_once().await.expect("l'échéance est largement passée");
+        let left = list(&backups).unwrap();
+        assert_eq!(left.len(), 2, "{left:?}");
+        // La plus récente est celle qu'on vient de produire.
+        assert!(left[0].created_at_unix > left[1].created_at_unix);
     }
 
     // ── Dates ──────────────────────────────────────────────────────────────
