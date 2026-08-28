@@ -200,6 +200,10 @@ pub struct EnrollCode {
 /// la vraie sonde dès qu'une machine consomme le code.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PendingEnrollCode {
+    /// Identifiant stable de l'attente. Sans lui, l'interface devait
+    /// rapprocher une ligne de son code par `site|sonde|expiration` — deux
+    /// codes émis pour le même site à la même seconde se confondaient.
+    pub enroll_id: i64,
     pub site_id: String,
     pub site: String,
     /// Renseigné pour un ré-enrôlement : la ligne concerne une sonde existante.
@@ -409,7 +413,7 @@ impl Db {
             [now],
         )?;
         let mut stmt = conn.prepare(
-            "SELECT c.site_id, s.name, c.probe_id, p.name, c.created_at, c.expires_at, c.code_plain
+            "SELECT c.rowid, c.site_id, s.name, c.probe_id, p.name, c.created_at, c.expires_at, c.code_plain
              FROM enroll_codes c
              JOIN sites s ON s.site_id = c.site_id
              LEFT JOIN probes p ON p.probe_id = c.probe_id
@@ -419,13 +423,14 @@ impl Db {
         let rows = stmt
             .query_map([now], |row| {
                 Ok(PendingEnrollCode {
-                    site_id: row.get(0)?,
-                    site: row.get(1)?,
-                    probe_id: row.get(2)?,
-                    probe: row.get(3)?,
-                    created_at: row.get(4)?,
-                    expires_at: row.get(5)?,
-                    code: row.get(6)?,
+                    enroll_id: row.get(0)?,
+                    site_id: row.get(1)?,
+                    site: row.get(2)?,
+                    probe_id: row.get(3)?,
+                    probe: row.get(4)?,
+                    created_at: row.get(5)?,
+                    expires_at: row.get(6)?,
+                    code: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
