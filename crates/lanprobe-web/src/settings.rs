@@ -25,6 +25,10 @@ pub mod keys {
     pub const HUB_PUBLIC_URL: &str = "hub_public_url";
     pub const RETENTION_DAYS: &str = "retention_days";
     pub const HEARTBEAT_INTERVAL_SECS: &str = "heartbeat_interval_secs";
+    /// Silence toléré avant qu'une sonde soit déclarée hors ligne. Ce n'est
+    /// pas un secret : il n'y a que ce réglage-là dans les notifications qui
+    /// ait le droit d'être en clair.
+    pub const NOTIFY_DELAY_SECS: &str = "notify_delay_secs";
 
     pub const ALL: &[&str] = &[
         INFLUX_URL,
@@ -34,6 +38,7 @@ pub mod keys {
         HUB_PUBLIC_URL,
         RETENTION_DAYS,
         HEARTBEAT_INTERVAL_SECS,
+        NOTIFY_DELAY_SECS,
     ];
 }
 
@@ -88,6 +93,17 @@ impl Settings {
         self.get_or(keys::RETENTION_DAYS, "0").parse().unwrap_or(0)
     }
 
+    /// Délai avant alerte. Cinq minutes par défaut : une sonde qui redémarre
+    /// ne réveille personne.
+    pub fn notify_delay_secs(&self) -> i64 {
+        self.get_or(
+            keys::NOTIFY_DELAY_SECS,
+            &crate::notify::DEFAULT_DELAY_SECS.to_string(),
+        )
+        .parse()
+        .unwrap_or(crate::notify::DEFAULT_DELAY_SECS)
+    }
+
     pub fn heartbeat_interval_secs(&self) -> i64 {
         self.get_or(
             keys::HEARTBEAT_INTERVAL_SECS,
@@ -115,6 +131,7 @@ impl Settings {
             keys::HUB_PUBLIC_URL: self.hub_public_url(),
             keys::RETENTION_DAYS: self.retention_days(),
             keys::HEARTBEAT_INTERVAL_SECS: self.heartbeat_interval_secs(),
+            keys::NOTIFY_DELAY_SECS: self.notify_delay_secs(),
         })
     }
 
@@ -132,7 +149,7 @@ impl Settings {
                     return Err(DbError::Conflict(format!("{key} ne peut pas être vide")));
                 }
             }
-            keys::HEARTBEAT_INTERVAL_SECS => {
+            keys::HEARTBEAT_INTERVAL_SECS | keys::NOTIFY_DELAY_SECS => {
                 let parsed: i64 = value
                     .parse()
                     .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
@@ -310,6 +327,17 @@ mod tests {
             );
         }
         assert!(s.put(keys::INFLUX_ADVERTISE_URL, "https://a.example:9086", false).is_ok());
+    }
+
+    #[test]
+    fn the_alert_delay_defaults_to_five_minutes_and_is_adjustable() {
+        let s = settings();
+        assert_eq!(s.notify_delay_secs(), 300);
+
+        assert!(s.put(keys::NOTIFY_DELAY_SECS, "0", false).is_err());
+        assert!(s.put(keys::NOTIFY_DELAY_SECS, "beaucoup", false).is_err());
+        s.put(keys::NOTIFY_DELAY_SECS, "600", false).unwrap();
+        assert_eq!(s.notify_delay_secs(), 600);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -98,6 +98,78 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE enroll_codes ADD COLUMN code_plain TEXT;
     "#,
+    // v4 → v5 : la désactivation d'un compte.
+    //
+    // Il n'y a pas de suppression de compte, et il n'y en aura pas : les
+    // lignes du journal d'audit nomment leur acteur, et un compte effacé
+    // emporterait la traçabilité de tout ce qu'il a fait. On désactive.
+    r#"
+    ALTER TABLE users ADD COLUMN disabled_at INTEGER;
+    "#,
+    // v5 → v6 : le journal d'audit.
+    //
+    // **Ajout seul.** Aucune requête de ce fichier n'en supprime une ligne, et
+    // aucune route n'y mène : un journal qu'on peut nettoyer ne prouve rien.
+    // Pas de purge par ancienneté non plus — quelques dizaines d'octets par
+    // geste d'opérateur ne justifient pas d'inventer un chemin d'effacement.
+    //
+    // `actor` est nullable : une tentative de connexion sur un compte
+    // inexistant n'a pas d'acteur connu, et la laisser tomber pour cette
+    // raison effacerait précisément les lignes qui comptent.
+    r#"
+    CREATE TABLE audit_log (
+      id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      at      INTEGER NOT NULL,
+      actor   TEXT,
+      action  TEXT NOT NULL,
+      target  TEXT,
+      outcome TEXT NOT NULL,
+      detail  TEXT
+    );
+
+    CREATE INDEX audit_log_at     ON audit_log(at DESC);
+    CREATE INDEX audit_log_actor  ON audit_log(actor);
+    CREATE INDEX audit_log_action ON audit_log(action);
+    "#,
+    // v6 → v7 : les notifications.
+    //
+    // `sealed_secrets` tient ce qui ne peut pas aller dans `settings` : mot de
+    // passe SMTP et URL de webhook, qui est elle-même un secret porteur. La
+    // section 7 du contrat pose que `settings` ne contient aucun secret et que
+    // `GET /api/settings` peut donc être rendue telle quelle — les y mettre
+    // aurait cassé les deux. Les valeurs sont scellées en AES-256-GCM
+    // (`enc:v1:`), et une valeur vide veut dire « non configuré » : rien ne se
+    // supprime, on désactive.
+    //
+    // `notify_subscriptions` porte l'activation par site, héritée par ses
+    // sondes, avec exception possible par sonde — `enabled` à NULL sur une
+    // sonde signifie « hérite du site ». Sans cet héritage on recocherait
+    // vingt cases à chaque nouveau client.
+    //
+    // `notify_states` retient l'état annoncé pour chaque sonde. C'est lui qui
+    // fait qu'on notifie des **transitions** et non des états : sans mémoire,
+    // un portable qu'on referme alerterait à chaque passage de la boucle, et
+    // trois alertes inutiles suffisent pour que plus personne ne les lise.
+    r#"
+    CREATE TABLE sealed_secrets (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE notify_subscriptions (
+      scope    TEXT NOT NULL,          -- 'site' | 'probe'
+      scope_id TEXT NOT NULL,
+      enabled  INTEGER,                -- NULL = hérite
+      PRIMARY KEY (scope, scope_id)
+    );
+
+    CREATE TABLE notify_states (
+      probe_id TEXT PRIMARY KEY REFERENCES probes(probe_id),
+      state    TEXT NOT NULL,          -- 'up' | 'down'
+      since    INTEGER NOT NULL
+    );
+    "#,
 ];
 
 /// Erreurs remontées jusqu'à la couche HTTP, qui les traduit en codes. Un
@@ -107,7 +179,12 @@ const MIGRATIONS: &[&str] = &[
 pub enum DbError {
     Conflict(String),
     NotFound(String),
+    /// L'appelant n'est pas authentifié, ou ses identifiants sont faux.
     Unauthorized(String),
+    /// L'appelant est bien authentifié, mais son rôle ne suffit pas. À
+    /// distinguer d'`Unauthorized` : répondre 401 le renverrait à l'écran de
+    /// connexion, où se reconnecter ne changerait rien.
+    Forbidden(String),
     Internal(String),
 }
 
@@ -117,6 +194,7 @@ impl std::fmt::Display for DbError {
             DbError::Conflict(m)
             | DbError::NotFound(m)
             | DbError::Unauthorized(m)
+            | DbError::Forbidden(m)
             | DbError::Internal(m) => write!(f, "{m}"),
         }
     }
@@ -129,6 +207,183 @@ impl From<rusqlite::Error> for DbError {
 }
 
 pub type DbResult<T> = Result<T, DbError>;
+
+/// Rôle d'un compte. **L'ordre de déclaration est l'ordre des privilèges** :
+/// c'est lui qui permet d'écrire « au moins operator » en une comparaison, au
+/// lieu d'énumérer les rôles autorisés à chaque route — une énumération qu'on
+/// oublie de compléter le jour où un rôle s'ajoute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    /// Consulte le parc, ne le modifie pas. C'est le rôle qui manque le plus
+    /// en entreprise : montrer les sondes à un client sans qu'un clic en
+    /// révoque une.
+    Viewer,
+    /// Enrôle, renomme, déplace, fait tourner les clés.
+    Operator,
+    /// Tout, y compris les comptes, la rétention et le journal d'audit.
+    Admin,
+}
+
+impl Role {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Operator => "operator",
+            Role::Admin => "admin",
+        }
+    }
+
+    /// Lecture stricte, pour une valeur qui vient d'une requête : un rôle mal
+    /// orthographié doit être refusé, pas interprété.
+    pub fn parse(value: &str) -> Option<Role> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "viewer" => Some(Role::Viewer),
+            "operator" => Some(Role::Operator),
+            "admin" => Some(Role::Admin),
+            _ => None,
+        }
+    }
+
+    /// Lecture d'une valeur **déjà en base**. Une valeur inconnue — écriture à
+    /// la main, rétrogradation de version — retombe sur le moindre privilège :
+    /// une base illisible ne doit jamais ouvrir plus de portes qu'elle n'en
+    /// nomme.
+    fn from_stored(value: &str) -> Role {
+        Role::parse(value).unwrap_or(Role::Viewer)
+    }
+}
+
+impl serde::Serialize for Role {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+/// Résultat d'une action journalisée. Les échecs comptent autant que les
+/// réussites : un journal qui n'enregistre que les succès ne montre jamais
+/// une tentative d'intrusion, il montre celui qui a fini par entrer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Success,
+    Failure,
+}
+
+impl Outcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Outcome::Success => "success",
+            Outcome::Failure => "failure",
+        }
+    }
+
+    fn from_stored(value: &str) -> Outcome {
+        match value {
+            "success" => Outcome::Success,
+            _ => Outcome::Failure,
+        }
+    }
+}
+
+impl serde::Serialize for Outcome {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+/// Une ligne du journal d'audit. **Jamais de secret ici** : ni jeton, ni mot
+/// de passe, ni code d'enrôlement. `detail` est une phrase courte destinée à
+/// être lue, pas un vidage de la requête.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub at: i64,
+    /// `None` pour une tentative anonyme — connexion sur un compte inconnu.
+    pub actor: Option<String>,
+    pub action: String,
+    pub target: Option<String>,
+    pub outcome: Outcome,
+    pub detail: Option<String>,
+}
+
+/// Plafond du nombre de lignes qu'une requête peut ramener. Le journal se lit
+/// par pages : une requête qui le viderait d'un coup ferait travailler le hub
+/// pour une page que personne ne lit jusqu'au bout.
+pub const AUDIT_MAX_LIMIT: i64 = 500;
+pub const AUDIT_DEFAULT_LIMIT: i64 = 100;
+
+#[derive(Debug, Clone)]
+pub struct AuditFilter {
+    pub limit: i64,
+    /// Pagination à rebours : la page suivante est « plus ancienne que cet
+    /// identifiant ». Un décalage par `OFFSET` glisserait à chaque ligne
+    /// ajoutée pendant la lecture, et rejouerait des lignes déjà vues.
+    pub before_id: Option<i64>,
+    pub actor: Option<String>,
+    pub action: Option<String>,
+}
+
+impl Default for AuditFilter {
+    fn default() -> Self {
+        Self {
+            limit: AUDIT_DEFAULT_LIMIT,
+            before_id: None,
+            actor: None,
+            action: None,
+        }
+    }
+}
+
+/// État d'alerte annoncé pour une sonde. On notifie les **transitions** de
+/// cet état, jamais l'état lui-même : « Paris est passée hors ligne », une
+/// fois, pas un rappel par minute tant qu'elle l'est.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertState {
+    Up,
+    Down,
+}
+
+impl AlertState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AlertState::Up => "up",
+            AlertState::Down => "down",
+        }
+    }
+
+    fn from_stored(value: &str) -> AlertState {
+        match value {
+            "down" => AlertState::Down,
+            _ => AlertState::Up,
+        }
+    }
+}
+
+/// Abonnement aux notifications, par site ou par sonde.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NotifySubscription {
+    /// `site` ou `probe`.
+    pub scope: String,
+    pub scope_id: String,
+    /// `None` sur une sonde = elle suit son site. Sur un site, `None` équivaut
+    /// à « pas d'alerte » — c'est le défaut.
+    pub enabled: Option<bool>,
+}
+
+/// Un compte, tel que l'interface l'affiche./// Un compte, tel que l'interface l'affiche./// Un compte, tel que l'interface l'affiche. **Le hash du mot de passe n'en
+/// fait pas partie** : aucune sérialisation ne l'expose.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserRecord {
+    pub username: String,
+    pub role: Role,
+    pub created_at: i64,
+    /// Renseigné quand le compte est désactivé. On ne supprime pas un compte.
+    pub disabled_at: Option<i64>,
+}
+
+/// Longueur minimale d'un mot de passe de compte, vérifiée en base et pas
+/// seulement dans le handler : une règle qui ne vit que dans la couche HTTP
+/// se contourne par le premier appelant qui l'ignore.
+const MIN_PASSWORD_LEN: usize = 8;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Site {
@@ -251,6 +506,24 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
         pending_influx_token: r.get(14)?,
         pending_influx_token_version: r.get(15)?,
     })
+}
+
+fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
+    Ok(UserRecord {
+        username: r.get(0)?,
+        role: Role::from_stored(&r.get::<_, String>(1)?),
+        created_at: r.get(2)?,
+        disabled_at: r.get(3)?,
+    })
+}
+
+fn check_password_length(password: &str) -> DbResult<()> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(DbError::Conflict(format!(
+            "le mot de passe doit faire au moins {MIN_PASSWORD_LEN} caractères"
+        )));
+    }
+    Ok(())
 }
 
 /// Traduit une violation de contrainte SQLite en `Conflict`. Sans ça, un nom
@@ -505,6 +778,152 @@ impl Db {
         Ok(())
     }
 
+    /// Les comptes, par ordre alphabétique. Un compte désactivé y figure —
+    /// on doit pouvoir le voir pour le réactiver.
+    pub fn list_users(&self) -> DbResult<Vec<UserRecord>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT username, role, created_at, disabled_at FROM users
+             ORDER BY username COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], user_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_user(&self, username: &str) -> DbResult<UserRecord> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT username, role, created_at, disabled_at FROM users WHERE username = ?1",
+            [username],
+            user_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| DbError::NotFound("compte inconnu".into()))
+    }
+
+    pub fn role_of(&self, username: &str) -> DbResult<Option<Role>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row("SELECT role FROM users WHERE username = ?1", [username], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .map(|raw| Role::from_stored(&raw)))
+    }
+
+    pub fn create_user(&self, username: &str, password: &str, role: Role) -> DbResult<UserRecord> {
+        let username = username.trim();
+        if username.is_empty() {
+            return Err(DbError::Conflict("le nom d'utilisateur est requis".into()));
+        }
+        check_password_length(password)?;
+        let hash = lanprobe_core::passwords::hash_password(password)
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![username, hash, role.as_str(), now()],
+            )
+            .map_err(|e| {
+                conflict_on_constraint(e, format!("le compte « {username} » existe déjà"))
+            })?;
+        }
+        self.get_user(username)
+    }
+
+    /// Change le rôle d'un compte. Deux refus, pour la même raison : un hub
+    /// sans administrateur ne se répare que par accès au conteneur.
+    ///
+    /// - on ne se retire pas son propre rôle d'administrateur — c'est le geste
+    ///   qu'on fait par erreur, et il n'a aucun usage légitime ;
+    /// - on ne rétrograde pas le dernier administrateur actif.
+    pub fn set_user_role(&self, actor: &str, username: &str, role: Role) -> DbResult<UserRecord> {
+        let target = self.get_user(username)?;
+        if target.role == Role::Admin && role != Role::Admin {
+            if actor == target.username {
+                return Err(DbError::Conflict(
+                    "un administrateur ne peut pas se retirer son propre rôle".into(),
+                ));
+            }
+            self.refuse_if_last_active_admin(&target)?;
+        }
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "UPDATE users SET role = ?2 WHERE username = ?1",
+                rusqlite::params![target.username, role.as_str()],
+            )?;
+        }
+        self.get_user(&target.username)
+    }
+
+    /// Désactive ou réactive un compte. **Aucune suppression** : la ligne
+    /// reste, parce que le journal d'audit la nomme.
+    pub fn set_user_disabled(
+        &self,
+        actor: &str,
+        username: &str,
+        disabled: bool,
+    ) -> DbResult<UserRecord> {
+        let target = self.get_user(username)?;
+        if disabled && target.disabled_at.is_none() {
+            // Se désactiver soi-même, c'est se fermer la porte : même geste
+            // par erreur que l'auto-rétrogradation, et pas davantage d'usage
+            // légitime — pour partir, on se déconnecte.
+            if actor == target.username {
+                return Err(DbError::Conflict(
+                    "un compte ne peut pas se désactiver lui-même".into(),
+                ));
+            }
+            if target.role == Role::Admin {
+                self.refuse_if_last_active_admin(&target)?;
+            }
+        }
+        let stamp = disabled.then(now);
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "UPDATE users SET disabled_at = ?2 WHERE username = ?1",
+                rusqlite::params![target.username, stamp],
+            )?;
+        }
+        self.get_user(&target.username)
+    }
+
+    pub fn reset_user_password(&self, username: &str, password: &str) -> DbResult<()> {
+        let target = self.get_user(username)?;
+        check_password_length(password)?;
+        let hash = lanprobe_core::passwords::hash_password(password)
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE users SET password_hash = ?2 WHERE username = ?1",
+            rusqlite::params![target.username, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Administrateurs **actifs**. Un compte admin désactivé ne répare rien :
+    /// le compter reviendrait à autoriser la fermeture de la dernière porte.
+    pub fn active_admin_count(&self) -> DbResult<i64> {
+        let conn = self.lock()?;
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    fn refuse_if_last_active_admin(&self, target: &UserRecord) -> DbResult<()> {
+        if target.disabled_at.is_none() && self.active_admin_count()? <= 1 {
+            return Err(DbError::Conflict(
+                "il doit rester au moins un administrateur actif".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Rend le nom d'utilisateur canonique si les identifiants sont bons.
     /// L'erreur ne distingue jamais « compte inconnu » de « mauvais mot de
     /// passe » : ce serait un oracle à noms de comptes.
@@ -514,6 +933,12 @@ impl Db {
         };
         lanprobe_core::passwords::verify_password(&hash, password)
             .map_err(|_| DbError::Unauthorized("identifiants invalides".into()))?;
+        // Un compte désactivé est traité comme un compte inconnu, et le mot
+        // de passe est vérifié d'abord : répondre plus vite pour un compte
+        // désactivé dirait à qui essaie que le nom existe.
+        if self.get_user(username)?.disabled_at.is_some() {
+            return Err(DbError::Unauthorized("identifiants invalides".into()));
+        }
         Ok(username.to_string())
     }
 
@@ -526,6 +951,180 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    // ── Journal d'audit ────────────────────────────────────────────────────
+
+    /// Ajoute une ligne. **Il n'existe aucune opération inverse** : pas de
+    /// suppression, pas de purge, pas même pour un administrateur.
+    ///
+    /// L'appelant est responsable de ne jamais passer de secret — `detail`
+    /// sert à dire « rétention portée à 90 jours », pas à recopier un corps
+    /// de requête.
+    pub fn record_audit(
+        &self,
+        actor: Option<&str>,
+        action: &str,
+        target: Option<&str>,
+        outcome: Outcome,
+        detail: Option<&str>,
+    ) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO audit_log (at, actor, action, target, outcome, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![now(), actor, action, target, outcome.as_str(), detail],
+        )?;
+        Ok(())
+    }
+
+    /// Les lignes, de la plus récente à la plus ancienne.
+    pub fn list_audit(&self, filter: &AuditFilter) -> DbResult<Vec<AuditEntry>> {
+        let limit = filter.limit.clamp(1, AUDIT_MAX_LIMIT);
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, at, actor, action, target, outcome, detail FROM audit_log
+             WHERE (?1 IS NULL OR id < ?1)
+               AND (?2 IS NULL OR actor = ?2)
+               AND (?3 IS NULL OR action = ?3)
+             ORDER BY id DESC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![filter.before_id, filter.actor, filter.action, limit],
+            |r| {
+                Ok(AuditEntry {
+                    id: r.get(0)?,
+                    at: r.get(1)?,
+                    actor: r.get(2)?,
+                    action: r.get(3)?,
+                    target: r.get(4)?,
+                    outcome: Outcome::from_stored(&r.get::<_, String>(5)?),
+                    detail: r.get(6)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ── Secrets scellés ────────────────────────────────────────────────────
+    //
+    // Ce que la table `settings` ne peut pas porter : mot de passe SMTP, URL
+    // de webhook. Le hub ne stocke ici que du chiffré (`enc:v1:`), et ne rend
+    // jamais ces valeurs par l'API — l'interface sait « configuré » ou « non
+    // configuré », plus un bouton de test.
+
+    pub fn get_sealed(&self, key: &str) -> DbResult<Option<String>> {
+        let conn = self.lock()?;
+        let value: Option<String> = conn
+            .query_row("SELECT value FROM sealed_secrets WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        // Une valeur vide veut dire « non configuré » : c'est ainsi qu'on
+        // désactive un canal sans supprimer de ligne.
+        Ok(value.filter(|v| !v.trim().is_empty()))
+    }
+
+    pub fn set_sealed(&self, key: &str, sealed: &str) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO sealed_secrets (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![key, sealed, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Désactive un canal. **Pas de `DELETE`** : la ligne reste, vidée, avec
+    /// la date à laquelle on l'a vidée.
+    pub fn clear_sealed(&self, key: &str) -> DbResult<()> {
+        self.set_sealed(key, "")
+    }
+
+    // ── Notifications : abonnements et états ───────────────────────────────
+
+    /// Active, désactive, ou remet à l'héritage (`None`). Aucune suppression :
+    /// « hérite » est une valeur, pas une absence de ligne.
+    pub fn set_notify_subscription(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        enabled: Option<bool>,
+    ) -> DbResult<()> {
+        if !matches!(scope, "site" | "probe") {
+            return Err(DbError::Conflict(format!(
+                "portée inconnue : {scope} (attendu : site ou probe)"
+            )));
+        }
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO notify_subscriptions (scope, scope_id, enabled) VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope, scope_id) DO UPDATE SET enabled = excluded.enabled",
+            rusqlite::params![scope, scope_id, enabled],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_notify_subscriptions(&self) -> DbResult<Vec<NotifySubscription>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT scope, scope_id, enabled FROM notify_subscriptions ORDER BY scope, scope_id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(NotifySubscription {
+                scope: r.get(0)?,
+                scope_id: r.get(1)?,
+                enabled: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// L'exception de la sonde gagne ; sinon elle suit son site ; sinon rien
+    /// n'alerte. Le défaut est le silence : une fonctionnalité de notification
+    /// qui parle avant qu'on le lui demande se fait couper le premier jour.
+    pub fn notify_enabled_for_probe(&self, probe_id: &str) -> DbResult<bool> {
+        let probe = self.get_probe(probe_id)?;
+        let conn = self.lock()?;
+        let resolve = |scope: &str, id: &str| -> DbResult<Option<bool>> {
+            Ok(conn
+                .query_row(
+                    "SELECT enabled FROM notify_subscriptions WHERE scope = ?1 AND scope_id = ?2",
+                    [scope, id],
+                    |r| r.get::<_, Option<bool>>(0),
+                )
+                .optional()?
+                .flatten())
+        };
+        if let Some(exception) = resolve("probe", probe_id)? {
+            return Ok(exception);
+        }
+        Ok(resolve("site", &probe.site_id)?.unwrap_or(false))
+    }
+
+    /// L'état annoncé pour une sonde, et depuis quand. `None` tant qu'on n'a
+    /// rien annoncé : c'est ce qui distingue « première évaluation » de
+    /// « toujours en ligne ».
+    pub fn notify_state(&self, probe_id: &str) -> DbResult<Option<(AlertState, i64)>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT state, since FROM notify_states WHERE probe_id = ?1",
+                [probe_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .map(|(state, since)| (AlertState::from_stored(&state), since)))
+    }
+
+    pub fn set_notify_state(&self, probe_id: &str, state: AlertState, since: i64) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO notify_states (probe_id, state, since) VALUES (?1, ?2, ?3)
+             ON CONFLICT(probe_id) DO UPDATE SET state = excluded.state, since = excluded.since",
+            rusqlite::params![probe_id, state.as_str(), since],
+        )?;
+        Ok(())
     }
 
     // ── Sites ──────────────────────────────────────────────────────────────
@@ -1621,6 +2220,581 @@ mod tests {
         let probes = db.list_probes(None).unwrap();
         assert_eq!(probes[0].site_name, "Durand");
         assert_eq!(probes[0].site_id, site.site_id);
+    }
+
+    // ── Comptes et rôles ───────────────────────────────────────────────
+
+    #[test]
+    fn migration_v5_adds_the_disabled_column_without_touching_the_accounts() {
+        // Une base en v4 tourne déjà en production : la colonne s'ajoute, les
+        // comptes restent, et personne ne se retrouve désactivé au réveil.
+        let dir = tmp_dir("v4-to-v5");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..4] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 4").unwrap();
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, created_at)
+                 VALUES ('ancien', 'peu-importe', 'admin', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        let users = db.list_users().unwrap();
+        assert_eq!(users.len(), 1, "le compte doit survivre");
+        assert_eq!(users[0].username, "ancien");
+        assert_eq!(users[0].role, Role::Admin);
+        assert!(users[0].disabled_at.is_none(), "personne ne se réveille désactivé");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_initial_account_is_an_admin() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        assert_eq!(db.role_of("admin").unwrap(), Some(Role::Admin));
+    }
+
+    #[test]
+    fn roles_are_ordered_from_the_least_to_the_most_privileged() {
+        // C'est cet ordre qui permet d'écrire « au moins operator » en un
+        // comparateur, au lieu d'énumérer les rôles à chaque route.
+        assert!(Role::Viewer < Role::Operator);
+        assert!(Role::Operator < Role::Admin);
+    }
+
+    #[test]
+    fn an_unreadable_stored_role_falls_back_to_the_least_privilege() {
+        // Une valeur inconnue en base — rétrogradation de version, écriture à
+        // la main — ne doit jamais ouvrir plus de portes qu'elle n'en nomme.
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute("UPDATE users SET role = 'sorcier' WHERE username = 'admin'", [])
+                .unwrap();
+        }
+        assert_eq!(db.role_of("admin").unwrap(), Some(Role::Viewer));
+    }
+
+    #[test]
+    fn an_account_is_created_with_the_role_it_was_given() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+
+        let created = db.create_user("claire", "password123", Role::Viewer).unwrap();
+        assert_eq!(created.username, "claire");
+        assert_eq!(created.role, Role::Viewer);
+        assert!(created.disabled_at.is_none());
+        assert_eq!(db.list_users().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_duplicate_username_is_a_conflict_not_a_silent_overwrite() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        let err = db.create_user("admin", "password123", Role::Viewer).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_disabled_account_can_no_longer_log_in() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+        assert!(db.verify_credentials("claire", "password123").is_ok());
+
+        db.set_user_disabled("admin", "claire", true).unwrap();
+
+        let err = db.verify_credentials("claire", "password123").unwrap_err();
+        assert!(matches!(err, DbError::Unauthorized(_)), "{err:?}");
+    }
+
+    #[test]
+    fn disabling_keeps_the_row_because_the_audit_trail_points_at_it() {
+        // On ne supprime pas un compte : ses lignes d'audit le nomment, et un
+        // compte disparu emporterait la traçabilité de ce qu'il a fait.
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+
+        db.set_user_disabled("admin", "claire", true).unwrap();
+
+        let claire = db.get_user("claire").unwrap();
+        assert!(claire.disabled_at.is_some(), "la désactivation doit être datée");
+        assert!(
+            db.list_users().unwrap().iter().any(|u| u.username == "claire"),
+            "la ligne doit rester listée"
+        );
+    }
+
+    #[test]
+    fn a_disabled_account_can_be_brought_back() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+        db.set_user_disabled("admin", "claire", true).unwrap();
+
+        db.set_user_disabled("admin", "claire", false).unwrap();
+
+        assert!(db.get_user("claire").unwrap().disabled_at.is_none());
+        assert!(db.verify_credentials("claire", "password123").is_ok());
+    }
+
+    #[test]
+    fn the_last_admin_cannot_be_disabled() {
+        // Un hub sans administrateur ne se répare que par accès au conteneur.
+        // On passe par un autre acteur : se désactiver soi-même est refusé
+        // plus tôt, pour une autre raison.
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+
+        let err = db.set_user_disabled("claire", "admin", true).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+        assert!(db.get_user("admin").unwrap().disabled_at.is_none());
+    }
+
+    #[test]
+    fn an_account_cannot_disable_itself() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+
+        let err = db.set_user_disabled("claire", "claire", true).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+        assert!(db.get_user("claire").unwrap().disabled_at.is_none());
+    }
+
+    #[test]
+    fn the_last_admin_cannot_be_demoted() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+
+        let err = db.set_user_role("admin", "admin", Role::Viewer).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+        assert_eq!(db.role_of("admin").unwrap(), Some(Role::Admin));
+    }
+
+    #[test]
+    fn an_admin_cannot_take_their_own_admin_role_away() {
+        // Même à deux administrateurs : se rétrograder soi-même est le geste
+        // qu'on fait par erreur, et il n'a aucun usage légitime.
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("bertrand", "password123", Role::Admin).unwrap();
+
+        let err = db.set_user_role("admin", "admin", Role::Operator).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+        assert_eq!(db.role_of("admin").unwrap(), Some(Role::Admin));
+    }
+
+    #[test]
+    fn another_admin_can_be_demoted_once_a_second_one_remains() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("bertrand", "password123", Role::Admin).unwrap();
+
+        db.set_user_role("admin", "bertrand", Role::Viewer).unwrap();
+        assert_eq!(db.role_of("bertrand").unwrap(), Some(Role::Viewer));
+    }
+
+    #[test]
+    fn a_disabled_admin_does_not_count_as_a_remaining_admin() {
+        // Deux comptes admin dont un désactivé, c'est un seul administrateur.
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("bertrand", "password123", Role::Admin).unwrap();
+        db.set_user_disabled("admin", "bertrand", true).unwrap();
+
+        let err = db.set_user_disabled("bertrand", "admin", true).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+    }
+
+    #[test]
+    fn resetting_a_password_replaces_the_old_one() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Viewer).unwrap();
+
+        db.reset_user_password("claire", "nouveau-mot-de-passe").unwrap();
+
+        assert!(db.verify_credentials("claire", "password123").is_err());
+        assert!(db.verify_credentials("claire", "nouveau-mot-de-passe").is_ok());
+    }
+
+    #[test]
+    fn a_password_shorter_than_eight_characters_is_refused() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+
+        assert!(db.create_user("claire", "court", Role::Viewer).is_err());
+        assert!(db.reset_user_password("admin", "court").is_err());
+    }
+
+    #[test]
+    fn acting_on_an_unknown_account_is_a_not_found() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+
+        assert!(matches!(
+            db.get_user("fantôme").unwrap_err(),
+            DbError::NotFound(_)
+        ));
+        assert!(matches!(
+            db.set_user_role("admin", "fantôme", Role::Viewer).unwrap_err(),
+            DbError::NotFound(_)
+        ));
+        assert!(matches!(
+            db.set_user_disabled("admin", "fantôme", true).unwrap_err(),
+            DbError::NotFound(_)
+        ));
+        assert!(matches!(
+            db.reset_user_password("fantôme", "password123").unwrap_err(),
+            DbError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn listing_accounts_never_carries_a_password_hash() {
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+
+        let rendered = serde_json::to_string(&db.list_users().unwrap()).unwrap();
+        assert!(!rendered.contains("$argon2"), "hash exposé : {rendered}");
+        for forbidden in ["hash", "password", "mot_de_passe"] {
+            assert!(!rendered.contains(forbidden), "{forbidden} exposé : {rendered}");
+        }
+    }
+
+    // ── Journal d'audit ────────────────────────────────────────────────
+
+    #[test]
+    fn migration_v6_adds_the_audit_log_to_an_existing_database() {
+        let dir = tmp_dir("v5-to-v6");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..5] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 5").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert!(db.table_exists("audit_log").unwrap());
+        assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_audit_line_carries_its_actor_action_target_and_outcome() {
+        let db = open_memory();
+        db.record_audit(Some("admin"), "probe.revoke", Some("p-1"), Outcome::Success, None)
+            .unwrap();
+
+        let entries = db.list_audit(&AuditFilter::default()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].actor.as_deref(), Some("admin"));
+        assert_eq!(entries[0].action, "probe.revoke");
+        assert_eq!(entries[0].target.as_deref(), Some("p-1"));
+        assert_eq!(entries[0].outcome, Outcome::Success);
+        assert!(entries[0].at > 0, "la ligne doit être datée");
+    }
+
+    #[test]
+    fn failures_are_recorded_as_much_as_successes() {
+        // Un journal qui n'enregistre que les succès ne montre jamais une
+        // tentative d'intrusion : il montre celui qui a fini par entrer.
+        let db = open_memory();
+        db.record_audit(Some("pirate"), "auth.login", None, Outcome::Failure, None)
+            .unwrap();
+        db.record_audit(Some("admin"), "auth.login", None, Outcome::Success, None)
+            .unwrap();
+
+        let entries = db.list_audit(&AuditFilter::default()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.outcome == Outcome::Failure));
+    }
+
+    #[test]
+    fn an_anonymous_attempt_is_recorded_without_an_actor() {
+        // Une tentative sur un compte inexistant n'a pas d'acteur connu ; la
+        // laisser tomber au motif qu'on ne sait pas qui c'était effacerait
+        // précisément les lignes qui comptent.
+        let db = open_memory();
+        db.record_audit(None, "auth.login", None, Outcome::Failure, Some("compte inconnu"))
+            .unwrap();
+
+        let entries = db.list_audit(&AuditFilter::default()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].actor.is_none());
+        assert_eq!(entries[0].detail.as_deref(), Some("compte inconnu"));
+    }
+
+    #[test]
+    fn audit_lines_come_back_newest_first_and_paginate_backwards() {
+        let db = open_memory();
+        for n in 0..5 {
+            db.record_audit(Some("admin"), &format!("action.{n}"), None, Outcome::Success, None)
+                .unwrap();
+        }
+
+        let page = db
+            .list_audit(&AuditFilter {
+                limit: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].action, "action.4", "la plus récente d'abord");
+        assert_eq!(page[1].action, "action.3");
+
+        let next = db
+            .list_audit(&AuditFilter {
+                limit: 2,
+                before_id: Some(page[1].id),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(next[0].action, "action.2");
+        assert_eq!(next[1].action, "action.1");
+    }
+
+    #[test]
+    fn the_audit_log_filters_by_actor_and_by_action() {
+        let db = open_memory();
+        db.record_audit(Some("admin"), "auth.login", None, Outcome::Success, None).unwrap();
+        db.record_audit(Some("claire"), "auth.login", None, Outcome::Failure, None).unwrap();
+        db.record_audit(Some("claire"), "probe.enroll", None, Outcome::Success, None).unwrap();
+
+        let by_actor = db
+            .list_audit(&AuditFilter {
+                actor: Some("claire".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(by_actor.len(), 2);
+
+        let by_action = db
+            .list_audit(&AuditFilter {
+                action: Some("auth.login".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(by_action.len(), 2);
+    }
+
+    #[test]
+    fn the_audit_limit_is_capped_so_one_request_cannot_drain_the_log() {
+        let db = open_memory();
+        for n in 0..3 {
+            db.record_audit(Some("admin"), &format!("a{n}"), None, Outcome::Success, None)
+                .unwrap();
+        }
+        let all = db
+            .list_audit(&AuditFilter {
+                limit: 100_000,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(all.len(), 3, "le plafond ne doit pas tronquer un journal court");
+        // Vérifié à la compilation : un plafond qui ne plafonne rien ne sert à rien.
+        const { assert!(AUDIT_MAX_LIMIT <= 1000) };
+    }
+
+    #[test]
+    fn disabling_an_account_leaves_its_audit_trail_intact() {
+        // C'est la raison même pour laquelle on ne supprime pas un compte.
+        let db = open_memory();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+        db.record_audit(Some("claire"), "probe.revoke", Some("p-1"), Outcome::Success, None)
+            .unwrap();
+
+        db.set_user_disabled("admin", "claire", true).unwrap();
+
+        let entries = db
+            .list_audit(&AuditFilter {
+                actor: Some("claire".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(entries.len(), 1, "les lignes de l'acteur doivent rester");
+    }
+
+    #[test]
+    fn the_audit_log_survives_a_restart() {
+        let dir = tmp_dir("audit-restart");
+        let path = dir.join("hub.sqlite");
+
+        let db = Db::open(&path).unwrap();
+        db.record_audit(Some("admin"), "auth.login", None, Outcome::Success, None)
+            .unwrap();
+        drop(db);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.list_audit(&AuditFilter::default()).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Notifications : stockage ───────────────────────────────────────
+
+    #[test]
+    fn migration_v7_adds_the_notification_tables_to_an_existing_database() {
+        let dir = tmp_dir("v6-to-v7");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..6] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 6").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        for table in ["sealed_secrets", "notify_subscriptions", "notify_states"] {
+            assert!(db.table_exists(table).unwrap(), "{table} doit exister");
+        }
+        assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sealed_value_round_trips_and_is_never_stored_in_the_clear() {
+        let db = open_memory();
+        assert!(db.get_sealed("notify_webhook").unwrap().is_none());
+
+        db.set_sealed("notify_webhook", "enc:v1:AAAA").unwrap();
+        assert_eq!(db.get_sealed("notify_webhook").unwrap().as_deref(), Some("enc:v1:AAAA"));
+    }
+
+    #[test]
+    fn clearing_a_sealed_value_unconfigures_without_deleting_the_row() {
+        // Aucune suppression dans ce projet : désactiver un canal écrit une
+        // valeur vide, la ligne reste et sa date de mise à jour avec.
+        let db = open_memory();
+        db.set_sealed("notify_smtp", "enc:v1:AAAA").unwrap();
+
+        db.clear_sealed("notify_smtp").unwrap();
+
+        assert!(db.get_sealed("notify_smtp").unwrap().is_none());
+        let rows: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM sealed_secrets", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(rows, 1, "la ligne doit rester");
+    }
+
+    #[test]
+    fn a_probe_inherits_the_notification_setting_of_its_site() {
+        // Sinon on recoche vingt cases à chaque nouveau client.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        assert!(
+            !db.notify_enabled_for_probe(&probe.probe_id).unwrap(),
+            "par défaut, rien n'alerte"
+        );
+
+        db.set_notify_subscription("site", &site.site_id, Some(true)).unwrap();
+
+        assert!(db.notify_enabled_for_probe(&probe.probe_id).unwrap());
+    }
+
+    #[test]
+    fn a_probe_exception_overrides_its_site() {
+        // Le poste de test de la baie du client n'alerte pas, le reste si.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (paris, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        let (banc, _) = db.enroll_probe(&site.site_id, "Banc de test").unwrap();
+        db.set_notify_subscription("site", &site.site_id, Some(true)).unwrap();
+
+        db.set_notify_subscription("probe", &banc.probe_id, Some(false)).unwrap();
+
+        assert!(db.notify_enabled_for_probe(&paris.probe_id).unwrap());
+        assert!(!db.notify_enabled_for_probe(&banc.probe_id).unwrap());
+    }
+
+    #[test]
+    fn an_exception_can_also_switch_a_probe_on_in_a_silent_site() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_notify_subscription("site", &site.site_id, Some(false)).unwrap();
+
+        db.set_notify_subscription("probe", &probe.probe_id, Some(true)).unwrap();
+
+        assert!(db.notify_enabled_for_probe(&probe.probe_id).unwrap());
+    }
+
+    #[test]
+    fn clearing_an_exception_gives_the_probe_back_to_its_site() {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_notify_subscription("site", &site.site_id, Some(true)).unwrap();
+        db.set_notify_subscription("probe", &probe.probe_id, Some(false)).unwrap();
+
+        // `None` n'efface pas la ligne : elle dit « hérite ».
+        db.set_notify_subscription("probe", &probe.probe_id, None).unwrap();
+
+        assert!(db.notify_enabled_for_probe(&probe.probe_id).unwrap());
+    }
+
+    #[test]
+    fn an_unknown_subscription_scope_is_refused() {
+        let db = open_memory();
+        let err = db.set_notify_subscription("planète", "x", Some(true)).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_alert_state_of_a_probe_is_remembered_across_restarts() {
+        // C'est ce qui empêche un redémarrage du hub de réannoncer une panne
+        // déjà annoncée.
+        let dir = tmp_dir("notify-state");
+        let path = dir.join("hub.sqlite");
+
+        let db = Db::open(&path).unwrap();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        assert!(db.notify_state(&probe.probe_id).unwrap().is_none());
+        db.set_notify_state(&probe.probe_id, AlertState::Down, 1_000).unwrap();
+        drop(db);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.notify_state(&probe.probe_id).unwrap(),
+            Some((AlertState::Down, 1_000))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Chaque test travaille dans son propre dossier — les tests Rust

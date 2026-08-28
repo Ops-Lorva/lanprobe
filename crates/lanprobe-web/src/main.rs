@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use lanprobe_web::{auth::Auth, db::Db, influx, settings::Settings, tls, web};
+use lanprobe_web::{auth::Auth, db::Db, influx, notify, secrets::Secrets, settings::Settings, tls, web};
 
 #[derive(Parser)]
 #[command(name = "lanprobe-web", about = "LanProbe Web — hub auto-hébergé")]
@@ -105,11 +105,35 @@ async fn main() -> Result<(), String> {
         });
     }
 
+    // Clé de scellement des secrets de notification. Si le volume refuse
+    // l'écriture, on continue avec une clé de session : le hub sert, et
+    // l'opérateur reconfigure ses canaux — refuser de démarrer pour ça serait
+    // une panne totale au service d'une fonctionnalité accessoire.
+    let secrets = match Secrets::load(db.clone(), &args.config_dir) {
+        Ok(secrets) => secrets,
+        Err(e) => {
+            tracing::error!(
+                "clé de scellement indisponible ({e}) — les identifiants de \
+                 notification ne survivront pas à ce démarrage"
+            );
+            Secrets::ephemeral(db.clone()).map_err(|e| e.to_string())?
+        }
+    };
+    let notifier = notify::Notifier::new(db.clone(), secrets, settings.clone());
+
+    // Boucle d'alerte. Le pas est court devant le délai : c'est le délai qui
+    // décide de la réactivité, pas la cadence de la boucle.
+    tokio::spawn(notify::run(
+        notifier.clone(),
+        std::time::Duration::from_secs(30),
+    ));
+
     let state = web::AppState {
         db,
         auth,
         settings,
         influx,
+        notifier,
         tls: args.tls,
     };
     let router = web::build_router(state);
