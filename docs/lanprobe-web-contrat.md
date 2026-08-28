@@ -701,3 +701,43 @@ Ils vivent dans un stockage scellé à part, chiffré par le mécanisme existant
 (`secrets.rs`, marqueur `enc:v1:`), **jamais renvoyé par l'API**. L'interface
 affiche « configuré » ou « non configuré », avec un bouton de test — jamais la
 valeur.
+
+## 14. Fiche d'une sonde : cinq onglets (non implémenté)
+
+Demandé par le propriétaire : la fiche reprend ce que fait LanProbe, et permet
+de le **déclencher à distance**.
+
+```
+Tableau de bord   la vue actuelle — état, latence, internet, débits
+Surveillance      les cibles surveillées, ajout et retrait
+Speedtest         historique des tests, et lancer un test
+Scan de ports     inventaire par machine, et lancer un scan
+Découverte        machines vues sur le réseau, et relancer une découverte
+```
+
+### Déclencher à distance sans tunnel
+
+Le battement de cœur est **déjà** un canal du hub vers la sonde. Sa réponse
+transporte donc une **file de commandes** :
+
+```json
+{ "ok": true, …, "commands": [
+  { "id": 42, "kind": "port_scan", "args": { "ip": "192.168.1.10" } },
+  { "id": 43, "kind": "add_monitor", "args": { "ip": "192.168.1.1" } }
+]}
+```
+
+La sonde exécute, publie le résultat (§12 pour les inventaires, Influx pour les
+séries) et accuse chaque `id` au battement suivant. Le hub retire les commandes
+accusées ; une commande sans accusé au bout de trois battements est marquée
+échouée plutôt que rejouée indéfiniment.
+
+**Latence : jusqu'à un intervalle de battement.** Pour un scan ou un speedtest
+qui dure plusieurs minutes, c'est invisible. Le tunnel inversé (§10) ne devient
+nécessaire que pour l'interface temps réel de la sonde — voir les résultats
+défiler pendant qu'ils arrivent. Construire la file d'abord donne l'essentiel
+pour une fraction du travail.
+
+⚠️ **Une commande est une action sur le réseau d'un client.** Un scan de ports
+lancé depuis le hub part de l'intérieur du LAN surveillé : réservé à `operator`,
+journalisé à l'audit avec son auteur, et jamais rejoué automatiquement.
