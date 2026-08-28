@@ -204,41 +204,55 @@
   const dirty = $derived(Object.keys(patch).length > 0);
 
   // ── Onglets ──────────────────────────────────────────────────────────────
-  // Découpage par motif de visite, pas par type de champ :
-  //   « Général »     — les préférences de CE navigateur (langue, thème) ;
-  //   « Sondes »      — ce que le hub raconte aux sondes (URL annoncée, cadence) ;
-  //   « InfluxDB »    — comment le hub joint la base, et combien de temps elle garde ;
-  //   « Vos données » — ce qu'il y a dedans et qui a le droit de le lire.
-  // La conservation vit dans « InfluxDB » : c'est une politique de rétention de
-  // bucket, appliquée par la base. Lui donner son propre onglet la coupait de
-  // ce qu'elle règle et laissait croire à un réglage du hub.
+  // Découpage par MOTIF DE VISITE, pas par type de champ. Un réglage se cherche
+  // avec une question en tête, pas avec une catégorie : ranger par nature de
+  // champ produit un classeur qu'il faut connaître pour s'en servir.
+  //
+  //   « Général »  — comment ce hub est réglé : l'adresse par laquelle les
+  //                  sondes le joignent, la cadence qu'il leur demande, sa
+  //                  version, plus la langue et le thème de CE navigateur.
+  //   « Stockage » — où vont les mesures, ce qu'il y a dedans, qui peut les
+  //                  lire de l'extérieur, et combien de temps on les garde.
+  //
+  // « InfluxDB » et « Vos données » ont fusionné : les deux répondaient à la
+  // même question — « mes mesures ». L'un portait l'adresse de la base, l'autre
+  // son contenu, et il fallait déjà savoir lequel des deux tient le bucket pour
+  // le trouver. Le contrat § 8 pose que personne ne doit avoir à administrer
+  // Influx ; le nom du produit ne fait donc pas un intitulé d'onglet.
+  //
+  // « Sondes » a rejoint « Général » : deux champs — l'adresse du hub et la
+  // cadence — ne remplissaient pas un onglet, et l'adresse du hub est ce qu'on
+  // vient corriger quand une sonde n'apparaît pas, c'est-à-dire au premier
+  // endroit qu'on ouvre.
+  //
   // Un seul bouton d'enregistrement pour l'ensemble : le contrat n'expose qu'un
-  // PATCH, le découper en trois formulaires mentirait sur ce qui part au hub.
+  // PATCH, le découper en formulaires mentirait sur ce qui part au hub.
   // La pastille sur un onglet dit où sont les modifications en attente — sans
   // elle, on enregistrerait une valeur saisie sur un onglet qu'on ne voit plus.
-  type Tab = 'general' | 'probes' | 'influx' | 'data';
+  type Tab = 'general' | 'storage';
   const TABS: { id: Tab; key: string }[] = [
     { id: 'general', key: 'settings.tab_general' },
-    { id: 'probes', key: 'settings.tab_probes' },
-    { id: 'influx', key: 'settings.tab_influx' },
-    { id: 'data', key: 'settings.influx_state_title' },
+    { id: 'storage', key: 'settings.tab_storage' },
   ];
   let tab = $state<Tab>('general');
 
   const dirtyTabs = $derived<Record<Tab, boolean>>({
-    // Langue et thème s'appliquent au clic et ne partent jamais au hub : il n'y
-    // a donc rien à y enregistrer, donc jamais de pastille.
-    general: false,
-    probes: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
-    influx:
+    // Langue et thème s'appliquent au clic et ne partent jamais au hub : rien à
+    // y enregistrer, donc jamais de pastille de leur fait.
+    general: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
+    storage:
       'influx_url' in patch ||
       'influx_org' in patch ||
       'influx_bucket' in patch ||
       'retention_days' in patch,
-    // Onglet en lecture seule : les jetons s'y créent et s'y révoquent tout de
-    // suite, rien n'y attend le bouton « Enregistrer ».
-    data: false,
   });
+
+  /**
+   * Les onglets qui portent des champs partant au hub par `PUT /api/settings`.
+   * Ailleurs (langue et thème, jetons, comptes, canaux), chaque geste s'applique
+   * seul : un bouton « Enregistrer » y laisserait croire qu'il reste à valider.
+   */
+  const savable = $derived(tab === 'general' || tab === 'storage');
 
   function onTabKey(e: KeyboardEvent) {
     const i = TABS.findIndex((t) => t.id === tab);
@@ -255,23 +269,23 @@
       onglet fermé serait invisible, donc incompréhensible. */
   function validate(): { msg: string; tab: Tab } | null {
     if (!influxUrl.trim() || !org.trim() || !bucket.trim())
-      return { msg: $_('settings.required'), tab: 'influx' };
+      return { msg: $_('settings.required'), tab: 'storage' };
     try {
       new URL(influxUrl.trim());
     } catch {
-      return { msg: $_('settings.invalid_url'), tab: 'influx' };
+      return { msg: $_('settings.invalid_url'), tab: 'storage' };
     }
     if (hubPublicUrl.trim()) {
       try {
         new URL(hubPublicUrl.trim());
       } catch {
-        return { msg: $_('settings.invalid_url'), tab: 'probes' };
+        return { msg: $_('settings.invalid_url'), tab: 'general' };
       }
     }
     if (!Number.isInteger(retentionNum) || retentionNum < 0)
-      return { msg: $_('settings.invalid_retention'), tab: 'influx' };
+      return { msg: $_('settings.invalid_retention'), tab: 'storage' };
     if (!Number.isInteger(heartbeatNum) || heartbeatNum < 10)
-      return { msg: $_('settings.invalid_heartbeat'), tab: 'probes' };
+      return { msg: $_('settings.invalid_heartbeat'), tab: 'general' };
     return null;
   }
 
@@ -363,29 +377,12 @@
 
   {#if tab === 'general'}
   <div class="cards" role="tabpanel" id="panel-general" aria-labelledby="tab-general" tabindex="-1">
-    <!--
-      Langue et thème sont les seuls réglages de cet écran qui ne partent pas au
-      hub : ils vivent dans ce navigateur. Posés sans le dire à côté de réglages
-      qui valent pour tout le monde, ils laisseraient croire qu'on change la
-      langue de tous les comptes — d'où le cadre et la ligne qui les nomment.
-    -->
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.device_title')}</h2>
-      <p class="sub">{$_('settings.device_note')}</p>
-      <LangTheme labelled />
-    </section>
-
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.hub_version_title')}</h2>
-      <p class="ro lp-mono">{$_('settings.hub_version', { values: { version: hubVersion } })}</p>
-    </section>
-  </div>
-  {:else if tab === 'probes'}
-  <div class="cards" role="tabpanel" id="panel-probes" aria-labelledby="tab-probes" tabindex="-1">
-    <!-- Une seule adresse à renseigner : celle du hub. Les sondes ne
-         reçoivent plus d'URL InfluxDB — elles écrivent par le hub, qui
-         relaie. Deux URL voisines à distinguer, c'était une sonde enrôlée
-         avec la mauvaise et une demi-heure à comprendre pourquoi. -->
+    <!-- L'adresse du hub ouvre l'onglet parce que c'est ce qu'on vient
+         corriger : une sonde qui n'apparaît jamais, c'est presque toujours
+         elle. Une seule adresse à renseigner — les sondes ne reçoivent plus
+         d'URL InfluxDB, elles écrivent par le hub, qui relaie. Deux URL
+         voisines à distinguer, c'était une sonde enrôlée avec la mauvaise et
+         une demi-heure à comprendre pourquoi. -->
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.hub_url_title')}</h2>
       <label class="lp-field">
@@ -411,9 +408,69 @@
         </span>
       </label>
     </section>
+
+    <!--
+      Langue et thème sont les seuls réglages de cet écran qui ne partent pas au
+      hub : ils vivent dans ce navigateur. Posés sans le dire à côté de réglages
+      qui valent pour tout le monde, ils laisseraient croire qu'on change la
+      langue de tous les comptes — d'où le cadre et la ligne qui les nomment.
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.device_title')}</h2>
+      <p class="sub">{$_('settings.device_note')}</p>
+      <LangTheme labelled />
+    </section>
+
+    <!-- Un fait, pas un réglage : d'où sa place en fin d'onglet. -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.hub_version_title')}</h2>
+      <p class="ro lp-mono">{$_('settings.hub_version', { values: { version: hubVersion } })}</p>
+    </section>
   </div>
-  {:else if tab === 'influx'}
-  <div class="cards" role="tabpanel" id="panel-influx" aria-labelledby="tab-influx" tabindex="-1">
+  {:else if tab === 'storage'}
+  <div class="cards" role="tabpanel" id="panel-storage" aria-labelledby="tab-storage" tabindex="-1">
+    <!--
+      Ce qu'il y a dans la base avant l'adresse de la base : on ouvre « Stockage »
+      pour savoir si les mesures arrivent et ce qu'elles pèsent. L'org et le
+      bucket ne se lisent que si la réponse à ça ne suffit pas.
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.influx_state_title')}</h2>
+
+      {#if influx}
+        <dl class="stats">
+          <div>
+            <dt>{$_('settings.state_health')}</dt>
+            <dd class:ok={influx.healthy === true} class:bad={influx.healthy === false}>
+              {influx.healthy == null
+                ? '—'
+                : influx.healthy
+                  ? $_('settings.state_healthy')
+                  : $_('settings.state_unhealthy')}
+            </dd>
+          </div>
+          <div>
+            <dt>{$_('settings.state_version')}</dt>
+            <dd class="lp-mono">{influx.version ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>{$_('settings.state_size')}</dt>
+            <dd class="lp-mono">{humanBytes(influx.size_bytes, lang)}</dd>
+          </div>
+          <div>
+            <dt>{$_('settings.state_series')}</dt>
+            <dd class="lp-mono">
+              {influx.series_count != null
+                ? new Intl.NumberFormat(lang).format(influx.series_count)
+                : '—'}
+            </dd>
+          </div>
+        </dl>
+      {:else}
+        <p class="muted">{$_('settings.state_unavailable')}{influxError ? ` (${influxError})` : ''}</p>
+      {/if}
+    </section>
+
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.section_influx')}</h2>
       <!-- Les sondes n'écrivent plus dans Influx : elles passent par le hub.
@@ -434,6 +491,67 @@
           <input class="lp-input" bind:value={bucket} spellcheck="false" autocomplete="off" />
         </label>
       </div>
+    </section>
+
+    <!--
+      Le jeton de lecture est ce qui fait sortir les mesures du hub : sa carte
+      est distincte de l'état de la base parce qu'on ne vient pas ici pour la
+      même raison — voir si Influx va bien, ou brancher un Grafana dessus.
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.tokens_title')}</h2>
+      <p class="ro">
+        {$_('settings.tokens_readonly', {
+          values: { bucket: influx?.bucket || bucket || 'lanprobe' },
+        })}
+      </p>
+
+      <div class="tok-form">
+        <label class="lp-field grow">
+          {$_('settings.tokens_desc_label')}
+          <input
+            class="lp-input"
+            bind:value={tokenDesc}
+            placeholder={$_('settings.tokens_desc_placeholder')}
+          />
+        </label>
+        <button class="lp-btn accent" onclick={createToken} disabled={tokenBusy}>
+          {tokenBusy ? $_('settings.tokens_creating') : $_('settings.tokens_create')}
+        </button>
+      </div>
+
+      {#if tokensError}<p class="err" role="alert">{tokensError}</p>{/if}
+
+      {#if tokens.length === 0}
+        <p class="muted">{$_('settings.tokens_none')}</p>
+      {:else}
+        <!-- La liste ne montre JAMAIS la valeur : identifiant et description
+             suffisent pour savoir lequel révoquer. -->
+        <table class="tok-table">
+          <thead>
+            <tr>
+              <th>{$_('settings.tokens_col_desc')}</th>
+              <th>{$_('settings.tokens_col_id')}</th>
+              <th>{$_('settings.tokens_col_created')}</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each tokens as t (t.auth_id)}
+              <tr>
+                <td>{t.description || '—'}</td>
+                <td class="lp-mono id">{t.auth_id}</td>
+                <td class="lp-mono">{dateOnly(t.created_at, lang)}</td>
+                <td class="right">
+                  <button class="lp-btn danger sm" onclick={() => (revokeToken = t)}>
+                    {$_('settings.tokens_revoke')}
+                  </button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
     </section>
 
     <!--
@@ -488,120 +606,12 @@
       </section>
     </div>
   </div>
-  {:else}
-  <div class="cards" role="tabpanel" id="panel-data" aria-labelledby="tab-data" tabindex="-1">
-    <!--
-      Influx en lecture seule. L'objectif n'est pas d'administrer la base, mais
-      de savoir où sont ses mesures et si elles vont bien — sans jamais ouvrir
-      la console d'InfluxDB.
-    -->
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.influx_state_title')}</h2>
-
-      {#if influx}
-        <dl class="stats">
-          <div>
-            <dt>{$_('settings.state_health')}</dt>
-            <dd class:ok={influx.healthy === true} class:bad={influx.healthy === false}>
-              {influx.healthy == null
-                ? '—'
-                : influx.healthy
-                  ? $_('settings.state_healthy')
-                  : $_('settings.state_unhealthy')}
-            </dd>
-          </div>
-          <div>
-            <dt>{$_('settings.state_version')}</dt>
-            <dd class="lp-mono">{influx.version ?? '—'}</dd>
-          </div>
-          <div>
-            <dt>{$_('settings.state_size')}</dt>
-            <dd class="lp-mono">{humanBytes(influx.size_bytes, lang)}</dd>
-          </div>
-          <div>
-            <dt>{$_('settings.state_series')}</dt>
-            <dd class="lp-mono">
-              {influx.series_count != null
-                ? new Intl.NumberFormat(lang).format(influx.series_count)
-                : '—'}
-            </dd>
-          </div>
-          <div>
-            <dt>{$_('settings.org_label')}</dt>
-            <dd class="lp-mono">{influx.org || '—'}</dd>
-          </div>
-          <div>
-            <dt>{$_('settings.bucket_label')}</dt>
-            <dd class="lp-mono">{influx.bucket || '—'}</dd>
-          </div>
-        </dl>
-      {:else}
-        <p class="muted">{$_('settings.state_unavailable')}{influxError ? ` (${influxError})` : ''}</p>
-      {/if}
-
-      <div class="tokens">
-        <h3>{$_('settings.tokens_title')}</h3>
-        <p class="ro">
-          {$_('settings.tokens_readonly', {
-            values: { bucket: influx?.bucket || bucket || 'lanprobe' },
-          })}
-        </p>
-
-        <div class="tok-form">
-          <label class="lp-field grow">
-            {$_('settings.tokens_desc_label')}
-            <input
-              class="lp-input"
-              bind:value={tokenDesc}
-              placeholder={$_('settings.tokens_desc_placeholder')}
-            />
-          </label>
-          <button class="lp-btn accent" onclick={createToken} disabled={tokenBusy}>
-            {tokenBusy ? $_('settings.tokens_creating') : $_('settings.tokens_create')}
-          </button>
-        </div>
-
-        {#if tokensError}<p class="err" role="alert">{tokensError}</p>{/if}
-
-        {#if tokens.length === 0}
-          <p class="muted">{$_('settings.tokens_none')}</p>
-        {:else}
-          <!-- La liste ne montre JAMAIS la valeur : identifiant et description
-               suffisent pour savoir lequel révoquer. -->
-          <table class="tok-table">
-            <thead>
-              <tr>
-                <th>{$_('settings.tokens_col_desc')}</th>
-                <th>{$_('settings.tokens_col_id')}</th>
-                <th>{$_('settings.tokens_col_created')}</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each tokens as t (t.auth_id)}
-                <tr>
-                  <td>{t.description || '—'}</td>
-                  <td class="lp-mono id">{t.auth_id}</td>
-                  <td class="lp-mono">{dateOnly(t.created_at, lang)}</td>
-                  <td class="right">
-                    <button class="lp-btn danger sm" onclick={() => (revokeToken = t)}>
-                      {$_('settings.tokens_revoke')}
-                    </button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-      </div>
-    </section>
-  </div>
   {/if}
 
-  <!-- Rien à enregistrer sur « Général » ni « Vos données » : le bouton ne s'y
-       affiche que s'il reste une modification en attente sur un autre onglet,
-       sinon il disparaîtrait avec du travail non enregistré. -->
-  {#if dirty || (tab !== 'general' && tab !== 'data')}
+  <!-- Le bouton n'appartient qu'aux onglets qui portent des champs du hub. Sur
+       les autres, il ne s'affiche que s'il reste une modification en attente
+       ailleurs — sinon il disparaîtrait avec du travail non enregistré. -->
+  {#if dirty || savable}
     <div class="save-row">
       {#if fieldError}<p class="err" role="alert">{fieldError}</p>{/if}
       {#if notice}<p class="ok" role="status">{notice}</p>{/if}
@@ -879,19 +889,6 @@
     color: var(--ep-danger);
   }
 
-  .tokens {
-    border-top: 1px solid var(--ep-border);
-    padding-top: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .tokens h3 {
-    font-size: 13px;
-    font-weight: 700;
-    margin: 0;
-    color: var(--ep-text-primary);
-  }
   .ro {
     font-size: 11.5px;
     color: var(--ep-success);

@@ -108,6 +108,7 @@
     "tab_probes": "Probes",
     "tab_influx": "InfluxDB",
     "tab_retention": "Retention",
+    "tab_storage": "Storage",
     "tab_dirty": "Unsaved changes in this tab.",
     "destructive_zone": "Destructive setting",
     "retention_lead": "How long InfluxDB keeps measurements before erasing them. It is the only setting on this screen that deletes data.",

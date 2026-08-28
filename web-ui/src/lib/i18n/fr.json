@@ -108,6 +108,7 @@
     "tab_probes": "Sondes",
     "tab_influx": "InfluxDB",
     "tab_retention": "Conservation",
+    "tab_storage": "Stockage",
     "tab_dirty": "Modifications non enregistrées dans cet onglet.",
     "destructive_zone": "Réglage destructif",
     "retention_lead": "Combien de temps InfluxDB garde les mesures avant de les effacer. C'est le seul réglage de cet écran qui supprime des données.",
