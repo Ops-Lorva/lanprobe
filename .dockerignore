@@ -1,0 +1,44 @@
+# Contexte de build de l'image lanprobe-web — voir Dockerfile.
+# Règle absolue : rien de secret ne doit jamais entrer dans le contexte de
+# build, même si aucune instruction COPY ne le cible explicitement
+# aujourd'hui (une instruction future pourrait le faire par erreur).
+
+# Certificats de signature Apple à la racine du dépôt — JAMAIS dans l'image.
+*.p12
+Certificates.*
+*.mobileprovision
+*.pem
+*.key
+.env
+.env.*
+
+# Rust — reconstruit dans l'étape rust-builder, jamais réutilisé depuis l'hôte
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Frontend desktop/serveur existant (Tauri + SvelteKit) — sans rapport avec
+# le hub, qui construit web-ui/ dans sa propre étape
+node_modules/
+node_modules.old*/
+.svelte-kit/
+build/
+dist/
+web-ui/node_modules/
+web-ui/dist/
+
+# Outils / VCS / agents
+.git/
+.github/
+.worktrees/
+.claude/
+.superpowers/
+docs/superpowers/
+
+# Divers
+*.log
+.DS_Store
+Thumbs.db
+@eaDir/
+Screenshot *.png
+macos_error.txt
