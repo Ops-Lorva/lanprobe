@@ -531,3 +531,41 @@ réseau client. Conditions minimales : désactivé par défaut, activable **par
 sonde**, révocable, et chaque session journalisée.
 
 À cadrer pour lui-même, pas à greffer.
+
+## 11. Audit et comptes (non implémenté)
+
+### Deux journaux, à ne pas confondre
+
+**Journal technique** (fait) — requêtes, codes, présence du cookie de session,
+`X-Forwarded-Proto`. Va sur la sortie standard, se perd au redémarrage. Sert au
+diagnostic. Sans lui, un « je n'arrive pas à me connecter » est indiagnosticable :
+le serveur répond correctement à tous les tests et personne ne voit ce que le
+client a réellement envoyé.
+
+**Journal d'audit** (à faire) — en base, consultable dans l'interface : qui s'est
+connecté, qui a enrôlé ou révoqué une sonde, fait tourner une clé, changé la
+rétention. Acteur, action, cible, date, résultat. Jamais de secret.
+
+Deux règles sans lesquelles il ne sert à rien :
+
+1. **Les échecs sont journalisés autant que les réussites.** Un journal qui
+   n'enregistre que les succès ne montre jamais une tentative d'intrusion — il
+   montre celui qui a fini par entrer.
+2. **Ajout seul.** Aucune route ne supprime une ligne d'audit, pas même pour un
+   administrateur. Un journal qu'on peut nettoyer ne prouve rien.
+
+### Rôles
+
+La table `users` porte déjà `role` ; il manque la gestion et l'application.
+
+| Rôle | Peut |
+|---|---|
+| `admin` | tout, y compris les comptes et la rétention |
+| `operator` | enrôler, renommer, déplacer, faire tourner les clés |
+| `viewer` | consulter |
+
+`viewer` est le rôle qui manque le plus en entreprise : montrer le parc à un
+client ou à un collègue sans qu'un clic révoque une sonde.
+
+L'application des rôles se fait **côté serveur**, route par route. Une interface
+qui se contente de masquer les boutons ne protège rien.

@@ -34,7 +34,7 @@ services:
       # Interface web du hub — HTTPS auto-signé par défaut (voir le README,
       # section "Sécurité"). C'est ici que vous créez le compte admin et
       # enrôlez vos sondes.
-      - "8443:8443"
+      - "8080:8080"
       # Écriture InfluxDB — exposé aux sondes du LAN. Ne pas exposer au-delà
       # de votre réseau local sans un reverse proxy TLS de confiance devant.
       - "8086:8086"

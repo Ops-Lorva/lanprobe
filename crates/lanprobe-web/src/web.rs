@@ -95,6 +95,11 @@ pub fn build_router(state: AppState) -> Router {
         // L'interface web est servie en dernier : toute requête qui n'a
         // trouvé aucune route d'API tombe ici.
         .fallback(crate::assets::serve)
+        // Journal d'accès. Sans lui, un « je n'arrive pas à me connecter »
+        // est indiagnosticable : le serveur répond correctement à tous les
+        // tests et personne ne voit ce que le client a réellement envoyé.
+        // On journalise la présence du cookie, jamais sa valeur.
+        .layer(middleware::from_fn(access_log))
 }
 
 // ── Erreurs ────────────────────────────────────────────────────────────────
@@ -214,6 +219,33 @@ fn session_cookie(token: &str, expired: bool, secure: bool) -> String {
         builder = builder.max_age(cookie::time::Duration::seconds(0));
     }
     builder.build().to_string()
+}
+
+/// Journal d'accès : méthode, chemin, code, et **présence** du cookie de
+/// session — jamais sa valeur. Savoir si le navigateur a renvoyé son cookie
+/// est ce qui distingue « mauvais mot de passe » de « cookie refusé par le
+/// navigateur », deux pannes qui se ressemblent et se corrigent autrement.
+async fn access_log(request: axum::extract::Request, next: middleware::Next) -> Response {
+    let method = request.method().clone();
+    let path = request
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_default();
+    let has_cookie = session_of(request.headers()).is_some();
+    let forwarded = request
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+    let response = next.run(request).await;
+    tracing::info!(
+        "{method} {path} → {} (cookie: {}, x-forwarded-proto: {forwarded})",
+        response.status().as_u16(),
+        if has_cookie { "présent" } else { "absent" },
+    );
+    response
 }
 
 fn session_of(headers: &HeaderMap) -> Option<String> {

@@ -157,7 +157,7 @@ RUN mkdir -p /data/lanprobe /data/influxdb \
     && chown -R lanprobe:lanprobe /data
 
 ENV LANPROBE_WEB_HOST=0.0.0.0 \
-    LANPROBE_WEB_PORT=8443 \
+    LANPROBE_WEB_PORT=8080 \
     LANPROBE_WEB_CONFIG_DIR=/data/lanprobe \
     INFLUX_PORT=8086 \
     INFLUX_ORG=lanprobe \
@@ -169,9 +169,10 @@ ENV LANPROBE_WEB_HOST=0.0.0.0 \
 # plusieurs Go — politique de sauvegarde différente, volontairement séparée.
 VOLUME ["/data/lanprobe", "/data/influxdb"]
 
-# 8443 : interface web du hub (HTTPS, auto-signé par défaut — cf. README).
+# 8080 : interface web du hub, en clair — à placer derrière le reverse
+#        proxy de l'utilisateur. LANPROBE_WEB_TLS=true pour du TLS auto-signé.
 # 8086 : écriture InfluxDB, exposé aux sondes du LAN.
-EXPOSE 8443 8086
+EXPOSE 8080 8086
 
 # Le conteneur démarre root le temps strictement nécessaire à
 # docker/entrypoint.sh (préparer les volumes) ; tini reste PID 1 en toutes

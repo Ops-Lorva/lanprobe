@@ -170,7 +170,7 @@ fi
 
 lanprobe-web \
     --host "${LANPROBE_WEB_HOST:-0.0.0.0}" \
-    --port "${LANPROBE_WEB_PORT:-8443}" \
+    --port "${LANPROBE_WEB_PORT:-8080}" \
     --config-dir "$LANPROBE_DATA" &
 HUB_PID=$!
 
