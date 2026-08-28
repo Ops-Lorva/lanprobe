@@ -84,6 +84,16 @@ pub struct HubConfig {
     pub influx: InfluxCredentials,
     #[serde(default = "default_heartbeat")]
     pub heartbeat_interval_secs: u64,
+    /// Accepte un certificat non vérifiable pour le hub. **Faux par défaut.**
+    ///
+    /// N'a de raison d'être que si l'utilisateur héberge son hub avec un
+    /// certificat auto-signé (`--tls`) et l'assume en connaissance de cause :
+    /// c'est le jeton de sonde qui voyage dans cette requête, et sans
+    /// vérification n'importe qui sur le chemin peut se faire passer pour le
+    /// hub et le récupérer. Le cas normal — un hub derrière un reverse proxy
+    /// avec un vrai certificat — ne l'active jamais.
+    #[serde(default)]
+    pub allow_self_signed: bool,
 }
 
 fn default_heartbeat() -> u64 {
@@ -185,6 +195,7 @@ pub async fn enroll(
     name: &str,
     code: Option<&str>,
     credentials: Option<(&str, &str, &str)>,
+    allow_self_signed: bool,
 ) -> Result<HubConfig, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -204,13 +215,24 @@ pub async fn enroll(
     }
 
     let body = EnrollRequest { code, username, password, site, name };
-    let response = http_client()
+    let response = http_client(allow_self_signed)
         .post(format!("{hub_url}/api/probes/enroll"))
         .json(&body)
         .timeout(Duration::from_secs(20))
         .send()
         .await
-        .map_err(|e| format!("hub injoignable : {e}"))?;
+        .map_err(|e| {
+            // Distinguer les deux causes : « je n'ai pas confiance en ce
+            // certificat » n'a pas la même correction que « personne ne
+            // répond », et le message générique enverrait l'utilisateur
+            // vérifier son réseau alors que son hub est parfaitement joignable.
+            let hint = if !allow_self_signed && looks_like_tls_failure(&e) {
+                " — certificat non vérifiable. Si votre hub utilise un certificat auto-signé, cochez l'option correspondante ; sinon placez-le derrière un reverse proxy muni d'un vrai certificat."
+            } else {
+                ""
+            };
+            format!("hub injoignable : {e}{hint}")
+        })?;
 
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
@@ -243,6 +265,7 @@ pub async fn enroll(
             token_version: parsed.influx.token_version,
         },
         heartbeat_interval_secs: parsed.heartbeat_interval_secs,
+        allow_self_signed,
     };
 
     save(state, &config)?;
@@ -351,7 +374,7 @@ async fn beat(
     let (buffered_points, last_write_ok) = status.read();
     let _ = state;
 
-    let response = http_client()
+    let response = http_client(config.allow_self_signed)
         .post(format!(
             "{}/api/probes/{}/heartbeat",
             config.url, config.probe_id
@@ -465,14 +488,27 @@ fn platform() -> &'static str {
     }
 }
 
-fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        // Le hub peut servir un certificat auto-signé (option `--tls`). On ne
-        // valide pas la chaîne ici : le secret qui compte, le jeton de sonde,
-        // est vérifié par le hub, et l'utilisateur a saisi l'adresse lui-même.
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_default()
+/// Vrai quand l'erreur de `reqwest` ressemble à un refus de certificat.
+fn looks_like_tls_failure(error: &reqwest::Error) -> bool {
+    let text = error.to_string().to_lowercase();
+    text.contains("certificate") || text.contains("tls") || text.contains("self-signed")
+}
+
+/// Client HTTP vers le hub.
+///
+/// **La vérification du certificat est active par défaut.** Le jeton de sonde
+/// voyage dans ces requêtes : sans vérification, n'importe qui sur le chemin
+/// peut se faire passer pour le hub et le récupérer. Elle n'est levée que si
+/// l'utilisateur a explicitement déclaré héberger un hub auto-signé — un choix
+/// qu'il pose lui-même, pas un défaut qu'il subit.
+fn http_client(allow_self_signed: bool) -> reqwest::Client {
+    let builder = reqwest::Client::builder();
+    let builder = if allow_self_signed {
+        builder.danger_accept_invalid_certs(true)
+    } else {
+        builder
+    };
+    builder.build().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -490,6 +526,17 @@ mod tests {
         assert!(!c.is_enrolled(), "sans jeton, la sonde ne peut rien faire");
         c.token = "enc:v1:…".into();
         assert!(c.is_enrolled());
+    }
+
+    #[test]
+    fn tls_verification_is_on_unless_explicitly_waived() {
+        // Le jeton de sonde voyage dans ces requêtes : le défaut doit être
+        // la vérification, jamais l'inverse.
+        let c: HubConfig = serde_json::from_str("{}").unwrap();
+        assert!(
+            !c.allow_self_signed,
+            "une configuration qui ne dit rien doit vérifier le certificat"
+        );
     }
 
     #[test]
