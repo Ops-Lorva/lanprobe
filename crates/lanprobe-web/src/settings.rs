@@ -21,6 +21,8 @@ pub mod keys {
     pub const INFLUX_ORG: &str = "influx_org";
     pub const INFLUX_BUCKET: &str = "influx_bucket";
     pub const INFLUX_ADVERTISE_URL: &str = "influx_advertise_url";
+    /// Adresse publique du hub, telle que les sondes le joignent.
+    pub const HUB_PUBLIC_URL: &str = "hub_public_url";
     pub const RETENTION_DAYS: &str = "retention_days";
     pub const HEARTBEAT_INTERVAL_SECS: &str = "heartbeat_interval_secs";
 
@@ -29,6 +31,7 @@ pub mod keys {
         INFLUX_ORG,
         INFLUX_BUCKET,
         INFLUX_ADVERTISE_URL,
+        HUB_PUBLIC_URL,
         RETENTION_DAYS,
         HEARTBEAT_INTERVAL_SECS,
     ];
@@ -63,6 +66,19 @@ impl Settings {
 
     /// URL annoncée telle qu'elle est réglée dans l'interface. `None` laisse
     /// la main aux niveaux suivants (variable d'environnement, en-tête `Host`).
+    /// Adresse publique du hub. C'est **le seul réglage d'adresse à renseigner
+    /// normalement** : l'URL d'Influx en découle. L'utilisateur ne devrait pas
+    /// avoir à distinguer deux URL voisines — il dit par où on le joint, le hub
+    /// calcule le reste.
+    pub fn hub_public_url(&self) -> Option<String> {
+        self.db
+            .get_setting(keys::HUB_PUBLIC_URL)
+            .ok()
+            .flatten()
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty())
+    }
+
     pub fn stored_advertise_url(&self) -> Option<String> {
         self.db.get_setting(keys::INFLUX_ADVERTISE_URL).ok().flatten()
     }
@@ -96,6 +112,7 @@ impl Settings {
             keys::INFLUX_ORG: self.influx_org(),
             keys::INFLUX_BUCKET: self.influx_bucket(),
             keys::INFLUX_ADVERTISE_URL: self.stored_advertise_url(),
+            keys::HUB_PUBLIC_URL: self.hub_public_url(),
             keys::RETENTION_DAYS: self.retention_days(),
             keys::HEARTBEAT_INTERVAL_SECS: self.heartbeat_interval_secs(),
         })
@@ -107,7 +124,9 @@ impl Settings {
     pub fn put(&self, key: &str, value: &str, confirm_data_loss: bool) -> DbResult<()> {
         let value = value.trim();
         match key {
-            keys::INFLUX_URL | keys::INFLUX_ADVERTISE_URL => validate_absolute_url(value)?,
+            keys::INFLUX_URL | keys::INFLUX_ADVERTISE_URL | keys::HUB_PUBLIC_URL => {
+                validate_absolute_url(value)?
+            }
             keys::INFLUX_ORG | keys::INFLUX_BUCKET => {
                 if value.is_empty() {
                     return Err(DbError::Conflict(format!("{key} ne peut pas être vide")));

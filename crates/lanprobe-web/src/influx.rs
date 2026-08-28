@@ -52,6 +52,9 @@ pub enum AdvertiseSource {
     Settings,
     /// `INFLUX_ADVERTISE_URL`, pour qui préfère préconfigurer.
     Env,
+    /// Déduite de l'adresse publique du hub : même hôte, port d'Influx.
+    /// C'est le chemin nominal une fois le hub configuré.
+    HubPublicUrl,
     /// L'hôte par lequel la sonde vient de joindre le hub.
     HostHeader,
     /// Dernier recours : l'URL interne. Elle ne marchera probablement pas pour
@@ -67,6 +70,7 @@ impl AdvertiseSource {
         match self {
             AdvertiseSource::Settings => "settings",
             AdvertiseSource::Env => "env",
+            AdvertiseSource::HubPublicUrl => "hub_public_url",
             AdvertiseSource::HostHeader => "host_header",
             AdvertiseSource::InternalUrl => "internal_url",
         }
@@ -134,8 +138,14 @@ impl Influx {
     ///
     /// Un conteneur ne peut pas connaître son port publié : avec `-p
     /// 9086:8086` le processus ne voit que `8086`. Aucune détection
-    /// automatique n'est possible, d'où ces trois niveaux — dont le premier
-    /// est réglable depuis l'interface, sans redémarrage.
+    /// automatique n'est possible, d'où ces niveaux — dont les deux premiers
+    /// sont réglables depuis l'interface, sans redémarrage.
+    ///
+    /// **Le réglage normal est l'adresse publique du hub**, pas celle
+    /// d'Influx : l'utilisateur dit par où on le joint, le hub en déduit où
+    /// les sondes écrivent. Deux URL voisines à distinguer, c'est une sonde
+    /// enrôlée avec la mauvaise et une demi-heure à comprendre pourquoi. La
+    /// surcharge Influx ne sert qu'au cas rare où il est exposé ailleurs.
     ///
     /// **Chemin unique** : l'enrôlement et le test de joignabilité passent
     /// tous deux par ici. Deux chemins finiraient par diverger, et le test
@@ -155,6 +165,18 @@ impl Influx {
         }
         let internal = self.settings.influx_url();
         let (scheme, _, port) = split_url(&internal);
+        // Déduction depuis l'adresse publique du hub : même hôte, port
+        // d'Influx. C'est le chemin nominal une fois le hub configuré.
+        if let Some(public) = self.settings.hub_public_url() {
+            let host = split_url(&public).1;
+            if !host.is_empty() {
+                let port = port.map(|p| format!(":{p}")).unwrap_or_default();
+                return (
+                    format!("{scheme}://{host}{port}"),
+                    AdvertiseSource::HubPublicUrl,
+                );
+            }
+        }
         if let Some(host) = host_header.map(host_without_port).filter(|h| !h.is_empty()) {
             let port = port.map(|p| format!(":{p}")).unwrap_or_default();
             return (format!("{scheme}://{host}{port}"), AdvertiseSource::HostHeader);
@@ -1033,6 +1055,45 @@ mod tests {
             !rendered.contains("jeton-operateur-secret"),
             "le jeton opérateur ne doit jamais être sérialisé : {rendered}"
         );
+    }
+
+    #[test]
+    fn the_hub_public_url_decides_where_probes_write() {
+        // Le réglage normal est l'adresse publique du hub : l'utilisateur dit
+        // par où on le joint, le hub en déduit où les sondes écrivent. Deux URL
+        // voisines à distinguer, c'est une sonde enrôlée avec la mauvaise.
+        let settings = settings_for("https://127.0.0.1:8086");
+        settings
+            .put(crate::settings::keys::HUB_PUBLIC_URL, "https://lanprobe.exemple.fr", false)
+            .unwrap();
+        let influx = Influx::new(settings, OPERATOR_TOKEN.to_string());
+        let (url, source) = influx.resolve_advertise_url(Some("10.0.0.5:8080"));
+        assert_eq!(
+            url, "https://lanprobe.exemple.fr:8086",
+            "l'hôte vient du réglage, le port d'Influx"
+        );
+        assert_eq!(source.as_str(), "hub_public_url");
+    }
+
+    #[test]
+    fn an_explicit_influx_url_still_wins_over_the_deduction() {
+        // Le cas rare — Influx exposé ailleurs — doit rester possible sans
+        // rendre le cas courant plus compliqué.
+        let settings = settings_for("https://127.0.0.1:8086");
+        settings
+            .put(crate::settings::keys::HUB_PUBLIC_URL, "https://lanprobe.exemple.fr", false)
+            .unwrap();
+        settings
+            .put(
+                crate::settings::keys::INFLUX_ADVERTISE_URL,
+                "https://metrics.exemple.fr:9086",
+                false,
+            )
+            .unwrap();
+        let influx = Influx::new(settings, OPERATOR_TOKEN.to_string());
+        let (url, source) = influx.resolve_advertise_url(None);
+        assert_eq!(url, "https://metrics.exemple.fr:9086");
+        assert_eq!(source.as_str(), "settings");
     }
 
     #[tokio::test]
