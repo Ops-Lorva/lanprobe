@@ -57,6 +57,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/probes/enroll", post(enroll))
+        .route("/api/probes/{id}/write", post(write_metrics))
         .route("/api/probes/{id}/heartbeat", post(heartbeat));
 
     // `GET /api/sites` accepte aussi les identifiants du compte : la sonde
@@ -540,6 +541,38 @@ struct HeartbeatBody {
     /// l'accusé de réception qui autorise le hub à retirer l'ancien.
     #[serde(default)]
     influx_token_version: Option<i64>,
+}
+
+/// Écriture des mesures, relayée vers Influx.
+///
+/// Les sondes n'atteignent plus Influx directement : une seule porte, une
+/// seule authentification, un seul certificat. Le corps est du line protocol
+/// brut, transmis tel quel — le hub relaie, il n'accumule pas.
+async fn write_metrics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let Some(token) = bearer_token(&headers) else {
+        return fail(StatusCode::UNAUTHORIZED, "jeton de sonde requis");
+    };
+    if let Err(e) = state.db.authenticate_probe(&id, &token) {
+        return error_response(e);
+    }
+    if body.trim().is_empty() {
+        // Un lot vide n'est pas une erreur : une sonde qui n'a rien mesuré
+        // pendant son intervalle a le droit de le dire sans être rejetée.
+        return ok_json(json!({ "ok": true, "written": 0 }));
+    }
+    let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
+    match state.influx.write_line_protocol(body).await {
+        Ok(()) => ok_json(json!({ "ok": true, "written": lines })),
+        // 502 et non 500 : la panne est en aval du hub. La sonde doit
+        // conserver son lot et réessayer, pas le jeter comme s'il était
+        // malformé — un 4xx lui dirait au contraire d'abandonner.
+        Err(e) => fail(StatusCode::BAD_GATEWAY, &e),
+    }
 }
 
 async fn heartbeat(
@@ -2110,6 +2143,67 @@ mod tests {
 
         assert_eq!(tested["url"], enrolled["influx"]["url"]);
         assert_eq!(tested["source"], "host_header");
+    }
+
+    // ── Écriture des mesures ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn writing_metrics_needs_the_probe_token() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let line = "ping,probe_id=x latency_ms=12 1787788800000000000";
+
+        // Sans jeton : refusé.
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/probes/{probe_id}/write"))
+            .body(Body::from(line))
+            .unwrap();
+        let (status, _, _) = h.call(request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Avec un mauvais jeton : refusé aussi. Le hub est la seule porte,
+        // il ne peut pas se permettre d'être permissif.
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/probes/{probe_id}/write"))
+            .header(header::AUTHORIZATION, "Bearer faux")
+            .body(Body::from(line))
+            .unwrap();
+        let (status, _, _) = h.call(request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Avec le bon jeton : relayé.
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/probes/{probe_id}/write"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(line))
+            .unwrap();
+        let (status, body, _) = h.call(request).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["written"], 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_batch_is_accepted_not_rejected() {
+        // Une sonde qui n'a rien mesuré pendant son intervalle a le droit de
+        // le dire : la rejeter la ferait réessayer en boucle pour rien.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/probes/{probe_id}/write"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(""))
+            .unwrap();
+        let (status, body, _) = h.call(request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["written"], 0);
     }
 
     // ── Jetons de lecture ──────────────────────────────────────────────────

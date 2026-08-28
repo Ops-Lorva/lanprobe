@@ -497,6 +497,43 @@ impl Influx {
 
     /// `tolerated` liste les codes non-2xx à traiter comme une réponse vide
     /// plutôt que comme une erreur.
+    /// Relaie un lot de points en line protocol vers Influx.
+    ///
+    /// Les sondes n'écrivent plus dans Influx directement : elles envoient au
+    /// hub, qui relaie. Une seule porte, une seule authentification, un seul
+    /// certificat — et Influx n'a plus besoin d'être joignable depuis le
+    /// réseau des sondes.
+    ///
+    /// Le corps est **transmis tel quel**, sans être accumulé en mémoire côté
+    /// hub au-delà de la requête : le hub est un relais, pas un tampon. S'il
+    /// bufferisait, une pointe d'écriture le ferait gonfler, et un
+    /// redémarrage perdrait des mesures que la sonde croit livrées.
+    pub async fn write_line_protocol(&self, body: String) -> Result<(), String> {
+        let url = format!(
+            "{}/api/v2/write?org={}&bucket={}&precision=ns",
+            self.settings.influx_url().trim_end_matches('/'),
+            urlencoding(&self.settings.influx_org()),
+            urlencoding(&self.settings.influx_bucket()),
+        );
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Token {}", self.operator_token))
+            .timeout(std::time::Duration::from_secs(20))
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| format!("InfluxDB injoignable : {e}"))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        // Le détail d'Influx est utile au diagnostic (point mal formé, bucket
+        // absent) : on le remonte à la sonde, qui le journalisera.
+        let detail = response.text().await.unwrap_or_default();
+        Err(format!("écriture refusée par InfluxDB ({status}) : {detail}"))
+    }
+
     async fn send_json(
         &self,
         method: reqwest::Method,
@@ -568,6 +605,21 @@ pub async fn run_provisioning(
 /// Découpe une URL en (schéma, hôte, port). Volontairement minimal : on ne
 /// traite que des URL qu'on a nous-même formées ou reçues d'une variable
 /// d'environnement, pas des URL arbitraires du web.
+/// Encodage minimal pour un paramètre de requête. `org` et `bucket` viennent
+/// des réglages : ils peuvent contenir un espace ou un `&` sans que ce soit
+/// une attaque, mais l'URL doit rester valide.
+fn urlencoding(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
 fn split_url(url: &str) -> (String, String, Option<u16>) {
     let (scheme, rest) = url.split_once("://").unwrap_or(("http", url));
     let authority = rest.split(['/', '?']).next().unwrap_or(rest);
@@ -844,6 +896,10 @@ pub(crate) mod testing {
                 };
 
                 match (method.as_str(), uri.path()) {
+                    // Relais d'écriture : Influx répond 204 sans corps.
+                    ("POST", "/api/v2/write") => {
+                        (axum::http::StatusCode::NO_CONTENT, "").into_response()
+                    }
                     ("GET", "/api/v2/orgs") if guard.org_exists => {
                         json(r#"{"orgs":[{"id":"org-1","name":"lanprobe"}]}"#)
                     }
