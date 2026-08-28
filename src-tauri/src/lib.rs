@@ -753,6 +753,10 @@ struct HubEnrollArgs {
 #[tauri::command]
 fn cmd_hub_status(state: tauri::State<'_, SharedState>) -> serde_json::Value {
     let cfg = lanprobe_server::hub::load(&state);
+    // L'état vient de la boucle de battement de cœur : c'est elle qui sait si
+    // le hub répond. La configuration seule dirait « rattachée » d'une sonde
+    // révoquée depuis trois jours.
+    let live = state.hub.snapshot();
     serde_json::json!({
         "enrolled": cfg.is_enrolled(),
         "url": cfg.url,
@@ -760,6 +764,10 @@ fn cmd_hub_status(state: tauri::State<'_, SharedState>) -> serde_json::Value {
         "name": cfg.name,
         "site": cfg.site,
         "heartbeat_interval_secs": cfg.heartbeat_interval_secs,
+        "state": live.state,
+        "last_beat_at": live.last_beat_at,
+        "last_error": live.last_error,
+        "buffered_points": live.buffered_points,
     })
 }
 

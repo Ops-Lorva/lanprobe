@@ -279,6 +279,10 @@ pub struct AppState {
     /// l'historique de monitoring — évite les faux outages lors d'un
     /// changement de profil réseau (l'interface est brièvement down).
     pub monitoring_blackout_until: Arc<Mutex<Option<Instant>>>,
+    /// État du rattachement à un hub, tenu à jour par la boucle de battement
+    /// de cœur et lu par l'interface. Il vit ici parce que c'est la boucle
+    /// qui le sait et l'interface qui le montre — elles ne se connaissent pas.
+    pub hub: Arc<crate::hub::HubStatus>,
 }
 
 impl AppState {
@@ -308,6 +312,7 @@ impl AppState {
             config,
             is_headless,
             monitoring_blackout_until: Arc::new(Mutex::new(None)),
+            hub: Arc::new(crate::hub::HubStatus::default()),
         }
     }
 

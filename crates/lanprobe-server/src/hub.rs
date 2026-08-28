@@ -443,6 +443,9 @@ fn save(state: &AppState, config: &HubConfig) -> Result<(), String> {
 /// Détache la sonde du hub. **Ne supprime aucune mesure** — celles déjà
 /// écrites appartiennent au hub, pas à la sonde.
 pub fn forget(state: &AppState) -> Result<(), String> {
+    // Sans ça, l'interface garderait une pastille d'erreur jusqu'au prochain
+    // passage de la boucle — pour une sonde qu'on vient de détacher exprès.
+    state.hub.set_detached();
     let mut root = state.config.get();
     if let Some(map) = root.as_object_mut() {
         map.remove(CONFIG_KEY);
@@ -450,6 +453,124 @@ pub fn forget(state: &AppState) -> Result<(), String> {
     state.config.put(root.clone())?;
     state.emit("config:update", root);
     Ok(())
+}
+
+// ── État du rattachement, tel que l'app le montre ──────────────────────────
+
+/// Les quatre états d'un rattachement. Ce ne sont pas quatre nuances de la
+/// même chose : chacun appelle une action différente de l'utilisateur, c'est
+/// ce qui justifie quatre couleurs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HubState {
+    /// Pas rattachée. Le rattachement est optionnel : son absence n'est pas
+    /// un défaut, et l'app n'a rien de particulier à signaler.
+    #[default]
+    Off,
+    /// Dernier battement réussi. Rien à faire.
+    Ok,
+    /// Rattachée, mais le lien est coupé. **Ça se répare tout seul** : rien à
+    /// faire, sinon savoir que les mesures ne partent plus et s'accumulent.
+    Degraded,
+    /// Le hub a refusé le jeton. **Réessayer ne servira jamais à rien** : il
+    /// faut un ré-enrôlement, donc une action humaine. Le confondre avec
+    /// `Degraded` ferait attendre une réparation qui ne viendra pas.
+    Broken,
+}
+
+/// Ce que l'app affiche du rattachement, à un instant donné.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HubSnapshot {
+    pub state: HubState,
+    /// Horodatage UNIX du dernier battement **réussi**. Conservé quand le
+    /// lien tombe : « plus rien ne part depuis 14 h 02 » se lit, « plus rien
+    /// ne part » ne dit pas depuis quand.
+    pub last_beat_at: Option<i64>,
+    /// Message du hub ou de la couche réseau. Il est écrit pour être lu.
+    pub last_error: Option<String>,
+    /// Points en attente d'écriture — c'est la profondeur du retard.
+    pub buffered_points: usize,
+}
+
+/// État partagé entre la boucle de battement et l'interface.
+#[derive(Debug, Default)]
+pub struct HubStatus {
+    inner: Mutex<HubSnapshot>,
+}
+
+impl HubStatus {
+    pub fn snapshot(&self) -> HubSnapshot {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Aucune configuration de hub : on ne signale rien.
+    pub fn set_detached(&self) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.state = HubState::Off;
+        g.last_error = None;
+    }
+
+    pub fn record_success(&self, buffered_points: usize, at: i64) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.state = HubState::Ok;
+        g.last_beat_at = Some(at);
+        g.last_error = None;
+        g.buffered_points = buffered_points;
+    }
+
+    /// Un échec transitoire ne **repeint pas** un rattachement déjà cassé :
+    /// une coupure réseau survenue après une révocation ne rend pas la sonde
+    /// réparable toute seule. Seul un battement réussi sort de `Broken`.
+    pub fn record_failure(&self, error: &BeatError, buffered_points: usize) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.state = match (g.state, error) {
+            (_, BeatError::Unrecoverable(_)) => HubState::Broken,
+            (HubState::Broken, _) => HubState::Broken,
+            _ => HubState::Degraded,
+        };
+        g.last_error = Some(error.message().to_string());
+        g.buffered_points = buffered_points;
+    }
+}
+
+/// Pourquoi un battement a échoué. La distinction n'est pas cosmétique :
+/// l'une des deux causes se répare toute seule, l'autre jamais.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeatError {
+    /// Rien ne se réparera tout seul : jeton refusé par le hub, ou secret
+    /// local illisible. Il faut un ré-enrôlement.
+    Unrecoverable(String),
+    /// Hub injoignable, réseau coupé, réponse illisible : le prochain tick
+    /// réessaiera, et un jour ça repassera.
+    Transient(String),
+}
+
+impl BeatError {
+    pub fn message(&self) -> &str {
+        match self {
+            BeatError::Unrecoverable(m) | BeatError::Transient(m) => m,
+        }
+    }
+}
+
+impl std::fmt::Display for BeatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// Traduit le code de réponse du hub. Seul un refus du jeton est définitif —
+/// un hub en train de redémarrer n'a révoqué personne.
+fn error_for_status(status: reqwest::StatusCode) -> Option<BeatError> {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Some(BeatError::Unrecoverable(
+            "jeton refusé par le hub — la sonde a probablement été révoquée, un ré-enrôlement est nécessaire".into(),
+        ));
+    }
+    if status.is_success() {
+        return None;
+    }
+    Some(BeatError::Transient(format!("réponse {status}")))
 }
 
 // ── Boucle de battement de cœur ────────────────────────────────────────────
@@ -484,20 +605,24 @@ pub async fn run(state: AppState, key: SecretKey, status: Arc<WriteStatus>) {
         let config = load(&state);
         if !config.is_enrolled() {
             // Pas encore enrôlée : on attend qu'elle le soit, sans bruit.
+            state.hub.set_detached();
             tokio::time::sleep(Duration::from_secs(15)).await;
             continue;
         }
 
         let interval = Duration::from_secs(config.heartbeat_interval_secs.max(5));
+        let (buffered_points, _) = status.read();
         match beat(&state, &key, &config, &status, &public_ip).await {
             Ok(response) => {
                 backoff = Duration::from_secs(5);
+                state.hub.record_success(buffered_points, unix_now());
                 if let Err(e) = apply(&state, &key, &config, response) {
                     tracing::warn!("hub : mise à jour locale impossible : {e}");
                 }
                 tokio::time::sleep(interval).await;
             }
             Err(e) => {
+                state.hub.record_failure(&e, buffered_points);
                 tracing::warn!("hub : battement de cœur échoué ({e}) — nouvelle tentative dans {backoff:?}");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -512,8 +637,10 @@ async fn beat(
     config: &HubConfig,
     status: &WriteStatus,
     public_ip: &PublicIpCache,
-) -> Result<HeartbeatResponse, String> {
-    let token = secrets::open(key, &config.token)?;
+) -> Result<HeartbeatResponse, BeatError> {
+    // Un secret local illisible ne se répare pas en réessayant : c'est un
+    // ré-enrôlement qu'il faut, pas de la patience.
+    let token = secrets::open(key, &config.token).map_err(BeatError::Unrecoverable)?;
     let (buffered_points, last_write_ok) = status.read();
 
     let identity = network_identity(state);
@@ -539,24 +666,26 @@ async fn beat(
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| BeatError::Transient(e.to_string()))?;
 
-    let status_code = response.status();
-    if status_code == reqwest::StatusCode::UNAUTHORIZED {
-        // La sonde a été révoquée, ou son jeton a changé côté hub. Insister
-        // ne sert à rien : il faut un ré-enrôlement, donc une action humaine.
-        return Err(
-            "jeton refusé par le hub — la sonde a probablement été révoquée, un ré-enrôlement est nécessaire".into(),
-        );
-    }
-    if !status_code.is_success() {
-        return Err(format!("réponse {status_code}"));
+    if let Some(e) = error_for_status(response.status()) {
+        return Err(e);
     }
 
+    // Un hub en train de redémarrer peut servir une page d'erreur : illisible
+    // ne veut pas dire révoquée.
     response
         .json::<HeartbeatResponse>()
         .await
-        .map_err(|e| format!("réponse illisible : {e}"))
+        .map_err(|e| BeatError::Transient(format!("réponse illisible : {e}")))
+}
+
+/// Horodatage UNIX en secondes.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 /// Applique ce que le hub a renvoyé. N'écrit la configuration que si quelque
@@ -708,6 +837,106 @@ mod tests {
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json.as_object().unwrap().len(), 1, "{json}");
         assert_eq!(json["name"], "Paris");
+    }
+
+    // ── État du rattachement, tel que l'app le montre ──────────────────
+
+    #[test]
+    fn a_probe_without_a_hub_is_off_not_broken() {
+        // Le rattachement est optionnel : son absence n'est pas un défaut.
+        let status = HubStatus::default();
+        assert_eq!(status.snapshot().state, HubState::Off);
+
+        status.set_detached();
+        let snap = status.snapshot();
+        assert_eq!(snap.state, HubState::Off);
+        assert_eq!(snap.last_error, None);
+    }
+
+    #[test]
+    fn a_failed_beat_degrades_and_the_next_success_repairs() {
+        // `degraded` se répare tout seul quand le lien revient : l'utilisateur
+        // n'a rien à faire, il doit juste savoir que ses mesures ne partent
+        // plus.
+        let status = HubStatus::default();
+        status.record_success(0, 1_000);
+        assert_eq!(status.snapshot().state, HubState::Ok);
+
+        status.record_failure(&BeatError::Transient("hub injoignable".into()), 42);
+        let snap = status.snapshot();
+        assert_eq!(snap.state, HubState::Degraded);
+        assert_eq!(snap.last_error.as_deref(), Some("hub injoignable"));
+        assert_eq!(snap.buffered_points, 42, "depuis combien de temps ça dure");
+        assert_eq!(
+            snap.last_beat_at,
+            Some(1_000),
+            "le dernier battement réussi ne s'efface pas"
+        );
+
+        status.record_success(0, 2_000);
+        let snap = status.snapshot();
+        assert_eq!(snap.state, HubState::Ok);
+        assert_eq!(snap.last_error, None, "l'erreur réparée ne reste pas affichée");
+        assert_eq!(snap.last_beat_at, Some(2_000));
+    }
+
+    #[test]
+    fn a_refused_token_is_broken_not_degraded() {
+        // Réessayer ne servira jamais à rien : il faut un ré-enrôlement.
+        // Confondre les deux ferait attendre une réparation qui ne viendra pas.
+        let status = HubStatus::default();
+        status.record_success(0, 1_000);
+        status.record_failure(&BeatError::Unrecoverable("jeton refusé".into()), 0);
+
+        let snap = status.snapshot();
+        assert_eq!(snap.state, HubState::Broken);
+        assert_ne!(snap.state, HubState::Degraded);
+        assert_eq!(snap.last_error.as_deref(), Some("jeton refusé"));
+    }
+
+    #[test]
+    fn a_network_hiccup_does_not_hide_a_revoked_probe() {
+        // Une coupure réseau après une révocation ne doit pas repeindre
+        // l'état en « ça va revenir ».
+        let status = HubStatus::default();
+        status.record_failure(&BeatError::Unrecoverable("jeton refusé".into()), 0);
+        status.record_failure(&BeatError::Transient("hub injoignable".into()), 3);
+
+        assert_eq!(status.snapshot().state, HubState::Broken);
+        // Seul un battement réussi — donc un ré-enrôlement — répare.
+        status.record_success(0, 2_000);
+        assert_eq!(status.snapshot().state, HubState::Ok);
+    }
+
+    #[test]
+    fn only_a_refusal_of_the_token_is_unrecoverable() {
+        use reqwest::StatusCode;
+        assert!(matches!(
+            error_for_status(StatusCode::UNAUTHORIZED),
+            Some(BeatError::Unrecoverable(_))
+        ));
+        // Un hub en train de redémarrer n'a révoqué personne.
+        assert!(matches!(
+            error_for_status(StatusCode::BAD_GATEWAY),
+            Some(BeatError::Transient(_))
+        ));
+        assert!(error_for_status(StatusCode::OK).is_none());
+    }
+
+    #[test]
+    fn the_status_serialises_as_the_app_expects_it() {
+        let status = HubStatus::default();
+        status.record_success(7, 1_787_914_000);
+        let json = serde_json::to_value(status.snapshot()).unwrap();
+        assert_eq!(json["state"], "ok");
+        assert_eq!(json["last_beat_at"], 1_787_914_000_i64);
+        assert_eq!(json["buffered_points"], 7);
+        assert_eq!(json["last_error"], serde_json::Value::Null);
+
+        status.record_failure(&BeatError::Transient("réseau coupé".into()), 7);
+        let json = serde_json::to_value(status.snapshot()).unwrap();
+        assert_eq!(json["state"], "degraded");
+        assert_eq!(json["last_error"], "réseau coupé");
     }
 
     #[test]
