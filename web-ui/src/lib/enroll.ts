@@ -1,22 +1,22 @@
-import { writable, derived, get } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import { api, ApiError, type PendingEnroll } from './api';
 
 /**
  * Enrôlements en attente — les emplacements réservés du parc.
  *
- * Deux sources, et c'est structurel :
+ * Deux sources, qui ne se doublonnent pas :
  *
- * 1. **Le hub** (`GET /api/enroll-codes/pending`) sait quels codes sont encore
- *    ouverts, mais **jamais leur valeur** : le code est haché en base, il
- *    n'existe en clair qu'à l'instant de sa création. Un code lisible en base
- *    donnerait à qui la vole de quoi enrôler une sonde dans le parc.
- * 2. **Ce navigateur**, qui vient de le créer, l'a en mémoire.
+ * 1. **Le hub** (`GET /api/enroll-codes/pending`) fait autorité : c'est lui qui
+ *    sait ce qui est encore ouvert, et il sert le code tant qu'il est valable.
+ *    C'est ce qui fait qu'un rechargement de page ne perd rien.
+ * 2. **Ce navigateur**, qui vient de créer un code, l'affiche sans attendre le
+ *    tour suivant — un aller-retour de latence entre le clic et le code serait
+ *    lu comme un échec.
  *
- * D'où la règle : on affiche le code tant qu'on est sur la page qui l'a
- * demandé ; après un rechargement, la ligne subsiste — le hub la connaît — mais
- * le code est perdu et se remplace d'un clic. On ne l'écrit **nulle part** :
- * ni `localStorage`, ni `sessionStorage`. Le contourner reviendrait à recréer
- * en clair, côté client, exactement ce que le hub refuse de stocker.
+ * La mémoire locale ne survit pas à la page, et c'est délibéré : rien n'est
+ * écrit dans `localStorage` ni `sessionStorage`. Le hub est déjà la source, y
+ * recopier un code d'enrôlement ne ferait qu'en créer une seconde, hors de son
+ * contrôle et sans expiration.
  */
 export type { PendingEnroll };
 
@@ -31,7 +31,7 @@ export function pendingKey(p: {
 
 export interface PendingRow extends PendingEnroll {
   key: string;
-  /** `null` = créée avant ce chargement de page : la valeur n'est plus disponible. */
+  /** `null` = code consommé ou expiré : la ligne propose alors son remplacement. */
   code: string | null;
 }
 
@@ -84,23 +84,24 @@ function create() {
     });
   }
 
-  return { subscribe, refresh, remember, hide, snapshot: () => get(store) };
+  return { subscribe, refresh, remember, hide };
 }
 
 export const enrollments = create();
 
 /**
- * Liste unifiée. La mémoire locale prime sur le hub pour la même attente :
- * c'est la seule des deux qui porte le code.
+ * Liste unifiée. Le hub fait autorité sur l'existence d'une attente ; la
+ * mémoire locale ne sert qu'à combler un code que le hub n'aurait pas donné —
+ * le cas du tout premier affichage, avant le rafraîchissement suivant.
  */
 export const pendingRows = derived(enrollments, ($e): PendingRow[] => {
   const byKey = new Map<string, PendingRow>();
   for (const entry of $e.server) {
     const key = pendingKey(entry);
-    byKey.set(key, { ...entry, key, code: null });
+    byKey.set(key, { ...entry, key, code: entry.code ?? $e.local[key]?.code ?? null });
   }
   for (const [key, { entry, code }] of Object.entries($e.local)) {
-    byKey.set(key, { ...entry, key, code });
+    if (!byKey.has(key)) byKey.set(key, { ...entry, key, code });
   }
   return [...byKey.values()]
     .filter((r) => !$e.hidden.includes(r.key))

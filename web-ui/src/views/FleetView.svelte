@@ -278,9 +278,15 @@
 
   onMount(() => {
     void fleet.load(onExpired);
+    void enrollments.refresh(onExpired);
     // Le statut est dérivé du dernier battement : sans rafraîchissement, un
     // parc laissé ouvert affiche un « en ligne » qui a vieilli d'une heure.
-    timer = setInterval(() => void fleet.load(onExpired, { quiet: true }), 30_000);
+    // Le même tour recharge les attentes : c'est ainsi qu'une place réservée
+    // disparaît d'elle-même quand la machine a consommé son code.
+    timer = setInterval(() => {
+      void fleet.load(onExpired, { quiet: true });
+      void enrollments.refresh(onExpired);
+    }, 30_000);
   });
   onDestroy(() => {
     if (timer) clearInterval(timer);
@@ -416,13 +422,14 @@
     </button>
   </StateBlock>
 {:else if $fleet.sites.length === 0 && $fleet.probes.length === 0}
-  <!-- Premier vide : rien du tout. On raconte d'où viennent les sondes. -->
+  <!-- Premier vide : rien du tout. Il n'y a pas encore de site où réserver une
+       place, donc la seule action possible est d'en créer un. -->
   <StateBlock title={$_('fleet.empty_sites_title')} body={$_('fleet.empty_sites_body')}>
-    <button class="lp-btn primary" onclick={() => go('/enroll')}>
+    <button class="lp-btn primary" onclick={() => (createOpen = true)}>
       {$_('fleet.empty_sites_cta')}
     </button>
   </StateBlock>
-{:else if filtered.length === 0 && hasFilter}
+{:else if filtered.length === 0 && hasFilter && $pendingRows.length === 0}
   <StateBlock
     title={$_('fleet.no_match_title')}
     body={$_('fleet.no_match_body', { values: { n: $fleet.probes.length } })}
@@ -457,6 +464,7 @@
         siteId={g.site.site_id}
         siteName={g.site.name}
         probes={g.probes}
+        pending={pendingBySite.get(g.site.site_id) ?? []}
         now={$now}
         expanded={isExpanded(g.site.site_id, g.probes, groups.length)}
         ontoggle={() =>
@@ -466,6 +474,12 @@
           })}
         onrename={() => openRename(g.site.site_id, g.site.name)}
         onfocusSite={() => fleet.selectSite(g.site.site_id, onExpired)}
+        onadd={() => void addProbe(g.site.site_id, g.site.name)}
+        addBusy={addBusySite === g.site.site_id}
+        addError={addErrors[g.site.site_id] ?? ''}
+        onregenerate={(row) => void regenerate(row)}
+        onhidePending={(row) => enrollments.hide(row.key)}
+        {pendingBusyKey}
         filtered={hasFilter}
       />
     {/each}

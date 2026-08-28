@@ -27,6 +27,7 @@
   import Modal from '$lib/components/Modal.svelte';
   import ActionMenu from '$lib/components/ActionMenu.svelte';
   import CodeDisplay from '$lib/components/CodeDisplay.svelte';
+  import { enrollments } from '$lib/enroll';
   import type { EnrollCode } from '$lib/api';
 
   const { id, onExpired } = $props<{ id: string; onExpired: () => void }>();
@@ -200,6 +201,19 @@
     reOpen = true;
     try {
       reCode = await api.reenrollCode(probe.probe_id);
+      // La même attente s'affiche aussi dans le parc, sur la ligne du site :
+      // sans ça, on quitterait cet écran et le code paraîtrait perdu.
+      enrollments.remember(
+        {
+          site_id: probe.site_id,
+          site: probe.site,
+          probe_id: probe.probe_id,
+          probe: probe.name,
+          created_at: Math.floor(Date.now() / 1000),
+          expires_at: reCode.expires_at,
+        },
+        reCode.code,
+      );
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
       reError = e instanceof ApiError ? e.message : String(e);

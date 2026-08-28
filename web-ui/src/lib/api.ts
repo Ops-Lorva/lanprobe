@@ -47,12 +47,14 @@ export interface EnrollCode {
 /**
  * Enrôlement encore ouvert, tel que le hub le connaît.
  *
- * ⚠️ **Pas de champ `code`, et c'est voulu** : le code est haché en base et
- * n'existe en clair qu'à sa création. Cette liste dit qu'une attente existe et
- * quand elle meurt, pas ce qu'il faut taper sur la sonde.
- *
  * `probe_id` renseigné = ré-enrôlement d'une sonde existante ; `null` = place
- * réservée pour une sonde qui n'existe pas encore.
+ * réservée pour une sonde qui n'existe pas encore. Les deux ne sont pas la même
+ * opération et ne se présentent pas pareil.
+ *
+ * ⚠️ `code` est **facultatif** : le hub l'efface dès qu'il est consommé ou
+ * expiré, seul le haché subsiste. La liste ne devrait servir que des codes
+ * ouverts, donc renseignés — mais l'interface traite l'absence plutôt que de
+ * parier dessus.
  */
 export interface PendingEnroll {
   site_id: string;
@@ -61,6 +63,7 @@ export interface PendingEnroll {
   probe: string | null;
   created_at: number;
   expires_at: number;
+  code?: string | null;
 }
 
 /** Vue lecture seule d'InfluxDB (contrat § 8). */
@@ -234,9 +237,9 @@ export const api = {
     }),
 
   /**
-   * Enrôlements encore ouverts. Ne contient jamais la valeur des codes — voir
-   * `PendingEnroll`. Un hub antérieur à cette route répond 404 : l'appelant
-   * doit traiter l'absence comme « rien à afficher », pas comme une panne.
+   * Enrôlements encore ouverts. Un hub antérieur à cette route répond 404 :
+   * l'appelant doit traiter l'absence comme « rien à afficher côté serveur »,
+   * pas comme une panne du parc.
    */
   pendingEnrollCodes: () => request<PendingEnroll[]>('/api/enroll-codes/pending'),
 

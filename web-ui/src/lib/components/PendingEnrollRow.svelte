@@ -73,8 +73,9 @@
       regenerateLabel={$_('code.regenerate')}
     />
   {:else}
-    <!-- Après un rechargement : l'attente existe toujours côté hub, sa valeur
-         non. On le dit franchement plutôt que d'afficher une ligne muette. -->
+    <!-- Le hub sert le code tant qu'il vaut quelque chose. Son absence dit donc
+         qu'il ne vaut plus rien — consommé, ou expiré. Une ligne muette laisserait
+         croire à une panne d'affichage. -->
     <div class="lost">
       <strong>{$_('pending.lost_title')}</strong>
       <p>{$_('pending.lost_body')}</p>

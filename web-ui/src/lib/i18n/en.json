@@ -204,7 +204,8 @@
     "site_menu": "Actions for site {name}",
     "site_rename": "Rename site",
     "site_open": "Show this site only",
-    "health_bar": "Status breakdown for site {name}"
+    "health_bar": "Status breakdown for site {name}",
+    "site_add": "Enrol a probe into site {name}"
   },
   "status": {
     "online": "Online",
@@ -351,6 +352,17 @@
     "site_created": "The site will be created at enrolment if it does not exist yet.",
     "dictate_enroll": "Read out: “Open LanProbe, go to Settings, then Server connection. Type in this address, then this code.”",
     "dictate_reenroll": "Read out: “Open LanProbe, go to Settings, then Server connection. Type in this address, then this code.” Nothing else to do, and no account to create."
+  },
+  "pending": {
+    "badge_new": "Pending",
+    "badge_reenroll": "Re-enrolment",
+    "ctx_new": "Slot reserved in “{site}”: the probe shows up here as soon as it takes this code.",
+    "ctx_reenroll": "Probe “{name}” comes back with the same history as soon as it takes this code.",
+    "hide": "Hide",
+    "hide_hint": "Removes the row from the screen. The code stays valid until it expires: nothing is revoked.",
+    "lost_title": "This code is no longer available",
+    "lost_body": "It has been used, or it has expired — the hub only keeps it readable while it is valid. If the probe has not arrived yet, generate a new one.",
+    "expired": "Expired"
   },
   "enroll": {
     "title": "Enrol a probe",

@@ -204,7 +204,8 @@
     "site_menu": "Actions du site {name}",
     "site_rename": "Renommer le site",
     "site_open": "N'afficher que ce site",
-    "health_bar": "Répartition des statuts du site {name}"
+    "health_bar": "Répartition des statuts du site {name}",
+    "site_add": "Enrôler une sonde dans le site {name}"
   },
   "status": {
     "online": "En ligne",
@@ -351,6 +352,17 @@
     "site_created": "Le site sera créé à l'enrôlement s'il n'existe pas encore.",
     "dictate_enroll": "À dicter : « Ouvrez LanProbe, allez dans Réglages, puis Connexion au serveur. Saisissez cette adresse, puis ce code. »",
     "dictate_reenroll": "À dicter : « Ouvrez LanProbe, allez dans Réglages, puis Connexion au serveur. Saisissez cette adresse, puis ce code. » Rien d'autre à faire, et aucun compte à créer."
+  },
+  "pending": {
+    "badge_new": "En attente",
+    "badge_reenroll": "Ré-enrôlement",
+    "ctx_new": "Place réservée dans « {site} » : la sonde apparaîtra ici dès qu'elle aura pris ce code.",
+    "ctx_reenroll": "La sonde « {name} » revient avec le même historique dès qu'elle aura pris ce code.",
+    "hide": "Masquer",
+    "hide_hint": "Retire la ligne de l'écran. Le code reste valable jusqu'à son expiration : rien n'est révoqué.",
+    "lost_title": "Ce code n'est plus disponible",
+    "lost_body": "Il a été utilisé, ou il a expiré — le hub ne le conserve en clair que pendant sa validité. Si la sonde n'est pas encore arrivée, générez-en un nouveau.",
+    "expired": "Expiré"
   },
   "enroll": {
     "title": "Enrôler une sonde",
