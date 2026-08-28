@@ -74,7 +74,6 @@
     // demande `operator`, les jetons de lecture `admin`. Les appeler pour tout
     // le monde déposait une ligne `access.denied` au journal à chaque visite
     // d'un observateur — le bruit exact qui masque les refus qui comptent.
-    if (get(canOperate)) void runTest();
     if (get(isAdmin)) void loadTokens();
   });
 
@@ -149,24 +148,10 @@
     }
   }
 
-  // ── Test de l'URL annoncée ───────────────────────────────────────────────
-  let testResult = $state<AdvertiseTest | null>(null);
-  let testPhase = $state<'idle' | 'testing' | 'done' | 'failed'>('idle');
-  let testError = $state('');
-
-  async function runTest() {
-    testPhase = 'testing';
-    testError = '';
-    try {
-      // `reachable: false` revient en 200 : c'est un verdict, pas une panne.
-      testResult = await api.testAdvertise();
-      testPhase = 'done';
-    } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      testError = e instanceof ApiError ? e.message : String(e);
-      testPhase = 'failed';
-    }
-  }
+  // Le test d'URL annoncée a disparu avec la carte qu'il alimentait : les
+  // sondes n'écrivent plus dans Influx, elles passent par le hub. L'appel
+  // subsistait sans que personne n'en voie jamais le verdict — une requête
+  // sortante à chaque ouverture des Réglages, pour rien.
 
   // ── Enregistrement ───────────────────────────────────────────────────────
   const retentionNum = $derived(Number.parseInt(retention, 10));
@@ -353,7 +338,6 @@
       shrinkOpen = false;
       notice = $_('settings.saved_all');
       await load();
-      await runTest();
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
       fieldError = e instanceof ApiError ? e.message : String(e);
