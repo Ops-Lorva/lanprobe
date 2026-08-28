@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { _, locale } from 'svelte-i18n';
   import { api, ApiError, type Account, type Role } from '$lib/api';
-  import { noteAdmin } from '$lib/session';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import RoleChoice from '$lib/components/RoleChoice.svelte';
@@ -28,7 +27,6 @@
       onExpired();
       return '';
     }
-    if (e instanceof ApiError && e.isForbidden) noteAdmin(false);
     return e instanceof ApiError ? e.message : String(e);
   }
 
@@ -39,7 +37,6 @@
     rowError = '';
     try {
       accounts = (await api.users()) ?? [];
-      noteAdmin(true);
     } catch (e) {
       const msg = handle(e);
       if (e instanceof ApiError && e.isForbidden) denied = msg;
@@ -190,19 +187,22 @@
   }
 </script>
 
-<header class="head">
-  <div class="titles">
-    <h1>{$_('accounts.title')}</h1>
-    {#if !loading && !denied && !loadError}
-      <p class="count">
-        {$_('accounts.count', { values: { active: activeCount, total: accounts.length } })}
-      </p>
-    {/if}
-  </div>
+<!--
+  Panneau de Réglages → Comptes : le titre de l'écran est « Réglages », et
+  l'onglet dit déjà « Comptes ». Un second titre ici ne ferait que répéter
+  l'onglet qu'on vient de cliquer — on garde ce qu'il n'annonce pas, le
+  décompte des comptes actifs, et l'action.
+-->
+<div class="head">
+  {#if !loading && !denied && !loadError}
+    <p class="count">
+      {$_('accounts.count', { values: { active: activeCount, total: accounts.length } })}
+    </p>
+  {/if}
   {#if !denied && !loadError}
     <button class="lp-btn primary" onclick={openCreate}>{$_('accounts.new')}</button>
   {/if}
-</header>
+</div>
 
 {#if loading}
   <StateBlock tone="loading" title={$_('common.loading')} />
@@ -358,24 +358,22 @@
 </Modal>
 
 <style>
+  /* Le décompte à gauche, l'action à droite, et rien entre les deux : la ligne
+     tient sur une seule à 390 px, et se replie proprement si la traduction
+     s'allonge. */
   .head {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
-    margin-bottom: 14px;
-  }
-  h1 {
-    font-size: 20px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    margin: 0;
+    margin-bottom: 12px;
+    min-height: 30px;
   }
   .count {
     font-size: 12px;
     color: var(--ep-text-secondary);
-    margin: 3px 0 0;
+    margin: 0;
   }
 
   .list {

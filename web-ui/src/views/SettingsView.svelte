@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { _, locale } from 'svelte-i18n';
   import {
     api,
@@ -14,6 +15,10 @@
   import Modal from '$lib/components/Modal.svelte';
   import CopyLine from '$lib/components/CopyLine.svelte';
   import LangTheme from '$lib/components/LangTheme.svelte';
+  import AccountsView from './AccountsView.svelte';
+  import NotificationsView from './NotificationsView.svelte';
+  import { go, route, type SettingsTab } from '$lib/router';
+  import { canOperate, isAdmin } from '$lib/session';
   import { dateOnly, humanBytes } from '$lib/time';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
@@ -64,9 +69,13 @@
 
   onMount(() => {
     void load();
-    void runTest();
     void loadInflux();
-    void loadTokens();
+    // Ces deux-là ont un rôle minimum (contrat § 11) : le test d'URL annoncée
+    // demande `operator`, les jetons de lecture `admin`. Les appeler pour tout
+    // le monde déposait une ligne `access.denied` au journal à chaque visite
+    // d'un observateur — le bruit exact qui masque les refus qui comptent.
+    if (get(canOperate)) void runTest();
+    if (get(isAdmin)) void loadTokens();
   });
 
   // ── Influx en lecture seule (contrat § 8) ────────────────────────────────
@@ -204,74 +213,108 @@
   const dirty = $derived(Object.keys(patch).length > 0);
 
   // ── Onglets ──────────────────────────────────────────────────────────────
-  // Découpage par motif de visite, pas par type de champ :
-  //   « Général »     — les préférences de CE navigateur (langue, thème) ;
-  //   « Sondes »      — ce que le hub raconte aux sondes (URL annoncée, cadence) ;
-  //   « InfluxDB »    — comment le hub joint la base, et combien de temps elle garde ;
-  //   « Vos données » — ce qu'il y a dedans et qui a le droit de le lire.
-  // La conservation vit dans « InfluxDB » : c'est une politique de rétention de
-  // bucket, appliquée par la base. Lui donner son propre onglet la coupait de
-  // ce qu'elle règle et laissait croire à un réglage du hub.
+  // Découpage par MOTIF DE VISITE, pas par type de champ. Un réglage se cherche
+  // avec une question en tête, pas avec une catégorie : ranger par nature de
+  // champ produit un classeur qu'il faut connaître pour s'en servir.
+  //
+  //   « Général »  — comment ce hub est réglé : l'adresse par laquelle les
+  //                  sondes le joignent, la cadence qu'il leur demande, sa
+  //                  version, plus la langue et le thème de CE navigateur.
+  //   « Stockage » — où vont les mesures, ce qu'il y a dedans, qui peut les
+  //                  lire de l'extérieur, et combien de temps on les garde.
+  //
+  // « InfluxDB » et « Vos données » ont fusionné : les deux répondaient à la
+  // même question — « mes mesures ». L'un portait l'adresse de la base, l'autre
+  // son contenu, et il fallait déjà savoir lequel des deux tient le bucket pour
+  // le trouver. Le contrat § 8 pose que personne ne doit avoir à administrer
+  // Influx ; le nom du produit ne fait donc pas un intitulé d'onglet.
+  //
+  // « Sondes » a rejoint « Général » : deux champs — l'adresse du hub et la
+  // cadence — ne remplissaient pas un onglet, et l'adresse du hub est ce qu'on
+  // vient corriger quand une sonde n'apparaît pas, c'est-à-dire au premier
+  // endroit qu'on ouvre.
+  //
   // Un seul bouton d'enregistrement pour l'ensemble : le contrat n'expose qu'un
-  // PATCH, le découper en trois formulaires mentirait sur ce qui part au hub.
+  // PATCH, le découper en formulaires mentirait sur ce qui part au hub.
   // La pastille sur un onglet dit où sont les modifications en attente — sans
   // elle, on enregistrerait une valeur saisie sur un onglet qu'on ne voit plus.
-  type Tab = 'general' | 'probes' | 'influx' | 'data';
-  const TABS: { id: Tab; key: string }[] = [
+  type Tab = SettingsTab;
+  const ALL_TABS: { id: Tab; key: string; admin?: true }[] = [
     { id: 'general', key: 'settings.tab_general' },
-    { id: 'probes', key: 'settings.tab_probes' },
-    { id: 'influx', key: 'settings.tab_influx' },
-    { id: 'data', key: 'settings.influx_state_title' },
+    { id: 'alerts', key: 'settings.tab_alerts' },
+    { id: 'storage', key: 'settings.tab_storage' },
+    { id: 'accounts', key: 'settings.tab_accounts', admin: true },
   ];
-  let tab = $state<Tab>('general');
+
+  // Un onglet qu'un rôle ne peut pas utiliser ne s'affiche pas pour lui — les
+  // comptes sont réservés à `admin` (contrat § 11). Ce n'est PAS la protection :
+  // elle est côté serveur, route par route. C'est du confort de navigation.
+  const TABS = $derived(ALL_TABS.filter((t) => !t.admin || $isAdmin));
+
+  // L'onglet vient de l'URL, pas d'un état local : « ouvre #/settings/storage »
+  // se dicte au téléphone, « le troisième onglet » non. Un onglet demandé mais
+  // indisponible retombe sur le premier plutôt que d'afficher un panneau que la
+  // rangée ne montre pas.
+  const asked = $derived($route.name === 'settings' ? $route.tab : 'general');
+  const tab = $derived<Tab>(TABS.some((t) => t.id === asked) ? asked : 'general');
+
+  function openTab(id: Tab) {
+    go(`#/settings/${id}`);
+  }
 
   const dirtyTabs = $derived<Record<Tab, boolean>>({
-    // Langue et thème s'appliquent au clic et ne partent jamais au hub : il n'y
-    // a donc rien à y enregistrer, donc jamais de pastille.
-    general: false,
-    probes: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
-    influx:
+    // Langue et thème s'appliquent au clic et ne partent jamais au hub : rien à
+    // y enregistrer de leur fait.
+    general: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
+    storage:
       'influx_url' in patch ||
       'influx_org' in patch ||
       'influx_bucket' in patch ||
       'retention_days' in patch,
-    // Onglet en lecture seule : les jetons s'y créent et s'y révoquent tout de
-    // suite, rien n'y attend le bouton « Enregistrer ».
-    data: false,
+    // Chaque geste s'y applique seul, rien n'y attend « Enregistrer ».
+    alerts: false,
+    accounts: false,
   });
+
+  /**
+   * Les onglets qui portent des champs partant au hub par `PUT /api/settings`.
+   * Ailleurs (langue et thème, jetons, comptes, canaux), chaque geste s'applique
+   * seul : un bouton « Enregistrer » y laisserait croire qu'il reste à valider.
+   */
+  const savable = $derived(tab === 'general' || tab === 'storage');
 
   function onTabKey(e: KeyboardEvent) {
     const i = TABS.findIndex((t) => t.id === tab);
-    if (e.key === 'ArrowRight') tab = TABS[(i + 1) % TABS.length].id;
-    else if (e.key === 'ArrowLeft') tab = TABS[(i - 1 + TABS.length) % TABS.length].id;
+    let next: Tab;
+    if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length].id;
+    else if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length].id;
     else return;
     e.preventDefault();
-    (e.currentTarget as HTMLElement)
-      .querySelector<HTMLElement>(`[data-tab="${tab}"]`)
-      ?.focus();
+    openTab(next);
+    (e.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus();
   }
 
   /** Le message ET l'onglet où se trouve le champ fautif : une erreur sur un
       onglet fermé serait invisible, donc incompréhensible. */
   function validate(): { msg: string; tab: Tab } | null {
     if (!influxUrl.trim() || !org.trim() || !bucket.trim())
-      return { msg: $_('settings.required'), tab: 'influx' };
+      return { msg: $_('settings.required'), tab: 'storage' };
     try {
       new URL(influxUrl.trim());
     } catch {
-      return { msg: $_('settings.invalid_url'), tab: 'influx' };
+      return { msg: $_('settings.invalid_url'), tab: 'storage' };
     }
     if (hubPublicUrl.trim()) {
       try {
         new URL(hubPublicUrl.trim());
       } catch {
-        return { msg: $_('settings.invalid_url'), tab: 'probes' };
+        return { msg: $_('settings.invalid_url'), tab: 'general' };
       }
     }
     if (!Number.isInteger(retentionNum) || retentionNum < 0)
-      return { msg: $_('settings.invalid_retention'), tab: 'influx' };
+      return { msg: $_('settings.invalid_retention'), tab: 'storage' };
     if (!Number.isInteger(heartbeatNum) || heartbeatNum < 10)
-      return { msg: $_('settings.invalid_heartbeat'), tab: 'probes' };
+      return { msg: $_('settings.invalid_heartbeat'), tab: 'general' };
     return null;
   }
 
@@ -283,7 +326,7 @@
     const bad = validate();
     fieldError = bad?.msg ?? '';
     if (bad) {
-      tab = bad.tab;
+      openTab(bad.tab);
       return;
     }
     if (!dirty) {
@@ -350,7 +393,7 @@
         aria-selected={tab === t.id}
         aria-controls="panel-{t.id}"
         tabindex={tab === t.id ? 0 : -1}
-        onclick={() => (tab = t.id)}
+        onclick={() => openTab(t.id)}
       >
         {$_(t.key)}
         {#if dirtyTabs[t.id]}
@@ -361,8 +404,56 @@
     {/each}
   </div>
 
+  <!-- `GET /api/settings` est ouverte à `viewer`, son écriture est réservée à
+       `admin` (contrat § 11). On montre donc les valeurs — c'est souvent ce
+       qu'on vient vérifier — mais on dit tout de suite qu'elles ne partiront
+       pas, plutôt que de laisser saisir puis refuser. -->
+  {#if !$isAdmin && (tab === 'general' || tab === 'storage')}
+    <p class="readonly">{$_('settings.readonly_note')}</p>
+  {/if}
+
   {#if tab === 'general'}
   <div class="cards" role="tabpanel" id="panel-general" aria-labelledby="tab-general" tabindex="-1">
+    <!-- L'adresse du hub ouvre l'onglet parce que c'est ce qu'on vient
+         corriger : une sonde qui n'apparaît jamais, c'est presque toujours
+         elle. Une seule adresse à renseigner — les sondes ne reçoivent plus
+         d'URL InfluxDB, elles écrivent par le hub, qui relaie. Deux URL
+         voisines à distinguer, c'était une sonde enrôlée avec la mauvaise et
+         une demi-heure à comprendre pourquoi. -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.hub_url_title')}</h2>
+      <label class="lp-field">
+        {$_('settings.hub_url_label')}
+        <input
+          class="lp-input"
+          bind:value={hubPublicUrl}
+          placeholder="https://lanprobe.exemple.fr"
+          spellcheck="false"
+          autocomplete="off"
+          disabled={!$isAdmin}
+        />
+        <span class="hint">{$_('settings.hub_url_hint')}</span>
+      </label>
+    </section>
+
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.section_probes')}</h2>
+      <label class="lp-field">
+        {$_('settings.heartbeat_label')}
+        <span class="unit-row">
+          <input
+            class="lp-input num"
+            type="number"
+            min="10"
+            step="1"
+            bind:value={heartbeat}
+            disabled={!$isAdmin}
+          />
+          <span class="unit">{$_('settings.heartbeat_unit')}</span>
+        </span>
+      </label>
+    </section>
+
     <!--
       Langue et thème sont les seuls réglages de cet écran qui ne partent pas au
       hub : ils vivent dans ce navigateur. Posés sans le dire à côté de réglages
@@ -375,125 +466,29 @@
       <LangTheme labelled />
     </section>
 
+    <!-- Un fait, pas un réglage : d'où sa place en fin d'onglet. -->
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.hub_version_title')}</h2>
       <p class="ro lp-mono">{$_('settings.hub_version', { values: { version: hubVersion } })}</p>
     </section>
   </div>
-  {:else if tab === 'probes'}
-  <div class="cards" role="tabpanel" id="panel-probes" aria-labelledby="tab-probes" tabindex="-1">
-    <!-- Une seule adresse à renseigner : celle du hub. Les sondes ne
-         reçoivent plus d'URL InfluxDB — elles écrivent par le hub, qui
-         relaie. Deux URL voisines à distinguer, c'était une sonde enrôlée
-         avec la mauvaise et une demi-heure à comprendre pourquoi. -->
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.hub_url_title')}</h2>
-      <label class="lp-field">
-        {$_('settings.hub_url_label')}
-        <input
-          class="lp-input"
-          bind:value={hubPublicUrl}
-          placeholder="https://lanprobe.exemple.fr"
-          spellcheck="false"
-          autocomplete="off"
-        />
-        <span class="hint">{$_('settings.hub_url_hint')}</span>
-      </label>
-    </section>
-
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.section_probes')}</h2>
-      <label class="lp-field">
-        {$_('settings.heartbeat_label')}
-        <span class="unit-row">
-          <input class="lp-input num" type="number" min="10" step="1" bind:value={heartbeat} />
-          <span class="unit">{$_('settings.heartbeat_unit')}</span>
-        </span>
-      </label>
-    </section>
+  {:else if tab === 'alerts'}
+  <div class="cards" role="tabpanel" id="panel-alerts" aria-labelledby="tab-alerts" tabindex="-1">
+    <!-- Écran d'origine repris tel quel, sans ses onglets internes : il devient
+         le contenu de celui-ci. Les abonnements se lisent dès `viewer`, les
+         canaux sont réservés à `admin` — le panneau s'en charge lui-même. -->
+    <NotificationsView {onExpired} />
   </div>
-  {:else if tab === 'influx'}
-  <div class="cards" role="tabpanel" id="panel-influx" aria-labelledby="tab-influx" tabindex="-1">
-    <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.section_influx')}</h2>
-      <!-- Les sondes n'écrivent plus dans Influx : elles passent par le hub.
-           Cette adresse n'est donc plus un réglage — c'est celle que le hub
-           emprunte lui-même, affichée pour le diagnostic. -->
-      <div class="lp-field">
-        {$_('settings.influx_url_label')}
-        <p class="ro lp-mono">{saved.influx_url}</p>
-        <span class="hint">{$_('settings.influx_url_hint')}</span>
-      </div>
-      <div class="pair">
-        <label class="lp-field">
-          {$_('settings.org_label')}
-          <input class="lp-input" bind:value={org} spellcheck="false" autocomplete="off" />
-        </label>
-        <label class="lp-field">
-          {$_('settings.bucket_label')}
-          <input class="lp-input" bind:value={bucket} spellcheck="false" autocomplete="off" />
-        </label>
-      </div>
-    </section>
-
-    <!--
-      La conservation appartient bien à InfluxDB — c'est la rétention du bucket,
-      appliquée par la base. Mais c'est aussi le seul réglage de cet écran qui
-      DÉTRUIT des mesures : il est donc renvoyé tout en bas, derrière une
-      séparation nommée, pour qu'on ne le croise pas en venant corriger une URL.
-      Isolé sans être exilé : au même endroit que ce qu'il règle, jamais sur le
-      chemin de ce qu'on est venu faire.
-    -->
-    <div class="zone">
-      <div class="zone-head">
-        <span class="zone-title">{$_('settings.destructive_zone')}</span>
-        <span class="zone-rule" aria-hidden="true"></span>
-      </div>
-
-      <section class="card lp-card danger-frame" class:risky={isShrink}>
-        <h2 class="lp-title">{$_('settings.section_retention')}</h2>
-        <p class="sub">{$_('settings.retention_lead')}</p>
-
-        <label class="lp-field">
-          {$_('settings.retention_label')}
-          <span class="unit-row">
-            <input class="lp-input num" type="number" min="0" step="1" bind:value={retention} />
-            <span class="unit">{$_('settings.retention_unit')}</span>
-          </span>
-          <span class="hint">{$_('settings.retention_hint')}</span>
-          <span class="cur">
-            {$_('settings.retention_current', {
-              values: { label: retentionLabel(saved.retention_days) },
-            })}
-          </span>
-        </label>
-
-        {#if isShrink}
-          <!-- L'avertissement apparaît pendant la saisie, pas seulement au clic :
-               on veut que la personne change d'avis avant, pas qu'elle découvre
-               la conséquence dans une boîte de dialogue. -->
-          <div class="warn" role="status">
-            <strong>{$_('settings.shrink_title')}</strong>
-            <p>
-              {$_('settings.shrink_from_to', {
-                values: {
-                  from: retentionLabel(saved.retention_days),
-                  to: retentionLabel(retentionNum),
-                },
-              })}
-              {$_('settings.shrink_cutoff', { values: { date: cutoffDate } })}
-            </p>
-          </div>
-        {/if}
-      </section>
-    </div>
+  {:else if tab === 'accounts'}
+  <div class="cards" role="tabpanel" id="panel-accounts" aria-labelledby="tab-accounts" tabindex="-1">
+    <AccountsView {onExpired} />
   </div>
-  {:else}
-  <div class="cards" role="tabpanel" id="panel-data" aria-labelledby="tab-data" tabindex="-1">
+  {:else if tab === 'storage'}
+  <div class="cards" role="tabpanel" id="panel-storage" aria-labelledby="tab-storage" tabindex="-1">
     <!--
-      Influx en lecture seule. L'objectif n'est pas d'administrer la base, mais
-      de savoir où sont ses mesures et si elles vont bien — sans jamais ouvrir
-      la console d'InfluxDB.
+      Ce qu'il y a dans la base avant l'adresse de la base : on ouvre « Stockage »
+      pour savoir si les mesures arrivent et ce qu'elles pèsent. L'org et le
+      bucket ne se lisent que si la réponse à ça ne suffit pas.
     -->
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.influx_state_title')}</h2>
@@ -526,82 +521,175 @@
                 : '—'}
             </dd>
           </div>
-          <div>
-            <dt>{$_('settings.org_label')}</dt>
-            <dd class="lp-mono">{influx.org || '—'}</dd>
-          </div>
-          <div>
-            <dt>{$_('settings.bucket_label')}</dt>
-            <dd class="lp-mono">{influx.bucket || '—'}</dd>
-          </div>
         </dl>
       {:else}
         <p class="muted">{$_('settings.state_unavailable')}{influxError ? ` (${influxError})` : ''}</p>
       {/if}
+    </section>
 
-      <div class="tokens">
-        <h3>{$_('settings.tokens_title')}</h3>
-        <p class="ro">
-          {$_('settings.tokens_readonly', {
-            values: { bucket: influx?.bucket || bucket || 'lanprobe' },
-          })}
-        </p>
-
-        <div class="tok-form">
-          <label class="lp-field grow">
-            {$_('settings.tokens_desc_label')}
-            <input
-              class="lp-input"
-              bind:value={tokenDesc}
-              placeholder={$_('settings.tokens_desc_placeholder')}
-            />
-          </label>
-          <button class="lp-btn accent" onclick={createToken} disabled={tokenBusy}>
-            {tokenBusy ? $_('settings.tokens_creating') : $_('settings.tokens_create')}
-          </button>
-        </div>
-
-        {#if tokensError}<p class="err" role="alert">{tokensError}</p>{/if}
-
-        {#if tokens.length === 0}
-          <p class="muted">{$_('settings.tokens_none')}</p>
-        {:else}
-          <!-- La liste ne montre JAMAIS la valeur : identifiant et description
-               suffisent pour savoir lequel révoquer. -->
-          <table class="tok-table">
-            <thead>
-              <tr>
-                <th>{$_('settings.tokens_col_desc')}</th>
-                <th>{$_('settings.tokens_col_id')}</th>
-                <th>{$_('settings.tokens_col_created')}</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each tokens as t (t.auth_id)}
-                <tr>
-                  <td>{t.description || '—'}</td>
-                  <td class="lp-mono id">{t.auth_id}</td>
-                  <td class="lp-mono">{dateOnly(t.created_at, lang)}</td>
-                  <td class="right">
-                    <button class="lp-btn danger sm" onclick={() => (revokeToken = t)}>
-                      {$_('settings.tokens_revoke')}
-                    </button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.section_influx')}</h2>
+      <!-- Les sondes n'écrivent plus dans Influx : elles passent par le hub.
+           Cette adresse n'est donc plus un réglage — c'est celle que le hub
+           emprunte lui-même, affichée pour le diagnostic. -->
+      <div class="lp-field">
+        {$_('settings.influx_url_label')}
+        <p class="ro lp-mono">{saved.influx_url}</p>
+        <span class="hint">{$_('settings.influx_url_hint')}</span>
+      </div>
+      <div class="pair">
+        <label class="lp-field">
+          {$_('settings.org_label')}
+          <input
+            class="lp-input"
+            bind:value={org}
+            spellcheck="false"
+            autocomplete="off"
+            disabled={!$isAdmin}
+          />
+        </label>
+        <label class="lp-field">
+          {$_('settings.bucket_label')}
+          <input
+            class="lp-input"
+            bind:value={bucket}
+            spellcheck="false"
+            autocomplete="off"
+            disabled={!$isAdmin}
+          />
+        </label>
       </div>
     </section>
+
+    <!--
+      Le jeton de lecture est ce qui fait sortir les mesures du hub : sa carte
+      est distincte de l'état de la base parce qu'on ne vient pas ici pour la
+      même raison — voir si Influx va bien, ou brancher un Grafana dessus.
+      Réservée à `admin` (contrat § 11), donc pas rendue pour les autres.
+    -->
+    {#if $isAdmin}
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.tokens_title')}</h2>
+      <p class="ro">
+        {$_('settings.tokens_readonly', {
+          values: { bucket: influx?.bucket || bucket || 'lanprobe' },
+        })}
+      </p>
+
+      <div class="tok-form">
+        <label class="lp-field grow">
+          {$_('settings.tokens_desc_label')}
+          <input
+            class="lp-input"
+            bind:value={tokenDesc}
+            placeholder={$_('settings.tokens_desc_placeholder')}
+          />
+        </label>
+        <button class="lp-btn accent" onclick={createToken} disabled={tokenBusy}>
+          {tokenBusy ? $_('settings.tokens_creating') : $_('settings.tokens_create')}
+        </button>
+      </div>
+
+      {#if tokensError}<p class="err" role="alert">{tokensError}</p>{/if}
+
+      {#if tokens.length === 0}
+        <p class="muted">{$_('settings.tokens_none')}</p>
+      {:else}
+        <!-- La liste ne montre JAMAIS la valeur : identifiant et description
+             suffisent pour savoir lequel révoquer. -->
+        <table class="tok-table">
+          <thead>
+            <tr>
+              <th>{$_('settings.tokens_col_desc')}</th>
+              <th>{$_('settings.tokens_col_id')}</th>
+              <th>{$_('settings.tokens_col_created')}</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each tokens as t (t.auth_id)}
+              <tr>
+                <td>{t.description || '—'}</td>
+                <td class="lp-mono id">{t.auth_id}</td>
+                <td class="lp-mono">{dateOnly(t.created_at, lang)}</td>
+                <td class="right">
+                  <button class="lp-btn danger sm" onclick={() => (revokeToken = t)}>
+                    {$_('settings.tokens_revoke')}
+                  </button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </section>
+    {/if}
+
+    <!--
+      La conservation appartient bien à InfluxDB — c'est la rétention du bucket,
+      appliquée par la base. Mais c'est aussi le seul réglage de cet écran qui
+      DÉTRUIT des mesures : il est donc renvoyé tout en bas, derrière une
+      séparation nommée, pour qu'on ne le croise pas en venant corriger une URL.
+      Isolé sans être exilé : au même endroit que ce qu'il règle, jamais sur le
+      chemin de ce qu'on est venu faire.
+    -->
+    <div class="zone">
+      <div class="zone-head">
+        <span class="zone-title">{$_('settings.destructive_zone')}</span>
+        <span class="zone-rule" aria-hidden="true"></span>
+      </div>
+
+      <section class="card lp-card danger-frame" class:risky={isShrink}>
+        <h2 class="lp-title">{$_('settings.section_retention')}</h2>
+        <p class="sub">{$_('settings.retention_lead')}</p>
+
+        <label class="lp-field">
+          {$_('settings.retention_label')}
+          <span class="unit-row">
+            <input
+              class="lp-input num"
+              type="number"
+              min="0"
+              step="1"
+              bind:value={retention}
+              disabled={!$isAdmin}
+            />
+            <span class="unit">{$_('settings.retention_unit')}</span>
+          </span>
+          <span class="hint">{$_('settings.retention_hint')}</span>
+          <span class="cur">
+            {$_('settings.retention_current', {
+              values: { label: retentionLabel(saved.retention_days) },
+            })}
+          </span>
+        </label>
+
+        {#if isShrink}
+          <!-- L'avertissement apparaît pendant la saisie, pas seulement au clic :
+               on veut que la personne change d'avis avant, pas qu'elle découvre
+               la conséquence dans une boîte de dialogue. -->
+          <div class="warn" role="status">
+            <strong>{$_('settings.shrink_title')}</strong>
+            <p>
+              {$_('settings.shrink_from_to', {
+                values: {
+                  from: retentionLabel(saved.retention_days),
+                  to: retentionLabel(retentionNum),
+                },
+              })}
+              {$_('settings.shrink_cutoff', { values: { date: cutoffDate } })}
+            </p>
+          </div>
+        {/if}
+      </section>
+    </div>
   </div>
   {/if}
 
-  <!-- Rien à enregistrer sur « Général » ni « Vos données » : le bouton ne s'y
-       affiche que s'il reste une modification en attente sur un autre onglet,
-       sinon il disparaîtrait avec du travail non enregistré. -->
-  {#if dirty || (tab !== 'general' && tab !== 'data')}
+  <!-- Le bouton n'appartient qu'aux onglets qui portent des champs du hub. Sur
+       les autres, il ne s'affiche que s'il reste une modification en attente
+       ailleurs — sinon il disparaîtrait avec du travail non enregistré. -->
+  {#if $isAdmin && (dirty || savable)}
     <div class="save-row">
       {#if fieldError}<p class="err" role="alert">{fieldError}</p>{/if}
       {#if notice}<p class="ok" role="status">{notice}</p>{/if}
@@ -722,6 +810,17 @@
     border-bottom-color: var(--ep-accent);
     font-weight: 600;
   }
+  /* Sous 520 px, la rangée occupe sa ligne à elle seule : on lui rend de la
+     place en resserrant les flancs plutôt que de la laisser se replier. Un
+     onglet passé à la ligne du dessous se lit comme s'il appartenait à une
+     autre famille — c'est précisément ce qu'un regroupement doit éviter. Le
+     pouce n'y perd rien, la hauteur de cible passe de 32 à 36 px. */
+  @media (max-width: 520px) {
+    .tab {
+      padding: 10px 8px;
+    }
+  }
+
   /* Une modification en attente sur un onglet fermé serait enregistrée sans
      avoir été revue : la pastille dit où elle est. */
   .dot {
@@ -730,6 +829,15 @@
     border-radius: 999px;
     background: var(--ep-warning);
     flex-shrink: 0;
+  }
+
+  .readonly {
+    font-size: 12px;
+    color: var(--ep-text-secondary);
+    border-left: 2px solid var(--ep-border);
+    padding-left: 10px;
+    margin: 0 0 12px;
+    max-width: 74ch;
   }
 
   .cards {
@@ -879,19 +987,6 @@
     color: var(--ep-danger);
   }
 
-  .tokens {
-    border-top: 1px solid var(--ep-border);
-    padding-top: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .tokens h3 {
-    font-size: 13px;
-    font-weight: 700;
-    margin: 0;
-    color: var(--ep-text-primary);
-  }
   .ro {
     font-size: 11.5px;
     color: var(--ep-success);
@@ -939,13 +1034,15 @@
     overflow-wrap: anywhere;
   }
 
+  /* Le bouton s'aligne sur le bord droit des cartes qu'il enregistre. Une
+     largeur maximale héritée d'une mise en page en colonne étroite le laissait
+     flotter au milieu du vide sur grand écran, loin de ce sur quoi il agit. */
   .save-row {
     display: flex;
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
     margin-top: 14px;
-    max-width: 760px;
   }
   .save-row button {
     margin-left: auto;

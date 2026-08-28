@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { isLoading, _ } from 'svelte-i18n';
-  import { api, ApiError, probeSession } from '$lib/api';
-  import { forgetAdmin } from '$lib/session';
+  import { api, ApiError, whoami, type Identity } from '$lib/api';
+  import { forgetIdentity, setIdentity } from '$lib/session';
   import SetupView from './views/SetupView.svelte';
   import LoginView from './views/LoginView.svelte';
   import Shell from './views/Shell.svelte';
@@ -24,16 +24,41 @@
         phase = 'setup';
         return;
       }
-      // `/api/status` ne dit pas si la session est valide (le contrat ne prévoit
-      // pas ce champ) : on interroge une route protégée pour trancher.
-      phase = (await probeSession()) ? 'app' : 'login';
+      // `/api/status` est publique et ne dit pas si la session tient. `/api/me`
+      // répond aux deux questions d'un coup : la session, et le rôle. Le rôle
+      // est donc connu AVANT le premier écran — l'interface n'a plus à
+      // l'apprendre en se faisant refuser une route, ce qui déposait au journal
+      // d'audit un `access.denied` par ouverture de session d'observateur.
+      const who = await whoami();
+      if (!who) {
+        phase = 'login';
+        return;
+      }
+      setIdentity(who);
+      phase = 'app';
     } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) phase = 'login';
+      if (e instanceof ApiError && e.isExpired) phase = 'login';
       else phase = 'unreachable';
     }
   }
 
   onMount(bootstrap);
+
+  /**
+   * Entrée dans l'application. La connexion connaît déjà l'identité — elle
+   * vient de la lire pour vérifier que le cookie a été accepté — et l'apporte
+   * plutôt que de faire redemander la même chose. L'écran d'installation, lui,
+   * n'a rien à apporter : on repasse par le démarrage complet.
+   */
+  async function enter(who?: Identity) {
+    if (who) {
+      setIdentity(who);
+      notice = '';
+      phase = 'app';
+      return;
+    }
+    await bootstrap();
+  }
 
   /** Appelé par n'importe quelle vue qui se prend un 401 en cours de route. */
   function onExpired() {
@@ -48,9 +73,8 @@
       // Même si le hub refuse, on quitte l'écran : garder l'utilisateur devant
       // un parc auquel il n'a plus accès serait pire.
     }
-    // Le compte suivant n'a aucune raison d'hériter de ce qu'on avait appris
-    // des droits du précédent.
-    forgetAdmin();
+    // Le compte suivant n'a aucune raison d'hériter de l'identité du précédent.
+    forgetIdentity();
     notice = '';
     phase = 'login';
   }
@@ -68,9 +92,9 @@
       </StateBlock>
     </div>
   {:else if phase === 'setup'}
-    <SetupView onDone={() => (phase = 'app')} />
+    <SetupView onDone={() => enter()} />
   {:else if phase === 'login'}
-    <LoginView {notice} onDone={() => ((notice = ''), (phase = 'app'))} />
+    <LoginView {notice} onDone={enter} />
   {:else}
     <Shell {version} {onExpired} {logout} />
   {/if}
