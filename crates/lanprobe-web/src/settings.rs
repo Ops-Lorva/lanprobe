@@ -30,6 +30,13 @@ pub mod keys {
     /// ait le droit d'être en clair.
     pub const NOTIFY_DELAY_SECS: &str = "notify_delay_secs";
 
+    /// La sauvegarde tourne toute seule. Une sauvegarde qu'il faut
+    /// déclencher est une sauvegarde qu'on oublie.
+    pub const BACKUP_ENABLED: &str = "backup_enabled";
+    pub const BACKUP_INTERVAL_HOURS: &str = "backup_interval_hours";
+    /// ⚠️ Baisser cette valeur **supprime des archives**.
+    pub const BACKUP_KEEP_LAST: &str = "backup_keep_last";
+
     pub const ALL: &[&str] = &[
         INFLUX_URL,
         INFLUX_ORG,
@@ -39,6 +46,9 @@ pub mod keys {
         RETENTION_DAYS,
         HEARTBEAT_INTERVAL_SECS,
         NOTIFY_DELAY_SECS,
+        BACKUP_ENABLED,
+        BACKUP_INTERVAL_HOURS,
+        BACKUP_KEEP_LAST,
     ];
 }
 
@@ -104,6 +114,31 @@ impl Settings {
         .unwrap_or(crate::notify::DEFAULT_DELAY_SECS)
     }
 
+    /// Vrai tant que personne ne l'a explicitement coupée. Le défaut est
+    /// « activée » : c'est tout l'intérêt du modèle.
+    pub fn backup_enabled(&self) -> bool {
+        self.get_or(keys::BACKUP_ENABLED, "true") != "false"
+    }
+
+    pub fn backup_interval_hours(&self) -> i64 {
+        self.get_or(
+            keys::BACKUP_INTERVAL_HOURS,
+            &crate::backup::DEFAULT_INTERVAL_HOURS.to_string(),
+        )
+        .parse()
+        .unwrap_or(crate::backup::DEFAULT_INTERVAL_HOURS)
+    }
+
+    /// Nombre d'archives conservées. `0` = toutes.
+    pub fn backup_keep_last(&self) -> i64 {
+        self.get_or(
+            keys::BACKUP_KEEP_LAST,
+            &crate::backup::DEFAULT_KEEP_LAST.to_string(),
+        )
+        .parse()
+        .unwrap_or(crate::backup::DEFAULT_KEEP_LAST)
+    }
+
     pub fn heartbeat_interval_secs(&self) -> i64 {
         self.get_or(
             keys::HEARTBEAT_INTERVAL_SECS,
@@ -132,12 +167,17 @@ impl Settings {
             keys::RETENTION_DAYS: self.retention_days(),
             keys::HEARTBEAT_INTERVAL_SECS: self.heartbeat_interval_secs(),
             keys::NOTIFY_DELAY_SECS: self.notify_delay_secs(),
+            keys::BACKUP_ENABLED: self.backup_enabled(),
+            keys::BACKUP_INTERVAL_HOURS: self.backup_interval_hours(),
+            keys::BACKUP_KEEP_LAST: self.backup_keep_last(),
         })
     }
 
-    /// Écrit un réglage après validation. `confirm_data_loss` n'a d'effet que
-    /// sur `retention_days` : raccourcir une rétention efface des mesures, et
-    /// sur ce projet rien ne s'efface sans accord explicite.
+    /// Écrit un réglage après validation. `confirm_data_loss` porte sur les
+    /// deux réglages dont la baisse **efface** quelque chose :
+    /// `retention_days` (des mesures) et `backup_keep_last` (des archives).
+    /// Sur ce projet rien ne s'efface sans accord explicite, et le garde-fou
+    /// est ici — côté serveur — pas dans l'interface.
     pub fn put(&self, key: &str, value: &str, confirm_data_loss: bool) -> DbResult<()> {
         let value = value.trim();
         match key {
@@ -149,7 +189,30 @@ impl Settings {
                     return Err(DbError::Conflict(format!("{key} ne peut pas être vide")));
                 }
             }
-            keys::HEARTBEAT_INTERVAL_SECS | keys::NOTIFY_DELAY_SECS => {
+            keys::BACKUP_ENABLED => {
+                if !matches!(value, "true" | "false") {
+                    return Err(DbError::Conflict(format!(
+                        "{key} attend true ou false"
+                    )));
+                }
+            }
+            keys::BACKUP_KEEP_LAST => {
+                let parsed: i64 = value
+                    .parse()
+                    .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
+                if parsed < 0 {
+                    return Err(DbError::Conflict(format!("{key} ne peut pas être négatif")));
+                }
+                if self.kept_archives_shrink_to(parsed) && !confirm_data_loss {
+                    return Err(DbError::Conflict(format!(
+                        "ne garder que {parsed} archive(s) supprime les plus anciennes — \
+                         renvoyer la requête avec confirm_data_loss: true"
+                    )));
+                }
+            }
+            keys::HEARTBEAT_INTERVAL_SECS
+            | keys::NOTIFY_DELAY_SECS
+            | keys::BACKUP_INTERVAL_HOURS => {
                 let parsed: i64 = value
                     .parse()
                     .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
@@ -174,6 +237,17 @@ impl Settings {
             other => return Err(DbError::Conflict(format!("réglage inconnu : {other}"))),
         }
         self.db.set_setting(key, value)
+    }
+
+    /// Vrai si passer à `new_keep` réduit le nombre d'archives conservées.
+    /// `0` vaut « toutes » : y aller n'efface rien, en partir efface.
+    fn kept_archives_shrink_to(&self, new_keep: i64) -> bool {
+        let current = self.backup_keep_last();
+        match (current, new_keep) {
+            (_, 0) => false,
+            (0, _) => true,
+            (c, n) => n < c,
+        }
     }
 
     /// Vrai si passer à `new_days` raccourcit la fenêtre conservée. `0` vaut
@@ -375,6 +449,73 @@ mod tests {
 
         assert!(s.put(keys::RETENTION_DAYS, "90", false).is_err());
         assert!(s.put(keys::RETENTION_DAYS, "90", true).is_ok());
+    }
+
+    #[test]
+    fn the_backup_settings_have_sensible_defaults() {
+        let s = settings();
+        assert!(s.backup_enabled(), "une sauvegarde qu'il faut déclencher est oubliée");
+        assert_eq!(s.backup_interval_hours(), 24);
+        assert_eq!(s.backup_keep_last(), 7, "sept jours : de quoi passer un week-end");
+    }
+
+    #[test]
+    fn the_backup_settings_are_adjustable_and_validated() {
+        let s = settings();
+        s.put(keys::BACKUP_ENABLED, "false", false).unwrap();
+        assert!(!s.backup_enabled());
+        s.put(keys::BACKUP_ENABLED, "true", false).unwrap();
+        assert!(s.backup_enabled());
+        assert!(s.put(keys::BACKUP_ENABLED, "peut-être", false).is_err());
+
+        assert!(s.put(keys::BACKUP_INTERVAL_HOURS, "0", false).is_err());
+        assert!(s.put(keys::BACKUP_INTERVAL_HOURS, "beaucoup", false).is_err());
+        s.put(keys::BACKUP_INTERVAL_HOURS, "6", false).unwrap();
+        assert_eq!(s.backup_interval_hours(), 6);
+
+        assert!(s.put(keys::BACKUP_KEEP_LAST, "-1", false).is_err());
+    }
+
+    #[test]
+    fn keeping_fewer_archives_is_refused_without_explicit_confirmation() {
+        // Baisser cette valeur supprime des archives : même règle que la
+        // rétention Influx, confirmation exigée côté serveur et pas seulement
+        // dans l'interface.
+        let s = settings();
+        assert_eq!(s.backup_keep_last(), 7);
+
+        let err = s.put(keys::BACKUP_KEEP_LAST, "3", false).unwrap_err();
+        assert!(
+            err.to_string().contains("confirm"),
+            "le refus doit nommer la confirmation attendue : {err}"
+        );
+        assert_eq!(s.backup_keep_last(), 7, "rien ne doit avoir changé");
+
+        s.put(keys::BACKUP_KEEP_LAST, "3", true).unwrap();
+        assert_eq!(s.backup_keep_last(), 3);
+    }
+
+    #[test]
+    fn keeping_more_archives_needs_no_confirmation() {
+        let s = settings();
+        assert!(s.put(keys::BACKUP_KEEP_LAST, "30", false).is_ok());
+        // 0 = tout garder. C'est l'augmentation maximale, pas une purge :
+        // confondre les deux ferait de la valeur la plus prudente la plus
+        // destructrice.
+        assert!(s.put(keys::BACKUP_KEEP_LAST, "0", false).is_ok());
+        assert_eq!(s.backup_keep_last(), 0);
+        // Et quitter « tout garder » redevient une réduction.
+        assert!(s.put(keys::BACKUP_KEEP_LAST, "7", false).is_err());
+        assert!(s.put(keys::BACKUP_KEEP_LAST, "7", true).is_ok());
+    }
+
+    #[test]
+    fn the_backup_settings_carry_no_secret_and_are_listed() {
+        let s = settings();
+        let all = s.all();
+        assert_eq!(all[keys::BACKUP_ENABLED], serde_json::json!(true));
+        assert_eq!(all[keys::BACKUP_INTERVAL_HOURS], serde_json::json!(24));
+        assert_eq!(all[keys::BACKUP_KEEP_LAST], serde_json::json!(7));
     }
 
     #[test]
