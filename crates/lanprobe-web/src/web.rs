@@ -69,7 +69,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/setup", post(setup))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
-        .route("/api/me", get(me))
         .route("/api/probes/enroll", post(enroll))
         .route("/api/probes/{id}/write", post(write_metrics))
         .route("/api/probes/{id}/heartbeat", post(heartbeat));
@@ -90,6 +89,7 @@ pub fn build_router(state: AppState) -> Router {
         &state,
         Role::Viewer,
         Router::new()
+            .route("/api/me", get(me))
             .route("/api/probes", get(list_probes))
             .route("/api/probes/{id}/metrics", get(probe_metrics))
             .route("/api/settings", get(get_settings))
@@ -3366,6 +3366,26 @@ mod tests {
 
         assert_eq!(tested["url"], enrolled["influx"]["url"]);
         assert_eq!(tested["source"], "host_header");
+    }
+
+    #[tokio::test]
+    async fn me_says_who_is_connected_and_with_which_role() {
+        // Route posée d'abord dans le groupe public : l'extension d'identité
+        // n'y est pas injectée, et la route répondait par une erreur interne.
+        // Elle doit vivre derrière le garde de session.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/me"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["username"], "admin");
+        assert_eq!(body["role"], "admin");
+
+        // Sans session : refusé, pas d'erreur interne.
+        let (status, _, _) = h.call(empty_request("GET", "/api/me")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     // ── Écriture des mesures ───────────────────────────────────────────────
