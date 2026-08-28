@@ -100,6 +100,8 @@ export interface HubSettings {
   influx_bucket: string;
   /** `null` = laissé à la déduction du hub. */
   influx_advertise_url: string | null;
+  /** Adresse publique du hub — le seul réglage d'adresse ; l'URL Influx en découle. */
+  hub_public_url: string | null;
   /** 0 = rétention illimitée. */
   retention_days: number;
   heartbeat_interval_secs: number;
@@ -110,6 +112,7 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   influx_org: 'lanprobe',
   influx_bucket: 'lanprobe',
   influx_advertise_url: null,
+  hub_public_url: null,
   retention_days: 0,
   heartbeat_interval_secs: 60,
 };

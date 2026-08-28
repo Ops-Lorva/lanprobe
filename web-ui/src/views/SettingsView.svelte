@@ -10,7 +10,6 @@
     type InfluxInfo,
     type ReadToken,
   } from '$lib/api';
-  import AdvertiseCard from '$lib/components/AdvertiseCard.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import CopyLine from '$lib/components/CopyLine.svelte';
@@ -29,7 +28,7 @@
   let influxUrl = $state('');
   let org = $state('');
   let bucket = $state('');
-  let advertise = $state('');
+  let hubPublicUrl = $state('');
   let retention = $state('0');
   let heartbeat = $state('60');
 
@@ -42,7 +41,7 @@
     influxUrl = s.influx_url;
     org = s.influx_org;
     bucket = s.influx_bucket;
-    advertise = s.influx_advertise_url ?? '';
+    hubPublicUrl = s.hub_public_url ?? '';
     retention = String(s.retention_days);
     heartbeat = String(s.heartbeat_interval_secs);
   }
@@ -192,8 +191,8 @@
     if (influxUrl.trim() !== saved.influx_url) p.influx_url = influxUrl.trim();
     if (org.trim() !== saved.influx_org) p.influx_org = org.trim();
     if (bucket.trim() !== saved.influx_bucket) p.influx_bucket = bucket.trim();
-    const adv = advertise.trim() === '' ? null : advertise.trim();
-    if (adv !== saved.influx_advertise_url) p.influx_advertise_url = adv;
+    const hubUrl = hubPublicUrl.trim() === '' ? null : hubPublicUrl.trim();
+    if (hubUrl !== saved.hub_public_url) p.hub_public_url = hubUrl;
     if (retentionNum !== saved.retention_days) p.retention_days = retentionNum;
     if (heartbeatNum !== saved.heartbeat_interval_secs) p.heartbeat_interval_secs = heartbeatNum;
     return p;
@@ -227,7 +226,7 @@
     // Langue et thème s'appliquent au clic et ne partent jamais au hub : il n'y
     // a donc rien à y enregistrer, donc jamais de pastille.
     general: false,
-    probes: 'influx_advertise_url' in patch || 'heartbeat_interval_secs' in patch,
+    probes: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
     influx:
       'influx_url' in patch ||
       'influx_org' in patch ||
@@ -259,9 +258,9 @@
     } catch {
       return { msg: $_('settings.invalid_url'), tab: 'influx' };
     }
-    if (advertise.trim()) {
+    if (hubPublicUrl.trim()) {
       try {
-        new URL(advertise.trim());
+        new URL(hubPublicUrl.trim());
       } catch {
         return { msg: $_('settings.invalid_url'), tab: 'probes' };
       }
@@ -375,29 +374,23 @@
   </div>
   {:else if tab === 'probes'}
   <div class="cards" role="tabpanel" id="panel-probes" aria-labelledby="tab-probes" tabindex="-1">
-    <!-- L'URL annoncée vient en premier : c'est celle qui casse le parc quand
-         elle est fausse, et la seule qu'on puisse vérifier d'un bouton. -->
+    <!-- Une seule adresse à renseigner : celle du hub. Les sondes ne
+         reçoivent plus d'URL InfluxDB — elles écrivent par le hub, qui
+         relaie. Deux URL voisines à distinguer, c'était une sonde enrôlée
+         avec la mauvaise et une demi-heure à comprendre pourquoi. -->
     <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.influx_title')}</h2>
-
+      <h2 class="lp-title">{$_('settings.hub_url_title')}</h2>
       <label class="lp-field">
-        {$_('settings.field_label')}
+        {$_('settings.hub_url_label')}
         <input
           class="lp-input"
-          bind:value={advertise}
-          placeholder={$_('settings.field_placeholder')}
+          bind:value={hubPublicUrl}
+          placeholder="https://lanprobe.exemple.fr"
           spellcheck="false"
           autocomplete="off"
         />
-        <span class="hint">{$_('settings.field_hint')}</span>
+        <span class="hint">{$_('settings.hub_url_hint')}</span>
       </label>
-
-      <AdvertiseCard
-        result={testResult}
-        phase={testPhase}
-        error={testError}
-        ontest={runTest}
-      />
     </section>
 
     <section class="card lp-card">
@@ -415,11 +408,14 @@
   <div class="cards" role="tabpanel" id="panel-influx" aria-labelledby="tab-influx" tabindex="-1">
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.section_influx')}</h2>
-      <label class="lp-field">
+      <!-- Les sondes n'écrivent plus dans Influx : elles passent par le hub.
+           Cette adresse n'est donc plus un réglage — c'est celle que le hub
+           emprunte lui-même, affichée pour le diagnostic. -->
+      <div class="lp-field">
         {$_('settings.influx_url_label')}
-        <input class="lp-input" bind:value={influxUrl} spellcheck="false" autocomplete="off" />
+        <p class="ro lp-mono">{saved.influx_url}</p>
         <span class="hint">{$_('settings.influx_url_hint')}</span>
-      </label>
+      </div>
       <div class="pair">
         <label class="lp-field">
           {$_('settings.org_label')}
@@ -692,7 +688,6 @@
     flex-wrap: wrap;
     border-bottom: 1px solid var(--ep-border);
     margin-bottom: 14px;
-    max-width: 760px;
   }
   .tab {
     display: inline-flex;
@@ -733,7 +728,10 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    max-width: 760px;
+    /* Pas de colonne étroite : l'écran a la place, autant s'en servir. Les
+       champs gardent leur propre largeur de confort — un champ de saisie de
+       1400 px est illisible, ce n'est pas la carte qui doit la contraindre. */
+    width: 100%;
   }
   .cards:focus {
     outline: none;

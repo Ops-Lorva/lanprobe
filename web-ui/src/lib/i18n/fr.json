@@ -30,7 +30,7 @@
     "section_probes": "Sondes",
     "section_retention": "Rétention des mesures",
     "influx_url_label": "URL interne d'InfluxDB",
-    "influx_url_hint": "Adresse interne au hub. Ce n'est pas celle que reçoivent les sondes.",
+    "influx_url_hint": "Adresse qu'emprunte le hub pour joindre InfluxDB. Les sondes ne s'en servent plus : elles écrivent par le hub.",
     "org_label": "Organisation",
     "bucket_label": "Bucket",
     "heartbeat_label": "Cadence du battement de cœur",
@@ -111,7 +111,10 @@
     "retention_lead": "Combien de temps InfluxDB garde les mesures avant de les effacer. C'est le seul réglage de cet écran qui supprime des données.",
     "tab_general": "Général",
     "device_title": "Cet appareil",
-    "device_note": "Langue et thème ne valent que pour ce navigateur."
+    "device_note": "Langue et thème ne valent que pour ce navigateur.",
+    "hub_url_title": "Adresse du hub",
+    "hub_url_label": "Adresse publique de ce hub",
+    "hub_url_hint": "L'adresse par laquelle vos sondes joignent ce hub. C'est le seul réglage d'adresse : tout le reste en découle."
   },
   "nav": {
     "fleet": "Parc",

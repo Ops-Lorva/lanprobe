@@ -30,7 +30,7 @@
     "section_probes": "Probes",
     "section_retention": "Measurement retention",
     "influx_url_label": "Internal InfluxDB URL",
-    "influx_url_hint": "Address internal to the hub. Not the one probes receive.",
+    "influx_url_hint": "Address the hub uses to reach InfluxDB. Probes no longer use it: they write through the hub.",
     "org_label": "Organisation",
     "bucket_label": "Bucket",
     "heartbeat_label": "Heartbeat interval",
@@ -111,7 +111,10 @@
     "retention_lead": "How long InfluxDB keeps measurements before erasing them. It is the only setting on this screen that deletes data.",
     "tab_general": "General",
     "device_title": "This device",
-    "device_note": "Language and theme apply to this browser only."
+    "device_note": "Language and theme apply to this browser only.",
+    "hub_url_title": "Hub address",
+    "hub_url_label": "Public address of this hub",
+    "hub_url_hint": "The address your probes use to reach this hub. It is the only address setting: everything else follows from it."
   },
   "nav": {
     "fleet": "Fleet",
