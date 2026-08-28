@@ -111,7 +111,13 @@
     "retention_lead": "Combien de temps InfluxDB garde les mesures avant de les effacer. C'est le seul réglage de cet écran qui supprime des données.",
     "tab_general": "Général",
     "device_title": "Cet appareil",
-    "device_note": "Langue et thème ne valent que pour ce navigateur."
+    "device_note": "Langue et thème ne valent que pour ce navigateur.",
+    "hub_url_title": "Adresse publique du hub",
+    "hub_url_label": "Adresse du hub",
+    "hub_url_placeholder": "ex. https://lanprobe.exemple.fr",
+    "hub_url_hint": "C'est par cette adresse que les sondes joignent le hub pour lui envoyer leurs mesures.",
+    "invalid_hub_url": "Indiquez une URL absolue, avec le schéma et l'hôte : https://lanprobe.exemple.fr.",
+    "influx_url_readonly": "Lecture seule. Utile pour brancher Grafana, avec un jeton de l'onglet « Vos données »."
   },
   "nav": {
     "fleet": "Parc",

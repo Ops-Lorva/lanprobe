@@ -5,12 +5,10 @@
     api,
     ApiError,
     SETTINGS_DEFAULTS,
-    type AdvertiseTest,
     type HubSettings,
     type InfluxInfo,
     type ReadToken,
   } from '$lib/api';
-  import AdvertiseCard from '$lib/components/AdvertiseCard.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import CopyLine from '$lib/components/CopyLine.svelte';
@@ -26,10 +24,9 @@
 
   // Brouillon : les champs numériques sont tenus en texte pour distinguer
   // « vidé » de « zéro » pendant la saisie.
-  let influxUrl = $state('');
+  let hubUrl = $state('');
   let org = $state('');
   let bucket = $state('');
-  let advertise = $state('');
   let retention = $state('0');
   let heartbeat = $state('60');
 
@@ -39,10 +36,9 @@
 
   function fill(s: HubSettings) {
     saved = s;
-    influxUrl = s.influx_url;
+    hubUrl = s.hub_public_url ?? '';
     org = s.influx_org;
     bucket = s.influx_bucket;
-    advertise = s.influx_advertise_url ?? '';
     retention = String(s.retention_days);
     heartbeat = String(s.heartbeat_interval_secs);
   }
@@ -62,7 +58,6 @@
 
   onMount(() => {
     void load();
-    void runTest();
     void loadInflux();
     void loadTokens();
   });
@@ -138,25 +133,6 @@
     }
   }
 
-  // ── Test de l'URL annoncée ───────────────────────────────────────────────
-  let testResult = $state<AdvertiseTest | null>(null);
-  let testPhase = $state<'idle' | 'testing' | 'done' | 'failed'>('idle');
-  let testError = $state('');
-
-  async function runTest() {
-    testPhase = 'testing';
-    testError = '';
-    try {
-      // `reachable: false` revient en 200 : c'est un verdict, pas une panne.
-      testResult = await api.testAdvertise();
-      testPhase = 'done';
-    } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      testError = e instanceof ApiError ? e.message : String(e);
-      testPhase = 'failed';
-    }
-  }
-
   // ── Enregistrement ───────────────────────────────────────────────────────
   const retentionNum = $derived(Number.parseInt(retention, 10));
   const heartbeatNum = $derived(Number.parseInt(heartbeat, 10));
@@ -189,11 +165,9 @@
 
   const patch = $derived.by(() => {
     const p: Partial<HubSettings> = {};
-    if (influxUrl.trim() !== saved.influx_url) p.influx_url = influxUrl.trim();
+    if (hubUrl.trim() !== (saved.hub_public_url ?? '')) p.hub_public_url = hubUrl.trim();
     if (org.trim() !== saved.influx_org) p.influx_org = org.trim();
     if (bucket.trim() !== saved.influx_bucket) p.influx_bucket = bucket.trim();
-    const adv = advertise.trim() === '' ? null : advertise.trim();
-    if (adv !== saved.influx_advertise_url) p.influx_advertise_url = adv;
     if (retentionNum !== saved.retention_days) p.retention_days = retentionNum;
     if (heartbeatNum !== saved.heartbeat_interval_secs) p.heartbeat_interval_secs = heartbeatNum;
     return p;
@@ -204,7 +178,7 @@
   // ── Onglets ──────────────────────────────────────────────────────────────
   // Découpage par motif de visite, pas par type de champ :
   //   « Général »     — les préférences de CE navigateur (langue, thème) ;
-  //   « Sondes »      — ce que le hub raconte aux sondes (URL annoncée, cadence) ;
+  //   « Sondes »      — l'adresse publique du hub et la cadence des battements ;
   //   « InfluxDB »    — comment le hub joint la base, et combien de temps elle garde ;
   //   « Vos données » — ce qu'il y a dedans et qui a le droit de le lire.
   // La conservation vit dans « InfluxDB » : c'est une politique de rétention de
@@ -227,12 +201,8 @@
     // Langue et thème s'appliquent au clic et ne partent jamais au hub : il n'y
     // a donc rien à y enregistrer, donc jamais de pastille.
     general: false,
-    probes: 'influx_advertise_url' in patch || 'heartbeat_interval_secs' in patch,
-    influx:
-      'influx_url' in patch ||
-      'influx_org' in patch ||
-      'influx_bucket' in patch ||
-      'retention_days' in patch,
+    probes: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
+    influx: 'influx_org' in patch || 'influx_bucket' in patch || 'retention_days' in patch,
     // Onglet en lecture seule : les jetons s'y créent et s'y révoquent tout de
     // suite, rien n'y attend le bouton « Enregistrer ».
     data: false,
@@ -252,19 +222,20 @@
   /** Le message ET l'onglet où se trouve le champ fautif : une erreur sur un
       onglet fermé serait invisible, donc incompréhensible. */
   function validate(): { msg: string; tab: Tab } | null {
-    if (!influxUrl.trim() || !org.trim() || !bucket.trim())
+    if (!org.trim() || !bucket.trim())
       return { msg: $_('settings.required'), tab: 'influx' };
-    try {
-      new URL(influxUrl.trim());
-    } catch {
-      return { msg: $_('settings.invalid_url'), tab: 'influx' };
-    }
-    if (advertise.trim()) {
+    // Le hub exige une URL absolue, schéma et hôte compris. On applique la même
+    // règle ici pour que le refus arrive avant l'aller-retour, pas après.
+    const hu = hubUrl.trim();
+    if (hu) {
+      let parsed: URL | null = null;
       try {
-        new URL(advertise.trim());
+        parsed = new URL(hu);
       } catch {
-        return { msg: $_('settings.invalid_url'), tab: 'probes' };
+        parsed = null;
       }
+      if (!parsed || !parsed.protocol || !parsed.hostname)
+        return { msg: $_('settings.invalid_hub_url'), tab: 'probes' };
     }
     if (!Number.isInteger(retentionNum) || retentionNum < 0)
       return { msg: $_('settings.invalid_retention'), tab: 'influx' };
@@ -308,7 +279,6 @@
       shrinkOpen = false;
       notice = $_('settings.saved_all');
       await load();
-      await runTest();
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
       fieldError = e instanceof ApiError ? e.message : String(e);
@@ -375,34 +345,29 @@
   </div>
   {:else if tab === 'probes'}
   <div class="cards" role="tabpanel" id="panel-probes" aria-labelledby="tab-probes" tabindex="-1">
-    <!-- L'URL annoncée vient en premier : c'est celle qui casse le parc quand
-         elle est fausse, et la seule qu'on puisse vérifier d'un bouton. -->
+    <!--
+      Depuis que les sondes écrivent au hub et non plus dans Influx, c'est la
+      seule adresse à régler de toute l'application. Elle vient donc en premier,
+      et c'est la seule qui casse le parc quand elle est fausse.
+    -->
     <section class="card lp-card">
-      <h2 class="lp-title">{$_('settings.influx_title')}</h2>
-
-      <label class="lp-field">
-        {$_('settings.field_label')}
+      <h2 class="lp-title">{$_('settings.hub_url_title')}</h2>
+      <label class="lp-field cap">
+        {$_('settings.hub_url_label')}
         <input
           class="lp-input"
-          bind:value={advertise}
-          placeholder={$_('settings.field_placeholder')}
+          bind:value={hubUrl}
+          placeholder={$_('settings.hub_url_placeholder')}
           spellcheck="false"
           autocomplete="off"
         />
-        <span class="hint">{$_('settings.field_hint')}</span>
+        <span class="hint">{$_('settings.hub_url_hint')}</span>
       </label>
-
-      <AdvertiseCard
-        result={testResult}
-        phase={testPhase}
-        error={testError}
-        ontest={runTest}
-      />
     </section>
 
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.section_probes')}</h2>
-      <label class="lp-field">
+      <label class="lp-field cap">
         {$_('settings.heartbeat_label')}
         <span class="unit-row">
           <input class="lp-input num" type="number" min="10" step="1" bind:value={heartbeat} />
@@ -415,11 +380,16 @@
   <div class="cards" role="tabpanel" id="panel-influx" aria-labelledby="tab-influx" tabindex="-1">
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.section_influx')}</h2>
-      <label class="lp-field">
-        {$_('settings.influx_url_label')}
-        <input class="lp-input" bind:value={influxUrl} spellcheck="false" autocomplete="off" />
-        <span class="hint">{$_('settings.influx_url_hint')}</span>
-      </label>
+      <!--
+        Lecture seule : plus aucune sonde ne reçoit cette adresse, le hub relaie
+        les mesures. Elle n'est affichée que pour brancher Grafana, avec un
+        jeton de l'onglet « Vos données ».
+      -->
+      <div class="lp-field cap">
+        <span>{$_('settings.influx_url_label')}</span>
+        <CopyLine value={saved.influx_url} shell={false} />
+        <span class="hint">{$_('settings.influx_url_readonly')}</span>
+      </div>
       <div class="pair">
         <label class="lp-field">
           {$_('settings.org_label')}
@@ -692,7 +662,6 @@
     flex-wrap: wrap;
     border-bottom: 1px solid var(--ep-border);
     margin-bottom: 14px;
-    max-width: 760px;
   }
   .tab {
     display: inline-flex;
@@ -729,11 +698,27 @@
     flex-shrink: 0;
   }
 
+  /*
+    L'écran occupe la largeur disponible, comme la vue du parc : sur 1440 px,
+    une colonne de 760 px laissait la moitié de l'écran vide. Les cartes
+    s'écoulent en grille et repassent en colonne unique quand la place manque.
+
+    Ce n'est pas la mise en page qui doit être bridée, ce sont les CHAMPS : une
+    zone de saisie de 1400 px est illisible. D'où `.cap` sur les champs plutôt
+    qu'un plafond sur le conteneur.
+  */
   .cards {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr));
+    align-items: start;
     gap: 12px;
-    max-width: 760px;
+  }
+  /* Largeur de confort d'un champ, indépendante de celle de la carte. */
+  .cap {
+    max-width: 460px;
+  }
+  .cap :global(.line) {
+    max-width: 460px;
   }
   .cards:focus {
     outline: none;
@@ -751,7 +736,10 @@
   /* Séparation nommée plutôt qu'un simple blanc : un espace se franchit sans
      s'en apercevoir, un intitulé « Réglage destructif » se lit avant le champ
      qu'il annonce. C'est la seule frontière de l'écran qui doit se remarquer. */
+  /* Toute la largeur : un réglage destructif ne se range pas en colonne à
+     côté d'un champ anodin, il barre l'écran. */
   .zone {
+    grid-column: 1 / -1;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -900,6 +888,7 @@
   .grow {
     flex: 1 1 220px;
     min-width: 0;
+    max-width: 460px;
   }
   .tok-table {
     width: 100%;
@@ -939,7 +928,6 @@
     gap: 12px;
     flex-wrap: wrap;
     margin-top: 14px;
-    max-width: 760px;
   }
   .save-row button {
     margin-left: auto;
