@@ -7,6 +7,7 @@
     ApiError,
     SETTINGS_DEFAULTS,
     type AdvertiseTest,
+    type BackupList,
     type HubSettings,
     type InfluxInfo,
     type ReadToken,
@@ -15,6 +16,8 @@
   import Modal from '$lib/components/Modal.svelte';
   import CopyLine from '$lib/components/CopyLine.svelte';
   import LangTheme from '$lib/components/LangTheme.svelte';
+  import BackupPanel from '$lib/components/BackupPanel.svelte';
+  import RestoreCard from '$lib/components/RestoreCard.svelte';
   import AccountsView from './AccountsView.svelte';
   import NotificationsView from './NotificationsView.svelte';
   import { go, route, type SettingsTab } from '$lib/router';
@@ -38,6 +41,9 @@
   let hubVersion = $state('—');
   let retention = $state('0');
   let heartbeat = $state('60');
+  let backupEnabled = $state(true);
+  let backupInterval = $state('24');
+  let backupKeep = $state('7');
 
   let fieldError = $state('');
   let busy = $state(false);
@@ -52,6 +58,9 @@
     api.status().then((st) => (hubVersion = st.version || '—')).catch(() => {});
     retention = String(s.retention_days);
     heartbeat = String(s.heartbeat_interval_secs);
+    backupEnabled = s.backup_enabled;
+    backupInterval = String(s.backup_interval_hours);
+    backupKeep = String(s.backup_keep_last);
   }
 
   async function load() {
@@ -74,8 +83,32 @@
     // demande `operator`, les jetons de lecture `admin`. Les appeler pour tout
     // le monde déposait une ligne `access.denied` au journal à chaque visite
     // d'un observateur — le bruit exact qui masque les refus qui comptent.
-    if (get(isAdmin)) void loadTokens();
+    if (get(isAdmin)) {
+      void loadTokens();
+      void loadBackups();
+    }
   });
+
+  // ── Sauvegardes ──────────────────────────────────────────────────────────
+  //
+  // La liste est tenue ici, et non dans chaque carte : la carte des archives
+  // et celle de la restauration lisent la même chose. Deux composants qui
+  // interrogeraient chacun `/api/backups` afficheraient deux états différents
+  // dès qu'une sauvegarde tombe entre les deux requêtes — et c'est la liste
+  // des sauvegardes, l'endroit où se contredire coûte le plus cher.
+  let backups = $state<BackupList | null>(null);
+  let backupsError = $state('');
+
+  async function loadBackups() {
+    try {
+      backups = await api.backups();
+      backupsError = '';
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      backups = null;
+      backupsError = e instanceof ApiError ? e.message : String(e);
+    }
+  }
 
   // ── Influx en lecture seule (contrat § 8) ────────────────────────────────
   let influx = $state<InfluxInfo | null>(null);
@@ -156,6 +189,8 @@
   // ── Enregistrement ───────────────────────────────────────────────────────
   const retentionNum = $derived(Number.parseInt(retention, 10));
   const heartbeatNum = $derived(Number.parseInt(heartbeat, 10));
+  const intervalNum = $derived(Number.parseInt(backupInterval, 10));
+  const keepNum = $derived(Number.parseInt(backupKeep, 10));
 
   function retentionLabel(days: number) {
     return days === 0
@@ -175,6 +210,26 @@
         (saved.retention_days > 0 && retentionNum > 0 && retentionNum < saved.retention_days)),
   );
 
+  /**
+   * Même règle pour les archives : `0` vaut « toutes », donc en partir est la
+   * réduction la plus destructrice — pas une augmentation. Le hub refuse ce
+   * changement en 409 tant que `confirm_data_loss` n'accompagne pas la requête.
+   */
+  const keepShrink = $derived(
+    Number.isInteger(keepNum) &&
+      keepNum >= 0 &&
+      ((saved.backup_keep_last === 0 && keepNum > 0) ||
+        (saved.backup_keep_last > 0 && keepNum > 0 && keepNum < saved.backup_keep_last)),
+  );
+
+  function keepLabel(n: number) {
+    return n === 0 ? $_('backup.keep_all_label') : $_('backup.keep_n_label', { values: { n } });
+  }
+
+  /** Les deux réductions partent dans le même PUT, donc dans la même confirmation. */
+  const dataLoss = $derived(isShrink || keepShrink);
+  const bothLosses = $derived(isShrink && keepShrink);
+
   const cutoffDate = $derived(
     Number.isInteger(retentionNum) && retentionNum > 0
       ? new Intl.DateTimeFormat(lang, { dateStyle: 'long' }).format(
@@ -192,6 +247,9 @@
     if (hubUrl !== saved.hub_public_url) p.hub_public_url = hubUrl;
     if (retentionNum !== saved.retention_days) p.retention_days = retentionNum;
     if (heartbeatNum !== saved.heartbeat_interval_secs) p.heartbeat_interval_secs = heartbeatNum;
+    if (backupEnabled !== saved.backup_enabled) p.backup_enabled = backupEnabled;
+    if (intervalNum !== saved.backup_interval_hours) p.backup_interval_hours = intervalNum;
+    if (keepNum !== saved.backup_keep_last) p.backup_keep_last = keepNum;
     return p;
   });
 
@@ -255,7 +313,10 @@
       'influx_url' in patch ||
       'influx_org' in patch ||
       'influx_bucket' in patch ||
-      'retention_days' in patch,
+      'retention_days' in patch ||
+      'backup_enabled' in patch ||
+      'backup_interval_hours' in patch ||
+      'backup_keep_last' in patch,
     // Chaque geste s'y applique seul, rien n'y attend « Enregistrer ».
     alerts: false,
     accounts: false,
@@ -300,6 +361,13 @@
       return { msg: $_('settings.invalid_retention'), tab: 'storage' };
     if (!Number.isInteger(heartbeatNum) || heartbeatNum < 10)
       return { msg: $_('settings.invalid_heartbeat'), tab: 'general' };
+    // Le hub refuse une cadence nulle ou négative. On le dit ici plutôt que de
+    // laisser partir la requête : le message serait le même, avec un aller-
+    // retour et un champ qu'on ne saurait pas retrouver.
+    if (!Number.isInteger(intervalNum) || intervalNum < 1)
+      return { msg: $_('backup.invalid_interval'), tab: 'storage' };
+    if (!Number.isInteger(keepNum) || keepNum < 0)
+      return { msg: $_('backup.invalid_keep'), tab: 'storage' };
     return null;
   }
 
@@ -318,7 +386,7 @@
       notice = $_('settings.no_change');
       return;
     }
-    if (isShrink) {
+    if (dataLoss) {
       // Confirmation explicite exigée : le clic sur « Enregistrer » peut être
       // un réflexe, cocher une case qui nomme la date de coupure ne l'est pas.
       shrinkAck = false;
@@ -342,9 +410,22 @@
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
       fieldError = e instanceof ApiError ? e.message : String(e);
       shrinkOpen = false;
+      // ⚠️ Le hub écrit les réglages un par un et s'arrête au premier refus :
+      // ceux qui précédaient sont DÉJÀ en base. On relit donc la RÉFÉRENCE,
+      // sans toucher au brouillon : les champs déjà passés sortent d'eux-mêmes
+      // du prochain envoi, et ce que la personne vient de taper reste à
+      // l'écran. Recharger tout l'écran effacerait sa saisie au moment précis
+      // où elle a besoin de la corriger.
+      try {
+        saved = await api.settings();
+      } catch {
+        /* la référence attendra : l'erreur d'enregistrement prime */
+      }
     } finally {
       busy = false;
     }
+    // La rétention des archives a pu en retirer : la liste doit suivre.
+    if (get(isAdmin)) void loadBackups();
   }
 </script>
 
@@ -607,6 +688,23 @@
         </table>
       {/if}
     </section>
+
+    <!--
+      La sauvegarde vient après les jetons parce qu'elle répond à une question
+      plus rare : « qu'est-ce qui me reste si cette machine disparaît ? ». On
+      ouvre « Stockage » d'abord pour voir si les mesures arrivent ; on y
+      revient, plus tard et moins souvent, pour vérifier le filet. Réservée à
+      `admin` comme les routes qu'elle appelle.
+    -->
+    <BackupPanel
+      list={backups}
+      listError={backupsError}
+      onReload={loadBackups}
+      {onExpired}
+      bind:enabled={backupEnabled}
+      bind:intervalHours={backupInterval}
+      bind:keepLast={backupKeep}
+    />
     {/if}
 
     <!--
@@ -622,6 +720,21 @@
         <span class="zone-title">{$_('settings.destructive_zone')}</span>
         <span class="zone-rule" aria-hidden="true"></span>
       </div>
+
+      <!--
+        La restauration ouvre la zone : c'est la plus lourde des deux. Elle
+        remplace tout le hub, là où la rétention ne touche qu'aux mesures. Et
+        elle est ici, sous la même barre rouge, plutôt qu'à côté de la liste
+        des archives : la liste se consulte pour se rassurer, on ne veut pas y
+        croiser le bouton qui écrase la base.
+      -->
+      {#if $isAdmin}
+        <RestoreCard
+          archives={backups?.backups ?? []}
+          onReload={loadBackups}
+          {onExpired}
+        />
+      {/if}
 
       <section class="card lp-card danger-frame" class:risky={isShrink}>
         <h2 class="lp-title">{$_('settings.section_retention')}</h2>
@@ -719,29 +832,72 @@
     {/snippet}
   </Modal>
 
-  <Modal open={shrinkOpen} title={$_('settings.shrink_title')} onclose={() => (shrinkOpen = false)}>
-    <p>
-      {$_('settings.shrink_from_to', {
-        values: {
-          from: retentionLabel(saved.retention_days),
-          to: retentionLabel(retentionNum),
-        },
-      })}
-    </p>
-    <p class="cutoff">{$_('settings.shrink_cutoff', { values: { date: cutoffDate } })}</p>
-    <p class="muted">{$_('settings.shrink_irreversible')}</p>
+  <!--
+    Une seule confirmation pour les deux réductions destructrices : le hub
+    n'expose qu'un `PUT` et qu'un `confirm_data_loss`, qui vaut pour la requête
+    entière. Deux boîtes à la suite laisseraient croire à deux envois, et faire
+    disparaître la seconde derrière la première laisserait passer une
+    suppression non lue. Chaque perte a donc son paragraphe, dans la même
+    boîte, et la case les couvre toutes.
+  -->
+  <Modal
+    open={shrinkOpen}
+    title={bothLosses
+      ? $_('settings.loss_title')
+      : isShrink
+        ? $_('settings.shrink_title')
+        : $_('backup.keep_shrink_title')}
+    onclose={() => (shrinkOpen = false)}
+  >
+    {#if isShrink}
+      {#if bothLosses}<strong class="loss-head">{$_('settings.shrink_title')}</strong>{/if}
+      <p>
+        {$_('settings.shrink_from_to', {
+          values: {
+            from: retentionLabel(saved.retention_days),
+            to: retentionLabel(retentionNum),
+          },
+        })}
+      </p>
+      <p class="cutoff">{$_('settings.shrink_cutoff', { values: { date: cutoffDate } })}</p>
+      <p class="muted">{$_('settings.shrink_irreversible')}</p>
+    {/if}
+
+    {#if keepShrink}
+      {#if bothLosses}<strong class="loss-head">{$_('backup.keep_shrink_title')}</strong>{/if}
+      <p>
+        {$_('backup.keep_shrink_from_to', {
+          values: { from: keepLabel(saved.backup_keep_last), to: keepLabel(keepNum) },
+        })}
+      </p>
+      <p class="cutoff">{$_('backup.keep_shrink_cutoff')}</p>
+    {/if}
 
     <label class="ack">
       <input type="checkbox" bind:checked={shrinkAck} />
-      <span>{$_('settings.shrink_ack', { values: { date: cutoffDate } })}</span>
+      <span>
+        {bothLosses
+          ? $_('settings.loss_ack')
+          : isShrink
+            ? $_('settings.shrink_ack', { values: { date: cutoffDate } })
+            : $_('backup.keep_shrink_ack', { values: { to: keepLabel(keepNum) } })}
+      </span>
     </label>
 
     {#snippet footer()}
       <button class="lp-btn" onclick={() => (shrinkOpen = false)}>
-        {$_('settings.shrink_keep', { values: { from: retentionLabel(saved.retention_days) } })}
+        {isShrink && !bothLosses
+          ? $_('settings.shrink_keep', { values: { from: retentionLabel(saved.retention_days) } })
+          : $_('common.cancel')}
       </button>
       <button class="lp-btn danger" onclick={() => commit(true)} disabled={!shrinkAck || busy}>
-        {busy ? $_('settings.saving_all') : $_('settings.shrink_confirm')}
+        {busy
+          ? $_('settings.saving_all')
+          : bothLosses
+            ? $_('settings.loss_confirm')
+            : isShrink
+              ? $_('settings.shrink_confirm')
+              : $_('backup.keep_shrink_confirm')}
       </button>
     {/snippet}
   </Modal>
@@ -1048,6 +1204,14 @@
     color: var(--ep-text-primary);
     border-left: 2px solid var(--ep-danger);
     padding-left: 10px;
+  }
+  /* Titre de bloc dans la boîte, présent uniquement quand elle porte deux
+     pertes : avec une seule, le titre du dialogue le dit déjà et le répéter
+     ferait lire deux fois la même chose. */
+  .loss-head {
+    font-size: 12.5px;
+    color: var(--ep-text-primary);
+    margin-top: 4px;
   }
   .muted {
     color: var(--ep-text-muted);
