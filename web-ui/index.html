@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>LanProbe Hub</title>
+    <script>
+      // Applique le thème et la palette AVANT le premier rendu : sans ça, une
+      // instance en thème clair affiche un flash bleu nuit au chargement.
+      try {
+        var t = localStorage.getItem('lanprobe.hub.theme');
+        if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+        var p = localStorage.getItem('lanprobe.hub.palette');
+        document.documentElement.setAttribute('data-palette', p || 'indigo');
+        var l = localStorage.getItem('lanprobe.hub.lang');
+        if (l) document.documentElement.setAttribute('lang', l);
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

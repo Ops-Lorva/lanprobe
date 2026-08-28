@@ -1,0 +1,234 @@
+/* ─────────────────────────────────────────────────────────────
+   LanProbe Hub — couche web.
+
+   Les tokens (couleurs, rayons, typo) viennent de `src/app.css`,
+   partagé tel quel avec l'app desktop : une seule source de vérité
+   pour la palette. Ce fichier n'ajoute que ce que le desktop n'a
+   pas besoin de connaître :
+     1. le comportement de défilement d'une page web,
+     2. les couleurs de séries des graphiques,
+     3. les classes d'éléments réutilisées par tous les écrans.
+   ───────────────────────────────────────────────────────────── */
+
+/* 1 — Défilement.
+   app.css verrouille `html, body { overflow: hidden }` : c'est correct pour une
+   fenêtre d'application, faux pour une page web où le parc peut dépasser
+   l'écran. On rend le défilement vertical au document (barre d'outils mobile
+   correcte, `position: sticky` fonctionnel) et on interdit explicitement le
+   défilement horizontal, qui est toujours un bug de mise en page. */
+html,
+body {
+  height: auto;
+  min-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 2 — Couleurs de séries.
+
+   Elles sont FIXES et n'héritent pas de `--ep-accent`. L'accent est
+   personnalisable (indigo, cyan, emerald, rose, amber, slate) : si « débit
+   descendant » portait l'accent, la même courbe changerait de couleur selon
+   le goût de l'utilisateur, et en palette « cyan » les deux séries
+   deviendraient indistinguables. L'identité d'une série ne se négocie pas
+   avec le thème.
+
+   Couples validés (scripts/validate_palette.js du skill dataviz) :
+     sombre  #6366f1 / #14a3bd sur #0d1220 → bande de clarté, plancher de
+             chroma, séparation CVD (deutan ΔE 15.7) et contraste : tout PASS
+     clair   #4f46e5 / #0891b2 sur #ffffff → tout PASS (deutan ΔE 16.4) */
+:root {
+  --lp-series-1: #6366f1;
+  --lp-series-2: #14a3bd;
+  --lp-chart-surface: var(--ep-bg-secondary);
+  --lp-grid: rgba(255, 255, 255, 0.07);
+  --lp-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+[data-theme='light'] {
+  --lp-series-1: #4f46e5;
+  --lp-series-2: #0891b2;
+  --lp-grid: rgba(15, 18, 32, 0.1);
+  --lp-shadow: 0 1px 2px rgba(15, 18, 32, 0.06);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --lp-series-1: #4f46e5;
+    --lp-series-2: #0891b2;
+    --lp-grid: rgba(15, 18, 32, 0.1);
+    --lp-shadow: 0 1px 2px rgba(15, 18, 32, 0.06);
+  }
+}
+
+/* 3 — Éléments partagés ------------------------------------------------- */
+
+.lp-card {
+  background: var(--ep-bg-secondary);
+  border: 1px solid var(--ep-border);
+  border-radius: var(--ep-radius-lg);
+  box-shadow: var(--lp-shadow);
+}
+
+.lp-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ep-text-primary);
+}
+
+.lp-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--ep-text-dim);
+}
+
+.lp-mono {
+  font-family: var(--ep-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.lp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 8px 14px;
+  border-radius: var(--ep-radius-md);
+  border: 1px solid var(--ep-border-strong);
+  background: var(--ep-bg-tertiary);
+  color: var(--ep-text-primary);
+  font-family: var(--ep-font-sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    color 0.12s;
+}
+.lp-btn:hover:not(:disabled) {
+  border-color: var(--ep-accent);
+  color: var(--ep-accent-bright);
+}
+.lp-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.lp-btn.primary {
+  background: var(--ep-accent);
+  border-color: var(--ep-accent);
+  color: #fff;
+}
+.lp-btn.primary:hover:not(:disabled) {
+  background: var(--ep-accent-bright);
+  border-color: var(--ep-accent-bright);
+  color: #fff;
+}
+.lp-btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ep-text-secondary);
+  font-weight: 500;
+}
+.lp-btn.ghost:hover:not(:disabled) {
+  background: var(--ep-glass-bg-md);
+  color: var(--ep-text-primary);
+}
+/* Variante d'accent : une action importante mais sans conséquence destructrice.
+   Elle doit se distinguer au premier regard des boutons neutres ET des rouges. */
+.lp-btn.accent {
+  border-color: var(--ep-accent);
+  color: var(--ep-accent-bright);
+  background: var(--ep-accent-dim);
+}
+.lp-btn.accent:hover:not(:disabled) {
+  background: var(--ep-accent);
+  color: #fff;
+}
+.lp-btn.danger {
+  border-color: var(--ep-danger);
+  color: var(--ep-danger);
+  background: transparent;
+}
+.lp-btn.danger:hover:not(:disabled) {
+  background: var(--ep-danger);
+  color: #fff;
+}
+.lp-btn.sm {
+  min-height: 28px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+}
+
+.lp-input {
+  width: 100%;
+  background: var(--ep-bg-tertiary);
+  border: 1px solid var(--ep-border);
+  border-radius: var(--ep-radius-md);
+  padding: 9px 11px;
+  color: var(--ep-text-primary);
+  font-family: var(--ep-font-mono);
+  font-size: 13px;
+  min-height: 36px;
+}
+.lp-input::placeholder {
+  color: var(--ep-text-dim);
+}
+.lp-input:focus {
+  outline: none;
+  border-color: var(--ep-accent);
+  box-shadow: 0 0 0 3px var(--ep-accent-dim);
+}
+
+.lp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ep-text-secondary);
+}
+
+.lp-code {
+  font-family: var(--ep-font-mono);
+  font-size: 12px;
+  background: var(--ep-bg-tertiary);
+  border: 1px solid var(--ep-border);
+  border-radius: var(--ep-radius-sm);
+  padding: 1px 5px;
+  color: var(--ep-text-primary);
+}
+
+/* Anneau de focus visible partout — le hub s'utilise au clavier sur un parc. */
+:where(a, button, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--ep-accent-bright);
+  outline-offset: 2px;
+  border-radius: var(--ep-radius-sm);
+}
+
+.lp-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
