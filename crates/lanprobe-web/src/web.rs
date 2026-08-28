@@ -89,6 +89,9 @@ pub fn build_router(state: AppState) -> Router {
         .merge(sites_read)
         .merge(protected)
         .with_state(state)
+        // L'interface web est servie en dernier : toute requête qui n'a
+        // trouvé aucune route d'API tombe ici.
+        .fallback(crate::assets::serve)
 }
 
 // ── Erreurs ────────────────────────────────────────────────────────────────

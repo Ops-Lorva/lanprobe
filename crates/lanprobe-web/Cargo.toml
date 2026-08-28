@@ -14,6 +14,11 @@ name = "lanprobe-web"
 path = "src/main.rs"
 
 [dependencies]
+# Interface web embarquée dans le binaire — pas de volume de statiques
+# dont la version pourrait diverger de celle du hub.
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
+
 lanprobe-core = { path = "../lanprobe-core" }
 
 serde = { workspace = true }
