@@ -10,24 +10,39 @@ Toute divergence entre les deux implémentations se règle ici, pas dans le code
 ## 1. Vue d'ensemble
 
 ```
-┌────────────────┐   1. enrôlement (HTTPS, compte admin)   ┌──────────────────┐
+┌────────────────┐  1. enrôlement (code court, ou compte)  ┌──────────────────┐
 │  sonde         │ ─────────────────────────────────────▶  │  lanprobe-web    │
-│  (desktop ou   │ ◀───────  jeton + coordonnées Influx ──  │  (conteneur)     │
+│  (desktop ou   │ ◀──────────────────  jeton de sonde ──   │  (conteneur)     │
 │   headless)    │                                          │                  │
 │                │   2. battement de cœur (jeton sonde)     │  SQLite : users, │
-│                │ ─────────────────────────────────────▶  │  probes          │
-│                │                                          │                  │
-│                │   3. mesures — écriture DIRECTE          │  InfluxDB 2      │
-│                │ ─────────────────────────────────────────────▶ (embarqué)   │
-└────────────────┘        line protocol, port dédié         └──────────────────┘
+│                │ ─────────────────────────────────────▶  │  probes, sites,  │
+│                │                                          │  audit, settings │
+│                │   3. mesures — RELAYÉES par le hub       │        │         │
+│                │ ─────────────────────────────────────▶  │        ▼         │
+└────────────────┘   line protocol, une seule adresse       │  InfluxDB 2      │
+                                                             │  (embarqué,      │
+                                                             │  local au hub)   │
+                                                             └──────────────────┘
 ```
 
-**Pourquoi trois flux et pas un seul.** Les mesures ne transitent pas par le hub :
-elles vont droit dans Influx, qui est fait pour ça. Mais une sonde éteinte
-n'écrit rien — et « rien » ressemble exactement à « tout va bien » dans une base
-de séries temporelles. Le battement de cœur est ce qui distingue une sonde
-silencieuse d'une sonde absente. Sans lui, l'interface afficherait un parc vert
-pendant qu'une sonde est débranchée depuis trois jours.
+**Le hub relaie, il ne fait plus passer les sondes en écriture directe.** Une
+sonde poste ses lots sur `POST /api/probes/{id}/write`, avec le même jeton que
+son battement de cœur, et le hub les rejoue vers son Influx embarqué. Une
+seule porte, une seule authentification, un seul certificat côté sonde —
+Influx n'a plus besoin d'être joignable depuis le réseau de chaque site, ni
+d'exposer un port dédié : seul le hub lui parle, en local.
+
+Le hub ne bufferise pas ce qu'il relaie : accumuler ferait gonfler sa mémoire
+sur une pointe d'écriture, et un redémarrage perdrait des mesures que la sonde
+croit déjà livrées. Une panne d'Influx répond `502`, pas `500` — c'est le
+signal pour la sonde de conserver son lot et de réessayer, là où un `4xx` lui
+dirait de l'abandonner.
+
+**Pourquoi le battement de cœur reste un flux à part.** Les mesures ne disent
+rien d'une sonde éteinte : « rien » ressemble exactement à « tout va bien »
+dans une base de séries temporelles. Le battement de cœur est ce qui distingue
+une sonde silencieuse d'une sonde absente. Sans lui, l'interface afficherait un
+parc vert pendant qu'une sonde est débranchée depuis trois jours.
 
 ## 2. Sites et identité d'une sonde
 

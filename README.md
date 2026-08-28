@@ -198,36 +198,36 @@ When `LANPROBE_SECRET_KEY` is set, **no key file is ever written**. Keep a copy 
 
 ### 🐳 Self-hosted Web Hub (Docker) — for a fleet of probes
 
-🚧 **In development**, built against [`docs/lanprobe-web-contrat.md`](docs/lanprobe-web-contrat.md) — the Docker packaging below is built and tested; the hub binary and its web UI land in separate branches and are not merged yet.
+🚧 **In development** on `feature/lanprobe-web`, built against [`docs/lanprobe-web-contrat.md`](docs/lanprobe-web-contrat.md) — not merged to `main`, not released yet.
 
-Got more than one probe? The hub is a **single Docker container** — the enrollment API and its own embedded InfluxDB — that your probes report to. **We host nothing**: it runs on a machine you control, end to end.
-
-#### Get started
-
-Nothing to edit — clone, start, and open the browser:
+One container, its own SQLite database, an embedded InfluxDB. Probes never talk to InfluxDB directly — they report to the hub over **one address, one login, one certificate**, and the hub relays their measurements. **We host nothing**: it runs on a machine you control, end to end.
 
 ```bash
 git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
 docker compose up -d
-docker compose logs lanprobe-web | grep -i "setup token"
+docker compose logs lanprobe-web | grep -i token   # the setup token only lives here
 ```
 
-Open `https://<this-machine>:8443` (self-signed certificate — accept the browser warning, same as the headless server above) and use that setup token to create the admin account. It is consumed on first use and never shown again.
+Open the hub, paste the setup token, create the admin account — it's consumed on first use. Then **Enrol a probe**: the hub gives you a short code, valid 15 minutes. In LanProbe, go to **Settings → Server connection** and enter the hub address and that code. No admin password ever leaves the browser.
 
-**Everything else lives in the app, not in `docker-compose.yml`.** Once the admin account exists, the Influx organization, bucket, retention, and the URL advertised to probes are all settings you change from the interface — they persist in the hub's own SQLite database, survive a redeploy, and never require touching a `.env` file or restarting the container. The hub already starts pre-configured against the InfluxDB it just initialized; there's a **test button** next to the advertised URL setting if you ever remap the published port and want to confirm probes can actually reach it. Lowering the retention setting deletes the data outside the new window — the UI asks for confirmation and names the amount of history you're about to lose.
+Accounts carry a role (`admin` / `operator` / `viewer`), every action is written to an audit log, and probe up/down alerts can go out over email or a generic webhook (Slack, Discord, ntfy…). See the [interface contract](docs/lanprobe-web-contrat.md) for the full API.
 
-#### Enroll a probe
+**Two things that will cost you ten minutes if you don't know them:**
+- the setup token is **only** in `docker logs` — the UI never shows it;
+- if this host was ever reached over HTTPS, the browser keeps a `Secure` cookie that silently blocks logging in over plain HTTP afterwards — login appears to succeed, then bounces back to the login screen, no error shown. Use a private window, or clear the site's cookies.
 
-Point a probe (desktop app or `lanprobe-server`) at the hub's URL with your admin username and password. The hub hands back a probe-specific token and Influx write coordinates restricted to that one bucket — a compromised probe can write, but it can't read or erase anyone else's measurements. See the [interface contract](docs/lanprobe-web-contrat.md) for the exact exchange.
+The hub serves **plain HTTP by default** — it's meant to sit behind your own reverse proxy. Pass `--tls` if you don't have one (self-signed, fine for a LAN). InfluxDB's port (`8086`) is optional: open it only if you want to point Grafana at it directly, probes never need it.
+
+The hub versions itself independently of the desktop app — currently `1.0.0`.
 
 #### Back up
 
-Two volumes, two different rhythms — never remove one without the other, they're two halves of the same state:
+Two Docker volumes, nothing else:
 
-| Volume | Contains | Backup cadence |
-|---|---|---|
-| `lanprobe_data` | Admin account, probe tokens (hashed), setup token, hub's TLS cert | Small — back up often, it's cheap |
-| `influxdb_data` | Time-series measurements | Can reach several GB — back up on whatever retention schedule suits your data |
+| Volume | Contains |
+|---|---|
+| `lanprobe_data` | SQLite database — accounts, roles, probes, sites, settings, audit log — plus the hub's TLS certificate if `--tls` is used |
+| `influxdb_data` | Time-series measurements |
 
 ```bash
 docker compose stop lanprobe-web
@@ -235,8 +235,6 @@ docker run --rm -v lanprobe_data:/from -v "$PWD":/to alpine tar czf /to/lanprobe
 docker run --rm -v influxdb_data:/from -v "$PWD":/to alpine tar czf /to/influxdb_data.tar.gz -C /from .
 docker compose start lanprobe-web
 ```
-
-> The container never deletes or overwrites its own data — not on restart, not on a half-finished setup. If InfluxDB and the hub's token ever get out of sync (an interrupted first boot), `docker logs lanprobe-web` explains exactly what happened and what to do; it never guesses on your behalf.
 
 ---
 

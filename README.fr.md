@@ -198,36 +198,36 @@ Quand `LANPROBE_SECRET_KEY` est définie, **aucun fichier de clé n'est écrit**
 
 ### 🐳 Hub web auto-hébergé (Docker) — pour un parc de sondes
 
-🚧 **En développement**, construit contre [`docs/lanprobe-web-contrat.md`](docs/lanprobe-web-contrat.md) — le packaging Docker ci-dessous est construit et testé ; le binaire du hub et son interface web arrivent par des branches séparées, pas encore fusionnées.
+🚧 **En développement** sur `feature/lanprobe-web`, construit contre [`docs/lanprobe-web-contrat.md`](docs/lanprobe-web-contrat.md) — pas encore fusionné dans `main`, pas encore publié.
 
-Plusieurs sondes à superviser ? Le hub est **un seul conteneur Docker** — l'API d'enrôlement et son InfluxDB embarqué — auquel vos sondes remontent leurs mesures. **Nous n'hébergeons rien** : tout tourne sur une machine que vous contrôlez, de bout en bout.
-
-#### Mise en route
-
-Rien à éditer — on clone, on démarre, on ouvre le navigateur :
+Un seul conteneur, sa propre base SQLite, un InfluxDB embarqué. Les sondes ne parlent jamais directement à InfluxDB — elles remontent leurs mesures au hub sur **une seule adresse, une seule authentification, un seul certificat**, et c'est le hub qui relaie. **Nous n'hébergeons rien** : tout tourne sur une machine que vous contrôlez, de bout en bout.
 
 ```bash
 git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
 docker compose up -d
-docker compose logs lanprobe-web | grep -i "jeton de configuration"
+docker compose logs lanprobe-web | grep -i token   # le jeton de configuration ne vit que là
 ```
 
-Ouvrez `https://<cette-machine>:8443` (certificat auto-signé — acceptez l'avertissement du navigateur, comme pour le serveur headless ci-dessus) et utilisez ce jeton pour créer le compte admin. Il est consommé au premier usage et ne réapparaît jamais.
+Ouvrez le hub, collez le jeton de configuration, créez le compte admin — il est consommé au premier usage. Puis **Enrôler une sonde** : le hub vous donne un code court, valable 15 minutes. Dans LanProbe, allez dans **Réglages → Connexion au serveur** et saisissez l'adresse du hub et ce code. Aucun mot de passe admin ne quitte le navigateur.
 
-**Tout le reste vit dans l'application, pas dans `docker-compose.yml`.** Une fois le compte admin créé, l'organisation Influx, le bucket, la rétention et l'URL annoncée aux sondes sont des réglages que vous changez depuis l'interface — ils vivent dans la base SQLite du hub, survivent à un redéploiement, et ne demandent jamais de toucher un fichier `.env` ni de redémarrer le conteneur. Le hub démarre déjà configuré contre l'InfluxDB qu'il vient d'initialiser ; un **bouton de test** existe à côté du réglage d'URL annoncée si vous remappez un jour le port publié et voulez vérifier que les sondes peuvent effectivement la joindre. Réduire la rétention efface les données au-delà de la nouvelle fenêtre — l'interface demande confirmation et nomme la quantité d'historique que vous vous apprêtez à perdre.
+Les comptes portent un rôle (`admin` / `operator` / `viewer`), chaque action est écrite dans un journal d'audit, et les alertes de sonde hors/en ligne peuvent partir par e-mail ou par un webhook générique (Slack, Discord, ntfy…). Voir le [contrat d'interface](docs/lanprobe-web-contrat.md) pour l'API complète.
 
-#### Enrôler une sonde
+**Deux pièges qui coûtent dix minutes si on ne les connaît pas :**
+- le jeton de configuration ne se lit **que** dans `docker logs` — l'interface ne l'affiche jamais ;
+- si cette machine a déjà été jointe en HTTPS, le navigateur garde un cookie `Secure` qui bloque silencieusement la connexion en HTTP par la suite — la connexion semble aboutir, puis revient à l'écran de login, sans erreur. Ouvrez une fenêtre privée, ou videz les cookies du site.
 
-Pointez une sonde (application desktop ou `lanprobe-server`) vers l'URL du hub avec vos identifiants admin. Le hub renvoie un jeton propre à cette sonde et des coordonnées d'écriture InfluxDB restreintes à ce seul bucket — une sonde compromise peut écrire, mais ne peut ni lire ni effacer les mesures des autres. Voir le [contrat d'interface](docs/lanprobe-web-contrat.md) pour l'échange exact.
+Le hub sert **en clair par défaut** — pensé pour vivre derrière votre propre reverse proxy. Passez `--tls` si vous n'en avez pas (auto-signé, suffisant sur un LAN). Le port InfluxDB (`8086`) est optionnel : ne l'ouvrez que si vous voulez brancher Grafana directement dessus, les sondes n'en ont jamais besoin.
+
+Le hub a sa propre version, indépendante de l'application desktop — actuellement `1.0.0`.
 
 #### Sauvegarder
 
-Deux volumes, deux rythmes différents — ne jamais en retirer un sans l'autre, ce sont les deux moitiés d'un même état :
+Deux volumes Docker, rien d'autre :
 
-| Volume | Contient | Fréquence de sauvegarde |
-|---|---|---|
-| `lanprobe_data` | Compte admin, jetons des sondes (hachés), jeton de configuration, certificat TLS du hub | Petit — sauvegardez-le souvent, ça ne coûte rien |
-| `influxdb_data` | Mesures de séries temporelles | Peut atteindre plusieurs Go — sauvegardez selon la politique de rétention qui vous convient |
+| Volume | Contient |
+|---|---|
+| `lanprobe_data` | Base SQLite — comptes, rôles, sondes, sites, réglages, journal d'audit — plus le certificat TLS du hub si `--tls` est utilisé |
+| `influxdb_data` | Mesures de séries temporelles |
 
 ```bash
 docker compose stop lanprobe-web
@@ -235,8 +235,6 @@ docker run --rm -v lanprobe_data:/from -v "$PWD":/to alpine tar czf /to/lanprobe
 docker run --rm -v influxdb_data:/from -v "$PWD":/to alpine tar czf /to/influxdb_data.tar.gz -C /from .
 docker compose start lanprobe-web
 ```
-
-> Le conteneur ne supprime ni n'écrase jamais ses propres données — ni au redémarrage, ni sur une initialisation interrompue en cours de route. Si InfluxDB et le jeton du hub se désynchronisent (premier démarrage coupé net), `docker logs lanprobe-web` explique précisément ce qui s'est passé et quoi faire — il ne devine jamais à votre place.
 
 ---
 
