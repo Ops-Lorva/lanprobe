@@ -65,6 +65,7 @@ pub struct StartConfig {
 pub async fn start(cfg: StartConfig) -> Result<ServerHandle, String> {
     std::fs::create_dir_all(&cfg.config_dir).map_err(|e| e.to_string())?;
 
+    let embedded_in_desktop = cfg.shared_state.is_some();
     let state = if let Some(s) = cfg.shared_state {
         s
     } else {
@@ -110,8 +111,22 @@ pub async fn start(cfg: StartConfig) -> Result<ServerHandle, String> {
         Err(e) => tracing::error!("impossible de générer le token de setup : {e}"),
     }
 
-    let influx_state = state.clone();
-    tokio::spawn(crate::influxdb::run(influx_state, secrets::load_or_create_key(&cfg.config_dir).ok(), None));
+    // ⚠️ Pas d'exportateur quand on est embarqué dans le desktop : celui de
+    // l'app tourne déjà sur le même bus. En lancer un second doublerait chaque
+    // point dans Influx, et depuis que le tampon est persistant, deux
+    // processus écriraient dans le même `buffer.ndjson`.
+    //
+    // Le moniteur internet était déjà conditionné de cette façon ; l'export ne
+    // l'était pas. Défaut trouvé par l'agent qui a rendu le tampon persistant,
+    // et rendu visible par son travail.
+    if !embedded_in_desktop {
+        let influx_state = state.clone();
+        tokio::spawn(crate::influxdb::run(
+            influx_state,
+            secrets::load_or_create_key(&cfg.config_dir).ok(),
+            None,
+        ));
+    }
     let sched_state = state.clone();
     tokio::spawn(crate::scheduler::run(sched_state));
 
