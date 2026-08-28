@@ -659,3 +659,45 @@ L'inventaire grossit. Une rétention lui est propre (`settings['inventory_days']
 défaut `0` = illimité) — et comme pour la rétention Influx, **la réduire supprime
 des données** : même confirmation explicite exigée, côté serveur comme côté
 interface.
+
+## 13. Notifications (non implémenté)
+
+### Deux canaux, pas cinq
+
+```
+SMTP              l'e-mail
+webhook générique Slack, Discord, Teams, ntfy, Gotify… tous acceptent un POST JSON
+```
+
+Un webhook paramétrable avec deux modèles préremplis (Slack, Discord) couvre
+l'écosystème entier, et le cas maison ou Mattermost marche sans toucher au code.
+Cinq intégrations dédiées auraient cinq fois plus de surface à maintenir pour
+le même résultat.
+
+### Le difficile n'est pas le canal, c'est le déclencheur
+
+Notifier « sonde hors ligne » condamne la fonctionnalité : un portable qu'on
+referme émet une alerte à chaque fois. Trois alertes inutiles et l'utilisateur
+coupe tout — et le jour où un vrai site tombe, personne ne le voit.
+
+1. **Transitions, pas états.** « Paris est passée hors ligne », une fois. Pas un
+   rappel par minute tant qu'elle l'est.
+2. **Délai avant alerte**, 5 minutes par défaut. Une sonde qui redémarre ne
+   réveille personne.
+3. **Le retour est notifié aussi.** Une alerte sans son « c'est revenu » oblige
+   à aller vérifier à la main, donc on cesse de les lire.
+4. **Activable par sonde ou par site.** Un poste de test n'alerte pas, la baie
+   d'un client si.
+
+Même logique que les alertes de disponibilité Taskori, pour les mêmes raisons.
+
+### ⚠️ Les secrets ne vont pas dans `settings`
+
+La section 7 pose que la table `settings` ne contient **aucun secret** et que
+`GET /api/settings` peut donc être rendue telle quelle. Un mot de passe SMTP et
+une URL de webhook (qui est elle-même un secret porteur) violent les deux.
+
+Ils vivent dans un stockage scellé à part, chiffré par le mécanisme existant
+(`secrets.rs`, marqueur `enc:v1:`), **jamais renvoyé par l'API**. L'interface
+affiche « configuré » ou « non configuré », avec un bouton de test — jamais la
+valeur.
