@@ -197,6 +197,9 @@ pub struct InfluxTarget {
     pub cli: PathBuf,
     pub host: String,
     pub org: String,
+    /// Bucket des mesures. La restauration le vise nommément : restaurer
+    /// l'instance entière remplacerait aussi ses jetons en cours de route.
+    pub bucket: String,
     pub token: String,
     /// Le certificat d'Influx est auto-signé dans le conteneur : sans ceci la
     /// CLI refuse sa propre instance.
@@ -1037,23 +1040,54 @@ pub fn restore_influx(archive: &Path, target: &InfluxTarget) -> BackupResult<()>
 }
 
 fn run_influx_restore(target: &InfluxTarget, dir: &Path) -> BackupResult<()> {
+    // ⚠️ **On restaure le bucket, pas l'instance entière.**
+    //
+    // `--full` a l'air plus sûr et ne l'est pas : il remplace aussi le magasin
+    // de clés d'InfluxDB, donc **tous ses jetons**, au milieu de sa propre
+    // exécution. Le jeton avec lequel la CLI s'est authentifiée devient alors
+    // invalide, et l'étape suivante échoue en `401` — vérifié : le snapshot KV
+    // passe, le snapshot SQL est refusé. Il n'existe pas d'ordre qui marche,
+    // puisqu'un seul jeton est valable à chaque moitié de l'opération.
+    //
+    // Restaurer le bucket seul évite le problème et est le bon découpage : ce
+    // qu'on veut récupérer d'Influx, ce sont les **mesures**. Les org, jetons
+    // et utilisateurs, le hub les reprovisionne au démarrage à partir de sa
+    // propre base — qui, elle, vient bien de l'archive.
+    //
+    // Bénéfice secondaire : `--full` écrasait toute l'instance, y compris des
+    // buckets qui ne nous appartiennent pas si l'utilisateur en héberge
+    // d'autres. Ce n'est plus le cas.
+    let bucket = &target.bucket;
+
+    // Le bucket existe déjà — le hub le crée au démarrage. `influx restore`
+    // refuse d'écrire dans un bucket existant, il faut donc le retirer. C'est
+    // une suppression, mais elle est le sens même de l'opération : on remplace
+    // les mesures par celles de l'archive, et l'appelant a confirmé.
+    let mut del = std::process::Command::new(&target.cli);
+    strip_influx_env(&mut del);
+    del.arg("bucket")
+        .arg("delete")
+        .arg("--name")
+        .arg(bucket)
+        .arg("--org")
+        .arg(&target.org)
+        .arg("--host")
+        .arg(&target.host)
+        .arg("--token")
+        .arg(&target.token);
+    if target.skip_verify {
+        del.arg("--skip-verify");
+    }
+    // Un bucket absent n'est pas une erreur ici : on allait le remplacer.
+    let _ = del.output();
+
     let mut cmd = std::process::Command::new(&target.cli);
-    // ⚠️ La CLI Influx lit `INFLUX_ORG` / `INFLUX_BUCKET` dans l'environnement,
-    // et l'entrypoint du conteneur les exporte. Combinés à `--full`, elle
-    // refuse : « --full restore cannot be limited to a single org or bucket ».
-    // La restauration échouait donc systématiquement dans le conteneur, alors
-    // qu'elle passait partout où ces variables sont absentes — c'est
-    // exactement le genre de défaut qu'aucun test unitaire ne montre.
-    cmd.env_remove("INFLUX_ORG")
-        .env_remove("INFLUX_BUCKET")
-        .env_remove("INFLUX_BUCKET_ID")
-        .env_remove("INFLUX_ORG_ID");
-    // `--full` : l'archive porte la sauvegarde complète de l'instance, et le
-    // jeton opérateur restauré avec elle correspond à cet état-là. Restaurer
-    // les deux séparément donnerait un hub qui ne sait plus parler à son
-    // propre Influx.
+    strip_influx_env(&mut cmd);
     cmd.arg("restore")
-        .arg("--full")
+        .arg("--bucket")
+        .arg(bucket)
+        .arg("--org")
+        .arg(&target.org)
         .arg("--host")
         .arg(&target.host)
         .arg("--token")
@@ -1063,6 +1097,16 @@ fn run_influx_restore(target: &InfluxTarget, dir: &Path) -> BackupResult<()> {
     }
     cmd.arg(dir);
     run_influx(cmd, "influx restore")
+}
+
+/// La CLI Influx lit `INFLUX_ORG` / `INFLUX_BUCKET` dans l'environnement, que
+/// l'entrypoint du conteneur exporte. Selon la sous-commande, elle les combine
+/// aux options passées et refuse. On part donc d'un environnement propre.
+fn strip_influx_env(cmd: &mut std::process::Command) {
+    cmd.env_remove("INFLUX_ORG")
+        .env_remove("INFLUX_BUCKET")
+        .env_remove("INFLUX_BUCKET_ID")
+        .env_remove("INFLUX_ORG_ID");
 }
 
 fn move_file(from: &Path, to: &Path) -> BackupResult<()> {

@@ -244,6 +244,7 @@ impl Influx {
             cli,
             host: self.settings.influx_url(),
             org: self.settings.influx_org(),
+            bucket: self.settings.influx_bucket(),
             token: self.operator_token.clone(),
             skip_verify: true,
         }
