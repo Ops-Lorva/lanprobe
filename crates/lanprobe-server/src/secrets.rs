@@ -228,6 +228,11 @@ mod tests {
 
     #[test]
     fn key_file_is_created_0600_and_reused() {
+        // `LANPROBE_SECRET_KEY` est globale au processus : sans ce verrou, ce
+        // test échouait une fois sur deux quand `env_key_takes_precedence…`
+        // la posait en parallèle — la clé venait alors de l'environnement et
+        // aucun fichier n'était écrit.
+        let _guard = ENV_KEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tmp_dir("keyfile");
         let key_path = default_key_path(&dir);
         let _ = std::fs::remove_file(&key_path);
