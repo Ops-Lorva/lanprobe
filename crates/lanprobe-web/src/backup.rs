@@ -817,10 +817,7 @@ pub fn restore(req: RestoreRequest<'_>) -> BackupResult<RestoreReport> {
     let aside = if occupied.is_empty() {
         None
     } else {
-        let aside = req
-            .config_dir
-            .join(format!("avant-restauration-{}", stamp(req.now)));
-        std::fs::create_dir_all(&aside)?;
+        let aside = free_aside_dir(req.config_dir, req.now)?;
         for name in &occupied {
             let _ = std::fs::rename(req.config_dir.join(name), aside.join(name));
         }
@@ -879,6 +876,31 @@ pub fn restore(req: RestoreRequest<'_>) -> BackupResult<RestoreReport> {
         // ferait croire à une restauration sans effet.
         restart_required: true,
     })
+}
+
+/// Un dossier de mise à côté qui n'existe pas encore.
+///
+/// Ce dossier **est** le filet : restaurer la mauvaise archive doit rester
+/// réparable. Deux restaurations dans la même seconde tombaient sur le même
+/// nom, et la seconde écrasait ce que la première avait sauvé — le filet
+/// disparaissait au moment précis où quelqu'un s'y reprend à deux fois.
+fn free_aside_dir(config_dir: &Path, now: i64) -> BackupResult<PathBuf> {
+    let base = format!("avant-restauration-{}", stamp(now));
+    for suffix in 0..1_000 {
+        let candidate = config_dir.join(if suffix == 0 {
+            base.clone()
+        } else {
+            format!("{base}-{suffix}")
+        });
+        if !candidate.exists() {
+            std::fs::create_dir(&candidate)?;
+            return Ok(candidate);
+        }
+    }
+    Err(BackupError::Io(format!(
+        "aucun nom libre pour mettre l'état précédent de côté dans {}",
+        config_dir.display()
+    )))
 }
 
 /// `secrets/secret.key` retombe à plat dans le volume : c'est le rangement de
@@ -1686,6 +1708,53 @@ mod tests {
         let new = Db::open(&target.join(DB_ENTRY)).unwrap();
         assert!(!new.list_sites().unwrap().iter().any(|s| s.name == "Unique-a-la-cible"));
         assert!(new.list_sites().unwrap().iter().any(|s| s.name == "Durand"));
+    }
+
+    #[test]
+    fn two_restores_in_the_same_second_do_not_clobber_the_safety_copy() {
+        // Le dossier « avant-restauration » EST le filet : restaurer la
+        // mauvaise archive doit rester réparable. Deux restaurations dans la
+        // même seconde tombaient sur le même nom, et la seconde écrasait ce
+        // que la première avait mis de côté — le filet disparaissait au
+        // moment précis où quelqu'un s'y reprend à deux fois.
+        let source = tmp_dir("filet-source");
+        let db = populated(&source);
+        let report = backup_into(&db, &source, &source.join("backup"), T0);
+
+        let target = tmp_dir("filet-cible");
+        let live = populated(&target);
+        drop(live);
+        std::fs::write(target.join("secret.key"), b"tout-premier-etat").unwrap();
+
+        let first = restore(RestoreRequest {
+            archive: &report.path,
+            config_dir: &target,
+            confirm_overwrite: true,
+            influx: None,
+            now: T0,
+        })
+        .unwrap();
+
+        std::fs::write(target.join("secret.key"), b"deuxieme-etat").unwrap();
+        let second = restore(RestoreRequest {
+            archive: &report.path,
+            config_dir: &target,
+            confirm_overwrite: true,
+            influx: None,
+            // Même seconde : c'est tout le sujet.
+            now: T0,
+        })
+        .unwrap();
+
+        let a = first.moved_aside.unwrap();
+        let b = second.moved_aside.unwrap();
+        assert_ne!(a, b, "deux mises de côté ne doivent pas partager un dossier");
+        assert_eq!(
+            std::fs::read(a.join("secret.key")).unwrap(),
+            b"tout-premier-etat",
+            "le premier filet a été écrasé par le second"
+        );
+        assert_eq!(std::fs::read(b.join("secret.key")).unwrap(), b"deuxieme-etat");
     }
 
     #[test]
