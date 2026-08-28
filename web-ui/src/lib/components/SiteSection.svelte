@@ -141,6 +141,19 @@
           </StateBlock>
         </div>
       {:else}
+        <!-- En-tête de colonnes répété à chaque site : posé une seule fois en
+             haut du parc, il finissait hors de vue dès qu'on faisait défiler,
+             et il fallait le chercher pour relire une colonne. Décoratif pour
+             les lecteurs d'écran, chaque ligne portant déjà ses libellés. -->
+        <div class="cols" aria-hidden="true">
+          <span>{$_('fleet.col_probe')}</span>
+          <span>{$_('fleet.col_status')}</span>
+          <span>{$_('fleet.col_last_seen')}</span>
+          <span class="c-platform">{$_('fleet.col_platform')}</span>
+          <span class="c-version">{$_('fleet.col_version')}</span>
+          <span>{$_('fleet.col_buffer')}</span>
+          <span></span>
+        </div>
         {#each probes as p (p.probe_id)}
           <ProbeRow probe={p} {now} />
         {/each}
@@ -150,6 +163,25 @@
 </section>
 
 <style>
+  .cols {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 118px 120px 92px 84px 78px 18px;
+    gap: 10px;
+    padding: 0 12px 6px 12px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--ep-text-dim);
+  }
+    .cols {
+      grid-template-columns: minmax(0, 1fr) 118px 120px 84px 78px 18px;
+    }
+    .cols {
+      grid-template-columns: minmax(0, 1fr) 118px 110px 78px 18px;
+    }
+    .cols {
+      display: none;
+    }
   .site {
     background: var(--ep-bg-secondary);
     border: 1px solid var(--ep-border);

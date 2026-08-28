@@ -445,19 +445,6 @@
     </button>
   </StateBlock>
 {:else}
-  <!-- En-tête de colonnes : une seule fois pour tout le parc, plutôt que
-       répété dans chacun des dix sites. Décoratif pour les lecteurs d'écran,
-       chaque ligne portant déjà ses propres libellés. -->
-  <div class="cols" aria-hidden="true">
-    <span>{$_('fleet.col_probe')}</span>
-    <span>{$_('fleet.col_status')}</span>
-    <span>{$_('fleet.col_last_seen')}</span>
-    <span class="c-platform">{$_('fleet.col_platform')}</span>
-    <span class="c-version">{$_('fleet.col_version')}</span>
-    <span>{$_('fleet.col_buffer')}</span>
-    <span></span>
-  </div>
-
   <div class="sections" class:dim={$fleet.refreshing}>
     {#each groups as g (g.site.site_id)}
       <SiteSection
@@ -680,16 +667,6 @@
 
   /* Doit rester aligné sur la grille de ProbeRow.svelte — les styles Svelte
      sont scopés, la définition ne peut pas être partagée. */
-  .cols {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 118px 120px 92px 84px 78px 18px;
-    gap: 10px;
-    padding: 0 12px 6px 12px;
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--ep-text-dim);
-  }
 
   .sections {
     display: flex;
@@ -723,24 +700,15 @@
   }
 
   @media (max-width: 1080px) {
-    .cols {
-      grid-template-columns: minmax(0, 1fr) 118px 120px 84px 78px 18px;
-    }
     .c-platform {
       display: none;
     }
   }
   @media (max-width: 900px) {
-    .cols {
-      grid-template-columns: minmax(0, 1fr) 118px 110px 78px 18px;
-    }
     .c-version {
       display: none;
     }
   }
   @media (max-width: 640px) {
-    .cols {
-      display: none;
-    }
   }
 </style>
