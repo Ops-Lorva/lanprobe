@@ -645,6 +645,28 @@ impl Db {
         Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
+    /// Écrit une copie **cohérente** de la base dans `dest`, base ouverte et
+    /// en cours d'écriture.
+    ///
+    /// C'est le seul moyen correct de sauvegarder du SQLite. `cp` sur le
+    /// fichier pendant qu'une transaction court produit une archive qui a
+    /// l'air parfaitement valide et refuse de s'ouvrir le jour où on en a
+    /// besoin — le pire mode de panne possible pour une sauvegarde.
+    ///
+    /// SQLite refuse d'écraser un fichier existant, et on ne contourne pas ce
+    /// refus : il protège une archive déjà écrite.
+    pub fn vacuum_into(&self, dest: &Path) -> DbResult<()> {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| DbError::Internal(e.to_string()))?;
+        }
+        let dest = dest
+            .to_str()
+            .ok_or_else(|| DbError::Internal("chemin de destination non UTF-8".into()))?;
+        let conn = self.lock()?;
+        conn.execute("VACUUM INTO ?1", [dest])?;
+        Ok(())
+    }
+
     pub fn table_exists(&self, name: &str) -> DbResult<bool> {
         let conn = self.lock()?;
         let found: Option<String> = conn
@@ -3069,6 +3091,42 @@ mod tests {
             .expect("une bascule d'opérateur doit se voir");
         assert_eq!(change.previous.as_deref(), Some("88.120.0.1"));
         assert_eq!(change.current, "88.120.0.2");
+    }
+
+    #[test]
+    fn vacuum_into_writes_a_consistent_copy_while_the_base_is_open() {
+        // Le seul point qui justifie `VACUUM INTO` : copier le fichier
+        // pendant qu'il est écrit produit une archive qui a l'air valide et
+        // ne se restaure pas. Ici la base reste ouverte pendant la copie.
+        let dir = tmp_dir("vacuum-into");
+        let db = Db::open(&dir.join("hub.sqlite")).unwrap();
+        db.create_site("Durand").unwrap();
+        db.create_initial_admin("admin", "password123").unwrap();
+
+        let copy = dir.join("copie.sqlite");
+        db.vacuum_into(&copy).unwrap();
+
+        // La base d'origine sert toujours.
+        db.create_site("Martin").unwrap();
+
+        let restored = Db::open(&copy).unwrap();
+        assert_eq!(restored.user_version().unwrap(), SCHEMA_VERSION);
+        let names: Vec<String> = restored.list_sites().unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["Durand".to_string()], "la copie fige l'instant du VACUUM");
+        assert!(restored.get_user("admin").is_ok());
+    }
+
+    #[test]
+    fn vacuum_into_refuses_to_overwrite_an_existing_file() {
+        // SQLite refuse d'écraser : on ne veut surtout pas contourner ce
+        // refus, il protège une archive déjà écrite.
+        let dir = tmp_dir("vacuum-existing");
+        let db = Db::open(&dir.join("hub.sqlite")).unwrap();
+        let copy = dir.join("copie.sqlite");
+        std::fs::write(&copy, b"deja la").unwrap();
+
+        assert!(db.vacuum_into(&copy).is_err());
+        assert_eq!(std::fs::read(&copy).unwrap(), b"deja la");
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
