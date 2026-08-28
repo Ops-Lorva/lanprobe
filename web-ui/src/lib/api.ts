@@ -105,6 +105,12 @@ export interface HubSettings {
   /** 0 = rétention illimitée. */
   retention_days: number;
   heartbeat_interval_secs: number;
+  /**
+   * Délai avant qu'une sonde silencieuse déclenche une alerte. Réglé depuis
+   * l'écran Notifications — c'est là qu'il veut dire quelque chose — mais il
+   * vit dans `settings`, comme le reste, et part par `PUT /api/settings`.
+   */
+  notify_delay_secs: number;
 }
 
 export const SETTINGS_DEFAULTS: HubSettings = {
@@ -115,7 +121,174 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   hub_public_url: null,
   retention_days: 0,
   heartbeat_interval_secs: 60,
+  notify_delay_secs: 300,
 };
+
+// ── Comptes (contrat § 11) ──────────────────────────────────────────────────
+
+/** Ordonnés : `viewer < operator < admin`. */
+export type Role = 'admin' | 'operator' | 'viewer';
+
+/** Du plus puissant au moins puissant : c'est l'ordre dans lequel on choisit. */
+export const ROLES: Role[] = ['admin', 'operator', 'viewer'];
+
+/**
+ * Un compte. **`disabled_at` remplace la suppression** : le hub n'a pas de
+ * `DELETE /api/users/{…}` et n'en aura pas, parce que le journal d'audit nomme
+ * ce compte et qu'une ligne d'audit qui désigne un compte disparu ne prouve
+ * plus rien.
+ */
+export interface Account {
+  username: string;
+  role: Role;
+  created_at: number;
+  /** Epoch en secondes quand le compte est désactivé, `null` s'il est actif. */
+  disabled_at: number | null;
+}
+
+// ── Journal d'audit (contrat § 11) ──────────────────────────────────────────
+
+export type AuditOutcome = 'success' | 'failure';
+
+export interface AuditEntry {
+  id: number;
+  at: number;
+  /** `null` = tentative anonyme (connexion sur un compte inconnu). */
+  actor: string | null;
+  action: string;
+  target: string | null;
+  outcome: AuditOutcome;
+  detail: string | null;
+}
+
+export interface AuditPage {
+  entries: AuditEntry[];
+  /** Curseur de la page suivante. `null` = fin du journal. */
+  next_before_id: number | null;
+}
+
+/**
+ * Vocabulaire fermé des actions, tel que le contrat § 11 l'énumère. Il sert à
+ * peupler le filtre : une saisie libre laisserait une faute de frappe rendre
+ * une liste vide sans dire pourquoi.
+ */
+export const AUDIT_ACTIONS: readonly string[] = [
+  'auth.setup',
+  'auth.login',
+  'auth.logout',
+  'access.denied',
+  'user.create',
+  'user.role',
+  'user.password',
+  'user.disable',
+  'user.enable',
+  'site.create',
+  'site.rename',
+  'site.delete',
+  'enroll.code',
+  'probe.enroll',
+  'probe.reenroll',
+  'probe.reenroll_code',
+  'probe.update',
+  'probe.revoke',
+  'probe.rotate',
+  'probe.revoke_token',
+  'settings.update',
+  'settings.retention',
+  'settings.advertise',
+  'influx.read_token.create',
+  'influx.read_token.revoke',
+  'notify.webhook',
+  'notify.smtp',
+  'notify.unconfigure',
+  'notify.subscription',
+  'notify.test',
+  'probe.down',
+  'probe.up',
+];
+
+// ── Notifications (contrat § 13) ────────────────────────────────────────────
+
+export type WebhookTemplate = 'generic' | 'slack' | 'discord';
+export type SmtpSecurity = 'none' | 'starttls' | 'tls';
+
+/**
+ * ⚠️ **L'URL n'est jamais rendue** : elle porte à elle seule le droit d'écrire
+ * dans le salon. `unreadable` dit qu'une valeur scellée existe mais ne s'ouvre
+ * plus — ce n'est pas « jamais réglé ».
+ */
+export interface WebhookStatus {
+  configured: boolean;
+  template?: WebhookTemplate;
+  unreadable?: boolean;
+}
+
+/** ⚠️ Le mot de passe n'est jamais rendu : `password_set` dit seulement qu'il existe. */
+export interface SmtpStatus {
+  configured: boolean;
+  unreadable?: boolean;
+  host?: string;
+  port?: number;
+  security?: SmtpSecurity;
+  username?: string | null;
+  password_set?: boolean;
+  from?: string;
+  to?: string[];
+}
+
+export interface NotifyStatus {
+  delay_secs: number;
+  smtp: SmtpStatus;
+  webhook: WebhookStatus;
+}
+
+/** Verdict d'un envoi de test. `attempted: false` = canal non configuré. */
+export interface ChannelOutcome {
+  channel: string;
+  attempted: boolean;
+  ok: boolean;
+  error: string | null;
+}
+
+/**
+ * Corps de `PUT /api/notifications/smtp`.
+ *
+ * ⚠️ `password` **absent** et `password: null` ne veulent pas dire la même
+ * chose : absent garde la valeur scellée, `null` la retire. L'interface n'ayant
+ * jamais vu le mot de passe, envoyer un champ vide en corrigeant un port
+ * l'effacerait.
+ */
+export interface SmtpPayload {
+  host: string;
+  port: number;
+  security: SmtpSecurity;
+  username?: string | null;
+  password?: string | null;
+  from: string;
+  to: string[];
+}
+
+export interface SiteSubscription {
+  site_id: string;
+  name: string;
+  enabled: boolean;
+}
+
+export interface ProbeSubscription {
+  probe_id: string;
+  name: string;
+  site_id: string;
+  site: string;
+  /** Ce qui est réglé SUR la sonde. `null` = elle suit son site. */
+  exception: boolean | null;
+  /** Ce qui s'applique, héritage déjà résolu par le hub. Ne pas le recalculer. */
+  enabled: boolean;
+}
+
+export interface Subscriptions {
+  sites: SiteSubscription[];
+  probes: ProbeSubscription[];
+}
 
 export interface HubStatus {
   needs_setup: boolean;
@@ -135,6 +308,20 @@ export class ApiError extends Error {
   /** Session absente ou expirée → l'UI doit repasser par l'écran de connexion. */
   get isUnauthorized() {
     return this.status === 401 || this.status === 403;
+  }
+
+  /** Session tombée. C'est le SEUL cas où se reconnecter change quelque chose. */
+  get isExpired() {
+    return this.status === 401;
+  }
+
+  /**
+   * Rôle insuffisant. Renvoyer l'écran de connexion ici serait une impasse :
+   * les mêmes identifiants donneront le même refus. On montre le message du
+   * hub, qui nomme la règle.
+   */
+  get isForbidden() {
+    return this.status === 403;
   }
 
   /** Nom de sonde déjà pris (contrat § enroll / PATCH). */
@@ -337,6 +524,95 @@ export const api = {
       `/api/probes/${encodeURIComponent(id)}/metrics` +
         `?measurement=${encodeURIComponent(measurement)}&range=${encodeURIComponent(range)}`,
     ),
+
+  // ── Comptes ──────────────────────────────────────────────────────────────
+  //
+  // Il n'y a pas de `deleteUser`, et ce n'est pas un oubli : le hub répond 405
+  // à `DELETE /api/users/{…}`, définitivement.
+
+  users: () => request<Account[]>('/api/users'),
+
+  createUser: (username: string, password: string, role: Role) =>
+    request<Account>('/api/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, role }),
+    }),
+
+  /** Rôle, activation, ou les deux. Le hub refuse (409) ce qui couperait le dernier accès. */
+  patchUser: (username: string, patch: { role?: Role; disabled?: boolean }) =>
+    request<Account>(`/api/users/${encodeURIComponent(username)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  setUserPassword: (username: string, password: string) =>
+    request<{ ok: boolean }>(`/api/users/${encodeURIComponent(username)}/password`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+
+  // ── Journal d'audit ──────────────────────────────────────────────────────
+  //
+  // Lecture seule. Pas de `deleteAudit` : `DELETE /api/audit` rend 405.
+
+  /**
+   * Pagination à rebours. `before_id` reprend là où la page précédente s'est
+   * arrêtée : un `OFFSET` rejouerait des lignes déjà vues dès qu'une ligne
+   * s'ajoute pendant la lecture.
+   */
+  audit: (q: {
+    limit?: number;
+    before_id?: number | null;
+    actor?: string;
+    action?: string;
+  } = {}) => {
+    const p = new URLSearchParams();
+    if (q.limit != null) p.set('limit', String(q.limit));
+    if (q.before_id != null) p.set('before_id', String(q.before_id));
+    if (q.actor?.trim()) p.set('actor', q.actor.trim());
+    if (q.action?.trim()) p.set('action', q.action.trim());
+    const qs = p.toString();
+    return request<AuditPage>(`/api/audit${qs ? `?${qs}` : ''}`);
+  },
+
+  // ── Notifications ────────────────────────────────────────────────────────
+
+  notifications: () => request<NotifyStatus>('/api/notifications'),
+
+  /**
+   * ⚠️ Ne pas passer `url` quand l'utilisateur n'a rien saisi : le champ absent
+   * garde l'URL scellée, un champ vide la remplacerait par du vide.
+   */
+  saveWebhook: (body: { template: WebhookTemplate; url?: string }) =>
+    request<NotifyStatus>('/api/notifications/webhook', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  clearWebhook: () =>
+    request<NotifyStatus>('/api/notifications/webhook', { method: 'DELETE' }),
+
+  saveSmtp: (body: SmtpPayload) =>
+    request<NotifyStatus>('/api/notifications/smtp', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  clearSmtp: () => request<NotifyStatus>('/api/notifications/smtp', { method: 'DELETE' }),
+
+  /** Envoie un VRAI message sur chaque canal configuré, et rend le verdict de chacun. */
+  testNotifications: () =>
+    request<{ channels: ChannelOutcome[] }>('/api/notifications/test', { method: 'POST' }),
+
+  /** Héritage déjà résolu par le hub — `enabled` est la valeur qui s'applique. */
+  subscriptions: () => request<Subscriptions>('/api/notifications/subscriptions'),
+
+  /** `enabled: null` sur une sonde = elle revient à l'héritage de son site. */
+  setSubscription: (scope: 'site' | 'probe', scope_id: string, enabled: boolean | null) =>
+    request<{ ok: boolean }>('/api/notifications/subscriptions', {
+      method: 'PUT',
+      body: JSON.stringify({ scope, scope_id, enabled }),
+    }),
 };
 
 /**

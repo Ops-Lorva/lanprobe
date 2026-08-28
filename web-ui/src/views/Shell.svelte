@@ -2,10 +2,15 @@
   import { _ } from 'svelte-i18n';
   import LogoMark from '$desktop/components/LogoMark.svelte';
   import Icons from '$desktop/components/Icons.svelte';
+  import HubIcon, { type HubIconName } from '$lib/components/HubIcon.svelte';
   import { route } from '$lib/router';
+  import { isAdmin } from '$lib/session';
   import FleetView from './FleetView.svelte';
   import ProbeView from './ProbeView.svelte';
   import SettingsView from './SettingsView.svelte';
+  import AccountsView from './AccountsView.svelte';
+  import AuditView from './AuditView.svelte';
+  import NotificationsView from './NotificationsView.svelte';
 
   const { version, onExpired, logout } = $props<{
     version: string;
@@ -13,16 +18,33 @@
     logout: () => void;
   }>();
 
-  // Deux entrées seulement. « Enrôler » a disparu de la navigation parce que
-  // l'enrôlement n'est plus un endroit où aller : c'est le « + » de la ligne du
-  // site, là où le site est déjà connu. Une entrée de menu aurait ramené le
-  // choix du site que ce « + » supprime.
-  // Les réglages restent hors du chemin de mise en route : on y arrive quand
-  // quelque chose ne marche pas, pas au premier démarrage.
-  const items = [
-    { id: 'fleet', href: '#/', icon: 'server' as const, key: 'nav.fleet' },
-    { id: 'settings', href: '#/settings', icon: 'settings' as const, key: 'nav.settings' },
+  // « Enrôler » a disparu de la navigation parce que l'enrôlement n'est plus un
+  // endroit où aller : c'est le « + » de la ligne du site, là où le site est
+  // déjà connu. Une entrée de menu aurait ramené le choix du site que ce « + »
+  // supprime.
+  //
+  // Les cinq entrées sont ordonnées par portée, pas par fréquence : ce qu'on
+  // surveille (Parc), ce qui vient nous chercher (Notifications), qui a le
+  // droit et qui a fait quoi (Comptes, Journal), puis la configuration
+  // (Réglages), qui reste hors du chemin de mise en route — on y arrive quand
+  // quelque chose ne marche pas.
+  //
+  // Le journal a son entrée propre plutôt qu'un onglet dans un écran
+  // « Administration » : c'est ce qu'on ouvre sous pression pendant un
+  // incident, et c'est aussi l'intitulé par lequel on apprend que le hub en
+  // tient un.
+  const items: { id: string; href: string; icon: HubIconName; key: string; admin?: true }[] = [
+    { id: 'fleet', href: '#/', icon: 'server', key: 'nav.fleet' },
+    { id: 'notifications', href: '#/notifications', icon: 'bell', key: 'nav.notifications' },
+    { id: 'accounts', href: '#/accounts', icon: 'users', key: 'nav.accounts', admin: true },
+    { id: 'audit', href: '#/audit', icon: 'journal', key: 'nav.audit', admin: true },
+    { id: 'settings', href: '#/settings', icon: 'settings', key: 'nav.settings' },
   ];
+
+  // Visibles tant que le hub n'a pas dit non. Voir `$lib/session` : il n'existe
+  // aucune route qui donne le rôle de la session, et sonder au démarrage
+  // déposerait au journal un refus que personne n'a provoqué.
+  const visible = $derived(items.filter((i) => !i.admin || $isAdmin !== false));
 
   // C'est `main` qui défile désormais, pas le document : un changement d'écran
   // doit donc le remonter à la main, sinon on arrive au milieu de la fiche
@@ -40,9 +62,10 @@
 
 <!--
   Même ossature que l'app desktop : barre latérale de 168 px, logo en haut,
-  réglages en bas. Elle devient une barre horizontale sous 900 px — la
-  navigation compte deux entrées, une colonne de 168 px sur un téléphone
-  coûterait le tiers de la largeur pour rien.
+  réglages en bas. Elle devient une barre horizontale sous 900 px — une colonne
+  de 168 px sur un téléphone coûterait le tiers de la largeur pour rien — puis
+  une rangée de pictogrammes seuls sous 620 px, où les cinq entrées tiennent
+  encore sur 390 px sans déborder.
 -->
 <div class="shell">
   <nav class="sidebar">
@@ -53,9 +76,14 @@
     </a>
 
     <div class="nav-main">
-      {#each items as item (item.id)}
-        <a class="nav-item" class:active={$route.name === item.id} href={item.href}>
-          <Icons name={item.icon} size={15} />
+      {#each visible as item (item.id)}
+        <a
+          class="nav-item"
+          class:active={$route.name === item.id}
+          href={item.href}
+          title={$_(item.key)}
+        >
+          <HubIcon name={item.icon} size={15} />
           <span class="nav-label">{$_(item.key)}</span>
         </a>
       {/each}
@@ -74,6 +102,12 @@
   <main bind:this={mainEl}>
     {#if $route.name === 'probe'}
       <ProbeView id={$route.id} {onExpired} />
+    {:else if $route.name === 'notifications'}
+      <NotificationsView {onExpired} />
+    {:else if $route.name === 'accounts'}
+      <AccountsView {onExpired} />
+    {:else if $route.name === 'audit'}
+      <AuditView {onExpired} />
     {:else if $route.name === 'settings'}
       <SettingsView {onExpired} />
     {:else}

@@ -56,7 +56,10 @@ function create() {
       }));
     } catch (e) {
       const err = e instanceof ApiError ? e : new ApiError(0, String(e));
-      if (err.isUnauthorized) {
+      // Seul un 401 renvoie à la connexion. Un 403 est un refus de rôle : s'y
+      // reconnecter avec les mêmes identifiants donnerait le même refus, alors
+      // qu'affiché comme erreur il nomme au moins la règle appliquée.
+      if (err.isExpired) {
         update((s) => ({ ...s, loading: false, refreshing: false }));
         onExpired();
         return;
