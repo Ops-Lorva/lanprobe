@@ -202,31 +202,35 @@
 
   // ── Onglets ──────────────────────────────────────────────────────────────
   // Découpage par motif de visite, pas par type de champ. On vient ici pour
-  // l'une de ces quatre raisons, jamais pour deux à la fois :
-  //   « Sondes »       — ce que le hub raconte aux sondes (URL annoncée, cadence) ;
-  //   « InfluxDB »     — comment le hub joint la base, et comment elle est servie ;
-  //   « Vos données »  — ce qu'il y a dedans et qui a le droit de le lire ;
-  //   « Conservation » — le seul réglage qui détruit des mesures, donc isolé.
+  // l'une de ces trois raisons, jamais pour deux à la fois :
+  //   « Sondes »      — ce que le hub raconte aux sondes (URL annoncée, cadence) ;
+  //   « InfluxDB »    — comment le hub joint la base, et combien de temps elle garde ;
+  //   « Vos données » — ce qu'il y a dedans et qui a le droit de le lire.
+  // La conservation vit dans « InfluxDB » : c'est une politique de rétention de
+  // bucket, appliquée par la base. Lui donner son propre onglet la coupait de
+  // ce qu'elle règle et laissait croire à un réglage du hub.
   // Un seul bouton d'enregistrement pour l'ensemble : le contrat n'expose qu'un
-  // PATCH, le découper en quatre formulaires mentirait sur ce qui part au hub.
+  // PATCH, le découper en trois formulaires mentirait sur ce qui part au hub.
   // La pastille sur un onglet dit où sont les modifications en attente — sans
   // elle, on enregistrerait une valeur saisie sur un onglet qu'on ne voit plus.
-  type Tab = 'probes' | 'influx' | 'data' | 'retention';
+  type Tab = 'probes' | 'influx' | 'data';
   const TABS: { id: Tab; key: string }[] = [
     { id: 'probes', key: 'settings.tab_probes' },
     { id: 'influx', key: 'settings.tab_influx' },
     { id: 'data', key: 'settings.influx_state_title' },
-    { id: 'retention', key: 'settings.tab_retention' },
   ];
   let tab = $state<Tab>('probes');
 
   const dirtyTabs = $derived<Record<Tab, boolean>>({
     probes: 'influx_advertise_url' in patch || 'heartbeat_interval_secs' in patch,
-    influx: 'influx_url' in patch || 'influx_org' in patch || 'influx_bucket' in patch,
+    influx:
+      'influx_url' in patch ||
+      'influx_org' in patch ||
+      'influx_bucket' in patch ||
+      'retention_days' in patch,
     // Onglet en lecture seule : les jetons s'y créent et s'y révoquent tout de
     // suite, rien n'y attend le bouton « Enregistrer ».
     data: false,
-    retention: 'retention_days' in patch,
   });
 
   function onTabKey(e: KeyboardEvent) {
@@ -258,7 +262,7 @@
       }
     }
     if (!Number.isInteger(retentionNum) || retentionNum < 0)
-      return { msg: $_('settings.invalid_retention'), tab: 'retention' };
+      return { msg: $_('settings.invalid_retention'), tab: 'influx' };
     if (!Number.isInteger(heartbeatNum) || heartbeatNum < 10)
       return { msg: $_('settings.invalid_heartbeat'), tab: 'probes' };
     return null;
@@ -323,7 +327,13 @@
   </StateBlock>
 {:else}
   <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-  <div class="tabs" role="tablist" aria-label={$_('settings.tabs_aria')} onkeydown={onTabKey}>
+  <div
+    class="tabs"
+    role="tablist"
+    tabindex="-1"
+    aria-label={$_('settings.tabs_aria')}
+    onkeydown={onTabKey}
+  >
     {#each TABS as t (t.id)}
       <button
         class="tab"
@@ -420,8 +430,60 @@
         {$_('settings.tls_body')}
       </p>
     </section>
+
+    <!--
+      La conservation appartient bien à InfluxDB — c'est la rétention du bucket,
+      appliquée par la base. Mais c'est aussi le seul réglage de cet écran qui
+      DÉTRUIT des mesures : il est donc renvoyé tout en bas, derrière une
+      séparation nommée, pour qu'on ne le croise pas en venant corriger une URL.
+      Isolé sans être exilé : au même endroit que ce qu'il règle, jamais sur le
+      chemin de ce qu'on est venu faire.
+    -->
+    <div class="zone">
+      <div class="zone-head">
+        <span class="zone-title">{$_('settings.destructive_zone')}</span>
+        <span class="zone-rule" aria-hidden="true"></span>
+      </div>
+
+      <section class="card lp-card danger-frame" class:risky={isShrink}>
+        <h2 class="lp-title">{$_('settings.section_retention')}</h2>
+        <p class="sub">{$_('settings.retention_lead')}</p>
+
+        <label class="lp-field">
+          {$_('settings.retention_label')}
+          <span class="unit-row">
+            <input class="lp-input num" type="number" min="0" step="1" bind:value={retention} />
+            <span class="unit">{$_('settings.retention_unit')}</span>
+          </span>
+          <span class="hint">{$_('settings.retention_hint')}</span>
+          <span class="cur">
+            {$_('settings.retention_current', {
+              values: { label: retentionLabel(saved.retention_days) },
+            })}
+          </span>
+        </label>
+
+        {#if isShrink}
+          <!-- L'avertissement apparaît pendant la saisie, pas seulement au clic :
+               on veut que la personne change d'avis avant, pas qu'elle découvre
+               la conséquence dans une boîte de dialogue. -->
+          <div class="warn" role="status">
+            <strong>{$_('settings.shrink_title')}</strong>
+            <p>
+              {$_('settings.shrink_from_to', {
+                values: {
+                  from: retentionLabel(saved.retention_days),
+                  to: retentionLabel(retentionNum),
+                },
+              })}
+              {$_('settings.shrink_cutoff', { values: { date: cutoffDate } })}
+            </p>
+          </div>
+        {/if}
+      </section>
+    </div>
   </div>
-  {:else if tab === 'data'}
+  {:else}
   <div class="cards" role="tabpanel" id="panel-data" aria-labelledby="tab-data" tabindex="-1">
     <!--
       Influx en lecture seule. L'objectif n'est pas d'administrer la base, mais
@@ -529,49 +591,6 @@
           </table>
         {/if}
       </div>
-    </section>
-  </div>
-  {:else}
-  <div
-    class="cards"
-    role="tabpanel"
-    id="panel-retention"
-    aria-labelledby="tab-retention"
-    tabindex="-1"
-  >
-    <section class="card lp-card" class:risky={isShrink}>
-      <h2 class="lp-title">{$_('settings.section_retention')}</h2>
-      <label class="lp-field">
-        {$_('settings.retention_label')}
-        <span class="unit-row">
-          <input class="lp-input num" type="number" min="0" step="1" bind:value={retention} />
-          <span class="unit">{$_('settings.retention_unit')}</span>
-        </span>
-        <span class="hint">{$_('settings.retention_hint')}</span>
-        <span class="cur">
-          {$_('settings.retention_current', {
-            values: { label: retentionLabel(saved.retention_days) },
-          })}
-        </span>
-      </label>
-
-      {#if isShrink}
-        <!-- L'avertissement apparaît pendant la saisie, pas seulement au clic :
-             on veut que la personne change d'avis avant, pas qu'elle découvre
-             la conséquence dans une boîte de dialogue. -->
-        <div class="warn" role="status">
-          <strong>{$_('settings.shrink_title')}</strong>
-          <p>
-            {$_('settings.shrink_from_to', {
-              values: {
-                from: retentionLabel(saved.retention_days),
-                to: retentionLabel(retentionNum),
-              },
-            })}
-            {$_('settings.shrink_cutoff', { values: { date: cutoffDate } })}
-          </p>
-        </div>
-      {/if}
     </section>
   </div>
   {/if}
@@ -729,6 +748,39 @@
   }
   .card.risky {
     border-color: color-mix(in srgb, var(--ep-danger) 45%, var(--ep-border));
+  }
+
+  /* Séparation nommée plutôt qu'un simple blanc : un espace se franchit sans
+     s'en apercevoir, un intitulé « Réglage destructif » se lit avant le champ
+     qu'il annonce. C'est la seule frontière de l'écran qui doit se remarquer. */
+  .zone {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .zone-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .zone-title {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    font-weight: 700;
+    color: var(--ep-danger);
+    flex-shrink: 0;
+  }
+  .zone-rule {
+    flex: 1;
+    height: 1px;
+    background: color-mix(in srgb, var(--ep-danger) 35%, transparent);
+  }
+  /* Le cadre reste rouge en permanence, pas seulement quand la valeur baisse :
+     ce qui est dangereux, c'est le champ, pas l'instant où on le modifie. */
+  .card.danger-frame {
+    border-left: 3px solid color-mix(in srgb, var(--ep-danger) 55%, var(--ep-border));
   }
   .sub {
     font-size: 12px;
