@@ -8,6 +8,7 @@ use serde::Serialize;
 use tokio::time::sleep;
 
 use crate::interfaces::get_interface_details;
+use crate::resolver::{dns_plan, DnsPlan};
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -92,19 +93,22 @@ impl InternetHistory {
     }
 }
 
-pub async fn probe_dns() -> (bool, Option<u64>) {
+/// Mesure la résolution DNS **de l'interface auditée**.
+///
+/// `getaddrinfo` passait par le résolveur système et donc par la route par
+/// défaut : le DNS du VLAN client pouvait être mort, le Wi-Fi du technicien
+/// répondait et la pastille restait verte. Le plan décide désormais d'où
+/// part la requête et vers quel serveur — et quand aucune mesure honnête
+/// n'est possible, elle échoue au lieu de mentir.
+pub async fn probe_dns(plan: &DnsPlan) -> (bool, Option<u64>) {
+    let binding = match plan {
+        DnsPlan::System => None,
+        DnsPlan::Bound(b) => Some(b),
+        DnsPlan::Impossible => return (false, None),
+    };
     let start = std::time::Instant::now();
-    // Résolution DNS via getaddrinfo (pas liée à une interface spécifique,
-    // utilise le resolver système). On mesure le temps total de résolution.
-    let result = tokio::time::timeout(
-        Duration::from_secs(3),
-        tokio::task::spawn_blocking(|| {
-            use std::net::ToSocketAddrs;
-            (DNS_TARGET, 80u16).to_socket_addrs().map(|_| ())
-        }),
-    ).await;
-    match result {
-        Ok(Ok(Ok(_))) => (true, Some(start.elapsed().as_millis() as u64)),
+    match crate::resolver::lookup(DNS_TARGET, binding, Duration::from_secs(3)).await {
+        Ok(addrs) if !addrs.is_empty() => (true, Some(start.elapsed().as_millis() as u64)),
         _ => (false, None),
     }
 }
@@ -172,12 +176,29 @@ fn parse_ping_rtt_ms(output: &str) -> Option<u64> {
     None
 }
 
-pub async fn probe_http(src: Option<Ipv4Addr>) -> (bool, Option<u64>) {
+/// Mesure HTTP de l'interface auditée.
+///
+/// La connexion part de `src`, et le nom de la cible est résolu par le même
+/// chemin : sans résolveur lié, la moitié de la mesure (la résolution)
+/// décrirait encore le poste du technicien.
+pub async fn probe_http(src: Option<Ipv4Addr>, plan: &DnsPlan) -> (bool, Option<u64>) {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .user_agent("LanProbe-Internet-Probe");
     if let Some(s) = src {
         builder = builder.local_address(IpAddr::V4(s));
+    }
+    match plan {
+        DnsPlan::System => {}
+        DnsPlan::Bound(b) => {
+            match crate::resolver::BoundHttpResolver::new(b, Duration::from_secs(3)) {
+                Some(r) => builder = builder.dns_resolver(std::sync::Arc::new(r)),
+                // Résolveur lié impossible à construire : on ne se rabat pas
+                // sur le résolveur système, on rate la mesure.
+                None => return (false, None),
+            }
+        }
+        DnsPlan::Impossible => return (false, None),
     }
     let client = match builder.build() {
         Ok(c) => c,
@@ -195,18 +216,23 @@ pub async fn probe_http(src: Option<Ipv4Addr>) -> (bool, Option<u64>) {
 pub type InternetStateHandle = Arc<InternetHistory>;
 pub type SelectedInterfaceHandle = Arc<Mutex<Option<String>>>;
 
-/// Résout l'IP source. Retour :
-/// - Ok(None) : aucune interface choisie (route par défaut)
-/// - Ok(Some) : interface résolue
+/// Résout d'où partent les mesures : IP source pour ICMP et HTTP, plan de
+/// résolution pour le DNS. Retour :
+/// - Ok((None, System)) : aucune interface choisie (route par défaut)
+/// - Ok((Some, …))      : interface résolue
 /// - Err : interface choisie mais pas d'IP → les probes doivent échouer
 ///   (offline) au lieu d'emprunter la route par défaut.
-fn resolve_src_from_iface(iface: &SelectedInterfaceHandle) -> Result<Option<Ipv4Addr>, ()> {
-    let Ok(guard) = iface.lock() else { return Ok(None); };
-    let Some(name) = guard.clone() else { return Ok(None); };
+fn resolve_src_from_iface(
+    iface: &SelectedInterfaceHandle,
+) -> Result<(Option<Ipv4Addr>, DnsPlan), ()> {
+    let Ok(guard) = iface.lock() else { return Ok((None, DnsPlan::System)); };
+    let Some(name) = guard.clone() else { return Ok((None, DnsPlan::System)); };
     drop(guard);
     let details = get_interface_details(&name);
-    let Some(ip_str) = details.ip else { return Err(()); };
-    ip_str.parse::<Ipv4Addr>().map(Some).map_err(|_| ())
+    let plan = dns_plan(Some(&details));
+    let Some(ip_str) = details.ip.as_deref() else { return Err(()); };
+    let ip = ip_str.parse::<Ipv4Addr>().map_err(|_| ())?;
+    Ok((Some(ip), plan))
 }
 
 /// Boucle de monitoring internet, runtime-agnostique. Le caller choisit où
@@ -235,7 +261,9 @@ pub async fn run_internet_monitor<F>(
             // accès à internet".
             let ((icmp_ok, icmp_ms), (http_ok, http_ms), (dns_ok, dns_ms)) =
                 match resolve_src_from_iface(&iface) {
-                    Ok(src) => tokio::join!(probe_icmp(src), probe_http(src), probe_dns()),
+                    Ok((src, plan)) => {
+                        tokio::join!(probe_icmp(src), probe_http(src, &plan), probe_dns(&plan))
+                    }
                     Err(_) => ((false, None), (false, None), (false, None)),
                 };
             let state = derive_state(icmp_ok, http_ok);
@@ -286,6 +314,24 @@ mod tests {
     #[test]
     fn offline_when_both_down() {
         assert_eq!(derive_state(false, false), InternetState::Offline);
+    }
+
+    #[tokio::test]
+    async fn le_http_ne_resout_pas_par_le_resolveur_du_technicien() {
+        // Interface choisie mais sans serveur DNS exploitable : la cible HTTP
+        // ne peut pas être résolue honnêtement. La résoudre quand même par le
+        // système afficherait « Online » sur le réseau du technicien.
+        let (ok, ms) = probe_http(Some(Ipv4Addr::new(127, 0, 0, 1)), &DnsPlan::Impossible).await;
+        assert!(!ok);
+        assert_eq!(ms, None);
+    }
+
+    #[tokio::test]
+    async fn une_interface_sans_resolveur_ne_verdit_pas_la_pastille_dns() {
+        // Interface choisie mais aucun serveur DNS à interroger : la mesure
+        // échoue. Se rabattre sur le résolveur système afficherait vert alors
+        // que le réseau audité, lui, ne résout rien.
+        assert_eq!(probe_dns(&DnsPlan::Impossible).await, (false, None));
     }
 
     #[test]
