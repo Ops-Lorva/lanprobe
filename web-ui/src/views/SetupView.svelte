@@ -60,7 +60,6 @@
       <p class="alt">{$_('setup.token_alt')}</p>
       <CopyLine value={DOCKER_FILE} />
       <p class="note">{$_('setup.token_hint_name')}</p>
-      <p class="note once">{$_('setup.token_once')}</p>
     </div>
   {/snippet}
 
@@ -138,10 +137,5 @@
   .note {
     font-size: 11.5px;
     color: var(--ep-text-muted);
-  }
-  .once {
-    border-top: 1px solid var(--ep-border);
-    padding-top: 9px;
-    margin-top: 3px !important;
   }
 </style>

@@ -14,6 +14,7 @@
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import CopyLine from '$lib/components/CopyLine.svelte';
+  import LangTheme from '$lib/components/LangTheme.svelte';
   import { dateOnly, humanBytes } from '$lib/time';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
@@ -201,8 +202,8 @@
   const dirty = $derived(Object.keys(patch).length > 0);
 
   // ── Onglets ──────────────────────────────────────────────────────────────
-  // Découpage par motif de visite, pas par type de champ. On vient ici pour
-  // l'une de ces trois raisons, jamais pour deux à la fois :
+  // Découpage par motif de visite, pas par type de champ :
+  //   « Général »     — les préférences de CE navigateur (langue, thème) ;
   //   « Sondes »      — ce que le hub raconte aux sondes (URL annoncée, cadence) ;
   //   « InfluxDB »    — comment le hub joint la base, et combien de temps elle garde ;
   //   « Vos données » — ce qu'il y a dedans et qui a le droit de le lire.
@@ -213,15 +214,19 @@
   // PATCH, le découper en trois formulaires mentirait sur ce qui part au hub.
   // La pastille sur un onglet dit où sont les modifications en attente — sans
   // elle, on enregistrerait une valeur saisie sur un onglet qu'on ne voit plus.
-  type Tab = 'probes' | 'influx' | 'data';
+  type Tab = 'general' | 'probes' | 'influx' | 'data';
   const TABS: { id: Tab; key: string }[] = [
+    { id: 'general', key: 'settings.tab_general' },
     { id: 'probes', key: 'settings.tab_probes' },
     { id: 'influx', key: 'settings.tab_influx' },
     { id: 'data', key: 'settings.influx_state_title' },
   ];
-  let tab = $state<Tab>('probes');
+  let tab = $state<Tab>('general');
 
   const dirtyTabs = $derived<Record<Tab, boolean>>({
+    // Langue et thème s'appliquent au clic et ne partent jamais au hub : il n'y
+    // a donc rien à y enregistrer, donc jamais de pastille.
+    general: false,
     probes: 'influx_advertise_url' in patch || 'heartbeat_interval_secs' in patch,
     influx:
       'influx_url' in patch ||
@@ -316,7 +321,6 @@
 
 <header class="head">
   <h1>{$_('settings.title')}</h1>
-  <p class="lead">{$_('settings.lead')}</p>
 </header>
 
 {#if loading}
@@ -355,13 +359,26 @@
     {/each}
   </div>
 
-  {#if tab === 'probes'}
+  {#if tab === 'general'}
+  <div class="cards" role="tabpanel" id="panel-general" aria-labelledby="tab-general" tabindex="-1">
+    <!--
+      Langue et thème sont les seuls réglages de cet écran qui ne partent pas au
+      hub : ils vivent dans ce navigateur. Posés sans le dire à côté de réglages
+      qui valent pour tout le monde, ils laisseraient croire qu'on change la
+      langue de tous les comptes — d'où le cadre et la ligne qui les nomment.
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.device_title')}</h2>
+      <p class="sub">{$_('settings.device_note')}</p>
+      <LangTheme labelled />
+    </section>
+  </div>
+  {:else if tab === 'probes'}
   <div class="cards" role="tabpanel" id="panel-probes" aria-labelledby="tab-probes" tabindex="-1">
     <!-- L'URL annoncée vient en premier : c'est celle qui casse le parc quand
          elle est fausse, et la seule qu'on puisse vérifier d'un bouton. -->
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.influx_title')}</h2>
-      <p class="sub">{$_('settings.influx_lead')}</p>
 
       <label class="lp-field">
         {$_('settings.field_label')}
@@ -381,17 +398,6 @@
         error={testError}
         ontest={runTest}
       />
-
-      <details class="why">
-        <summary>{$_('settings.why_title')}</summary>
-        <p>{$_('settings.why_body')}</p>
-        <p class="ord-title">{$_('settings.order_title')}</p>
-        <ol>
-          <li>{$_('settings.order_1')}</li>
-          <li>{$_('settings.order_2')}</li>
-          <li>{$_('settings.order_3')}</li>
-        </ol>
-      </details>
     </section>
 
     <section class="card lp-card">
@@ -402,7 +408,6 @@
           <input class="lp-input num" type="number" min="10" step="1" bind:value={heartbeat} />
           <span class="unit">{$_('settings.heartbeat_unit')}</span>
         </span>
-        <span class="hint">{$_('settings.heartbeat_hint')}</span>
       </label>
     </section>
   </div>
@@ -425,10 +430,6 @@
           <input class="lp-input" bind:value={bucket} spellcheck="false" autocomplete="off" />
         </label>
       </div>
-      <p class="tls">
-        <strong>{$_('settings.tls_title')}</strong>
-        {$_('settings.tls_body')}
-      </p>
     </section>
 
     <!--
@@ -492,7 +493,6 @@
     -->
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.influx_state_title')}</h2>
-      <p class="sub">{$_('settings.influx_state_lead')}</p>
 
       {#if influx}
         <dl class="stats">
@@ -537,7 +537,6 @@
 
       <div class="tokens">
         <h3>{$_('settings.tokens_title')}</h3>
-        <p class="sub">{$_('settings.tokens_lead')}</p>
         <p class="ro">
           {$_('settings.tokens_readonly', {
             values: { bucket: influx?.bucket || bucket || 'lanprobe' },
@@ -595,13 +594,18 @@
   </div>
   {/if}
 
-  <div class="save-row">
-    {#if fieldError}<p class="err" role="alert">{fieldError}</p>{/if}
-    {#if notice}<p class="ok" role="status">{notice}</p>{/if}
-    <button class="lp-btn primary" onclick={onSave} disabled={busy || !dirty}>
-      {busy ? $_('settings.saving_all') : $_('settings.save_all')}
-    </button>
-  </div>
+  <!-- Rien à enregistrer sur « Général » ni « Vos données » : le bouton ne s'y
+       affiche que s'il reste une modification en attente sur un autre onglet,
+       sinon il disparaîtrait avec du travail non enregistré. -->
+  {#if dirty || (tab !== 'general' && tab !== 'data')}
+    <div class="save-row">
+      {#if fieldError}<p class="err" role="alert">{fieldError}</p>{/if}
+      {#if notice}<p class="ok" role="status">{notice}</p>{/if}
+      <button class="lp-btn primary" onclick={onSave} disabled={busy || !dirty}>
+        {busy ? $_('settings.saving_all') : $_('settings.save_all')}
+      </button>
+    </div>
+  {/if}
 
   <!-- Jeton affiché une seule fois : le dire avant de le montrer, pas après. -->
   <Modal
@@ -677,12 +681,6 @@
     font-weight: 800;
     letter-spacing: -0.02em;
     margin: 0;
-  }
-  .lead {
-    font-size: 12.5px;
-    line-height: 1.65;
-    color: var(--ep-text-secondary);
-    margin: 6px 0 0;
   }
 
   /* Onglets soulignés plutôt qu'en pastilles : le trait actif prolonge la ligne
@@ -818,42 +816,7 @@
     color: var(--ep-text-muted);
   }
 
-  .tls {
-    font-size: 11.5px;
-    color: var(--ep-text-muted);
-    line-height: 1.6;
-    margin: 0;
-    border-left: 2px solid var(--ep-border-strong);
-    padding-left: 10px;
-    max-width: 78ch;
-  }
-  .tls strong {
-    color: var(--ep-text-secondary);
-    display: block;
-  }
 
-  .why {
-    font-size: 12px;
-    color: var(--ep-text-secondary);
-  }
-  .why summary {
-    cursor: pointer;
-    color: var(--ep-text-secondary);
-    font-size: 12px;
-  }
-  .why p,
-  .why ol {
-    margin: 8px 0 0;
-    line-height: 1.6;
-    max-width: 78ch;
-  }
-  .why ol {
-    padding-left: 20px;
-  }
-  .ord-title {
-    font-weight: 600;
-    color: var(--ep-text-primary);
-  }
 
   .warn {
     border: 1px solid color-mix(in srgb, var(--ep-danger) 45%, var(--ep-border));

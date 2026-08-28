@@ -487,7 +487,6 @@
 {/if}
 
 <Modal open={createOpen} title={$_('site.create_title')} onclose={() => (createOpen = false)}>
-  <p>{$_('site.create_hint')}</p>
   <label class="lp-field">
     {$_('site.name_label')}
     <input
@@ -559,6 +558,22 @@
     gap: 12px;
     flex-wrap: wrap;
     margin-bottom: 14px;
+  }
+  /*
+    Le bloc de titre doit pouvoir rétrécir. Sans ça il réclame sa largeur de
+    contenu, et « Actualisé il y a 1 min. » — qui s'allonge tout seul avec le
+    temps — pousse les deux boutons sur une deuxième ligne : 40 px de haut de
+    page qui apparaissent et disparaissent selon l'âge du rafraîchissement.
+    On préfère que la ligne de comptage passe à la ligne, elle, c'est stable.
+
+    Base explicite et non `auto` : avec `flex-wrap`, le navigateur passe à la
+    ligne AVANT de rétrécir un élément dont la base vaut son contenu. Une base
+    de 180 px laisse les deux boutons tenir sur la même ligne, et c'est la
+    ligne de comptage qui se replie.
+  */
+  .page-head > div:first-child {
+    flex: 1 1 180px;
+    min-width: 0;
   }
   h1 {
     font-size: 20px;

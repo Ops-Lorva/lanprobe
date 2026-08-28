@@ -2,7 +2,6 @@
   import { _ } from 'svelte-i18n';
   import LogoMark from '$desktop/components/LogoMark.svelte';
   import Icons from '$desktop/components/Icons.svelte';
-  import LangTheme from '$lib/components/LangTheme.svelte';
   import { route } from '$lib/router';
   import FleetView from './FleetView.svelte';
   import ProbeView from './ProbeView.svelte';
@@ -62,8 +61,9 @@
       {/each}
     </div>
 
+    <!-- Langue et thème sont partis dans Réglages → Général : ce sont des
+         préférences, pas de la navigation, et la barre n'a plus à les porter. -->
     <div class="nav-bottom">
-      <LangTheme />
       <button class="nav-item logout" onclick={logout}>
         <Icons name="chevron-right" size={15} />
         <span class="nav-label">{$_('nav.logout')}</span>

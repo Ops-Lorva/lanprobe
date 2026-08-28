@@ -353,7 +353,6 @@
           </button>
           <button class="lp-btn sm" onclick={() => (editing = false)}>{$_('common.cancel')}</button>
         </div>
-        <p class="hint">{$_('probe.rename_hint')}</p>
         {#if nameError}<p class="err" role="alert">{nameError}</p>{/if}
       {:else}
         <div class="title-row">
@@ -624,7 +623,6 @@
     onclose={() => (reOpen = false)}
   >
     <p class="keep"><strong>{$_('probe.reenroll_keeps')}</strong></p>
-    <p>{$_('probe.reenroll_keeps_body')}</p>
     {#if reError}
       <p class="err" role="alert">{reError}</p>
     {:else if reCode}
@@ -740,11 +738,6 @@
     font-family: var(--ep-font-sans);
     font-size: 15px;
     font-weight: 700;
-  }
-  .hint {
-    font-size: 11px;
-    color: var(--ep-text-muted);
-    margin: 6px 0 0;
   }
   .badges {
     display: flex;
