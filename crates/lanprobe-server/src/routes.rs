@@ -16,7 +16,8 @@ use axum::{
 };
 use lanprobe_core::configure::{apply_dhcp, apply_static, NetworkConfig};
 use lanprobe_core::discovery::{
-    get_hostname, get_local_network_cidr, parse_cidr, read_arp_table, DiscoveredHost,
+    get_hostname, get_local_network_cidr, parse_cidr, read_arp_table, scan_interface,
+    DiscoveredHost,
 };
 use lanprobe_core::interfaces::{get_interface_details, list_interfaces};
 use lanprobe_core::iperf::run_iperf3;
@@ -215,10 +216,20 @@ async fn dispatch(cmd: &str, args: Value, state: &AppState) -> Result<Value, Str
             let events = state.events.clone();
             let discovery = state.discovery.clone();
             let cidr_for_spawn = cidr.clone();
+            // La table ARP est lue à travers l'interface choisie : sans ça,
+            // les voisins du Wi-Fi du technicien s'affichent comme des hôtes
+            // du VLAN client dès que les deux plans se recouvrent.
+            let scan_iface = scan_interface(
+                state
+                    .selected_interface
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_deref(),
+            );
 
             tokio::spawn(async move {
                 let cidr = cidr_for_spawn;
-                let arp_initial = read_arp_table().await;
+                let arp_initial = read_arp_table(scan_iface.as_ref()).await;
                 if cancel.load(Ordering::SeqCst) {
                     let _ = events.send(done_event(&cidr, 0));
                     return;
@@ -287,7 +298,7 @@ async fn dispatch(cmd: &str, args: Value, state: &AppState) -> Result<Value, Str
                     let _ = events.send(done_event(&cidr, 0));
                     return;
                 }
-                let arp_after = read_arp_table().await;
+                let arp_after = read_arp_table(scan_iface.as_ref()).await;
                 for (ip, mac) in &arp_after {
                     if arp_initial.contains_key(ip) { continue; }
                     if let Some(i) = parse_ip_u32(ip) {
