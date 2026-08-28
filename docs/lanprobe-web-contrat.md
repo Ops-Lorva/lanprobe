@@ -508,3 +508,26 @@ l'avant et l'après.
 
 Le ré-enrôlement remplace le jeton de sonde **et** le jeton d'écriture Influx :
 les identifiants de la machine compromise ne valent plus rien.
+
+## 10. Phase 2 — piloter une sonde à distance (non implémenté)
+
+Objectif : cliquer sur une sonde dans le parc et **piloter la vraie LanProbe du
+site** — scan, ports, speedtest — depuis le navigateur, sans VPN ni port ouvert
+chez le client.
+
+La moitié du travail est déjà faite : `lanprobe-server` sert **l'intégralité** de
+l'interface LanProbe en HTTP+WebSocket. L'obstacle est le sens de la connexion —
+la sonde est derrière le NAT du client, le hub ne peut pas l'appeler.
+
+**Approche : tunnel inversé sur le canal existant.** La sonde garde une
+connexion sortante vers le hub (le battement de cœur en pose déjà la base), et
+le hub y multiplexe les requêtes du navigateur.
+
+⚠️ **Ça change la nature du produit côté sécurité, et il faut le traiter comme
+tel.** Aujourd'hui une sonde compromise ne peut qu'écrire de fausses mesures.
+Avec le tunnel, qui prend la main sur le hub peut **piloter les outils réseau de
+tous les sites** — scanner, sonder les ports, depuis l'intérieur de chaque
+réseau client. Conditions minimales : désactivé par défaut, activable **par
+sonde**, révocable, et chaque session journalisée.
+
+À cadrer pour lui-même, pas à greffer.

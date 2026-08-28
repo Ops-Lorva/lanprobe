@@ -43,6 +43,9 @@ pub struct AppState {
     pub auth: Arc<Auth>,
     pub settings: Settings,
     pub influx: Arc<Influx>,
+    /// Vrai quand le hub termine lui-même le TLS. Faux quand il sert en clair
+    /// derrière un reverse proxy — le cas courant en auto-hébergement.
+    pub tls: bool,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -155,10 +158,15 @@ struct Credentials {
     password: String,
 }
 
-async fn login(State(state): State<AppState>, Json(body): Json<Credentials>) -> Response {
+async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Credentials>,
+) -> Response {
+    let secure = is_https(&state, &headers);
     match state.auth.login(&body.username, &body.password) {
         Ok(token) => (
-            [(header::SET_COOKIE, session_cookie(&token, false))],
+            [(header::SET_COOKIE, session_cookie(&token, false, secure))],
             Json(json!({ "ok": true })),
         )
             .into_response(),
@@ -171,18 +179,37 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         state.auth.logout(&token);
     }
     (
-        [(header::SET_COOKIE, session_cookie("", true))],
+        [(header::SET_COOKIE, session_cookie("", true, is_https(&state, &headers)))],
         Json(json!({ "ok": true })),
     )
         .into_response()
 }
 
-fn session_cookie(token: &str, expired: bool) -> String {
+/// Vrai si le client parle en HTTPS — soit directement, soit via un reverse
+/// proxy qui a terminé le TLS et l'annonce par `X-Forwarded-Proto`.
+///
+/// C'est ce qui décide de l'attribut `Secure` du cookie. Le poser en dur
+/// rendrait la connexion impossible derrière un proxy en clair : le navigateur
+/// refuse silencieusement le cookie, l'utilisateur reçoit un 200 puis retombe
+/// sur l'écran de connexion, sans le moindre message d'erreur.
+fn is_https(state: &AppState, headers: &HeaderMap) -> bool {
+    if state.tls {
+        return true;
+    }
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        // Un proxy peut chaîner les valeurs ; la première est celle du client.
+        .map(|v| v.split(',').next().unwrap_or("").trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+fn session_cookie(token: &str, expired: bool, secure: bool) -> String {
     let mut builder = Cookie::build((SESSION_COOKIE, token.to_string()))
         .http_only(true)
         .same_site(SameSite::Strict)
         .path("/")
-        .secure(true);
+        .secure(secure);
     if expired {
         builder = builder.max_age(cookie::time::Duration::seconds(0));
     }
@@ -1128,6 +1155,9 @@ mod tests {
                 auth,
                 settings,
                 influx,
+                // Les tests jouent le cas courant : hub en clair derrière un
+                // proxy. Le cookie `Secure` est vérifié via `X-Forwarded-Proto`.
+                tls: false,
             };
             let router = build_router(state.clone());
             Self {
@@ -1317,6 +1347,35 @@ mod tests {
         let cookie = cookies.first().expect("un cookie est attendu");
         assert!(cookie.contains("HttpOnly"), "cookie non HttpOnly : {cookie}");
         assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+        // En clair, `Secure` doit être absent : le navigateur refuserait le
+        // cookie et l'utilisateur retomberait sur l'écran de connexion sans
+        // le moindre message d'erreur.
+        assert!(!cookie.contains("Secure"), "{cookie}");
+    }
+
+    #[tokio::test]
+    async fn session_cookie_is_secure_behind_an_https_proxy() {
+        // Le proxy a terminé le TLS : le cookie doit reprendre `Secure`,
+        // sinon il voyagerait en clair sur le dernier tronçon si quelqu'un
+        // atteignait le hub sans passer par le proxy.
+        let h = Harness::with_admin().await;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-forwarded-proto", "https")
+            .body(Body::from(
+                serde_json::json!({ "username": "admin", "password": PASSWORD }).to_string(),
+            ))
+            .unwrap();
+        let response = h.router.clone().oneshot(request).await.unwrap();
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         assert!(cookie.contains("Secure"), "{cookie}");
 
         let session = cookie.split(';').next().unwrap().to_string();

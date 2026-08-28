@@ -20,8 +20,17 @@ struct Args {
     #[arg(long, env = "LANPROBE_WEB_HOST", default_value = "0.0.0.0")]
     host: String,
 
-    #[arg(long, env = "LANPROBE_WEB_PORT", default_value_t = 8443)]
+    #[arg(long, env = "LANPROBE_WEB_PORT", default_value_t = 8080)]
     port: u16,
+
+    /// Termine le TLS dans le hub, avec un certificat auto-signé.
+    ///
+    /// Par défaut le hub sert en clair : en auto-hébergement il vit presque
+    /// toujours derrière un reverse proxy qui porte déjà un vrai certificat, et
+    /// un certificat auto-signé n'y ajouterait qu'un avertissement de
+    /// navigateur. L'option existe pour qui n'a pas de proxy.
+    #[arg(long, env = "LANPROBE_WEB_TLS", default_value_t = false)]
+    tls: bool,
 
     /// Volume du hub : base SQLite, certificat, jeton opérateur, token de setup.
     #[arg(long, env = "LANPROBE_WEB_CONFIG_DIR", default_value = "/data/lanprobe")]
@@ -101,21 +110,36 @@ async fn main() -> Result<(), String> {
         auth,
         settings,
         influx,
+        tls: args.tls,
     };
     let router = web::build_router(state);
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port)
         .parse()
         .map_err(|e| format!("adresse d'écoute invalide : {e}"))?;
-    let tls_paths = tls::tls_paths(&args.config_dir);
-    let tls_config = tls::server_config(&tls_paths)?;
+    if args.tls {
+        let tls_paths = tls::tls_paths(&args.config_dir);
+        let tls_config = tls::server_config(&tls_paths)?;
+        tracing::info!("hub à l'écoute sur https://{addr}");
+        return axum_server::bind_rustls(
+            addr,
+            axum_server::tls_rustls::RustlsConfig::from_config(tls_config),
+        )
+        .serve(router.into_make_service())
+        .await
+        .map_err(|e| e.to_string());
+    }
 
-    tracing::info!("hub à l'écoute sur https://{addr}");
-    axum_server::bind_rustls(
-        addr,
-        axum_server::tls_rustls::RustlsConfig::from_config(tls_config),
-    )
-    .serve(router.into_make_service())
-    .await
-    .map_err(|e| e.to_string())
+    tracing::info!("hub à l'écoute sur http://{addr}");
+    tracing::warn!(
+        "le hub sert en clair : placez-le derrière un reverse proxy en HTTPS. \
+         Sans proxy, le mot de passe administrateur circule en clair sur le \
+         réseau — utilisez --tls si vous n'en avez pas."
+    );
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| e.to_string())?;
+    axum::serve(listener, router.into_make_service())
+        .await
+        .map_err(|e| e.to_string())
 }
