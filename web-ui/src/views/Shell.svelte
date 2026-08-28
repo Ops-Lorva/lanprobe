@@ -68,9 +68,6 @@
         <Icons name="chevron-right" size={15} />
         <span class="nav-label">{$_('nav.logout')}</span>
       </button>
-      {#if version}
-        <span class="version lp-mono">{$_('nav.version', { values: { version } })}</span>
-      {/if}
     </div>
   </nav>
 
@@ -185,11 +182,6 @@
   .nav-label {
     flex: 1;
   }
-  .version {
-    font-size: 9.5px;
-    color: var(--ep-text-dim);
-    padding: 0 10px 2px;
-  }
 
   main {
     flex: 1;
@@ -242,9 +234,6 @@
       align-items: center;
       border-top: none;
       padding-top: 0;
-    }
-    .version {
-      display: none;
     }
     main {
       padding: 14px 12px 36px;

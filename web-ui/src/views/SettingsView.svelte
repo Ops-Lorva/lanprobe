@@ -29,6 +29,8 @@
   let org = $state('');
   let bucket = $state('');
   let hubPublicUrl = $state('');
+  // La version vient de /api/status, la seule route publique du hub.
+  let hubVersion = $state('—');
   let retention = $state('0');
   let heartbeat = $state('60');
 
@@ -42,6 +44,7 @@
     org = s.influx_org;
     bucket = s.influx_bucket;
     hubPublicUrl = s.hub_public_url ?? '';
+    api.status().then((st) => (hubVersion = st.version || '—')).catch(() => {});
     retention = String(s.retention_days);
     heartbeat = String(s.heartbeat_interval_secs);
   }
@@ -370,6 +373,11 @@
       <h2 class="lp-title">{$_('settings.device_title')}</h2>
       <p class="sub">{$_('settings.device_note')}</p>
       <LangTheme labelled />
+    </section>
+
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.hub_version_title')}</h2>
+      <p class="ro lp-mono">{$_('settings.hub_version', { values: { version: hubVersion } })}</p>
     </section>
   </div>
   {:else if tab === 'probes'}

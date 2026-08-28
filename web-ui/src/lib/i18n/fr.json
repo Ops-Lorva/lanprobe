@@ -114,7 +114,9 @@
     "device_note": "Langue et thème ne valent que pour ce navigateur.",
     "hub_url_title": "Adresse du hub",
     "hub_url_label": "Adresse publique de ce hub",
-    "hub_url_hint": "L'adresse par laquelle vos sondes joignent ce hub. C'est le seul réglage d'adresse : tout le reste en découle."
+    "hub_url_hint": "L'adresse par laquelle vos sondes joignent ce hub. C'est le seul réglage d'adresse : tout le reste en découle.",
+    "hub_version_title": "Version",
+    "hub_version": "Hub {version}"
   },
   "nav": {
     "fleet": "Parc",

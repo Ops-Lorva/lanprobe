@@ -114,7 +114,9 @@
     "device_note": "Language and theme apply to this browser only.",
     "hub_url_title": "Hub address",
     "hub_url_label": "Public address of this hub",
-    "hub_url_hint": "The address your probes use to reach this hub. It is the only address setting: everything else follows from it."
+    "hub_url_hint": "The address your probes use to reach this hub. It is the only address setting: everything else follows from it.",
+    "hub_version_title": "Version",
+    "hub_version": "Hub {version}"
   },
   "nav": {
     "fleet": "Fleet",
