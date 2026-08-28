@@ -101,10 +101,11 @@ pub fn binding_for(details: &InterfaceDetails) -> Option<DnsBinding> {
 }
 
 /// Ce que la sonde doit faire pour mesurer le DNS, selon l'interface choisie.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DnsPlan {
     /// Aucune interface imposée : le résolveur système mesure bien la route
     /// par défaut, qui est ce qu'on veut mesurer.
+    #[default]
     System,
     /// Interface imposée : requêtes émises depuis son IP, vers ses serveurs.
     Bound(DnsBinding),
