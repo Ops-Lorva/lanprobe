@@ -11,6 +11,56 @@
   import { influxDb, type InfluxDbConfig } from '../stores/influxdb';
   import { scheduler } from '../stores/scheduler';
 
+  // ── Rattachement à un hub ───────────────────────────────────────────────
+  let hub = $state<{ enrolled: boolean; url: string; name: string; site: string }>({
+    enrolled: false, url: '', name: '', site: '',
+  });
+  let hubUrl = $state('');
+  let hubName = $state('');
+  let hubCode = $state('');
+  let hubSelfSigned = $state(false);
+  let hubBusy = $state(false);
+  let hubError = $state('');
+
+  async function refreshHub() {
+    try {
+      hub = await invoke('cmd_hub_status');
+    } catch {
+      // Le rattachement est optionnel : son indisponibilité ne doit pas
+      // empêcher le reste des réglages de s'afficher.
+    }
+  }
+
+  async function connectHub() {
+    hubError = '';
+    hubBusy = true;
+    try {
+      await invoke('cmd_hub_enroll', {
+        args: {
+          url: hubUrl.trim(),
+          name: hubName.trim(),
+          code: hubCode.trim() || null,
+          allow_self_signed: hubSelfSigned,
+        },
+      });
+      hubCode = '';
+      await refreshHub();
+    } catch (e) {
+      hubError = String(e);
+    } finally {
+      hubBusy = false;
+    }
+  }
+
+  async function forgetHub() {
+    try {
+      await invoke('cmd_hub_forget');
+      await refreshHub();
+    } catch (e) {
+      hubError = String(e);
+    }
+  }
+
   const langs: { value: Lang; labelKey: string }[] = [
     { value: 'en', labelKey: 'settings.language.english' },
     { value: 'fr', labelKey: 'settings.language.french' },
@@ -142,6 +192,8 @@
     serverBusy = false;
   }
 
+  onMount(refreshHub);
+
   onMount(async () => {
     try { appVersion = await invoke<string>('cmd_app_version'); } catch {}
     try { installType = await invoke<'pkg' | 'dmg' | 'unknown' | 'headless-server'>('cmd_install_type'); } catch {}
@@ -269,6 +321,50 @@
 <div class="page">
   <h1>{$_('settings.title')}</h1>
   <p class="page-sub">{readOnly ? $_('settings.web_readonly_hint') : 'LanProbe · v' + appVersion}</p>
+
+  <!-- Rattachement à un hub : entièrement optionnel. Sans lui, LanProbe
+       fonctionne exactement comme avant, sans compte ni serveur. -->
+  <div class="group">
+    <section class="section">
+      <div class="section-head">{$_('settings.hub.title')}</div>
+      {#if hub.enrolled}
+        <p class="hub-state">
+          {$_('settings.hub.connected')} <strong>{hub.url}</strong>
+          — <strong>{hub.name}</strong>{#if hub.site} · {$_('settings.hub.site')} {hub.site}{/if}
+        </p>
+        <button class="hub-btn ghost" onclick={forgetHub} disabled={readOnly}>
+          {$_('settings.hub.forget')}
+        </button>
+        <p class="hub-hint">{$_('settings.hub.forget_hint')}</p>
+      {:else}
+        <p class="hub-hint">{$_('settings.hub.lead')}</p>
+        <label class="hub-field">
+          {$_('settings.hub.url')}
+          <input type="url" bind:value={hubUrl} placeholder="https://lanprobe.exemple.fr" disabled={readOnly} />
+        </label>
+        <label class="hub-field">
+          {$_('settings.hub.name')}
+          <input type="text" bind:value={hubName} placeholder="Paris" disabled={readOnly} />
+        </label>
+        <label class="hub-field">
+          {$_('settings.hub.code')}
+          <input type="text" bind:value={hubCode} placeholder="K7M2-4PQX" spellcheck="false" disabled={readOnly} />
+        </label>
+        <p class="hub-hint">{$_('settings.hub.code_hint')}</p>
+        <label class="hub-check">
+          <input type="checkbox" bind:checked={hubSelfSigned} disabled={readOnly} />
+          {$_('settings.hub.self_signed')}
+        </label>
+        <p class="hub-hint">{$_('settings.hub.self_signed_hint')}</p>
+        <button class="hub-btn" onclick={connectHub} disabled={readOnly || hubBusy || !hubUrl || !hubName || !hubCode}>
+          {hubBusy ? $_('settings.hub.connecting') : $_('settings.hub.connect')}
+        </button>
+        {#if hubError}
+          <p class="hub-error" role="alert">{$_('settings.hub.error')} — {hubError}</p>
+        {/if}
+      {/if}
+    </section>
+  </div>
 
   <!-- Apparence : Thème + Layout groupés dans une carte -->
   <div class="group">
@@ -612,6 +708,18 @@
 </div>
 
 <style>
+  .hub-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 13px; }
+  .hub-field input { padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border, #333);
+    background: var(--input-bg, #1a1a1a); color: inherit; font-size: 13px; }
+  .hub-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 4px 0; }
+  .hub-hint { font-size: 12px; opacity: .65; margin: 2px 0 10px; }
+  .hub-state { font-size: 13px; margin-bottom: 10px; }
+  .hub-error { font-size: 12px; color: var(--danger, #f87171); margin-top: 8px; }
+  .hub-btn { padding: 7px 14px; border-radius: 6px; border: 1px solid transparent;
+    background: var(--accent, #6366f1); color: #fff; font-size: 13px; cursor: pointer; }
+  .hub-btn.ghost { background: transparent; border-color: var(--border, #333); color: inherit; }
+  .hub-btn:disabled { opacity: .5; cursor: default; }
+
   .page { padding: 24px 28px; max-width: 680px; }
   h1 { font-size: 18px; font-weight: 800; margin-bottom: 6px; letter-spacing: -.2px; }
   .page-sub { font-size: 12px; color: var(--ep-text-muted); margin-bottom: 24px; }

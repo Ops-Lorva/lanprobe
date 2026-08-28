@@ -404,6 +404,23 @@
       "interval_disabled": "Disabled (0 = off)",
       "interval_unit": "min",
       "hint": "Automatically run probes at regular intervals. Results are exported to InfluxDB if enabled."
+    },
+    "hub": {
+      "title": "Server connection",
+      "lead": "Attach this probe to your LanProbe hub to follow it remotely.",
+      "url": "Hub address",
+      "name": "Name of this probe",
+      "code": "Enrolment code",
+      "code_hint": "Generated in the hub, valid for 15 minutes.",
+      "self_signed": "Accept a self-signed certificate",
+      "self_signed_hint": "Only tick this if your hub has no valid certificate.",
+      "connect": "Connect",
+      "connecting": "Connecting…",
+      "connected": "Attached to",
+      "site": "Site",
+      "forget": "Detach from hub",
+      "forget_hint": "No measurement is deleted: those already sent stay in the hub.",
+      "error": "Attachment failed"
     }
   },
   "scheduler": {

@@ -404,6 +404,23 @@
       "interval_disabled": "Désactivé (0 = désactivé)",
       "interval_unit": "min",
       "hint": "Lance automatiquement des sondes à intervalles réguliers. Les résultats sont exportés vers InfluxDB si activé."
+    },
+    "hub": {
+      "title": "Connexion au serveur",
+      "lead": "Rattachez cette sonde à votre hub LanProbe pour la suivre à distance.",
+      "url": "Adresse du hub",
+      "name": "Nom de cette sonde",
+      "code": "Code d'enrôlement",
+      "code_hint": "Généré dans le hub, valable 15 minutes.",
+      "self_signed": "Accepter un certificat auto-signé",
+      "self_signed_hint": "À cocher seulement si votre hub n'a pas de certificat valide.",
+      "connect": "Se connecter",
+      "connecting": "Connexion…",
+      "connected": "Rattachée à",
+      "site": "Site",
+      "forget": "Détacher du hub",
+      "forget_hint": "Aucune mesure n'est supprimée : celles déjà envoyées restent dans le hub.",
+      "error": "Échec du rattachement"
     }
   },
   "scheduler": {

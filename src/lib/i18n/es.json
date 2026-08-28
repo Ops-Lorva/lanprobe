@@ -404,6 +404,23 @@
       "interval_disabled": "Desactivado (0 = off)",
       "interval_unit": "min",
       "hint": "Ejecuta sondas automáticamente a intervalos regulares. Los resultados se exportan a InfluxDB si está activado."
+    },
+    "hub": {
+      "title": "Conexión al servidor",
+      "lead": "Vincule esta sonda a su hub LanProbe para seguirla a distancia.",
+      "url": "Dirección del hub",
+      "name": "Nombre de esta sonda",
+      "code": "Código de inscripción",
+      "code_hint": "Generado en el hub, válido 15 minutos.",
+      "self_signed": "Aceptar un certificado autofirmado",
+      "self_signed_hint": "Marque solo si su hub no tiene un certificado válido.",
+      "connect": "Conectar",
+      "connecting": "Conectando…",
+      "connected": "Vinculada a",
+      "site": "Sitio",
+      "forget": "Desvincular del hub",
+      "forget_hint": "No se elimina ninguna medición: las ya enviadas permanecen en el hub.",
+      "error": "Fallo al vincular"
     }
   },
   "scheduler": {

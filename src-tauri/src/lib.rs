@@ -730,6 +730,74 @@ fn cmd_server_mode_set_account(
     shared.auth.set_or_update_credentials(args.username.trim(), &args.password)
 }
 
+// ── Rattachement à un hub ──────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct HubEnrollArgs {
+    url: String,
+    name: String,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    site: Option<String>,
+    #[serde(default)]
+    allow_self_signed: bool,
+}
+
+/// État du rattachement, sans aucun secret : l'interface a besoin de savoir
+/// *si* la sonde est rattachée et à quoi, jamais avec quel jeton.
+#[tauri::command]
+fn cmd_hub_status(state: tauri::State<'_, SharedState>) -> serde_json::Value {
+    let cfg = lanprobe_server::hub::load(&state);
+    serde_json::json!({
+        "enrolled": cfg.is_enrolled(),
+        "url": cfg.url,
+        "probe_id": cfg.probe_id,
+        "name": cfg.name,
+        "site": cfg.site,
+        "heartbeat_interval_secs": cfg.heartbeat_interval_secs,
+    })
+}
+
+#[tauri::command]
+async fn cmd_hub_enroll(
+    state: tauri::State<'_, SharedState>,
+    args: HubEnrollArgs,
+) -> Result<serde_json::Value, String> {
+    let config_dir = lanprobe_server::default_config_dir();
+    let key = lanprobe_server::secrets::load_or_create_key(&config_dir)?;
+    let credentials = match (&args.username, &args.password) {
+        (Some(u), Some(p)) => Some((u.as_str(), p.as_str(), args.site.as_deref().unwrap_or(""))),
+        _ => None,
+    };
+    let cfg = lanprobe_server::hub::enroll(
+        &state,
+        &key,
+        &args.url,
+        &args.name,
+        args.code.as_deref(),
+        credentials,
+        args.allow_self_signed,
+    )
+    .await?;
+    Ok(serde_json::json!({
+        "probe_id": cfg.probe_id,
+        "name": cfg.name,
+        "site": cfg.site,
+    }))
+}
+
+/// Détache la sonde. **Ne supprime aucune mesure** : celles déjà écrites
+/// appartiennent au hub, pas à la sonde.
+#[tauri::command]
+fn cmd_hub_forget(state: tauri::State<'_, SharedState>) -> Result<(), String> {
+    lanprobe_server::hub::forget(&state)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config_dir = lanprobe_server::default_config_dir();
@@ -773,6 +841,26 @@ pub fn run() {
                     payload: serde_json::to_value(tick).unwrap_or(serde_json::Value::Null),
                 });
             }));
+            // Rattachement à un hub : battement de cœur et envoi des mesures.
+            // Tant qu'aucun enrôlement n'existe, ces tâches dorment — LanProbe
+            // fonctionne exactement comme avant, sans compte ni serveur.
+            let hub_state = (*shared).clone();
+            let export_state = (*shared).clone();
+            let key = lanprobe_server::secrets::load_or_create_key(
+                &lanprobe_server::default_config_dir(),
+            )
+            .ok();
+            if let Some(key) = key {
+                let status = std::sync::Arc::new(lanprobe_server::hub::WriteStatus::default());
+                let key_for_export = key.clone();
+                tauri::async_runtime::spawn(lanprobe_server::hub::run(hub_state, key, status));
+                tauri::async_runtime::spawn(lanprobe_server::influxdb::run(
+                    export_state,
+                    Some(key_for_export),
+                ));
+            } else {
+                eprintln!("clé de scellement indisponible — rattachement à un hub impossible");
+            }
             let _ = app_handle;
             Ok(())
         })
@@ -788,6 +876,9 @@ pub fn run() {
             cmd_get_discovery_snapshot,
             cmd_clear_discovery,
             cmd_get_monitoring_snapshot,
+            cmd_hub_status,
+            cmd_hub_enroll,
+            cmd_hub_forget,
             cmd_config_get,
             cmd_config_set,
             cmd_apply_static,

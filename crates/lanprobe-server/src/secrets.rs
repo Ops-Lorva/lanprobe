@@ -35,6 +35,7 @@ pub const SEALED_PREFIX: &str = "enc:v1:";
 /// volume de données (base64 de 32 octets).
 pub const KEY_ENV: &str = "LANPROBE_SECRET_KEY";
 
+#[derive(Clone)]
 pub struct SecretKey {
     bytes: [u8; 32],
 }
