@@ -140,7 +140,12 @@ const MIGRATIONS: &[&str] = &[
 pub enum DbError {
     Conflict(String),
     NotFound(String),
+    /// L'appelant n'est pas authentifié, ou ses identifiants sont faux.
     Unauthorized(String),
+    /// L'appelant est bien authentifié, mais son rôle ne suffit pas. À
+    /// distinguer d'`Unauthorized` : répondre 401 le renverrait à l'écran de
+    /// connexion, où se reconnecter ne changerait rien.
+    Forbidden(String),
     Internal(String),
 }
 
@@ -150,6 +155,7 @@ impl std::fmt::Display for DbError {
             DbError::Conflict(m)
             | DbError::NotFound(m)
             | DbError::Unauthorized(m)
+            | DbError::Forbidden(m)
             | DbError::Internal(m) => write!(f, "{m}"),
         }
     }
@@ -2413,7 +2419,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(all.len(), 3, "le plafond ne doit pas tronquer un journal court");
-        assert!(AUDIT_MAX_LIMIT <= 1000, "un plafond qui ne plafonne rien ne sert à rien");
+        // Vérifié à la compilation : un plafond qui ne plafonne rien ne sert à rien.
+        const { assert!(AUDIT_MAX_LIMIT <= 1000) };
     }
 
     #[test]
