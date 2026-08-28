@@ -822,6 +822,15 @@ pub fn restore(req: RestoreRequest<'_>) -> BackupResult<RestoreReport> {
     } else {
         let aside = free_aside_dir(req.config_dir, req.now)?;
         for name in &occupied {
+            // ⚠️ Le jeton opérateur d'Influx reste en place. Il appartient à
+            // l'InfluxDB qui tourne, pas à l'archive : le déplacer laissait le
+            // conteneur sans jeton au redémarrage, et son entrypoint refusait
+            // de démarrer — « InfluxDB semble déjà initialisé mais aucun jeton
+            // n'est persisté ». La restauration réussissait et rendait le hub
+            // impossible à relancer.
+            if name == "influx-operator-token" {
+                continue;
+            }
             let _ = std::fs::rename(req.config_dir.join(name), aside.join(name));
         }
         Some(aside)
