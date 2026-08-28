@@ -85,7 +85,7 @@
     aria-label={label}
     title={label}
   >
-    <Icons name="settings" size={15} />
+    <Icons name="gear" size={15} />
     <svg
       class="caret"
       width="9"
