@@ -983,3 +983,27 @@ contrairement à Influx, joint en local sur un certificat auto-signé dont le hu
 épingle l'empreinte, un relais SMTP est une machine distante quelconque, et
 accepter n'importe quel certificat livrerait le mot de passe au premier
 intermédiaire venu.
+
+## 15. Ce que la sonde raconte d'elle-même (non implémenté)
+
+Le battement de cœur transporte, en plus de son état :
+
+```json
+{ "public_ip": "88.120.x.x", "interface": "en0",
+  "local_ips": ["10.6.8.42/24"], "gateway": "10.6.8.1" }
+```
+
+L'IP publique s'affiche sur la ligne du parc — c'est elle qui identifie le site
+d'un coup d'œil et qui trahit un changement d'opérateur ou une bascule sur un
+lien de secours. L'interface et les adresses locales vont sur le tableau de bord
+de la sonde, comme dans l'app.
+
+⚠️ **L'IP publique ne se redemande pas à chaque battement.** La connaître exige
+un appel sortant vers un service tiers ; le faire toutes les minutes pour chaque
+sonde du parc, c'est marteler un service gratuit et publier son trafic. La sonde
+la met en cache et ne la rafraîchit **qu'au changement d'interface ou toutes les
+6 heures** — elle change rarement, et un changement compte plus que sa fraîcheur.
+
+Le hub garde la **dernière valeur connue** avec sa date : une sonde hors ligne
+doit continuer d'afficher l'adresse qu'elle avait, pas un tiret. C'est justement
+quand elle ne répond plus qu'on veut savoir où elle était.
