@@ -1038,12 +1038,19 @@ async fn test_advertise(State(state): State<AppState>, headers: HeaderMap) -> Re
 
 // ── Influx vu depuis les réglages ──────────────────────────────────────────
 
-async fn influx_overview(State(state): State<AppState>) -> Response {
+async fn influx_overview(State(state): State<AppState>, headers: HeaderMap) -> Response {
     // L'utilisateur ne doit jamais avoir à administrer Influx, mais il doit
     // pouvoir aller voir ses données. Aucun jeton dans cette réponse.
     let health = state.influx.health().await;
+    // Deux adresses, et les confondre coûte cher : `url` est celle que le hub
+    // emprunte depuis l'intérieur du conteneur (`127.0.0.1`), inutilisable
+    // depuis Grafana. `grafana_url` est celle à coller dans Grafana — même
+    // hôte public que le hub, port d'Influx.
+    let (grafana_url, source) = state.influx.resolve_advertise_url(host_header(&headers).as_deref());
     ok_json(json!({
         "url": state.settings.influx_url(),
+        "grafana_url": grafana_url,
+        "grafana_url_source": source.as_str(),
         "org": state.settings.influx_org(),
         "bucket": state.settings.influx_bucket(),
         "provisioned": state.influx.is_ready(),
