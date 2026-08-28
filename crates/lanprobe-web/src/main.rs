@@ -312,12 +312,24 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
             } else {
                 args.backup_dir.join(archive)
             };
+            // ⚠️ Le jeton opérateur **de l'instance vivante**, capturé AVANT
+            // que la restauration n'écrase le fichier.
+            //
+            // `influx restore` s'authentifie auprès de l'InfluxDB en place, qui
+            // porte encore ses propres jetons — ceux de l'archive n'y existent
+            // pas. Utiliser le jeton de l'archive donnait un `401` à tous les
+            // coups : la restauration des mesures n'a donc jamais pu
+            // fonctionner. Après un `--full` réussi, l'instance adopte les
+            // jetons de l'archive, et le fichier déjà remis en place devient
+            // le bon.
+            let live_token = influx::load_operator_token(&args.config_dir).ok();
+
             let report = backup::restore(backup::RestoreRequest {
                 archive: &path,
                 config_dir: &args.config_dir,
                 confirm_overwrite: *force,
-                // Le jeton opérateur qu'il faudrait est DANS l'archive : le
-                // volet InfluxDB se joue après, une fois les fichiers remis.
+                // Le volet InfluxDB se joue après, avec le jeton capturé
+                // ci-dessus — pas avec celui que l'archive vient de poser.
                 influx: None,
                 now: backup::now(),
             })
@@ -338,7 +350,7 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
             // l'archive sont en place, on peut parler à InfluxDB.
             let db = open_volume(args)?;
             let settings = Settings::new(db.clone());
-            match influx_from_volume(args, settings) {
+            match influx_target_with_token(args, settings, live_token) {
                 Some(target) => match backup::restore_influx(&path, &target) {
                     Ok(()) => println!("  mesures InfluxDB restaurées"),
                     Err(e) => eprintln!("⚠️  mesures InfluxDB non restaurées : {e}"),
@@ -373,7 +385,19 @@ fn open_volume(args: &Args) -> Result<Arc<Db>, String> {
 }
 
 fn influx_from_volume(args: &Args, settings: Settings) -> Option<backup::InfluxTarget> {
-    let token = influx::load_operator_token(&args.config_dir).unwrap_or_default();
-    let influx = influx::Influx::new(settings, token);
+    let token = influx::load_operator_token(&args.config_dir).ok();
+    influx_target_with_token(args, settings, token)
+}
+
+/// Construit la cible InfluxDB avec un jeton **fourni**, et non relu du volume.
+///
+/// La restauration en a besoin : elle doit s'authentifier avec le jeton de
+/// l'instance vivante, capturé avant que l'archive n'écrase le fichier.
+fn influx_target_with_token(
+    args: &Args,
+    settings: Settings,
+    token: Option<String>,
+) -> Option<backup::InfluxTarget> {
+    let influx = influx::Influx::new(settings, token.unwrap_or_default());
     influx_backup_target(&influx, &args.influx_cli)
 }
