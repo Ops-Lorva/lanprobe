@@ -59,6 +59,14 @@ pub struct AppState {
     /// Vrai quand le hub termine lui-même le TLS. Faux quand il sert en clair
     /// derrière un reverse proxy — le cas courant en auto-hébergement.
     pub tls: bool,
+    /// Le volume du hub : base SQLite, `secret.key`, jeton opérateur,
+    /// certificats. C'est ce que la sauvegarde emporte et ce que la
+    /// restauration remplace.
+    pub config_dir: std::path::PathBuf,
+    /// Le volume des archives, monté sur `/backup` dans le conteneur.
+    pub backup_dir: std::path::PathBuf,
+    /// Chemin de la CLI `influx`, présente dans l'image du hub.
+    pub influx_cli: std::path::PathBuf,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -148,7 +156,20 @@ pub fn build_router(state: AppState) -> Router {
                 "/api/notifications/smtp",
                 put(put_smtp).delete(clear_smtp),
             )
-            .route("/api/notifications/test", post(test_notification)),
+            .route("/api/notifications/test", post(test_notification))
+            .route("/api/backup", post(create_backup))
+            .route("/api/backups", get(list_backups))
+            .route("/api/backup/restore/{file}", post(restore_named_backup))
+            .route(
+                "/api/backup/restore",
+                post(restore_uploaded_backup)
+                    // Une archive fait plusieurs centaines de Mo dès qu'elle
+                    // porte les séries : le plafond de 2 Mio d'axum la
+                    // rejetterait sans que personne comprenne pourquoi. Le
+                    // corps est écrit au fil de l'eau sur disque, jamais
+                    // gardé en mémoire.
+                    .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+            ),
     );
 
     Router::new()
@@ -1897,6 +1918,388 @@ fn flux_duration(value: &str) -> String {
     if safe.is_empty() { "-1h".into() } else { safe }
 }
 
+// ── Sauvegarde et restauration ─────────────────────────────────────────────
+
+/// Plafond du téléversement d'une archive. Généreux — une archive avec ses
+/// séries pèse lourd — mais fini : la route est réservée aux administrateurs,
+/// pas ouverte, et remplir le volume du hub reste un déni de service.
+const MAX_UPLOAD_BYTES: usize = 16 * 1024 * 1024 * 1024;
+
+/// Traduit une erreur de sauvegarde en code HTTP.
+///
+/// Tout écraser en 500 rendrait l'interface incapable de distinguer « ce
+/// fichier n'est pas une archive » (l'utilisateur s'est trompé de fichier) de
+/// « le disque est plein » (le hub a un problème). Ce sont deux écrans
+/// différents.
+fn backup_status(e: &crate::backup::BackupError) -> StatusCode {
+    use crate::backup::BackupError::*;
+    match e {
+        NotAnArchive(_) | Corrupt(_) => StatusCode::BAD_REQUEST,
+        SchemaTooNew { .. } | ConfirmationRequired(_) => StatusCode::CONFLICT,
+        Io(_) | Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn backup_error(e: crate::backup::BackupError) -> Response {
+    let status = backup_status(&e);
+    (status, Json(json!({ "error": e.to_string() }))).into_response()
+}
+
+/// La cible InfluxDB, ou `None` s'il n'y a pas de quoi l'appeler. Sans jeton
+/// opérateur `influx backup` échouerait de toute façon ; le dire à l'avance
+/// donne un message utile plutôt qu'un code de sortie.
+fn influx_target(state: &AppState) -> Option<crate::backup::InfluxTarget> {
+    state
+        .influx
+        .has_operator_token()
+        .then(|| state.influx.backup_target(state.influx_cli.clone()))
+}
+
+/// Sauvegarde immédiate, puis application de la rétention.
+///
+/// Elle existe pour le geste « je sauvegarde avant de faire quelque chose de
+/// risqué ». Le fonctionnement normal est la sauvegarde planifiée : personne
+/// ne doit avoir à penser à cliquer ici.
+async fn create_backup(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
+    // `spawn_blocking` et non `block_in_place` : la sauvegarde fait du
+    // VACUUM, du SHA-256 et de la compression — plusieurs secondes de calcul
+    // synchrone qui bloqueraient le fil d'exécution asynchrone, donc toutes
+    // les autres requêtes du hub.
+    let (db, config_dir, backup_dir, influx) = (
+        state.db.clone(),
+        state.config_dir.clone(),
+        state.backup_dir.clone(),
+        influx_target(&state),
+    );
+    let report = tokio::task::spawn_blocking(move || {
+        crate::backup::create(crate::backup::BackupRequest {
+            db: &db,
+            config_dir: &config_dir,
+            backup_dir: &backup_dir,
+            influx,
+            now: crate::backup::now(),
+        })
+    })
+    .await;
+    let report = match report {
+        Ok(report) => report,
+        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let report = match report {
+        Ok(report) => report,
+        Err(e) => {
+            audit(
+                &state,
+                Some(&actor.username),
+                "backup.create",
+                None,
+                Outcome::Failure,
+                Some(&e.to_string()),
+            );
+            return backup_error(e);
+        }
+    };
+    audit(
+        &state,
+        Some(&actor.username),
+        "backup.create",
+        Some(&report.file),
+        Outcome::Success,
+        Some(&format!(
+            "{} octets, InfluxDB {}",
+            report.bytes,
+            if report.influx_included { "inclus" } else { "absent" }
+        )),
+    );
+
+    let pruned = apply_retention(&state, Some(&actor.username));
+
+    ok_json(json!({
+        "file": report.file,
+        "bytes": report.bytes,
+        "created_at": report.created_at,
+        "hub_version": report.hub_version,
+        "schema_version": report.schema_version,
+        "influx_included": report.influx_included,
+        "influx_error": report.influx_error,
+        "pruned": pruned,
+    }))
+}
+
+/// Retire les archives au-delà de `backup_keep_last`. Chaque retrait est
+/// journalisé : c'est le seul endroit du hub qui supprime un fichier, il n'a
+/// pas le droit de le faire en silence.
+fn apply_retention(state: &AppState, actor: Option<&str>) -> Vec<String> {
+    let keep = state.settings.backup_keep_last();
+    match crate::backup::prune(&state.backup_dir, keep) {
+        Ok(removed) if removed.is_empty() => removed,
+        Ok(removed) => {
+            audit(
+                state,
+                actor,
+                "backup.retention",
+                None,
+                Outcome::Success,
+                Some(&format!(
+                    "{} archive(s) retirée(s) au-delà de {keep} : {}",
+                    removed.len(),
+                    removed.join(", ")
+                )),
+            );
+            removed
+        }
+        Err(e) => {
+            audit(
+                state,
+                actor,
+                "backup.retention",
+                None,
+                Outcome::Failure,
+                Some(&e.to_string()),
+            );
+            Vec::new()
+        }
+    }
+}
+
+async fn list_backups(State(state): State<AppState>) -> Response {
+    let archives = match crate::backup::list(&state.backup_dir) {
+        Ok(archives) => archives,
+        Err(e) => return backup_error(e),
+    };
+    ok_json(json!({
+        "dir": state.backup_dir.to_string_lossy(),
+        "enabled": state.settings.backup_enabled(),
+        "interval_hours": state.settings.backup_interval_hours(),
+        "keep_last": state.settings.backup_keep_last(),
+        "backups": archives,
+    }))
+}
+
+#[derive(Deserialize, Default)]
+struct RestoreBody {
+    #[serde(default)]
+    confirm_overwrite: bool,
+}
+
+/// Restaure une archive **déjà présente** dans le répertoire de sauvegarde.
+/// Le chemin de ligne de commande, pour qui a déposé son fichier dans le
+/// volume plutôt que de le téléverser.
+async fn restore_named_backup(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(file): Path<String>,
+    body: Option<Json<RestoreBody>>,
+) -> Response {
+    // `{file}` nomme une archive DANS le répertoire de sauvegarde. Un nom qui
+    // en sort n'a pas à être ouvert, quel que soit ce qu'il désigne.
+    if !is_plain_file_name(&file) {
+        audit(
+            &state,
+            Some(&actor.username),
+            "backup.restore",
+            Some(&file),
+            Outcome::Failure,
+            Some("nom d'archive refusé"),
+        );
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "nom d'archive invalide : attendu le nom d'un fichier du répertoire de sauvegarde",
+        );
+    }
+    let confirm = body.map(|Json(b)| b.confirm_overwrite).unwrap_or(false);
+    let archive = state.backup_dir.join(&file);
+    run_restore(&state, &actor, archive, &file, confirm).await
+}
+
+/// Restaure une archive **téléversée**. C'est le chemin principal : on remet
+/// le fichier compressé, et le hub se débrouille.
+///
+/// ⚠️ Une archive est un fichier de confiance : elle porte `secret.key` et
+/// remplace la base. Le manifeste est vérifié avant tout, et le corps est
+/// écrit au fil de l'eau dans le répertoire de sauvegarde plutôt que gardé en
+/// mémoire — une archive avec ses séries n'y tiendrait pas.
+async fn restore_uploaded_backup(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let mut confirm = false;
+    let mut uploaded: Option<std::path::PathBuf> = None;
+
+    if let Err(e) = std::fs::create_dir_all(&state.backup_dir) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    let temporary = state
+        .backup_dir
+        .join(format!(".televerse-{}.zip", crate::backup::now()));
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => {
+                let _ = std::fs::remove_file(&temporary);
+                return fail(StatusCode::BAD_REQUEST, &format!("envoi illisible : {e}"));
+            }
+        };
+        match field.name().unwrap_or_default() {
+            "confirm_overwrite" => {
+                confirm = field.text().await.map(|v| v.trim() == "true").unwrap_or(false);
+            }
+            "archive" => {
+                let mut field = field;
+                let file = match std::fs::File::create(&temporary) {
+                    Ok(file) => file,
+                    Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                };
+                let mut file = std::io::BufWriter::new(file);
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if let Err(e) = std::io::Write::write_all(&mut file, &chunk) {
+                                let _ = std::fs::remove_file(&temporary);
+                                return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&temporary);
+                            return fail(
+                                StatusCode::BAD_REQUEST,
+                                &format!("envoi interrompu : {e}"),
+                            );
+                        }
+                    }
+                }
+                if let Err(e) = std::io::Write::flush(&mut file) {
+                    return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+                }
+                uploaded = Some(temporary.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let Some(archive) = uploaded else {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "aucune archive dans l'envoi : champ « archive » attendu",
+        );
+    };
+    let response = run_restore(&state, &actor, archive.clone(), "archive téléversée", confirm).await;
+
+    // L'archive téléversée reste dans le répertoire de sauvegarde, sous son
+    // nom canonique quand il est libre. Rien ne se supprime sur ce projet, et
+    // celle qui vient de servir est précisément celle qu'on veut garder.
+    keep_uploaded_archive(&state, &archive);
+    response
+}
+
+fn keep_uploaded_archive(state: &AppState, archive: &std::path::Path) {
+    let manifest = match crate::backup::inspect(archive) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            // Ce n'est pas une archive LanProbe : ce fichier n'a rien à faire
+            // dans le répertoire des sauvegardes. Le laisser le remplirait
+            // sans que personne ne s'en aperçoive — `list` ne le montre pas,
+            // son nom ne correspondant à aucune archive. On ne retire ici que
+            // ce que cette requête vient elle-même d'écrire.
+            let _ = std::fs::remove_file(archive);
+            return;
+        }
+    };
+    let name = format!(
+        "lanprobe_backup_v{}_{}.zip",
+        manifest.hub_version,
+        manifest.created_at.replace(['-', ':'], ".").replace('T', "_").replace('Z', "")
+    );
+    let destination = state.backup_dir.join(&name);
+    if !destination.exists() {
+        let _ = std::fs::rename(archive, destination);
+    }
+}
+
+async fn run_restore(
+    state: &AppState,
+    actor: &Identity,
+    archive: std::path::PathBuf,
+    label: &str,
+    confirm_overwrite: bool,
+) -> Response {
+    let (config_dir, influx) = (state.config_dir.clone(), influx_target(state));
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::backup::restore(crate::backup::RestoreRequest {
+            archive: &archive,
+            config_dir: &config_dir,
+            confirm_overwrite,
+            influx,
+            now: crate::backup::now(),
+        })
+    })
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    match outcome {
+        Ok(report) => {
+            audit(
+                state,
+                Some(&actor.username),
+                "backup.restore",
+                Some(label),
+                Outcome::Success,
+                Some(&format!(
+                    "archive du {} (hub {}, schéma {})",
+                    report.created_at, report.hub_version, report.schema_version
+                )),
+            );
+            tracing::warn!(
+                "base restaurée depuis {label} — le hub sert encore l'ancienne \
+                 base tant qu'il n'a pas redémarré"
+            );
+            ok_json(json!({
+                "ok": true,
+                "hub_version": report.hub_version,
+                "schema_version": report.schema_version,
+                "created_at": report.created_at,
+                "restored": report.restored,
+                "moved_aside": report.moved_aside.map(|p| p.to_string_lossy().into_owned()),
+                "influx_restored": report.influx_restored,
+                "influx_error": report.influx_error,
+                "restart_required": report.restart_required,
+            }))
+        }
+        Err(e) => {
+            // Un refus de restauration est exactement la ligne qu'un journal
+            // doit montrer : quelqu'un a tenté de remplacer la base.
+            audit(
+                state,
+                Some(&actor.username),
+                "backup.restore",
+                Some(label),
+                Outcome::Failure,
+                Some(&e.to_string()),
+            );
+            backup_error(e)
+        }
+    }
+}
+
+/// Un nom de fichier nu : ni séparateur, ni remontée, ni chemin absolu.
+fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
 // ── Réglages ───────────────────────────────────────────────────────────────
 
 async fn get_settings(State(state): State<AppState>) -> Response {
@@ -2224,6 +2627,20 @@ mod tests {
         _fake: FakeInflux,
     }
 
+    /// Volume jetable, propre à chaque test : la sauvegarde et la
+    /// restauration écrivent réellement sur disque.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "lanprobe-web-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     impl Harness {
         /// Hub complet devant un faux Influx local, admin déjà créé.
         async fn start() -> Self {
@@ -2253,6 +2670,11 @@ mod tests {
                 // Les tests jouent le cas courant : hub en clair derrière un
                 // proxy. Le cookie `Secure` est vérifié via `X-Forwarded-Proto`.
                 tls: false,
+                config_dir: scratch("volume"),
+                backup_dir: scratch("archives"),
+                // Aucune CLI `influx` en test : les sauvegardes doivent donc
+                // annoncer leur volet Influx manquant plutôt que de mentir.
+                influx_cli: "influx-absent-des-tests".into(),
             };
             let router = build_router(state.clone());
             Self {
@@ -2370,6 +2792,379 @@ mod tests {
                 body["token"].as_str().unwrap().to_string(),
             )
         }
+    }
+
+    // ── Sauvegarde et restauration ─────────────────────────────────────────
+
+    /// Corps multipart minimal : un champ fichier, et le drapeau de
+    /// confirmation. Écrit à la main parce qu'aucune dépendance de test ne le
+    /// fabrique et que la forme est justement ce qu'on veut figer.
+    fn multipart_request(uri: &str, archive: &[u8], confirm: Option<bool>) -> Request<Body> {
+        const BOUNDARY: &str = "----lanprobe-test-boundary";
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"archive\"; \
+                 filename=\"televerse.zip\"\r\nContent-Type: application/zip\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(archive);
+        body.extend_from_slice(b"\r\n");
+        if let Some(confirm) = confirm {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; \
+                     name=\"confirm_overwrite\"\r\n\r\n{confirm}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={BOUNDARY}"))
+            .header(header::HOST, "hub.example.org:8443")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[test]
+    fn the_backup_error_codes_do_not_all_collapse_into_five_hundred() {
+        // Un schéma trop récent n'est pas une panne du hub, et un fichier
+        // quelconque non plus : l'interface doit pouvoir les distinguer.
+        use crate::backup::BackupError;
+        assert_eq!(backup_status(&BackupError::NotAnArchive("x".into())), StatusCode::BAD_REQUEST);
+        assert_eq!(backup_status(&BackupError::Corrupt("x".into())), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            backup_status(&BackupError::SchemaTooNew { archive: 9, binary: 8 }),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            backup_status(&BackupError::ConfirmationRequired("x".into())),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            backup_status(&BackupError::Io("x".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn a_backup_is_produced_on_demand_listed_and_recorded() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        h.state.db.create_site("Durand").unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("POST", "/api/backup"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let file = body["file"].as_str().expect("un nom de fichier");
+        assert!(file.starts_with("lanprobe_backup_v"), "{file}");
+        assert!(file.ends_with(".zip"), "{file}");
+        assert_eq!(body["hub_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["schema_version"], crate::db::SCHEMA_VERSION);
+        assert!(body["bytes"].as_u64().unwrap() > 0);
+        // Pas d'InfluxDB joignable dans les tests : l'archive doit le dire
+        // plutôt que de laisser croire qu'elle porte les mesures.
+        assert_eq!(body["influx_included"], false);
+        assert!(body["influx_error"].is_string());
+
+        let (status, listing, _) = h
+            .call(with_cookie(empty_request("GET", "/api/backups"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{listing}");
+        let archives = listing["backups"].as_array().unwrap();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0]["file"], file);
+        assert_eq!(listing["keep_last"], 7);
+        assert_eq!(listing["enabled"], true);
+
+        let lines = h.audit(&session, "backup.create").await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["actor"], "admin");
+        assert_eq!(lines[0]["outcome"], "success");
+        assert_eq!(lines[0]["target"], file);
+    }
+
+    #[tokio::test]
+    async fn backing_up_and_restoring_are_reserved_to_admins() {
+        let h = Harness::with_admin().await;
+        h.user("operateur", Role::Operator).await;
+        h.user("lecteur", Role::Viewer).await;
+
+        for username in ["operateur", "lecteur"] {
+            let session = h.login_as(username).await;
+            for (method, uri) in [
+                ("POST", "/api/backup"),
+                ("GET", "/api/backups"),
+                ("POST", "/api/backup/restore/quelconque.zip"),
+            ] {
+                let (status, body, _) = h
+                    .call(with_cookie(empty_request(method, uri), &session))
+                    .await;
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{username} ne doit pas pouvoir {method} {uri} : {body}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_uploaded_file_that_is_not_an_archive_is_refused_without_touching_the_volume() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let witness = h.state.config_dir.join("secret.key");
+        std::fs::write(&witness, b"cle-en-place").unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                multipart_request(
+                    "/api/backup/restore",
+                    b"\x89PNG\r\n\x1a\n absolument pas une archive",
+                    Some(true),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("LanProbe"),
+            "le refus doit dire ce qu'on attendait : {body}"
+        );
+        assert_eq!(
+            std::fs::read(&witness).unwrap(),
+            b"cle-en-place",
+            "rien du volume ne doit avoir bougé"
+        );
+
+        let lines = h.audit(&session, "backup.restore").await;
+        assert_eq!(lines.len(), 1, "un refus est une ligne d'audit : {lines:?}");
+        assert_eq!(lines[0]["outcome"], "failure");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_upload_leaves_nothing_behind_in_the_backup_directory() {
+        // Le fichier reçu est écrit sur disque avant d'être examiné — une
+        // archive avec ses séries ne tiendrait pas en mémoire. Un envoi
+        // refusé ne doit pas pour autant laisser un déchet dans /backup :
+        // `list` ne le montrerait pas (son nom ne correspond à rien) et le
+        // disque se remplirait sans que personne ne voie quoi que ce soit.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        for _ in 0..3 {
+            let (status, _, _) = h
+                .call(with_cookie(
+                    multipart_request("/api/backup/restore", b"pas une archive", Some(true)),
+                    &session,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        let left: Vec<String> = std::fs::read_dir(&h.state.backup_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(left.is_empty(), "des envois refusés traînent dans /backup : {left:?}");
+    }
+
+    #[tokio::test]
+    async fn an_uploaded_archive_is_restored_and_the_restart_is_announced() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        // Une archive fabriquée depuis un hub voisin, avec du contenu à
+        // reconnaître après restauration.
+        let source = std::env::temp_dir().join(format!("lanprobe-web-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&source);
+        std::fs::create_dir_all(&source).unwrap();
+        let other = crate::db::Db::open(&source.join("hub.sqlite")).unwrap();
+        other.create_initial_admin("venu-de-l-archive", PASSWORD).unwrap();
+        other.create_site("Site-de-l-archive").unwrap();
+        std::fs::write(source.join("secret.key"), b"cle-de-l-archive").unwrap();
+        let report = crate::backup::create(crate::backup::BackupRequest {
+            db: &other,
+            config_dir: &source,
+            backup_dir: &source.join("archives"),
+            influx: None,
+            now: 1_787_927_400,
+        })
+        .unwrap();
+        let bytes = std::fs::read(&report.path).unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                multipart_request("/api/backup/restore", &bytes, Some(true)),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["schema_version"], crate::db::SCHEMA_VERSION);
+        assert_eq!(body["created_at"], "2026-08-28T14:30:00Z");
+        assert_eq!(
+            body["restart_required"], true,
+            "le processus tient encore l'ancienne base : le taire ferait croire \
+             à une restauration sans effet"
+        );
+        let restored = body["restored"].as_array().unwrap();
+        assert!(restored.iter().any(|v| v == "hub.sqlite"), "{restored:?}");
+        assert!(restored.iter().any(|v| v == "secret.key"), "{restored:?}");
+
+        // Et le volume porte bien le contenu de l'archive.
+        assert_eq!(
+            std::fs::read(h.state.config_dir.join("secret.key")).unwrap(),
+            b"cle-de-l-archive"
+        );
+        let landed = crate::db::Db::open(&h.state.config_dir.join("hub.sqlite")).unwrap();
+        assert!(landed.get_user("venu-de-l-archive").is_ok());
+        assert!(landed.list_sites().unwrap().iter().any(|s| s.name == "Site-de-l-archive"));
+
+        let lines = h.audit(&session, "backup.restore").await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "success");
+        assert_eq!(lines[0]["actor"], "admin");
+    }
+
+    #[tokio::test]
+    async fn restoring_over_a_populated_volume_needs_the_confirmation() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        std::fs::write(h.state.config_dir.join("secret.key"), b"cle-en-place").unwrap();
+
+        // Une archive valide, produite par ce hub même.
+        let (status, created, _) = h
+            .call(with_cookie(empty_request("POST", "/api/backup"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let file = created["file"].as_str().unwrap().to_string();
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/backup/restore/{file}"),
+                    serde_json::json!({}),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("confirm_overwrite"), "{body}");
+        assert_eq!(
+            std::fs::read(h.state.config_dir.join("secret.key")).unwrap(),
+            b"cle-en-place"
+        );
+
+        // Avec la confirmation, la même demande passe.
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/backup/restore/{file}"),
+                    serde_json::json!({ "confirm_overwrite": true }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["moved_aside"].is_string(), "l'ancien état doit être quelque part : {body}");
+    }
+
+    #[tokio::test]
+    async fn an_archive_named_by_a_traversal_is_never_opened() {
+        // `/api/backup/restore/{file}` désigne une archive DANS le répertoire
+        // de sauvegarde. Un nom qui en sort n'a pas à être ouvert.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        for name in ["..%2F..%2Fetc%2Fpasswd", "..", "%2Fetc%2Fpasswd"] {
+            let (status, body, _) = h
+                .call(with_cookie(
+                    json_request(
+                        "POST",
+                        &format!("/api/backup/restore/{name}"),
+                        serde_json::json!({ "confirm_overwrite": true }),
+                    ),
+                    &session,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "« {name} » : {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_archive_from_a_newer_schema_is_refused_over_http_with_a_readable_reason() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let source = std::env::temp_dir().join(format!("lanprobe-web-futur-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&source);
+        std::fs::create_dir_all(&source).unwrap();
+        let other = crate::db::Db::open(&source.join("hub.sqlite")).unwrap();
+        let report = crate::backup::create(crate::backup::BackupRequest {
+            db: &other,
+            config_dir: &source,
+            backup_dir: &source.join("archives"),
+            influx: None,
+            now: 1_787_927_400,
+        })
+        .unwrap();
+        // On vieillit le binaire plutôt que d'inventer un schéma : le
+        // manifeste annonce une version que ce hub ne connaît pas.
+        let bytes = forge_schema(&report.path, crate::db::SCHEMA_VERSION + 3);
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                multipart_request("/api/backup/restore", &bytes, Some(true)),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let message = body["error"].as_str().unwrap();
+        assert!(message.contains(&(crate::db::SCHEMA_VERSION + 3).to_string()), "{message}");
+        assert!(
+            message.contains("jour") || message.contains("récente"),
+            "le message doit dire quoi faire : {message}"
+        );
+    }
+
+    /// Réécrit le manifeste d'une archive avec un autre numéro de schéma.
+    fn forge_schema(archive: &std::path::Path, schema: i64) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).unwrap()).unwrap();
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        for i in 0..zip.len() {
+            let mut file = zip.by_index(i).unwrap();
+            let name = file.name().to_string();
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer).unwrap();
+            entries.push((name, buffer));
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut out);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            for (name, content) in entries {
+                let content = if name == crate::backup::MANIFEST_NAME {
+                    let mut manifest: serde_json::Value = serde_json::from_slice(&content).unwrap();
+                    manifest["schema_version"] = serde_json::json!(schema);
+                    serde_json::to_vec(&manifest).unwrap()
+                } else {
+                    content
+                };
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&content).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        out.into_inner()
     }
 
     fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {

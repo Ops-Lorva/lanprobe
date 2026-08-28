@@ -29,7 +29,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 cookie = { version = "0.18", features = ["percent-encode"] }
@@ -54,6 +54,12 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 ring = "0.17"
 base64 = "0.22"
 getrandom = "0.2"
+
+# Archive de sauvegarde. ZIP et non tar.zst : l'utilisateur doit pouvoir
+# l'ouvrir avec l'explorateur de son système sans rien installer, ce qui
+# exclut zstd sous Windows et macOS. `deflate` seul — les autres méthodes de
+# compression du format ne sont pas lues par tous les outils intégrés.
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

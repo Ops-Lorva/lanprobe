@@ -18,35 +18,42 @@ services:
 
     # Aucune variable d'environnement n'est requise : `docker compose up`
     # marche tel quel. Tout se règle ensuite dans l'interface (organisation,
-    # bucket, rétention, URL Influx annoncée aux sondes...) — voir le README.
-    #
-    # environment:
-    #   # Facultatif. Si connue à l'avance, l'IP ou le nom LAN de cette
-    #   # machine : ajouté au certificat TLS auto-signé d'InfluxDB (évite un
-    #   # avertissement de nom d'hôte en plus de celui, normal, du
-    #   # certificat auto-signé) et repris comme valeur initiale de l'URL
-    #   # Influx annoncée aux sondes. Sans elle, le hub déduit cette URL de
-    #   # la requête d'enrôlement, et elle reste modifiable dans l'interface
-    #   # à tout moment (avec un bouton de test).
-    #   LANPROBE_ADVERTISE_HOST: "192.168.1.10"
+    # bucket, rétention, cadence des sauvegardes...) — voir le README.
 
     ports:
       # Interface web du hub — HTTPS auto-signé par défaut (voir le README,
-      # section "Sécurité"). C'est ici que vous créez le compte admin et
-      # enrôlez vos sondes.
+      # section "Sécurité"). C'est ici que vous créez le compte admin, que
+      # vous enrôlez vos sondes, et c'est par ici qu'elles envoient leurs
+      # mesures : une seule porte, une seule authentification.
       - "8080:8080"
-      # Écriture InfluxDB — exposé aux sondes du LAN. Ne pas exposer au-delà
-      # de votre réseau local sans un reverse proxy TLS de confiance devant.
-      - "8086:8086"
+      # InfluxDB. **Optionnel, et fermé par défaut** : les sondes n'en ont
+      # pas besoin, elles passent par le hub qui relaie. Ne l'ouvrez que pour
+      # brancher un Grafana sur les séries, avec un jeton de lecture émis
+      # depuis l'interface. Sans reverse proxy TLS de confiance devant, ne
+      # l'exposez pas au-delà de votre réseau local.
+      # - "8086:8086"
 
     volumes:
-      # Comptes, jetons, base SQLite, certificat TLS du hub. Petit, change
-      # peu : à sauvegarder souvent et facilement (voir README).
+      # Comptes, jetons, base SQLite, certificat TLS du hub, `secret.key`.
+      # Petit, change peu.
       - lanprobe_data:/data/lanprobe
       # Séries temporelles InfluxDB. Peut grossir de plusieurs Go avec le
-      # temps : politique de sauvegarde volontairement séparée de la ligne
-      # au-dessus.
+      # temps.
       - influxdb_data:/data/influxdb
+      # Archives de sauvegarde. Le hub en produit une par jour, tout seul, et
+      # ne garde que les 7 dernières (les deux réglages sont dans
+      # l'interface). Une archive porte la base, les mesures et les secrets.
+      #
+      # ⚠️ Un volume Docker nommé vit sur la même machine que le reste : il ne
+      # protège de rien s'il faut la remplacer. Remplacez cette ligne par un
+      # chemin de votre choix — idéalement sur un autre disque, ou un montage
+      # réseau — pour que les archives survivent à la machine :
+      #   - /mnt/nas/lanprobe-backups:/backup
+      #
+      # ⚠️ Ces archives contiennent `secret.key`, qui déchiffre les
+      # identifiants SMTP et les URL de webhook du hub. Traitez le dossier
+      # comme un secret.
+      - lanprobe_backups:/backup
 
     # Le HEALTHCHECK est défini dans l'image (il interroge réellement
     # /api/status, pas seulement l'existence du processus).
@@ -54,3 +61,4 @@ services:
 volumes:
   lanprobe_data:
   influxdb_data:
+  lanprobe_backups:

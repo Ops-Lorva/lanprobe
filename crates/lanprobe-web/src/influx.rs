@@ -231,6 +231,30 @@ impl Influx {
     /// Oublie ce qui a été déduit d'anciens réglages. Appelé quand l'org, le
     /// bucket ou l'URL changent : garder l'ancien `bucket_id` frapperait des
     /// jetons pour un bucket que l'opérateur vient d'abandonner.
+    /// De quoi appeler `influx backup` / `influx restore`. Le jeton
+    /// opérateur ne sort pas d'ici autrement : il ne va ni en base, ni dans
+    /// une réponse d'API, ni dans un log.
+    ///
+    /// `skip_verify` est vrai par construction : Influx est servi en HTTPS
+    /// avec un certificat auto-signé sur la machine même, et la CLI refuserait
+    /// sa propre instance sans cela. C'est le même saut local que le client
+    /// HTTP de ce module accepte déjà.
+    pub fn backup_target(&self, cli: std::path::PathBuf) -> crate::backup::InfluxTarget {
+        crate::backup::InfluxTarget {
+            cli,
+            host: self.settings.influx_url(),
+            org: self.settings.influx_org(),
+            token: self.operator_token.clone(),
+            skip_verify: true,
+        }
+    }
+
+    /// Faux quand le jeton opérateur n'a pas pu être lu au démarrage : sans
+    /// lui `influx backup` échouerait, et il vaut mieux le dire à l'avance.
+    pub fn has_operator_token(&self) -> bool {
+        !self.operator_token.is_empty()
+    }
+
     pub fn invalidate(&self) {
         if let Ok(mut guard) = self.ids.lock() {
             *guard = None;

@@ -159,19 +159,33 @@ RUN mkdir -p /data/lanprobe /data/influxdb \
 ENV LANPROBE_WEB_HOST=0.0.0.0 \
     LANPROBE_WEB_PORT=8080 \
     LANPROBE_WEB_CONFIG_DIR=/data/lanprobe \
+    LANPROBE_WEB_BACKUP_DIR=/backup \
+    LANPROBE_INFLUX_CLI=/usr/local/bin/influx \
     INFLUX_PORT=8086 \
     INFLUX_ORG=lanprobe \
     INFLUX_BUCKET=lanprobe
 
-# Deux volumes distincts et non un seul : /data/lanprobe (comptes, jetons,
-# base SQLite, cert TLS du hub) est petit et change peu — sauvegarde bon
-# marché et fréquente. /data/influxdb (séries temporelles) peut grossir de
-# plusieurs Go — politique de sauvegarde différente, volontairement séparée.
-VOLUME ["/data/lanprobe", "/data/influxdb"]
+# Trois volumes distincts et non un seul.
+#
+# /data/lanprobe (comptes, jetons, base SQLite, cert TLS du hub, secret.key)
+#   est petit et change peu.
+# /data/influxdb (séries temporelles) peut grossir de plusieurs Go.
+# /backup porte les archives de sauvegarde, que le hub produit lui-même.
+#   Il est séparé pour une raison précise : une sauvegarde qui vit dans le
+#   volume qu'elle sauvegarde ne protège de rien. L'utilisateur est invité à
+#   le pointer sur un autre disque depuis le compose.
+#
+# ⚠️ Une archive contient `secret.key`, qui déchiffre les identifiants de
+# notification du hub : /backup est un dossier de secrets.
+RUN mkdir -p /backup && chown lanprobe:lanprobe /backup
+VOLUME ["/data/lanprobe", "/data/influxdb", "/backup"]
 
 # 8080 : interface web du hub, en clair — à placer derrière le reverse
 #        proxy de l'utilisateur. LANPROBE_WEB_TLS=true pour du TLS auto-signé.
-# 8086 : écriture InfluxDB, exposé aux sondes du LAN.
+#        C'est aussi par ce port que les sondes envoient leurs mesures : le
+#        hub relaie vers InfluxDB, elles ne lui parlent jamais directement.
+# 8086 : InfluxDB. Utile seulement pour brancher un Grafana ; laissé fermé
+#        par défaut dans le compose, les sondes n'en ont pas besoin.
 EXPOSE 8080 8086
 
 # Le conteneur démarre root le temps strictement nécessaire à

@@ -32,18 +32,18 @@ INFLUX_BUCKET="${INFLUX_BUCKET:-lanprobe}"
 log() { printf '[lanprobe-hub] %s\n' "$*" >&2; }
 
 # ── 1. Certificat TLS d'InfluxDB — généré une seule fois, jamais régénéré ───
-# Les sondes écrivent en HTTPS directement sur InfluxDB (voir le contrat,
-# §1) : il lui faut donc son propre certificat, indépendant de celui du hub.
+# InfluxDB est servi en HTTPS sur la machine même : il lui faut son propre
+# certificat, indépendant de celui du hub. Ses seuls clients sont le hub
+# lui-même — les sondes envoient leurs mesures au hub, qui relaie — et un
+# éventuel Grafana branché sur le port 8086.
 # Vous pouvez fournir le vôtre en déposant cert.pem/key.pem dans ce dossier
 # avant le premier démarrage — ce script ne les touchera jamais s'ils existent.
 #
-# LANPROBE_ADVERTISE_HOST est entièrement optionnelle (contrat §7) : si vous
-# la fournissez, elle est ajoutée au SAN du certificat (pour éviter un
-# avertissement de nom d'hôte dans le navigateur en plus de l'avertissement
-# "auto-signé"), et reprise comme valeur initiale de l'URL Influx annoncée
-# aux sondes (étape 4). Sans elle, tout fonctionne quand même : le hub
-# déduit cette URL de l'en-tête Host à l'enrôlement, et elle reste
-# modifiable dans l'interface à tout moment.
+# LANPROBE_ADVERTISE_HOST est entièrement optionnelle : si vous la
+# fournissez, elle est ajoutée au SAN du certificat, ce qui évite un
+# avertissement de nom d'hôte en plus de l'avertissement « auto-signé »
+# quand vous ouvrez InfluxDB depuis un navigateur ou un Grafana. Sans elle,
+# tout fonctionne.
 mkdir -p "$INFLUX_TLS_DIR"
 if [ ! -f "${INFLUX_TLS_DIR}/cert.pem" ] || [ ! -f "${INFLUX_TLS_DIR}/key.pem" ]; then
     log "Génération du certificat TLS auto-signé d'InfluxDB (premier démarrage)."

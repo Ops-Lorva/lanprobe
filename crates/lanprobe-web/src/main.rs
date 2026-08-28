@@ -10,8 +10,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
-use lanprobe_web::{auth::Auth, db::Db, influx, notify, secrets::Secrets, settings::Settings, tls, web};
+use clap::{Parser, Subcommand};
+use lanprobe_web::{
+    auth::Auth, backup, db::Db, influx, notify, secrets::Secrets, settings::Settings, tls, web,
+};
 
 #[derive(Parser)]
 #[command(name = "lanprobe-web", about = "LanProbe Web — hub auto-hébergé")]
@@ -35,6 +37,44 @@ struct Args {
     /// Volume du hub : base SQLite, certificat, jeton opérateur, token de setup.
     #[arg(long, env = "LANPROBE_WEB_CONFIG_DIR", default_value = "/data/lanprobe")]
     config_dir: PathBuf,
+
+    /// Volume des archives de sauvegarde. Monté sur `/backup` dans le
+    /// conteneur ; l'utilisateur le pointe où il veut depuis le compose.
+    #[arg(long, env = "LANPROBE_WEB_BACKUP_DIR", default_value = lanprobe_web::backup::DEFAULT_BACKUP_DIR)]
+    backup_dir: PathBuf,
+
+    /// CLI `influx`, présente dans l'image du hub. `influx backup` est le
+    /// seul moyen correct de sauvegarder InfluxDB — jamais une copie du
+    /// répertoire `engine`.
+    #[arg(long, env = "LANPROBE_INFLUX_CLI", default_value = "influx")]
+    influx_cli: PathBuf,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Sans sous-commande, le binaire sert le hub — c'est ce que fait le
+/// conteneur, et le changer casserait toutes les images déjà déployées.
+///
+/// Les sous-commandes existent pour l'hôte : un cron peut sauvegarder sans
+/// passer par l'API, et une restauration se fait hub arrêté — c'est le seul
+/// moment où elle prend effet sans redémarrage.
+#[derive(Subcommand)]
+enum Command {
+    /// Produit une archive dans le répertoire de sauvegarde, puis applique
+    /// la rétention.
+    Backup,
+    /// Liste les archives présentes.
+    Backups,
+    /// Restaure une archive. ⚠️ Remplace la base et les secrets du volume.
+    Restore {
+        /// Nom d'une archive du répertoire de sauvegarde, ou chemin complet.
+        archive: PathBuf,
+        /// Sans ceci, une restauration qui écraserait des données en place
+        /// est refusée.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -48,6 +88,10 @@ async fn main() -> Result<(), String> {
 
     let args = Args::parse();
     std::fs::create_dir_all(&args.config_dir).map_err(|e| e.to_string())?;
+
+    if let Some(command) = &args.command {
+        return run_command(&args, command);
+    }
 
     let db = Arc::new(Db::open(&args.config_dir.join("hub.sqlite")).map_err(|e| e.to_string())?);
     let settings = Settings::new(db.clone());
@@ -128,6 +172,21 @@ async fn main() -> Result<(), String> {
         std::time::Duration::from_secs(30),
     ));
 
+    // Sauvegarde planifiée. Elle tourne toute seule : une sauvegarde qu'il
+    // faut déclencher est une sauvegarde qu'on oublie. L'échéance se lit dans
+    // les archives, pas depuis ce démarrage — un hub redémarré souvent
+    // sauvegarde quand même.
+    tokio::spawn(backup::run(
+        backup::Scheduler {
+            db: db.clone(),
+            settings: settings.clone(),
+            config_dir: args.config_dir.clone(),
+            backup_dir: args.backup_dir.clone(),
+            influx: influx_backup_target(&influx, &args.influx_cli),
+        },
+        std::time::Duration::from_secs(15 * 60),
+    ));
+
     let state = web::AppState {
         db,
         auth,
@@ -135,6 +194,9 @@ async fn main() -> Result<(), String> {
         influx,
         notifier,
         tls: args.tls,
+        config_dir: args.config_dir.clone(),
+        backup_dir: args.backup_dir.clone(),
+        influx_cli: args.influx_cli.clone(),
     };
     let router = web::build_router(state);
 
@@ -166,4 +228,152 @@ async fn main() -> Result<(), String> {
     axum::serve(listener, router.into_make_service())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// La cible InfluxDB pour `influx backup`, ou `None` s'il n'y a pas de jeton
+/// opérateur : la commande échouerait de toute façon, et le dire à l'avance
+/// donne un message utile plutôt qu'un code de sortie.
+fn influx_backup_target(
+    influx: &influx::Influx,
+    cli: &std::path::Path,
+) -> Option<backup::InfluxTarget> {
+    influx
+        .has_operator_token()
+        .then(|| influx.backup_target(cli.to_path_buf()))
+}
+
+/// Les sous-commandes. Elles ouvrent le volume, agissent, et rendent la main
+/// — pas de serveur, pas de boucle.
+fn run_command(args: &Args, command: &Command) -> Result<(), String> {
+    match command {
+        Command::Backups => {
+            let archives = backup::list(&args.backup_dir).map_err(|e| e.to_string())?;
+            if archives.is_empty() {
+                println!("aucune archive dans {}", args.backup_dir.display());
+                return Ok(());
+            }
+            for archive in archives {
+                println!("{}  {:>12} octets  {}", archive.created_at, archive.bytes, archive.file);
+            }
+            Ok(())
+        }
+        Command::Backup => {
+            let db = open_volume(args)?;
+            let settings = Settings::new(db.clone());
+            let target = influx_from_volume(args, settings.clone());
+            let report = backup::create(backup::BackupRequest {
+                db: &db,
+                config_dir: &args.config_dir,
+                backup_dir: &args.backup_dir,
+                influx: target,
+                now: backup::now(),
+            })
+            .map_err(|e| e.to_string())?;
+            println!("{} ({} octets)", report.path.display(), report.bytes);
+            // Une archive sans les séries reste utile — elle porte les
+            // comptes, le parc et les secrets — mais le taire serait un piège.
+            if let Some(reason) = &report.influx_error {
+                eprintln!("⚠️  sans les mesures InfluxDB : {reason}");
+            }
+            let _ = db.record_audit(
+                None,
+                "backup.create",
+                Some(&report.file),
+                lanprobe_web::db::Outcome::Success,
+                Some("ligne de commande"),
+            );
+            let removed = backup::prune(&args.backup_dir, settings.backup_keep_last())
+                .map_err(|e| e.to_string())?;
+            for file in &removed {
+                println!("retirée (rétention) : {file}");
+            }
+            if !removed.is_empty() {
+                let _ = db.record_audit(
+                    None,
+                    "backup.retention",
+                    None,
+                    lanprobe_web::db::Outcome::Success,
+                    Some(&format!("{} archive(s) retirée(s)", removed.len())),
+                );
+            }
+            Ok(())
+        }
+        Command::Restore { archive, force } => {
+            // ⚠️ **Aucune ouverture de base avant la restauration.** Ouvrir
+            // `hub.sqlite` le CRÉE dans le volume cible, et la garde
+            // « ce volume porte déjà des données » se déclenche alors sur le
+            // fichier que la commande vient elle-même de poser — rendant la
+            // restauration sur une machine neuve impossible.
+            //
+            // Un nom nu désigne une archive du répertoire de sauvegarde :
+            // c'est ainsi qu'on la lit dans `lanprobe-web backups`.
+            let path = if archive.is_file() {
+                archive.clone()
+            } else {
+                args.backup_dir.join(archive)
+            };
+            let report = backup::restore(backup::RestoreRequest {
+                archive: &path,
+                config_dir: &args.config_dir,
+                confirm_overwrite: *force,
+                // Le jeton opérateur qu'il faudrait est DANS l'archive : le
+                // volet InfluxDB se joue après, une fois les fichiers remis.
+                influx: None,
+                now: backup::now(),
+            })
+            .map_err(|e| e.to_string())?;
+
+            println!(
+                "restauré : archive du {} (hub {}, schéma {})",
+                report.created_at, report.hub_version, report.schema_version
+            );
+            for name in &report.restored {
+                println!("  {name}");
+            }
+            if let Some(aside) = &report.moved_aside {
+                println!("l'état précédent est conservé dans {}", aside.display());
+            }
+
+            // Maintenant seulement : la base et le jeton opérateur de
+            // l'archive sont en place, on peut parler à InfluxDB.
+            let db = open_volume(args)?;
+            let settings = Settings::new(db.clone());
+            match influx_from_volume(args, settings) {
+                Some(target) => match backup::restore_influx(&path, &target) {
+                    Ok(()) => println!("  mesures InfluxDB restaurées"),
+                    Err(e) => eprintln!("⚠️  mesures InfluxDB non restaurées : {e}"),
+                },
+                None => eprintln!(
+                    "⚠️  mesures InfluxDB non restaurées : pas de jeton opérateur dans {}",
+                    args.config_dir.display()
+                ),
+            }
+
+            let _ = db.record_audit(
+                None,
+                "backup.restore",
+                path.file_name().and_then(|n| n.to_str()),
+                lanprobe_web::db::Outcome::Success,
+                Some("ligne de commande"),
+            );
+            println!(
+                "redémarrez le hub : un processus déjà lancé sert encore l'ancienne base"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Ouvre la base du volume. À n'appeler que lorsque l'existence du fichier
+/// est voulue — jamais avant une restauration.
+fn open_volume(args: &Args) -> Result<Arc<Db>, String> {
+    Ok(Arc::new(
+        Db::open(&args.config_dir.join("hub.sqlite")).map_err(|e| e.to_string())?,
+    ))
+}
+
+fn influx_from_volume(args: &Args, settings: Settings) -> Option<backup::InfluxTarget> {
+    let token = influx::load_operator_token(&args.config_dir).unwrap_or_default();
+    let influx = influx::Influx::new(settings, token);
+    influx_backup_target(&influx, &args.influx_cli)
 }

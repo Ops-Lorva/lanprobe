@@ -18,7 +18,11 @@ set -euo pipefail
 LANPROBE_UID=10001
 LANPROBE_GID=10001
 
-DATA_DIRS=(/data/lanprobe /data/influxdb)
+# /backup en fait partie : le hub y écrit ses archives, en utilisateur non
+# privilégié. Sans ce chown, un volume nommé neuf reste à root:root et la
+# sauvegarde quotidienne échoue — silencieusement du point de vue de
+# l'utilisateur, qui découvrirait le vide le jour de la restauration.
+DATA_DIRS=(/data/lanprobe /data/influxdb "${LANPROBE_WEB_BACKUP_DIR:-/backup}")
 
 for dir in "${DATA_DIRS[@]}"; do
     mkdir -p "$dir"
