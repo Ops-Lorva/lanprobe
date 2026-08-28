@@ -111,6 +111,11 @@ export interface HubSettings {
    * vit dans `settings`, comme le reste, et part par `PUT /api/settings`.
    */
   notify_delay_secs: number;
+  /** Sauvegarde planifiée. Coupée, plus aucune archive n'est produite seule. */
+  backup_enabled: boolean;
+  backup_interval_hours: number;
+  /** Archives conservées. `0` = toutes ; baisser la valeur en supprime. */
+  backup_keep_last: number;
 }
 
 export const SETTINGS_DEFAULTS: HubSettings = {
@@ -122,7 +127,80 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   retention_days: 0,
   heartbeat_interval_secs: 60,
   notify_delay_secs: 300,
+  backup_enabled: true,
+  backup_interval_hours: 24,
+  backup_keep_last: 7,
 };
+
+// ── Sauvegarde ──────────────────────────────────────────────────────────────
+
+/**
+ * Une archive du répertoire de sauvegarde. Le hub la décrit **d'après son
+ * nom** : il n'ouvre pas les archives pour dresser la liste, une archive
+ * abîmée doit y figurer quand même.
+ */
+export interface BackupArchive {
+  file: string;
+  path: string;
+  bytes: number;
+  hub_version: string;
+  /** Epoch en secondes, déduit du nom du fichier. */
+  created_at_unix: number;
+  /** Même instant en RFC 3339. */
+  created_at: string;
+}
+
+export interface BackupList {
+  /** Chemin du volume, tel que le hub le voit. Il porte `secret.key`. */
+  dir: string;
+  enabled: boolean;
+  interval_hours: number;
+  keep_last: number;
+  /** La plus récente en tête — c'est le hub qui trie. */
+  backups: BackupArchive[];
+}
+
+/**
+ * Verdict d'une sauvegarde immédiate.
+ *
+ * ⚠️ `influx_included: false` avec un `influx_error` n'est **pas** un échec :
+ * l'archive existe et porte la base, les comptes et les secrets. Mais elle
+ * n'a pas les mesures, et c'est le genre de détail qu'on découvre au pire
+ * moment si l'écran l'a passé sous silence.
+ */
+export interface BackupCreated {
+  file: string;
+  bytes: number;
+  created_at: string;
+  hub_version: string;
+  schema_version: number;
+  influx_included: boolean;
+  influx_error: string | null;
+  /** Archives retirées par la rétention dans la foulée. */
+  pruned: string[];
+}
+
+/**
+ * Verdict d'une restauration.
+ *
+ * ⚠️ `restart_required` vaut **toujours** `true` : le processus tient encore
+ * l'ancienne base ouverte et continuera de la servir. Une interface qui ne le
+ * dit pas laisse conclure que la restauration n'a rien fait.
+ */
+export interface RestoreReport {
+  ok: boolean;
+  hub_version: string;
+  schema_version: number;
+  /** Date de fabrication de l'archive, RFC 3339. */
+  created_at: string;
+  /** Noms des fichiers remplacés dans le volume. */
+  restored: string[];
+  /** Où l'état précédent a été déplacé. `null` = le volume était vide. */
+  moved_aside: string | null;
+  influx_restored: boolean;
+  influx_error: string | null;
+  restart_required: boolean;
+}
 
 // ── Comptes (contrat § 11) ──────────────────────────────────────────────────
 
@@ -360,7 +438,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     res = await fetch(path, {
       credentials: 'same-origin',
-      headers: init.body ? { 'Content-Type': 'application/json' } : undefined,
+      // ⚠️ Uniquement pour un corps JSON, sérialisé en chaîne. Un `FormData`
+      // doit garder le `Content-Type` que le navigateur pose lui-même : lui
+      // seul connaît la limite `multipart/…; boundary=…`, et l'écraser par
+      // `application/json` rend l'envoi illisible côté hub.
+      headers: typeof init.body === 'string' ? { 'Content-Type': 'application/json' } : undefined,
       ...init,
     });
   } catch {
@@ -629,6 +711,47 @@ export const api = {
 
   /** Héritage déjà résolu par le hub — `enabled` est la valeur qui s'applique. */
   subscriptions: () => request<Subscriptions>('/api/notifications/subscriptions'),
+
+  // ── Sauvegarde ───────────────────────────────────────────────────────────
+
+  backups: async (): Promise<BackupList> => {
+    const raw = (await request<Partial<BackupList>>('/api/backups')) ?? {};
+    return {
+      dir: raw.dir ?? '',
+      enabled: raw.enabled ?? true,
+      interval_hours: raw.interval_hours ?? 24,
+      keep_last: raw.keep_last ?? 7,
+      backups: raw.backups ?? [],
+    };
+  },
+
+  /** Sauvegarde immédiate, puis application de la rétention par le hub. */
+  createBackup: () => request<BackupCreated>('/api/backup', { method: 'POST' }),
+
+  /**
+   * Restaure une archive **déjà dans le volume**. `confirm_overwrite` est
+   * exigé dès qu'il y a des données en place : sans lui le hub répond 409 et
+   * ne touche à rien.
+   */
+  restoreBackup: (file: string, confirm_overwrite: boolean) =>
+    request<RestoreReport>(`/api/backup/restore/${encodeURIComponent(file)}`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm_overwrite }),
+    }),
+
+  /**
+   * Restaure une archive téléversée — le chemin principal.
+   *
+   * ⚠️ `FormData` sans `Content-Type` explicite : c'est le navigateur qui doit
+   * poser la limite `multipart/boundary=…`. La fixer à la main produit un
+   * corps que le hub lit comme « envoi illisible ».
+   */
+  restoreUpload: (archive: File, confirm_overwrite: boolean) => {
+    const form = new FormData();
+    form.append('confirm_overwrite', String(confirm_overwrite));
+    form.append('archive', archive, archive.name);
+    return request<RestoreReport>('/api/backup/restore', { method: 'POST', body: form });
+  },
 
   /** `enabled: null` sur une sonde = elle revient à l'héritage de son site. */
   setSubscription: (scope: 'site' | 'probe', scope_id: string, enabled: boolean | null) =>
