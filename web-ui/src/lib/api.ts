@@ -278,13 +278,11 @@ export const api = {
   /**
    * Mise à jour partielle : on n'envoie que ce que l'utilisateur a changé.
    *
-   * ⚠️ `confirm_retention_reduction` n'est PAS nommé dans le contrat. Le hub
-   * doit refuser une réduction de rétention non confirmée ; il lui faut donc un
-   * drapeau, et celui-ci est le nom retenu côté interface. À figer dans le
-   * contrat avec l'implémentation backend.
+   * `confirm_data_loss` est exigé par le hub pour toute réduction de la
+   * rétention — elle supprime des mesures. Sans ce drapeau, il répond 409.
    */
   saveSettings: (
-    patch: Partial<HubSettings> & { confirm_retention_reduction?: boolean },
+    patch: Partial<HubSettings> & { confirm_data_loss?: boolean },
   ) => request<Partial<HubSettings>>('/api/settings', {
     method: 'PUT',
     body: JSON.stringify(patch),

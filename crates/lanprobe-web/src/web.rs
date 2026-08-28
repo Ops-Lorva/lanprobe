@@ -724,14 +724,105 @@ async fn probe_metrics(
         ));
     }
     match state.influx.query_flux(&flux).await {
-        Ok(csv) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/csv; charset=utf-8")],
-            csv,
-        )
-            .into_response(),
+        Ok(csv) => ok_json(serde_json::json!({
+            "range": range,
+            "series": series_from_flux_csv(&csv),
+        })),
         Err(e) => fail(StatusCode::BAD_GATEWAY, &e),
     }
+}
+
+/// Convertit le CSV annoté d'InfluxDB en séries JSON.
+///
+/// Le navigateur ne doit pas apprendre à lire le CSV annoté : c'est un format
+/// versionné, propre à Influx, dont les colonnes d'annotation changent d'une
+/// version à l'autre. Le hub proxifie déjà la requête pour garder le jeton de
+/// lecture côté serveur — il isole aussi l'interface du format de sortie, sans
+/// quoi une montée de version d'Influx casserait les graphes.
+///
+/// Sortie : `[{ "field": "latency_ms", "points": [{ "t": <ms>, "v": <f64> }] }]`
+fn series_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    let mut series: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    let mut cols: Option<Vec<String>> = None;
+
+    for line in csv.lines() {
+        let line = line.trim_end_matches('\r');
+        // Les lignes d'annotation (#datatype, #group, #default) ne portent pas
+        // de données ; une ligne vide sépare deux tables et remet l'en-tête à
+        // zéro — deux tables peuvent avoir des colonnes différentes.
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.is_empty() {
+            cols = None;
+            continue;
+        }
+        let cells: Vec<&str> = line.split(',').collect();
+        let Some(header) = cols.as_ref() else {
+            cols = Some(cells.iter().map(|c| c.trim().to_string()).collect());
+            continue;
+        };
+        let at = |name: &str| {
+            header
+                .iter()
+                .position(|c| c == name)
+                .and_then(|i| cells.get(i))
+                .map(|s| s.trim())
+        };
+        let (Some(time), Some(value)) = (at("_time"), at("_value")) else {
+            continue;
+        };
+        // Une valeur vide est une absence de mesure, pas un zéro : l'écrire
+        // comme 0 dessinerait une chute qui n'a jamais eu lieu.
+        let Ok(v) = value.parse::<f64>() else { continue };
+        let Some(t) = rfc3339_to_millis(time) else {
+            continue;
+        };
+        let field = at("_field").unwrap_or("value").to_string();
+        series
+            .entry(field)
+            .or_default()
+            .push(serde_json::json!({ "t": t, "v": v }));
+    }
+
+    series
+        .into_iter()
+        .map(|(field, points)| serde_json::json!({ "field": field, "points": points }))
+        .collect()
+}
+
+/// RFC3339 → millisecondes epoch, sans dépendance de date : Influx rend
+/// toujours de l'UTC (`…Z`) sur ces requêtes.
+fn rfc3339_to_millis(s: &str) -> Option<i64> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 20 {
+        return None;
+    }
+    let num = |a: usize, b: usize| s.get(a..b)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    let frac = s
+        .split_once('.')
+        .and_then(|(_, rest)| {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let ms: String = digits.chars().chain("000".chars()).take(3).collect();
+            ms.parse::<i64>().ok()
+        })
+        .unwrap_or(0);
+
+    // Jours écoulés depuis l'époque — algorithme des jours civils de Howard
+    // Hinnant, valable pour toute date grégorienne.
+    let y_adj = if mo <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+
+    Some(((days * 86_400 + h * 3600 + mi * 60 + sec) * 1000) + frac)
 }
 
 /// Littéral de chaîne Flux échappé — les valeurs viennent de l'URL, elles ne
@@ -919,6 +1010,66 @@ mod tests {
     use tower::ServiceExt;
 
     const PASSWORD: &str = "password123";
+
+    /// CSV annoté tel qu'InfluxDB 2 le rend : trois lignes d'annotation, un
+    /// en-tête, puis les données. Deux tables séparées par une ligne vide,
+    /// parce que c'est le cas qui casse un parseur naïf.
+    const FLUX_CSV: &str = "\
+#datatype,string,long,dateTime:RFC3339,dateTime:RFC3339,dateTime:RFC3339,double,string,string
+#group,false,false,true,true,false,false,true,true
+#default,_result,,,,,,,
+,result,table,_start,_stop,_time,_value,_field,_measurement
+,,0,2026-08-27T00:00:00Z,2026-08-27T01:00:00Z,2026-08-27T00:00:00Z,12.5,latency_ms,ping
+,,0,2026-08-27T00:00:00Z,2026-08-27T01:00:00Z,2026-08-27T00:01:00.250Z,13,latency_ms,ping
+
+#datatype,string,long,dateTime:RFC3339,double,string
+,result,table,_time,_value,_field
+,,1,2026-08-27T00:00:00Z,1,alive
+";
+
+    #[test]
+    fn flux_csv_becomes_json_series() {
+        let series = series_from_flux_csv(FLUX_CSV);
+        assert_eq!(series.len(), 2, "un champ = une série : {series:?}");
+
+        let latency = series.iter().find(|s| s["field"] == "latency_ms").unwrap();
+        let points = latency["points"].as_array().unwrap();
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0]["t"], 1_787_788_800_000i64);
+        assert_eq!(points[0]["v"], 12.5);
+        // Les millisecondes de l'horodatage ne doivent pas être perdues.
+        assert_eq!(points[1]["t"], 1_787_788_860_250i64);
+
+        assert!(series.iter().any(|s| s["field"] == "alive"));
+    }
+
+    #[test]
+    fn flux_csv_skips_empty_values_instead_of_writing_zero() {
+        // Une mesure absente n'est pas une mesure à zéro : l'écrire comme 0
+        // dessinerait une chute qui n'a jamais eu lieu.
+        let csv = ",result,table,_time,_value,_field\n\
+                   ,,0,2026-08-27T00:00:00Z,,latency_ms\n\
+                   ,,0,2026-08-27T00:00:01Z,7,latency_ms\n";
+        let series = series_from_flux_csv(csv);
+        let points = series[0]["points"].as_array().unwrap();
+        assert_eq!(points.len(), 1, "la ligne vide doit être ignorée");
+        assert_eq!(points[0]["v"], 7.0);
+    }
+
+    #[test]
+    fn flux_csv_without_data_is_an_empty_list_not_an_error() {
+        assert!(series_from_flux_csv("").is_empty());
+        assert!(series_from_flux_csv("#datatype,string\n").is_empty());
+    }
+
+    #[test]
+    fn rfc3339_matches_known_epochs() {
+        assert_eq!(rfc3339_to_millis("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_to_millis("2000-03-01T00:00:00Z"), Some(951_868_800_000));
+        // 2024 est bissextile : le 29 février doit exister.
+        assert_eq!(rfc3339_to_millis("2024-02-29T12:00:00Z"), Some(1_709_208_000_000));
+        assert_eq!(rfc3339_to_millis("pas une date"), None);
+    }
 
     struct Harness {
         state: AppState,

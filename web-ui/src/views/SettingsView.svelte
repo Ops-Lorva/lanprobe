@@ -245,7 +245,7 @@
     fieldError = '';
     try {
       await api.saveSettings(
-        confirmed ? { ...patch, confirm_retention_reduction: true } : patch,
+        confirmed ? { ...patch, confirm_data_loss: true } : patch,
       );
       shrinkOpen = false;
       notice = $_('settings.saved_all');
