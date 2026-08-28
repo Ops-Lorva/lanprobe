@@ -2200,8 +2200,17 @@ async fn restore_uploaded_backup(
 }
 
 fn keep_uploaded_archive(state: &AppState, archive: &std::path::Path) {
-    let Ok(manifest) = crate::backup::inspect(archive) else {
-        return;
+    let manifest = match crate::backup::inspect(archive) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            // Ce n'est pas une archive LanProbe : ce fichier n'a rien à faire
+            // dans le répertoire des sauvegardes. Le laisser le remplirait
+            // sans que personne ne s'en aperçoive — `list` ne le montre pas,
+            // son nom ne correspondant à aucune archive. On ne retire ici que
+            // ce que cette requête vient elle-même d'écrire.
+            let _ = std::fs::remove_file(archive);
+            return;
+        }
     };
     let name = format!(
         "lanprobe_backup_v{}_{}.zip",
@@ -2937,6 +2946,34 @@ mod tests {
         let lines = h.audit(&session, "backup.restore").await;
         assert_eq!(lines.len(), 1, "un refus est une ligne d'audit : {lines:?}");
         assert_eq!(lines[0]["outcome"], "failure");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_upload_leaves_nothing_behind_in_the_backup_directory() {
+        // Le fichier reçu est écrit sur disque avant d'être examiné — une
+        // archive avec ses séries ne tiendrait pas en mémoire. Un envoi
+        // refusé ne doit pas pour autant laisser un déchet dans /backup :
+        // `list` ne le montrerait pas (son nom ne correspond à rien) et le
+        // disque se remplirait sans que personne ne voie quoi que ce soit.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        for _ in 0..3 {
+            let (status, _, _) = h
+                .call(with_cookie(
+                    multipart_request("/api/backup/restore", b"pas une archive", Some(true)),
+                    &session,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        let left: Vec<String> = std::fs::read_dir(&h.state.backup_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(left.is_empty(), "des envois refusés traînent dans /backup : {left:?}");
     }
 
     #[tokio::test]
