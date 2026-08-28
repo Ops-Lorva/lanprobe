@@ -20,17 +20,20 @@
 ########################################################################
 FROM node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS web-ui-builder
 
-WORKDIR /web-ui
+WORKDIR /src
 
-# HYPOTHÈSE : web-ui/ (branche feat/web-ui, absente de ce worktree) a son
-# propre package.json + lockfile npm à la racine du dossier, et un script
-# "build" qui écrit dans web-ui/dist — c'est la mécanique déjà en place pour
-# le frontend Svelte existant (package.json racine, script "build" → vite
-# build), transposée telle quelle par le contrat.
-COPY web-ui/package.json web-ui/package-lock.json ./
+# L'interface du hub n'a pas son propre package.json : elle est construite
+# depuis la racine (`npm run build:web` → `vite build --config
+# web-ui/vite.config.ts`), et elle importe la palette et deux composants du
+# frontend desktop via des alias Vite. Une seule définition des couleurs pour
+# les deux surfaces — d'où la copie de `src/` en plus de `web-ui/`.
+COPY package.json package-lock.json ./
 RUN npm ci
-COPY web-ui/ ./
-RUN npm run build
+
+COPY web-ui/ ./web-ui/
+COPY src/ ./src/
+COPY svelte.config.js ./
+RUN npm run build:web
 
 ########################################################################
 # Étape 2 — build du binaire Rust du hub (cargo build -p lanprobe-web)
@@ -65,10 +68,9 @@ COPY src-tauri ./src-tauri
 # "$CARGO_MANIFEST_DIR/../../build"]`). Par symétrie, lanprobe-web attend très
 # probablement web-ui/dist au même niveau relatif — d'où cette copie avant le
 # `cargo build`, et non dans l'image finale.
-COPY --from=web-ui-builder /web-ui/dist ./web-ui/dist
+COPY --from=web-ui-builder /src/web-ui/dist ./web-ui/dist
 
-# ⚠️ Échoue tant que crates/lanprobe-web (branche feat/web-hub) n'existe pas :
-# c'est le point d'arrêt attendu de ce Dockerfile en l'état actuel du dépôt.
+# `web-ui/dist` doit exister ici : le binaire l'embarque via rust-embed.
 RUN cargo build --release --locked -p lanprobe-web --bin lanprobe-web
 
 ########################################################################

@@ -779,7 +779,20 @@ fn series_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
         };
         // Une valeur vide est une absence de mesure, pas un zéro : l'écrire
         // comme 0 dessinerait une chute qui n'a jamais eu lieu.
-        let Ok(v) = value.parse::<f64>() else { continue };
+        //
+        // Les booléens (`alive`, `icmp_ok`…) deviennent 1/0 : ce sont des
+        // séries qu'on veut tracer, et les laisser tomber au motif qu'elles ne
+        // sont pas numériques ferait disparaître l'information la plus utile —
+        // savoir si l'hôte répondait. Les champs texte (`state`) sont écartés :
+        // ils n'ont pas de représentation sur un axe.
+        let v = match value {
+            "true" => 1.0,
+            "false" => 0.0,
+            other => match other.parse::<f64>() {
+                Ok(n) => n,
+                Err(_) => continue,
+            },
+        };
         let Some(t) = rfc3339_to_millis(time) else {
             continue;
         };
@@ -1057,6 +1070,21 @@ mod tests {
         let points = series[0]["points"].as_array().unwrap();
         assert_eq!(points.len(), 1, "la ligne vide doit être ignorée");
         assert_eq!(points[0]["v"], 7.0);
+    }
+
+    #[test]
+    fn flux_csv_turns_booleans_into_one_and_zero() {
+        // `alive` est la série la plus utile d'un ping : la perdre parce
+        // qu'elle n'est pas numérique viderait le graphe de son intérêt.
+        let csv = ",result,table,_time,_value,_field\n\
+                   ,,0,2026-08-27T00:00:00Z,true,alive\n\
+                   ,,0,2026-08-27T00:00:01Z,false,alive\n\
+                   ,,0,2026-08-27T00:00:02Z,dégradé,state\n";
+        let series = series_from_flux_csv(csv);
+        assert_eq!(series.len(), 1, "le champ texte n'est pas traçable");
+        let points = series[0]["points"].as_array().unwrap();
+        assert_eq!(points[0]["v"], 1.0);
+        assert_eq!(points[1]["v"], 0.0);
     }
 
     #[test]
