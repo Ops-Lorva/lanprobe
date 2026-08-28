@@ -6,7 +6,6 @@
   import { route } from '$lib/router';
   import FleetView from './FleetView.svelte';
   import ProbeView from './ProbeView.svelte';
-  import EnrollView from './EnrollView.svelte';
   import SettingsView from './SettingsView.svelte';
 
   const { version, onExpired, logout } = $props<{
@@ -15,11 +14,14 @@
     logout: () => void;
   }>();
 
+  // Deux entrées seulement. « Enrôler » a disparu de la navigation parce que
+  // l'enrôlement n'est plus un endroit où aller : c'est le « + » de la ligne du
+  // site, là où le site est déjà connu. Une entrée de menu aurait ramené le
+  // choix du site que ce « + » supprime.
   // Les réglages restent hors du chemin de mise en route : on y arrive quand
   // quelque chose ne marche pas, pas au premier démarrage.
   const items = [
     { id: 'fleet', href: '#/', icon: 'server' as const, key: 'nav.fleet' },
-    { id: 'enroll', href: '#/enroll', icon: 'scan' as const, key: 'nav.enroll' },
     { id: 'settings', href: '#/settings', icon: 'settings' as const, key: 'nav.settings' },
   ];
 
@@ -29,7 +31,9 @@
   let mainEl = $state<HTMLElement | null>(null);
   $effect(() => {
     void $route.name;
-    void $route.id;
+    // Passer d'une sonde à l'autre change l'écran sans changer `name` : c'est
+    // l'identifiant qu'il faut lire pour que l'effet se redéclenche.
+    void ($route.name === 'probe' ? $route.id : '');
     mainEl?.scrollTo({ top: 0 });
     window.scrollTo({ top: 0 });
   });
@@ -73,8 +77,6 @@
   <main bind:this={mainEl}>
     {#if $route.name === 'probe'}
       <ProbeView id={$route.id} {onExpired} />
-    {:else if $route.name === 'enroll'}
-      <EnrollView {onExpired} />
     {:else if $route.name === 'settings'}
       <SettingsView {onExpired} />
     {:else}
