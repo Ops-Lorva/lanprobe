@@ -27,7 +27,22 @@
 <dialog bind:this={el} class:wide onclose={onclose} oncancel={onclose} aria-label={title}>
   <div class="head">
     <h2>{title}</h2>
-    <button class="lp-btn ghost sm" onclick={onclose} aria-label={$_('common.close')}>✕</button>
+    <!-- Croix en SVG et non en caractère : « ✕ » (U+2715) est absent de Geist,
+         Safari le rendait en carré vide. Un tracé ne dépend d'aucune police. -->
+    <button class="lp-btn ghost sm close" onclick={onclose} aria-label={$_('common.close')}>
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+        aria-hidden="true"
+      >
+        <path d="M4 4l8 8M12 4l-8 8" />
+      </svg>
+    </button>
   </div>
   <div class="body">{@render children()}</div>
   {#if footer}<div class="foot">{@render footer()}</div>{/if}
@@ -80,11 +95,18 @@
     border-bottom: 1px solid var(--ep-border);
     flex-shrink: 0;
   }
+  .close {
+    min-height: 26px;
+    padding: 4px 7px;
+    flex-shrink: 0;
+  }
   h2 {
     font-size: 14px;
     font-weight: 700;
     margin: 0;
   }
+  /* Un contenu trop grand fait défiler le corps, pas la fenêtre : l'en-tête et
+     les boutons de confirmation restent visibles quoi qu'il arrive. */
   .body {
     padding: 16px;
     display: flex;
@@ -96,8 +118,6 @@
     overflow-y: auto;
     min-height: 0;
   }
-  /* Un contenu trop grand fait défiler le corps, pas la fenêtre : l'en-tête et
-     les boutons de confirmation restent visibles quoi qu'il arrive. */
   .foot {
     flex-shrink: 0;
     display: flex;
