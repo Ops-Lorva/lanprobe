@@ -2176,6 +2176,7 @@ dependencies = [
  "ping-async",
  "rand 0.10.1",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tokio",
