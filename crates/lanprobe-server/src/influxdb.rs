@@ -88,14 +88,27 @@ impl InfluxClient {
     ///
     /// L'export direct vers Influx reste entièrement fonctionnel pour qui
     /// n'utilise pas de hub : on ajoute un chemin, on n'en retire pas.
-    async fn for_hub(hub_url: &str, probe_id: &str, token: &str, host_tag: String) -> Self {
+    async fn for_hub(
+        hub_url: &str,
+        probe_id: &str,
+        token: &str,
+        host_tag: String,
+        allow_self_signed: bool,
+    ) -> Self {
         Self {
-            http: reqwest::Client::builder()
-                // Le hub peut porter un certificat auto-signé si l'utilisateur
-                // l'a choisi ; la vérification suit le même réglage que le
-                // reste du dialogue avec lui.
-                .build()
-                .unwrap_or_default(),
+            // Le hub peut porter un certificat auto-signé quand l'utilisateur
+            // l'a explicitement déclaré : le relais des mesures doit suivre le
+            // même réglage que le battement de cœur, sinon la sonde se
+            // rattache mais n'écrit jamais rien.
+            http: {
+                let builder = reqwest::Client::builder();
+                let builder = if allow_self_signed {
+                    builder.danger_accept_invalid_certs(true)
+                } else {
+                    builder
+                };
+                builder.build().unwrap_or_default()
+            },
             base_url: format!(
                 "{}/api/probes/{}/write",
                 hub_url.trim_end_matches('/'),
@@ -387,7 +400,16 @@ async fn hub_client(state: &AppState, key: &crate::secrets::SecretKey) -> Option
         cfg.name.clone()
     };
     tracing::info!("mesures envoyées au hub {} (sonde « {} »)", cfg.url, host_tag);
-    Some(InfluxClient::for_hub(&cfg.url, &cfg.probe_id, &token, host_tag).await)
+    Some(
+        InfluxClient::for_hub(
+            &cfg.url,
+            &cfg.probe_id,
+            &token,
+            host_tag,
+            cfg.allow_self_signed,
+        )
+        .await,
+    )
 }
 
 /// Boucle d'envoi commune aux deux destinations.

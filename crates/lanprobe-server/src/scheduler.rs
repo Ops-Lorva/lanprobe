@@ -152,19 +152,31 @@ async fn run_speedtest_task(state: AppState, interval_min: u64) {
                 cfg_val["iperfServer"].as_str().unwrap_or("").to_string()
             };
             // Résoudre l'IP source depuis l'interface sélectionnée.
-            let src = resolve_src(&state);
-            lanprobe_core::iperf::run_iperf3(&server, src).await
+            match resolve_src(&state) {
+                Ok(src) => lanprobe_core::iperf::run_iperf3(&server, src).await,
+                Err(e) => Err(e),
+            }
         } else {
             // Ookla — run_speedtest gère l'interface sélectionnée elle-même.
-            let src = resolve_src(&state);
-            let iface_name = get_selected_iface_name(&state);
-            let iface_for_cli = iface_name.as_ref().map(|n| {
-                #[cfg(target_os = "macos")]
-                { get_interface_details(n).bsd_name.unwrap_or(n.clone()) }
-                #[cfg(not(target_os = "macos"))]
-                { n.clone() }
-            });
-            lanprobe_core::speedtest::run_speedtest(src, iface_for_cli).await
+            //
+            // ⚠️ Abandonner plutôt que mesurer sans source : Ookla traite `-I`
+            // comme une indication contournable, et le pré-check de
+            // connectivité qui l'en empêche ne tourne que si une IP source est
+            // connue. Sans elle, le test partirait par la route par défaut et
+            // rendrait le débit du mauvais lien.
+            match resolve_src(&state) {
+                Ok(src) => {
+                    let iface_name = get_selected_iface_name(&state);
+                    let iface_for_cli = iface_name.as_ref().map(|n| {
+                        #[cfg(target_os = "macos")]
+                        { get_interface_details(n).bsd_name.unwrap_or(n.clone()) }
+                        #[cfg(not(target_os = "macos"))]
+                        { n.clone() }
+                    });
+                    lanprobe_core::speedtest::run_speedtest(src, iface_for_cli).await
+                }
+                Err(e) => Err(e),
+            }
         };
 
         match result {
@@ -247,7 +259,13 @@ async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
             }
         };
 
-        let src = resolve_src(&state);
+        let src = match resolve_src(&state) {
+            Ok(src) => src,
+            Err(e) => {
+                tracing::warn!("découverte planifiée abandonnée : {e}");
+                return;
+            }
+        };
 
         // Réinitialiser le store de découverte pour ce nouveau scan.
         state.discovery.clear();
@@ -401,7 +419,13 @@ async fn run_portscan_task(state: AppState, interval_min: u64, targets: Vec<Stri
             }
 
             let ip = target.clone();
-            let src = resolve_src(&state);
+            let src = match resolve_src(&state) {
+                Ok(src) => src,
+                Err(e) => {
+                    tracing::warn!("scan de ports planifié abandonné : {e}");
+                    continue;
+                }
+            };
 
             // Marquer le scan comme en cours et envoyer l'event.
             state.portscan.mark_in_progress(&ip, None);
@@ -434,30 +458,42 @@ async fn run_portscan_task(state: AppState, interval_min: u64, targets: Vec<Stri
 /// Retourne l'IP source de l'interface sélectionnée, ou `None`.
 ///
 /// # Comportement quand `None` est retourné
+/// Résout l'IP source de l'interface sélectionnée, **strictement**.
 ///
-/// Aucune interface n'est sélectionnée (ou l'interface sélectionnée n'a pas
-/// d'adresse IPv4). Les appelants passent cette valeur directement à
-/// `scan_ports` / `scan_udp_ports` / `run_iperf3` / `run_speedtest`.
+/// Trois cas, et le troisième est celui qui fabriquait de fausses mesures :
 ///
-/// - `scan_ports` / `scan_udp_ports` : si `src` est `None`, le socket TCP/UDP
-///   n'est pas bindé à une adresse source particulière — le système
-///   d'exploitation choisit l'interface de sortie automatiquement (comportement
-///   équivalent à `bind("0.0.0.0:0")`). Cela ne provoque pas de panique ni
-///   d'erreur ; les scans fonctionnent mais partent possiblement par une autre
-///   interface que celle attendue par l'utilisateur.
-/// - `run_iperf3` / `run_speedtest` : même sémantique — `None` est interprété
-///   comme "laisser l'OS choisir".
+/// - aucune interface choisie → `Ok(None)`, l'OS décide. Légitime : personne
+///   n'a exprimé de préférence.
+/// - interface choisie, avec une IPv4 → `Ok(Some(ip))`.
+/// - **interface choisie, sans IPv4** → `Err`. Le lien est tombé, ou le bail
+///   DHCP a expiré.
 ///
-/// En résumé : `None` est sûr, mais peut donner des résultats mesurés sur une
-/// interface non désirée si plusieurs interfaces sont présentes.
-fn resolve_src(state: &AppState) -> Option<Ipv4Addr> {
+/// Ce dernier cas rendait `None` auparavant, donc « que l'OS décide » — et la
+/// mesure planifiée partait par l'interface de management. Un speedtest
+/// mesurait alors le débit du mauvais lien, et le point arrivait dans Influx
+/// avec une valeur parfaitement plausible que personne ne remettait en cause.
+/// C'est le seul chemin qui tourne sans humain devant l'écran : c'est donc
+/// celui où une mesure fausse dure le plus longtemps.
+///
+/// Mieux vaut une mesure absente, visible comme telle, qu'une mesure crédible
+/// prise sur le mauvais réseau.
+fn resolve_src(state: &AppState) -> Result<Option<Ipv4Addr>, String> {
     let name = state
         .selected_interface
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .clone()?;
+        .clone();
+    let Some(name) = name else { return Ok(None) };
     let details = get_interface_details(&name);
-    details.ip?.parse::<Ipv4Addr>().ok()
+    let Some(ip) = details.ip else {
+        return Err(format!(
+            "l'interface « {name} » n'a pas d'adresse IPv4 — mesure abandonnée \
+             plutôt que prise par une autre interface"
+        ));
+    };
+    ip.parse::<Ipv4Addr>()
+        .map(Some)
+        .map_err(|_| format!("adresse IPv4 invalide sur « {name} » : {ip}"))
 }
 
 /// Retourne le nom de l'interface sélectionnée, ou `None`.
