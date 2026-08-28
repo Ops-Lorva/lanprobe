@@ -59,6 +59,14 @@ pub struct AppState {
     /// Vrai quand le hub termine lui-même le TLS. Faux quand il sert en clair
     /// derrière un reverse proxy — le cas courant en auto-hébergement.
     pub tls: bool,
+    /// Vrai dès qu'une restauration a eu lieu dans ce processus.
+    ///
+    /// Le hub sert encore l'ancienne base : SQLite tient le fichier remplacé
+    /// sous le pied, et toute écriture échoue en « readonly database ». Sans
+    /// ce drapeau exposé par `/api/status`, l'avertissement de redémarrage ne
+    /// vivait que sur la carte de restauration — il disparaissait au premier
+    /// rechargement, laissant un hub qui refuse d'écrire sans dire pourquoi.
+    pub restart_required: Arc<std::sync::atomic::AtomicBool>,
     /// Le volume du hub : base SQLite, `secret.key`, jeton opérateur,
     /// certificats. C'est ce que la sauvegarde emporte et ce que la
     /// restauration remplace.
@@ -227,6 +235,9 @@ async fn status(State(state): State<AppState>) -> Response {
     ok_json(json!({
         "needs_setup": state.auth.needs_setup(),
         "version": env!("CARGO_PKG_VERSION"),
+        "restart_required": state
+            .restart_required
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 
@@ -2262,6 +2273,12 @@ async fn run_restore(
                 "base restaurée depuis {label} — le hub sert encore l'ancienne \
                  base tant qu'il n'a pas redémarré"
             );
+            // Rendu par `/api/status` : l'avertissement doit survivre au
+            // rechargement de la page. Sans ça, le hub refuse d'écrire
+            // (« readonly database ») sans que rien à l'écran ne l'explique.
+            state
+                .restart_required
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             ok_json(json!({
                 "ok": true,
                 "hub_version": report.hub_version,
@@ -2675,6 +2692,7 @@ mod tests {
                 // Aucune CLI `influx` en test : les sauvegardes doivent donc
                 // annoncer leur volet Influx manquant plutôt que de mentir.
                 influx_cli: "influx-absent-des-tests".into(),
+                            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             };
             let router = build_router(state.clone());
             Self {

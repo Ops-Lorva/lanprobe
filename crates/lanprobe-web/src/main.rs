@@ -197,6 +197,7 @@ async fn main() -> Result<(), String> {
         config_dir: args.config_dir.clone(),
         backup_dir: args.backup_dir.clone(),
         influx_cli: args.influx_cli.clone(),
+            restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let router = web::build_router(state);
 
