@@ -36,6 +36,14 @@ export const RANGES = ['-1h', '-6h', '-24h', '-7d'] as const;
 export type Range = (typeof RANGES)[number];
 export const DEFAULT_RANGE: Range = '-6h';
 
+/** Durée d'une fenêtre en millisecondes (`-6h` → 21 600 000). */
+export function rangeMillis(range: Range): number {
+  const m = /^-(\d+)([hd])$/.exec(range);
+  if (!m) return 3_600_000;
+  const n = Number(m[1]);
+  return m[2] === 'd' ? n * 86_400_000 : n * 3_600_000;
+}
+
 /**
  * Ramène un horodatage à des millisecondes.
  * Influx date en nanosecondes, un backend peut renvoyer des secondes ou du
@@ -195,6 +203,8 @@ export function normalizeMetrics(payload: unknown, fallbackField = 'value'): Ser
 export interface Curve {
   field: string;
   label: string;
+  /** Étiquettes Influx de la courbe (`engine`, `ip`, …). */
+  tags: Record<string, string>;
   points: Point[];
 }
 
@@ -226,7 +236,15 @@ export function normalizeCurves(payload: unknown, fallbackField = 'value'): Curv
         if (t != null && (typeof v === 'number' || typeof v === 'string')) points.push({ t, v });
       }
       points.sort((a, b) => a.t - b.t);
-      out.push({ field, label, points });
+      const tags =
+        raw.tags && typeof raw.tags === 'object' && !Array.isArray(raw.tags)
+          ? Object.fromEntries(
+              Object.entries(raw.tags as Record<string, unknown>)
+                .filter(([, v]) => typeof v === 'string')
+                .map(([k, v]) => [k, v as string]),
+            )
+          : {};
+      out.push({ field, label, tags, points });
       understood = true;
     }
     // Une enveloppe `series` d'une autre forme (colonnes/valeurs) retombe sur
@@ -237,6 +255,7 @@ export function normalizeCurves(payload: unknown, fallbackField = 'value'): Curv
   return Object.entries(normalizeMetrics(payload, fallbackField)).map(([field, points]) => ({
     field,
     label: field,
+    tags: {},
     points,
   }));
 }

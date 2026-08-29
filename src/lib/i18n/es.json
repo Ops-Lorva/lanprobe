@@ -83,7 +83,9 @@
       "throughput": "↓ / ↑"
     },
     "hub_buffered": "{n} mediciones pendientes",
-    "hub_broken": "sonda revocada — reinscribir"
+    "hub_broken": "sonda revocada — reinscribir",
+    "hub_ok": "Hub conectado",
+    "hub_degraded": "Hub inaccesible"
   },
   "discovery": {
     "title": "Descubrimiento de red",

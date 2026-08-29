@@ -13,6 +13,8 @@
     refreshing?: boolean;
     children: Snippet;
     table?: Snippet;
+    /** Contenu libre dans l'en-tête, à gauche du bouton de tableau. */
+    action?: Snippet;
   }
   let {
     title,
@@ -23,6 +25,7 @@
     refreshing = false,
     children,
     table,
+    action,
   }: Props = $props();
 
   let showTable = $state(false);
@@ -36,6 +39,7 @@
     </div>
 
     <div class="right">
+      {#if action}{@render action()}{/if}
       {#if legend.length > 1}
         <!-- La légende est le canal d'identité fiable : elle est toujours là
              dès qu'il y a deux séries, et le texte reste en encre de texte. -->

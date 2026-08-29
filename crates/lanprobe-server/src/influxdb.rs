@@ -289,14 +289,23 @@ fn event_to_points(event: &BroadcastEvent, host: &str) -> Vec<String> {
             let lat = p["latency_ms"].as_u64().unwrap_or(0);
             // jitter_ms est Option<f64> dans SpeedResult.
             let jitter = p["jitter_ms"].as_f64().unwrap_or(0.0);
+            // L'URL du résultat Ookla est un CHAMP, jamais une étiquette :
+            // elle est unique à chaque test, et une étiquette unique fait
+            // exploser la cardinalité de la série. iperf3 n'en produit pas.
+            let result_url = p["result_url"]
+                .as_str()
+                .filter(|u| !u.is_empty())
+                .map(|u| format!(",result_url=\"{}\"", escape_field_str(u)))
+                .unwrap_or_default();
             vec![format!(
-                "speedtest,host={},engine={} download_mbps={},upload_mbps={},latency_ms={}i,jitter_ms={} {}",
+                "speedtest,host={},engine={} download_mbps={},upload_mbps={},latency_ms={}i,jitter_ms={}{} {}",
                 host_tag,
                 escape_tag(engine),
                 dl,
                 ul,
                 lat,
                 jitter,
+                result_url,
                 ts
             )]
         }
@@ -754,6 +763,50 @@ mod tests {
         let points = event_to_points(&event, "testhost");
         assert_eq!(points.len(), 1);
         assert!(points[0].contains(",engine=ookla "), "Expected ',engine=ookla ' in: {}", points[0]);
+    }
+
+    #[test]
+    fn a_speedtest_result_url_travels_as_a_field_not_a_tag() {
+        // L'interface propose un lien vers le résultat Ookla ; il doit donc
+        // arriver jusqu'à Influx. En étiquette, chaque test créerait une série
+        // nouvelle — la cardinalité exploserait pour un lien qu'on ne filtre
+        // jamais.
+        let event = make_event(
+            "speedtest:result",
+            json!({
+                "engine": "ookla",
+                "download_mbps": 910.7,
+                "upload_mbps": 360.2,
+                "latency_ms": 12,
+                "jitter_ms": 1.5,
+                "result_url": "https://www.speedtest.net/result/c/abc-123"
+            }),
+        );
+        let points = event_to_points(&event, "testhost");
+        let (tags, fields) = points[0].split_once(' ').unwrap();
+        assert!(!tags.contains("result_url"), "l'URL ne doit pas être une étiquette : {tags}");
+        assert!(
+            fields.contains(r#"result_url="https://www.speedtest.net/result/c/abc-123""#),
+            "URL absente des champs : {fields}"
+        );
+    }
+
+    #[test]
+    fn iperf_has_no_result_url_and_the_field_is_simply_absent() {
+        // Un champ vide n'est pas un champ à chaîne vide : l'interface doit
+        // pouvoir distinguer « pas de lien » de « lien vide ».
+        let event = make_event(
+            "speedtest:result",
+            json!({
+                "engine": "iperf3",
+                "download_mbps": 940.0,
+                "upload_mbps": 930.0,
+                "latency_ms": 1,
+                "jitter_ms": 0.2
+            }),
+        );
+        let points = event_to_points(&event, "testhost");
+        assert!(!points[0].contains("result_url"), "{}", points[0]);
     }
 
     #[test]

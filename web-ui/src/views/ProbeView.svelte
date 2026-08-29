@@ -12,11 +12,13 @@
     DEFAULT_RANGE,
     MetricsShapeError,
     normalizeCurves,
+    rangeMillis,
     numeric,
     type Range,
     type Curve,
   } from '$lib/metrics';
-  import { SERIES, seriesColor, normalizeState } from '$lib/charts';
+  import { seriesColor, normalizeState } from '$lib/charts';
+  import { platformLabel } from '$lib/format';
   import StatusMark from '$lib/components/StatusMark.svelte';
   import BufferBadge from '$lib/components/BufferBadge.svelte';
   import ChartCard from '$lib/components/ChartCard.svelte';
@@ -235,6 +237,12 @@
   let inet = $state<ChartState>({ ...blank });
   let speed = $state<ChartState>({ ...blank });
   let refreshing = $state(false);
+  /**
+   * Instant de la dernière lecture : c'est lui qui borne l'axe, pas `now`.
+   * Une horloge réactive ferait glisser les trois graphiques à chaque
+   * seconde alors que leurs points, eux, ne bougent pas.
+   */
+  let loadedAt = $state(Date.now());
 
   async function fetchOne(measurement: string, fallbackField: string): Promise<ChartState> {
     try {
@@ -280,6 +288,7 @@
     ping = p;
     inet = i;
     speed = s;
+    loadedAt = Date.now();
     refreshing = false;
   }
 
@@ -294,33 +303,126 @@
     untrack(() => void loadMetrics());
   });
 
-  /** Points d'un champ donné, toutes étiquettes confondues. */
-  function pointsOf(state: ChartState, field: string) {
-    return numeric(state.curves.find((c) => c.field === field)?.points);
-  }
+  // La fenêtre demandée borne l'axe, même si les mesures n'en couvrent qu'un
+  // coin : « 6 h » doit montrer six heures, sinon trente minutes de relevés
+  // occupent toute la largeur et on croit lire six heures de données.
+  const domain = $derived({ from: loadedAt - rangeMillis(range), to: loadedAt });
 
   // Une courbe par cible pinguée : le hub les sépare déjà, les rassembler
   // dessinerait une latence moyenne qu'aucune machine n'a jamais mesurée.
-  const pingCurves = $derived(
-    ping.curves
-      .filter((c) => c.field === 'latency_ms' && c.points.length > 0)
-      .map((c, i) => ({
-        key: c.label,
-        // Une seule cible : pas la peine d'afficher son adresse en légende.
-        label: ping.curves.filter((o) => o.field === 'latency_ms').length > 1
-          ? c.label.replace(/^latency_ms\s*·\s*/, '')
-          : $_('charts.latency'),
-        color: seriesColor(i),
-        points: numeric(c.points),
-      })),
-  );
+  const pingCurves = $derived.by(() => {
+    const latency = ping.curves.filter((c) => c.field === 'latency_ms' && c.points.length > 0);
+    return latency.map((c, i) => ({
+      key: c.label,
+      // Une seule cible : pas la peine d'afficher son adresse en légende.
+      label: latency.length > 1 ? (c.tags.ip ?? c.label) : $_('charts.latency'),
+      color: seriesColor(i),
+      points: numeric(c.points),
+    }));
+  });
   const pingPoints = $derived(pingCurves.flatMap((c) => c.points));
   const inetPoints = $derived(inet.curves.find((c) => c.field === 'state')?.points ?? []);
-  const dlPoints = $derived(pointsOf(speed, 'download_mbps'));
-  const ulPoints = $derived(pointsOf(speed, 'upload_mbps'));
+
+  // ── Débits ───────────────────────────────────────────────────────────────
+  //
+  // Une sonde peut mesurer avec deux moteurs — Ookla vers internet, iperf3
+  // vers un serveur du LAN. Ce ne sont pas les mêmes ordres de grandeur ni la
+  // même question, mais on veut les comparer d'un coup d'œil : une courbe par
+  // (sens, moteur) sur le même graphique, jamais une fusion qui ferait croire
+  // à un débit unique.
+  const ENGINE_LABEL: Record<string, string> = {
+    ookla: 'Speedtest.net',
+    iperf3: 'iperf3',
+  };
+  function engineLabel(raw: string | undefined): string {
+    if (!raw) return '';
+    return ENGINE_LABEL[raw.toLowerCase()] ?? raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+
+  const speedCurves = $derived.by(() => {
+    const wanted: [string, string][] = [
+      ['download_mbps', $_('charts.download')],
+      ['upload_mbps', $_('charts.upload')],
+    ];
+    const engines = new Set(
+      speed.curves.filter((c) => c.points.length > 0).map((c) => c.tags.engine ?? ''),
+    );
+    const out: { key: string; label: string; color: string; points: { t: number; v: number }[] }[] = [];
+    for (const [field, direction] of wanted) {
+      for (const c of speed.curves.filter((c) => c.field === field && c.points.length > 0)) {
+        const engine = engineLabel(c.tags.engine);
+        out.push({
+          key: `${field}:${c.tags.engine ?? ''}`,
+          // Le moteur n'apparaît que s'il y en a plusieurs : sur une sonde qui
+          // n'en utilise qu'un, « Descendant · Speedtest.net » est du bruit.
+          label: engines.size > 1 && engine ? `${direction} · ${engine}` : direction,
+          color: seriesColor(out.length),
+          points: numeric(c.points),
+        });
+      }
+    }
+    return out;
+  });
+
+  /** Moteurs effectivement représentés, pour l'étiquette de l'en-tête. */
+  const speedEngines = $derived([
+    ...new Set(
+      speed.curves
+        .filter((c) => c.points.length > 0 && c.tags.engine)
+        .map((c) => engineLabel(c.tags.engine)),
+    ),
+  ]);
+
+  /**
+   * Lien vers le résultat public du dernier test Ookla. iperf3 n'en produit
+   * pas — l'absence de lien est donc une information, pas une panne.
+   */
+  const lastResultUrl = $derived.by(() => {
+    const curve = speed.curves.find((c) => c.field === 'result_url' && c.points.length > 0);
+    const last = curve?.points[curve.points.length - 1]?.v;
+    return typeof last === 'string' && /^https?:\/\//.test(last) ? last : null;
+  });
+
+  // ── Tableaux de valeurs ──────────────────────────────────────────────────
+  //
+  // Les tableaux se lisent par instant, pas par courbe : on regroupe donc sur
+  // l'horodatage. Sans ça, deux cibles pinguées donnaient deux lignes
+  // interlignées qu'on prenait pour des relevés successifs d'une seule.
+  const pingRows = $derived.by(() => {
+    const rows = pingCurves.flatMap((c) =>
+      c.points.map((p) => ({ t: p.t, target: c.label, v: p.v })),
+    );
+    rows.sort((a, b) => a.t - b.t || a.target.localeCompare(b.target));
+    return rows.map((r) => [tooltipTime(r.t, lang), r.target, r.v.toFixed(0)]);
+  });
+
+  const speedRows = $derived.by(() => {
+    const byRun = new Map<string, { t: number; engine: string; dl?: number; ul?: number }>();
+    for (const c of speed.curves) {
+      if (c.field !== 'download_mbps' && c.field !== 'upload_mbps') continue;
+      const engine = engineLabel(c.tags.engine);
+      for (const p of numeric(c.points)) {
+        const key = `${p.t}:${engine}`;
+        const row = byRun.get(key) ?? { t: p.t, engine };
+        if (c.field === 'download_mbps') row.dl = p.v;
+        else row.ul = p.v;
+        byRun.set(key, row);
+      }
+    }
+    return [...byRun.values()]
+      .sort((a, b) => a.t - b.t)
+      .map((r) => [
+        tooltipTime(r.t, lang),
+        r.engine || '—',
+        r.dl != null ? r.dl.toFixed(1) : '—',
+        r.ul != null ? r.ul.toFixed(1) : '—',
+      ]);
+  });
 
   const speedTone = $derived(
-    speed.tone === 'ready' && dlPoints.length === 0 && ulPoints.length === 0 ? 'empty' : speed.tone,
+    speed.tone === 'ready' && speedCurves.every((c) => c.points.length === 0)
+      ? 'empty'
+      : speed.tone,
   );
   const pingTone = $derived(
     ping.tone === 'ready' && pingPoints.length === 0 ? 'empty' : ping.tone,
@@ -329,10 +431,10 @@
     inet.tone === 'ready' && inetPoints.length === 0 ? 'empty' : inet.tone,
   );
 
-  const speedLegend = $derived([
-    { label: $_('charts.download'), color: SERIES.one },
-    { label: $_('charts.upload'), color: SERIES.two },
-  ]);
+  const speedLegend = $derived(speedCurves.map((c) => ({ label: c.label, color: c.color })));
+  const pingLegend = $derived(
+    pingCurves.length > 1 ? pingCurves.map((c) => ({ label: c.label, color: c.color })) : [],
+  );
 </script>
 
 <a class="back" href="#/">
@@ -500,7 +602,7 @@
   <dl class="meta">
     <div><dt>{$_('probe.meta_id')}</dt><dd class="lp-mono id">{probe.probe_id}</dd></div>
     <div><dt>{$_('probe.meta_site')}</dt><dd>{probe.site}</dd></div>
-    <div><dt>{$_('probe.meta_platform')}</dt><dd class="lp-mono">{probe.platform || '—'}</dd></div>
+    <div><dt>{$_('probe.meta_platform')}</dt><dd class="lp-mono">{platformLabel(probe.platform, '—')}</dd></div>
     <div><dt>{$_('probe.meta_version')}</dt><dd class="lp-mono">{probe.version || '—'}</dd></div>
     <div>
       <dt>{$_('probe.meta_created')}</dt>
@@ -536,16 +638,22 @@
       sub={$_('charts.latency_sub')}
       tone={pingTone}
       errorText={ping.error}
+      legend={pingLegend}
       {refreshing}
     >
       <TimeSeriesChart
         series={pingCurves}
+        {domain}
         unit={$_('charts.unit_ms')}
       />
       {#snippet table()}
         <ValueTable
-          columns={[$_('charts.table_time'), `${$_('charts.latency')} (${$_('charts.unit_ms')})`]}
-          rows={pingPoints.map((p) => [tooltipTime(p.t, lang), p.v.toFixed(0)])}
+          columns={[
+            $_('charts.table_time'),
+            $_('charts.table_target'),
+            `${$_('charts.latency')} (${$_('charts.unit_ms')})`,
+          ]}
+          rows={pingRows}
         />
       {/snippet}
     </ChartCard>
@@ -557,7 +665,7 @@
       errorText={inet.error}
       {refreshing}
     >
-      <StatusBand points={inetPoints} />
+      <StatusBand points={inetPoints} {domain} />
       {#snippet table()}
         <ValueTable
           columns={[$_('charts.table_time'), $_('charts.table_state')]}
@@ -577,26 +685,26 @@
       legend={speedLegend}
       {refreshing}
     >
-      <TimeSeriesChart
-        series={[
-          { key: 'dl', label: $_('charts.download'), color: SERIES.one, points: dlPoints },
-          { key: 'ul', label: $_('charts.upload'), color: SERIES.two, points: ulPoints },
-        ]}
-        unit={$_('charts.unit_mbps')}
-        decimals={1}
-      />
+      {#snippet action()}
+        {#if speedEngines.length}
+          <span class="engine">{speedEngines.join(' · ')}</span>
+        {/if}
+        {#if lastResultUrl}
+          <a class="lp-btn ghost sm" href={lastResultUrl} target="_blank" rel="noopener noreferrer">
+            {$_('charts.speed_result_link')}
+          </a>
+        {/if}
+      {/snippet}
+      <TimeSeriesChart series={speedCurves} unit={$_('charts.unit_mbps')} decimals={1} {domain} />
       {#snippet table()}
         <ValueTable
           columns={[
             $_('charts.table_time'),
+            $_('charts.table_engine'),
             `${$_('charts.download')} (${$_('charts.unit_mbps')})`,
             `${$_('charts.upload')} (${$_('charts.unit_mbps')})`,
           ]}
-          rows={dlPoints.map((p, i) => [
-            tooltipTime(p.t, lang),
-            p.v.toFixed(1),
-            ulPoints[i] ? ulPoints[i].v.toFixed(1) : '—',
-          ])}
+          rows={speedRows}
         />
       {/snippet}
     </ChartCard>
@@ -995,6 +1103,13 @@
   .err.top {
     margin: 0 0 14px;
   }
+  .engine {
+    font-size: 10px;
+    letter-spacing: 0.4px;
+    color: var(--ep-text-dim);
+    white-space: nowrap;
+  }
+
   .keep {
     color: var(--ep-text-primary);
     border-left: 2px solid var(--ep-success);

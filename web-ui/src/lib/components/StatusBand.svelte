@@ -7,8 +7,14 @@
   interface Props {
     points: Point[];
     height?: number;
+    /**
+     * Fenêtre de temps à représenter (cf. `TimeSeriesChart`). Les trois
+     * graphiques d'une fiche doivent partager exactement le même axe, sans
+     * quoi on croit lire trois périodes différentes.
+     */
+    domain?: { from: number; to: number };
   }
-  let { points, height = 74 }: Props = $props();
+  let { points, height = 74, domain }: Props = $props();
 
   const lang = $derived($locale ?? 'en');
 
@@ -66,6 +72,7 @@
   });
 
   const bounds = $derived.by(() => {
+    if (domain && domain.to > domain.from) return { tMin: domain.from, tMax: domain.to };
     if (segments.length === 0) return { tMin: 0, tMax: 1 };
     const tMin = segments[0].from;
     const tMax = Math.max(segments[segments.length - 1].to, tMin + 1);

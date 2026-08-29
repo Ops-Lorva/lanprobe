@@ -202,17 +202,31 @@
   .cancel-inline { margin-top: 16px; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .error { color: var(--ep-danger); font-size: 13px; margin-bottom: 12px; }
+  /* ⚠️ La carte vit dans une colonne étroite, pas sur toute la largeur.
+     En `flex: 1` seul, les trois mesures gardaient leur largeur de contenu
+     (`min-width: auto` par défaut) : la ligne débordait et le débit montant
+     se retrouvait coupé net au bord de la carte. D'où `min-width: 0`, un
+     retour à la ligne autorisé, et une taille de chiffre qui suit la
+     largeur disponible. */
   .result-card {
-    display: flex; gap: 24px;
+    display: flex; flex-wrap: wrap; gap: 20px 16px;
     background: var(--ep-glass-bg);
     border: 1px solid var(--ep-glass-border);
     border-radius: var(--ep-radius-lg);
-    padding: 32px; margin-bottom: 12px;
+    padding: 24px 20px; margin-bottom: 12px;
     transition: border-color 0.15s;
+    container-type: inline-size;
   }
   .result-card:hover { border-color: var(--ep-glass-border-strong); }
-  .metric { flex: 1; text-align: center; }
-  .metric-value { font-size: 48px; font-weight: 800; line-height: 1; font-family: var(--ep-font-mono); }
+  .metric { flex: 1 1 132px; min-width: 0; text-align: center; }
+  .metric-value {
+    font-size: clamp(26px, 11cqw, 48px);
+    font-weight: 800; line-height: 1;
+    font-family: var(--ep-font-mono);
+    /* Le chiffre ne doit jamais dépasser sa colonne, même si `cqw` n'est pas
+       compris : l'ellipse vaut mieux qu'un débordement silencieux. */
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .metric-label { font-size: 12px; color: var(--ep-text-secondary); margin-top: 6px; }
   .server-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding: 0 4px; }
   .server-name { font-size: 12px; color: var(--ep-text-muted); }

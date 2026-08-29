@@ -9,8 +9,18 @@
     height?: number;
     /** Décimales à l'affichage des valeurs. */
     decimals?: number;
+    /**
+     * Fenêtre de temps à représenter, en millisecondes epoch.
+     *
+     * ⚠️ Sans elle, l'axe se cale sur l'étendue des points : trente minutes de
+     * mesures remplissaient toute la largeur d'un graphique annoncé « 6 h »,
+     * et un point isolé donnait un axe où les six graduations affichaient la
+     * même minute. La fenêtre choisie doit se voir, y compris — surtout —
+     * quand elle est presque vide.
+     */
+    domain?: { from: number; to: number };
   }
-  let { series, unit, height = 168, decimals = 0 }: Props = $props();
+  let { series, unit, height = 168, decimals = 0, domain }: Props = $props();
 
   const lang = $derived($locale ?? 'en');
 
@@ -91,6 +101,7 @@
         if (p.v > vMax) vMax = p.v;
       }
     }
+    if (domain && domain.to > domain.from) return { tMin: domain.from, tMax: domain.to, vMax };
     if (!Number.isFinite(tMin)) return { tMin: 0, tMax: 1, vMax: 1 };
     if (tMax === tMin) tMax = tMin + 1;
     return { tMin, tMax, vMax };

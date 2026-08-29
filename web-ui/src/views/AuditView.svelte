@@ -111,6 +111,26 @@
     return [...out.entries()];
   });
 
+  /**
+   * Libellé lisible d'une action.
+   *
+   * Le code (`auth.login`) reste la vérité : il sert au filtre, il est le même
+   * dans les journaux du conteneur, et une action inconnue de la traduction —
+   * une version plus récente du hub, par exemple — doit rester lisible plutôt
+   * que de disparaître. Il est donc conservé en titre de l'élément.
+   */
+  function actionLabel(code: string): string {
+    const key = `audit.action.${code.replace(/\./g, '_')}`;
+    const label = $_(key);
+    return label === key ? code : label;
+  }
+
+  function familyLabel(family: string): string {
+    const key = `audit.family.${family}`;
+    const label = $_(key);
+    return label === key ? family : label;
+  }
+
   const failures = $derived(entries.filter((e) => e.outcome === 'failure').length);
 </script>
 
@@ -163,9 +183,9 @@
       >
         <option value="">{$_('audit.filter_all_actions')}</option>
         {#each grouped as [family, list] (family)}
-          <optgroup label={family}>
+          <optgroup label={familyLabel(family)}>
             {#each list as a (a)}
-              <option value={a}>{a}</option>
+              <option value={a}>{actionLabel(a)}</option>
             {/each}
           </optgroup>
         {/each}
@@ -235,7 +255,7 @@
             {/if}
           </span>
 
-          <span class="action lp-mono">{e.action}</span>
+          <span class="action" title={e.action}>{actionLabel(e.action)}</span>
 
           <span class="target lp-mono">{e.target ?? '—'}</span>
 

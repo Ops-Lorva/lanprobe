@@ -83,7 +83,9 @@
       "throughput": "↓ / ↑"
     },
     "hub_buffered": "{n} mesures en attente",
-    "hub_broken": "sonde révoquée — ré-enrôler"
+    "hub_broken": "sonde révoquée — ré-enrôler",
+    "hub_ok": "Hub connecté",
+    "hub_degraded": "Hub injoignable"
   },
   "discovery": {
     "title": "Network Discovery",

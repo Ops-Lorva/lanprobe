@@ -302,6 +302,11 @@ export const AUDIT_ACTIONS: readonly string[] = [
   'notify.test',
   'probe.down',
   'probe.up',
+  'probe.public_ip_changed',
+  'backup.create',
+  'backup.restore',
+  'backup.retention',
+  'user.password_reset_cli',
 ];
 
 // ── Notifications (contrat § 13) ────────────────────────────────────────────

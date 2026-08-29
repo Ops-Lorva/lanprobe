@@ -225,13 +225,20 @@
            impossible. -->
       <span class="hub-pill" class:ok={hub.state === 'ok'}
             class:warn={hub.state === 'degraded'} class:bad={hub.state === 'broken'}
-            title={hub.last_error ?? ''}>
+            title={hub.last_error ? `${hub.url} — ${hub.last_error}` : hub.url}>
         <span class="dot" aria-hidden="true"></span>
-        <span class="hub-url">{hub.url}</span>
+        <!-- L'URL était affichée ici : sur un hub interne elle est longue,
+             tronquée, et ne dit rien de plus que le point de couleur. Elle
+             reste dans l'infobulle, où on la cherche quand on en a besoin. -->
+        <span class="hub-state">
+          {hub.state === 'broken'
+            ? $_('dashboard.hub_broken')
+            : hub.state === 'degraded'
+              ? $_('dashboard.hub_degraded')
+              : $_('dashboard.hub_ok')}
+        </span>
         {#if hub.state === 'degraded' && hub.buffered_points > 0}
           <span class="hub-buf">{$_('dashboard.hub_buffered', { values: { n: hub.buffered_points } })}</span>
-        {:else if hub.state === 'broken'}
-          <span class="hub-buf">{$_('dashboard.hub_broken')}</span>
         {/if}
       </span>
     {/if}
@@ -354,7 +361,7 @@
   .hub-pill {
     display: inline-flex; align-items: center; gap: 7px;
     padding: 4px 10px; border-radius: 999px; font-size: 12px;
-    border: 1px solid var(--border, #333); margin-left: auto; margin-right: 10px;
+    border: 1px solid var(--border, #333); margin-right: auto;
   }
   .hub-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; flex: none; }
   /* La forme double la couleur : un anneau et un disque barré restent
@@ -364,11 +371,11 @@
   .hub-pill.bad .dot { background: #ef4444; box-shadow: inset 0 0 0 2px rgba(0,0,0,.45); }
   .hub-pill.warn { border-color: #f59e0b; }
   .hub-pill.bad { border-color: #ef4444; }
-  .hub-url { opacity: .8; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hub-state { opacity: .85; white-space: nowrap; }
   .hub-buf { opacity: .9; font-variant-numeric: tabular-nums; }
 
   .page { padding: 24px; }
-  .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+  .page-header { display: flex; gap: 12px; align-items: center; margin-bottom: 24px; }
   h1 { font-size: 20px; font-weight: 700; }
   button { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); cursor: pointer; font-size: 12px; }
   button:disabled { opacity: .5; cursor: wait; }

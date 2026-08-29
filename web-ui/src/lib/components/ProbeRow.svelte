@@ -1,5 +1,6 @@
 <script lang="ts">
   import { _, locale } from 'svelte-i18n';
+  import { platformLabel } from '$lib/format';
   import StatusMark from './StatusMark.svelte';
   import BufferBadge from './BufferBadge.svelte';
   import { relativeTime, absoluteTime } from '$lib/time';
@@ -22,11 +23,6 @@
    * « Macos », qui est faux : les noms de plateformes ont une graphie, autant
    * la respecter.
    */
-  function platformLabel(p: string | null | undefined): string {
-    if (!p) return $_('common.none');
-    const known: Record<string, string> = { linux: 'Linux', windows: 'Windows', macos: 'macOS' };
-    return known[p.toLowerCase()] ?? p.charAt(0).toUpperCase() + p.slice(1);
-  }
 </script>
 
 <!--
@@ -56,7 +52,7 @@
   </span>
 
   <span class="pubip lp-mono" title={probe.public_ip ?? ''}>{probe.public_ip || '—'}</span>
-  <span class="platform lp-mono">{platformLabel(probe.platform)}</span>
+  <span class="platform lp-mono">{platformLabel(probe.platform, $_('common.none'))}</span>
   <span class="version lp-mono">{probe.version || $_('common.none')}</span>
   <span class="buffer"><BufferBadge points={probe.buffered_points} /></span>
 

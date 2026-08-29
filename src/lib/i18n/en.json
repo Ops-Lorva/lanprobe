@@ -83,7 +83,9 @@
       "throughput": "↓ / ↑"
     },
     "hub_buffered": "{n} measurements pending",
-    "hub_broken": "probe revoked — re-enrol"
+    "hub_broken": "probe revoked — re-enrol",
+    "hub_ok": "Hub connected",
+    "hub_degraded": "Hub unreachable"
   },
   "discovery": {
     "title": "Network Discovery",
