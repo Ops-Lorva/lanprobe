@@ -464,7 +464,7 @@
     slaError = '';
     try {
       // La fenêtre du rapport est celle affichée : on exporte ce qu'on regarde.
-      const payload = await api.sla(id, range);
+      const payload = await api.sla(id, { range });
       const { downloadSlaReport } = await import('$lib/sla-report');
       await downloadSlaReport(payload, (k, v) => $_(k, { values: v }), lang);
     } catch (e) {

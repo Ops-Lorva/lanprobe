@@ -43,14 +43,40 @@ export interface SpeedtestRow {
   result_url: string | null;
 }
 
+export interface ScanHost {
+  ip: string;
+  hostname?: string | null;
+  mac?: string | null;
+  vendor?: string | null;
+  latency_ms?: number | null;
+}
+
+export interface ScanPort {
+  ip: string;
+  port: number;
+  proto: string;
+  service?: string | null;
+}
+
+export interface Scan {
+  started_at: number;
+  cidr: string | null;
+  hosts: ScanHost[];
+  ports: ScanPort[];
+}
+
 export interface SlaPayload {
   probe: string;
   site: string;
   range: string;
+  start?: number | null;
+  stop?: number | null;
   generated_at: number;
   targets: TargetSeries[];
   internet: Sample[];
   speedtests: SpeedtestRow[];
+  discovery: Scan | null;
+  ports: Scan | null;
 }
 
 export interface Outage {
@@ -128,11 +154,103 @@ export function stats(samples: Sample[]): Stats {
  */
 export type Translate = (key: string, values?: Record<string, string | number>) => string;
 
-export function windowLabel(range: string, t: Translate): string {
+export function windowLabel(range: string, t: Translate, locale = 'en'): string {
+  // Bornes explicites : « du … au … », qui est la seule forme qui vaille dans
+  // un document contractuel.
+  const bounds = /^(\d+)\.\.(\d+)$/.exec(range);
+  if (bounds) {
+    const fmt = (s: number) =>
+      new Intl.DateTimeFormat(locale, { dateStyle: 'medium' }).format(new Date(s * 1000));
+    return `${t('sla.from')} ${fmt(Number(bounds[1]))} ${t('sla.to')} ${fmt(Number(bounds[2]))}`;
+  }
   const m = /^-(\d+)([hd])$/.exec(range);
   if (!m) return range;
   const n = Number(m[1]);
   return m[2] === 'd' ? t('sla.window_days', { n }) : t('sla.window_hours', { n });
+}
+
+/**
+ * Graphique de latence d'une cible, en PNG.
+ *
+ * ⚠️ Dessiné sur un canvas plutôt qu'en graphique Excel natif : un graphique
+ * natif se recalcule à l'ouverture, et un client qui trie une colonne le voit
+ * changer sous ses yeux. Une image dit ce qu'on a mesuré, définitivement.
+ *
+ * Les coupures sont peintes en fond, pas seulement absentes de la courbe :
+ * une ligne qui s'interrompt se confond avec une ligne qui sort du cadre.
+ */
+function chartPng(samples: Sample[], t: Translate): string | null {
+  if (samples.length < 2) return null;
+  const W = 900;
+  const H = 260;
+  const PAD = { top: 16, right: 16, bottom: 26, left: 52 };
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const t0 = samples[0].timestamp;
+  const t1 = samples[samples.length - 1].timestamp;
+  const span = Math.max(1, t1 - t0);
+  const lat = samples
+    .map((s) => s.latency_ms)
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  const vMax = Math.max(1, ...lat) * 1.15;
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+  const x = (ts: number) => PAD.left + ((ts - t0) / span) * plotW;
+  const y = (v: number) => PAD.top + plotH - (v / vMax) * plotH;
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+
+  // Coupures en fond.
+  ctx.fillStyle = 'rgba(239, 68, 68, 0.16)';
+  for (const o of outages(samples)) {
+    const from = x(o.start);
+    const to = x(o.end ?? t1);
+    ctx.fillRect(from, PAD.top, Math.max(1, to - from), plotH);
+  }
+
+  // Grille et graduations.
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.fillStyle = '#6b7280';
+  ctx.font = '11px sans-serif';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const v = (vMax / 4) * i;
+    const yy = Math.round(y(v)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(PAD.left, yy);
+    ctx.lineTo(W - PAD.right, yy);
+    ctx.stroke();
+    ctx.fillText(v.toFixed(0), 6, yy + 4);
+  }
+
+  // Courbe, coupée sur les interruptions — une droite au travers d'un trou
+  // affirmerait une latence pendant une période sans mesure.
+  ctx.strokeStyle = '#4f46e5';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  let pen = false;
+  for (const s of samples) {
+    if (!s.alive || typeof s.latency_ms !== 'number') {
+      pen = false;
+      continue;
+    }
+    const px = x(s.timestamp);
+    const py = y(s.latency_ms);
+    if (pen) ctx.lineTo(px, py);
+    else ctx.moveTo(px, py);
+    pen = true;
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = '#374151';
+  ctx.fillText(t('sla.col_latency'), PAD.left, 11);
+
+  return canvas.toDataURL('image/png').split(',')[1];
 }
 
 function dt(seconds: number, locale: string): string {
@@ -185,7 +303,7 @@ export async function downloadSlaWorkbook(
   wb.creator = 'LanProbe';
   wb.created = new Date(first.generated_at * 1000);
 
-  const window = windowLabel(first.range, t);
+  const window = windowLabel(first.range, t, locale);
   const header = (ws: import('exceljs').Worksheet, probe?: string) => {
     if (probe) ws.addRow([t('sla.probe'), probe]);
     ws.addRow([t('sla.site'), first.site]);
@@ -287,6 +405,17 @@ export async function downloadSlaWorkbook(
       ]);
     }
     ws.columns = [24, 14, 14, 12].map((width) => ({ width }));
+
+    // Le graphique se pose à droite des données, jamais dessus : il ne doit
+    // pas masquer les chiffres qu'il illustre.
+    const png = chartPng(r.samples, t);
+    if (png) {
+      const imgId = wb.addImage({ base64: png, extension: 'png' });
+      ws.addImage(imgId, {
+        tl: { col: 5, row: 1 } as never,
+        ext: { width: 720, height: 210 },
+      });
+    }
   }
 
   // ── Débits ──────────────────────────────────────────────────────────────
@@ -321,6 +450,58 @@ export async function downloadSlaWorkbook(
     ws.columns = [18, 24, 12, 30, 12, 12, 12, 12].map((width) => ({ width }));
   }
 
+  // ── Inventaire : machines vues, et ports ouverts ────────────────────────
+  //
+  // Un client qui reçoit un SLA veut aussi savoir ce qui tournait chez lui.
+  const hosts = payloads.flatMap((p) =>
+    (p.discovery?.hosts ?? []).map((h) => ({ probe: p.probe, at: p.discovery!.started_at, ...h })),
+  );
+  if (hosts.length) {
+    const ws = wb.addWorksheet(t('sla.sheet_hosts'));
+    header(ws, payloads.length === 1 ? first.probe : undefined);
+    ws.addRow([
+      t('sla.probe'),
+      t('sla.col_scan_at'),
+      t('sla.col_ip'),
+      t('sla.col_hostname'),
+      t('sla.col_mac'),
+      t('sla.col_vendor'),
+      t('sla.col_latency'),
+    ]);
+    for (const h of hosts) {
+      ws.addRow([
+        h.probe,
+        dt(h.at, locale),
+        h.ip,
+        h.hostname ?? '—',
+        h.mac ?? '—',
+        h.vendor ?? '—',
+        h.latency_ms ?? '—',
+      ]);
+    }
+    ws.columns = [18, 22, 16, 24, 20, 22, 12].map((width) => ({ width }));
+  }
+
+  const openPorts = payloads.flatMap((p) =>
+    (p.ports?.ports ?? []).map((o) => ({ probe: p.probe, at: p.ports!.started_at, ...o })),
+  );
+  if (openPorts.length) {
+    const ws = wb.addWorksheet(t('sla.sheet_ports'));
+    header(ws, payloads.length === 1 ? first.probe : undefined);
+    ws.addRow([
+      t('sla.probe'),
+      t('sla.col_scan_at'),
+      t('sla.col_ip'),
+      t('sla.col_port'),
+      t('sla.col_proto'),
+      t('sla.col_service'),
+    ]);
+    for (const o of openPorts) {
+      ws.addRow([o.probe, dt(o.at, locale), o.ip, o.port, o.proto, o.service ?? '—']);
+    }
+    ws.columns = [18, 22, 16, 10, 10, 22].map((width) => ({ width }));
+  }
+
   const buffer = await wb.xlsx.writeBuffer();
   const blob = new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -329,7 +510,12 @@ export async function downloadSlaWorkbook(
   const a = document.createElement('a');
   const slug = title.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
   a.href = url;
-  a.download = `lanprobe-sla-${slug || 'rapport'}-${first.range.replace('-', '')}.xlsx`;
+  // Le nom de fichier porte la période : trois rapports du même site dans un
+  // dossier de téléchargements doivent se distinguer sans les ouvrir.
+  const period = first.range.includes('..')
+    ? first.range.split('..').map((s) => new Date(Number(s) * 1000).toISOString().slice(0, 10)).join('_')
+    : first.range.replace('-', '');
+  a.download = `lanprobe-sla-${slug || 'rapport'}-${period}.xlsx`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

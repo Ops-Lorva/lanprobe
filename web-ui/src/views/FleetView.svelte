@@ -284,9 +284,17 @@
   let slaSiteId = $state('');
   let slaSiteName = $state('');
   let slaPicked = $state(new SvelteSet<string>());
-  let slaRange = $state<Range>('-7d');
+  let slaRange = $state<Range | 'custom'>('-7d');
+  // Bornes explicites, au format `YYYY-MM-DD` des champs date.
+  let slaFrom = $state('');
+  let slaTo = $state('');
   let slaBusy = $state(false);
   let slaError = $state('');
+
+  /** Une période précise n'est exportable que si elle est complète et ordonnée. */
+  const slaReady = $derived(
+    slaRange !== 'custom' || (slaFrom !== '' && slaTo !== '' && slaFrom <= slaTo),
+  );
 
   const slaCandidates = $derived(
     $fleet.probes.filter((p) => p.site_id === slaSiteId),
@@ -316,9 +324,20 @@
       // Séquentiel : trente sondes en parallèle, ce sont trente requêtes Flux
       // simultanées sur le même Influx, et un hub qui ne répond plus pendant
       // qu'on produit un rapport.
+      // ⚠️ La borne de fin couvre le jour ENTIER : « du 1er au 31 » sans ça
+      // s'arrêterait à minuit le 31 au matin, et le dernier jour manquerait
+      // au rapport sans que personne ne s'en aperçoive.
+      const window =
+        slaRange === 'custom'
+          ? {
+              start: Math.floor(new Date(`${slaFrom}T00:00:00`).getTime() / 1000),
+              stop: Math.floor(new Date(`${slaTo}T23:59:59`).getTime() / 1000),
+            }
+          : { range: slaRange };
+
       const payloads = [];
       for (const p of chosen) {
-        payloads.push(await api.sla(p.probe_id, slaRange));
+        payloads.push(await api.sla(p.probe_id, window));
       }
       const { downloadSlaWorkbook } = await import('$lib/sla-report');
       await downloadSlaWorkbook(payloads, slaSiteName, (k, v) => $_(k, { values: v }), lang);
@@ -546,8 +565,25 @@
       {#each RANGES as r (r)}
         <option value={r}>{$_(`probe.range_${r.replace('-', '')}`)}</option>
       {/each}
+      <!-- ⚠️ Au-delà de sept jours, et pour tout rapport contractuel, ce sont
+           des dates qu'il faut : une fenêtre glissante donne un chiffre
+           différent à chaque ouverture du document. -->
+      <option value="custom">{$_('sla.custom')}</option>
     </select>
   </label>
+
+  {#if slaRange === 'custom'}
+    <div class="sladates">
+      <label class="lp-field">
+        {$_('sla.from')}
+        <input class="lp-input" type="date" bind:value={slaFrom} max={slaTo || undefined} />
+      </label>
+      <label class="lp-field">
+        {$_('sla.to')}
+        <input class="lp-input" type="date" bind:value={slaTo} min={slaFrom || undefined} />
+      </label>
+    </div>
+  {/if}
 
   <!-- ⚠️ Toutes cochées d'office : le cas courant est « tout le site », et
        décocher deux lignes va plus vite que d'en cocher trente. Mais on peut
@@ -576,7 +612,7 @@
     <button
       class="lp-btn primary"
       onclick={runSlaExport}
-      disabled={slaBusy || slaPicked.size === 0}
+      disabled={slaBusy || slaPicked.size === 0 || !slaReady}
     >
       {slaBusy ? $_('sla.exporting') : $_('sla.export')}
     </button>
@@ -637,6 +673,11 @@
     margin: 0 0 12px;
     font-size: 13px;
     color: var(--ep-text-secondary);
+  }
+  .sladates {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
   }
   .slapick {
     list-style: none;

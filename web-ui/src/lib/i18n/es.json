@@ -759,6 +759,19 @@
     "window_days": "{n, plural, one {último día} other {últimos # días}}",
     "window_hours": "{n, plural, one {última hora} other {últimas # horas}}",
     "export_title": "Informe SLA — {name}",
-    "export_lead": "Un libro para este sitio: resumen, cortes fechados, mediciones y caudales. Desmarque las sondas que no conciernen al destinatario."
+    "export_lead": "Un libro para este sitio: resumen, cortes fechados, mediciones y caudales. Desmarque las sondas que no conciernen al destinatario.",
+    "sheet_hosts": "Máquinas descubiertas",
+    "sheet_ports": "Puertos abiertos",
+    "col_scan_at": "Escaneo del",
+    "col_ip": "Dirección",
+    "col_hostname": "Nombre de host",
+    "col_mac": "MAC",
+    "col_vendor": "Fabricante",
+    "col_port": "Puerto",
+    "col_proto": "Protocolo",
+    "col_service": "Servicio",
+    "from": "Del",
+    "to": "al",
+    "custom": "Periodo exacto…"
   }
 }

@@ -77,3 +77,14 @@ describe('windowLabel', () => {
     expect(windowLabel('-90m', t)).toBe('-90m');
   });
 });
+
+describe('windowLabel avec bornes explicites', () => {
+  it('écrit « du … au … » plutôt qu’une durée relative', () => {
+    // ⚠️ Un rapport contractuel porte sur une période convenue. « 7 derniers
+    // jours » donnerait un chiffre différent à chaque ouverture du document.
+    const out = windowLabel('1788000000..1788600000', t, 'fr');
+    expect(out).toContain('sla.from');
+    expect(out).toContain('sla.to');
+    expect(out).not.toContain('window_days');
+  });
+});

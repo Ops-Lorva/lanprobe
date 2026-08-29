@@ -759,6 +759,19 @@
     "window_days": "{n, plural, one {last day} other {last # days}}",
     "window_hours": "{n, plural, one {last hour} other {last # hours}}",
     "export_title": "SLA report — {name}",
-    "export_lead": "One workbook for this site: summary, dated outages, samples and throughput. Untick the probes the recipient has nothing to do with."
+    "export_lead": "One workbook for this site: summary, dated outages, samples and throughput. Untick the probes the recipient has nothing to do with.",
+    "sheet_hosts": "Discovered machines",
+    "sheet_ports": "Open ports",
+    "col_scan_at": "Scan of",
+    "col_ip": "Address",
+    "col_hostname": "Hostname",
+    "col_mac": "MAC",
+    "col_vendor": "Vendor",
+    "col_port": "Port",
+    "col_proto": "Protocol",
+    "col_service": "Service",
+    "from": "From",
+    "to": "to",
+    "custom": "Exact period…"
   }
 }

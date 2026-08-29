@@ -1849,14 +1849,14 @@ async fn probe_sla_samples(
         Ok(probe) => probe,
         Err(e) => return error_response(e),
     };
-    let range = query.range.unwrap_or_else(|| "-24h".into());
+    let (window, range) = flux_range(&query);
     let bucket = state.settings.influx_bucket();
     let flux = format!(
-        "from(bucket: {})\n  |> range(start: {})\n  \
+        "from(bucket: {})\n  |> range({})\n  \
          |> filter(fn: (r) => r[\"probe_id\"] == {})\n  \
          |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
         flux_string(&bucket),
-        flux_duration(&range),
+        window,
         flux_string(&id),
     );
     let csv = match state.influx.query_flux(&flux).await {
@@ -1868,12 +1868,12 @@ async fn probe_sla_samples(
     // un client qui lit « 99,9 % sur la passerelle » veut aussi savoir si le
     // lien vers l'extérieur tenait pendant ce temps-là.
     let internet_flux = format!(
-        "from(bucket: {})\n  |> range(start: {})\n  \
+        "from(bucket: {})\n  |> range({})\n  \
          |> filter(fn: (r) => r[\"probe_id\"] == {})\n  \
          |> filter(fn: (r) => r[\"_measurement\"] == \"internet_status\")\n  \
          |> filter(fn: (r) => r[\"_field\"] == \"state\" or r[\"_field\"] == \"icmp_ms\")",
         flux_string(&bucket),
-        flux_duration(&range),
+        window,
         flux_string(&id),
     );
     let internet = match state.influx.query_flux(&internet_flux).await {
@@ -1887,15 +1887,24 @@ async fn probe_sla_samples(
     };
 
     let speedtests = state.db.speedtest_history(&id, 500).unwrap_or_default();
+    // Les inventaires du rapport : ce que la sonde a vu sur le réseau, et les
+    // ports ouverts qu'elle y a relevés. Un client qui reçoit un SLA veut
+    // aussi savoir ce qui tournait chez lui.
+    let discovery = state.db.latest_scan(&id, "discovery").ok().flatten();
+    let ports = state.db.latest_scan(&id, "ports").ok().flatten();
 
     ok_json(json!({
         "probe": probe.name,
         "site": probe.site_name,
         "range": range,
+        "start": query.start,
+        "stop": query.stop,
         "generated_at": crate::db::now(),
         "targets": samples_from_flux_csv(&csv),
         "internet": internet,
         "speedtests": speedtests,
+        "discovery": discovery,
+        "ports": ports,
     }))
 }
 
@@ -2363,6 +2372,29 @@ struct MetricsQuery {
     measurement: Option<String>,
     #[serde(default)]
     range: Option<String>,
+    /// Bornes explicites, en secondes epoch. Prennent le pas sur `range`.
+    ///
+    /// ⚠️ Un rapport de SLA porte sur une période convenue — « du 1er au 31 »
+    /// — pas sur « les sept derniers jours ». Une fenêtre glissante donnerait
+    /// un chiffre différent à chaque ouverture du document.
+    #[serde(default)]
+    start: Option<i64>,
+    #[serde(default)]
+    stop: Option<i64>,
+}
+
+/// Construit la clause `range(...)` de Flux et le libellé de la période.
+fn flux_range(query: &MetricsQuery) -> (String, String) {
+    match (query.start, query.stop) {
+        (Some(start), Some(stop)) if stop > start => (
+            format!("start: {start}, stop: {stop}"),
+            format!("{start}..{stop}"),
+        ),
+        _ => {
+            let range = query.range.clone().unwrap_or_else(|| "-24h".into());
+            (format!("start: {}", flux_duration(&range)), range)
+        }
+    }
 }
 
 /// Requête Flux proxifiée. Le navigateur ne parle jamais directement à
@@ -4356,6 +4388,34 @@ mod tests {
             ))
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[test]
+    fn explicit_bounds_win_over_a_sliding_window() {
+        // ⚠️ Un rapport de SLA porte sur une période convenue — « du 1er au
+        // 31 » — pas sur « les sept derniers jours ». Une fenêtre glissante
+        // donnerait un chiffre différent à chaque ouverture du document.
+        let (window, label) = flux_range(&MetricsQuery {
+            measurement: None,
+            range: Some("-7d".into()),
+            start: Some(1_788_000_000),
+            stop: Some(1_788_600_000),
+        });
+        assert_eq!(window, "start: 1788000000, stop: 1788600000");
+        assert_eq!(label, "1788000000..1788600000");
+    }
+
+    #[test]
+    fn reversed_bounds_fall_back_instead_of_asking_influx_for_nothing() {
+        // Des bornes inversées rendraient une fenêtre vide, donc un rapport à
+        // 0 % qu'on prendrait pour une panne totale.
+        let (window, _) = flux_range(&MetricsQuery {
+            measurement: None,
+            range: Some("-24h".into()),
+            start: Some(1_788_600_000),
+            stop: Some(1_788_000_000),
+        });
+        assert_eq!(window, "start: -24h");
     }
 
     #[test]

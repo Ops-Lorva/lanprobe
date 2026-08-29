@@ -724,10 +724,24 @@ export const api = {
     ),
 
   /** Relevés bruts d'une fenêtre, pour le rapport SLA. */
-  sla: (id: string, range: string) =>
-    request<import('./sla-report').SlaPayload>(
-      `/api/probes/${encodeURIComponent(id)}/sla?range=${encodeURIComponent(range)}`,
-    ),
+  /**
+   * `range` pour une fenêtre glissante, `start`/`stop` (epoch, secondes) pour
+   * une période précise. ⚠️ Un rapport remis à un client porte sur une période
+   * convenue : « les 7 derniers jours » donnerait un chiffre différent à
+   * chaque ouverture du document.
+   */
+  sla: (id: string, window: { range?: string; start?: number; stop?: number }) => {
+    const q = new URLSearchParams();
+    if (window.start != null && window.stop != null) {
+      q.set('start', String(window.start));
+      q.set('stop', String(window.stop));
+    } else {
+      q.set('range', window.range ?? '-24h');
+    }
+    return request<import('./sla-report').SlaPayload>(
+      `/api/probes/${encodeURIComponent(id)}/sla?${q}`,
+    );
+  },
 
   commands: (id: string) =>
     request<{ commands: ProbeCommand[] }>(
