@@ -18,6 +18,17 @@
   let hubUrl = $state('');
   let hubName = $state('');
   let hubCode = $state('');
+
+  /**
+   * Met le code en forme pendant la frappe : majuscules et tiret posé tout
+   * seul. Le code est dicté au téléphone — on le tape donc souvent en
+   * minuscules, ou sans le tiret. Le refuser pour ça serait absurde quand la
+   * correction est mécanique.
+   */
+  function formatCode(raw: string): string {
+    const clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    return clean.length > 4 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean;
+  }
   let hubSelfSigned = $state(false);
   let hubBusy = $state(false);
   let hubError = $state('');
@@ -348,7 +359,16 @@
         </label>
         <label class="hub-field">
           {$_('settings.hub.code')}
-          <input type="text" bind:value={hubCode} placeholder="K7M2-4PQX" spellcheck="false" disabled={readOnly} />
+          <input
+            type="text"
+            value={hubCode}
+            oninput={(e) => (hubCode = formatCode(e.currentTarget.value))}
+            placeholder="K7M2-4PQX"
+            spellcheck="false"
+            autocapitalize="characters"
+            autocomplete="off"
+            disabled={readOnly}
+          />
         </label>
         <p class="hub-hint">{$_('settings.hub.code_hint')}</p>
         <label class="hub-check">

@@ -43,9 +43,17 @@ interface EnrollState {
   hidden: string[];
   /** Vrai quand le hub ne sert pas encore la route : on ne montre alors que le local. */
   serverUnavailable: boolean;
+  /** Vrai dès que le hub a répondu une fois : il fait alors autorité. */
+  serverLoaded: boolean;
 }
 
-const initial: EnrollState = { server: [], local: {}, hidden: [], serverUnavailable: false };
+const initial: EnrollState = {
+  server: [],
+  local: {},
+  hidden: [],
+  serverUnavailable: false,
+  serverLoaded: false,
+};
 
 function create() {
   const store = writable<EnrollState>({ ...initial });
@@ -66,7 +74,7 @@ function create() {
   async function refresh(onExpired: () => void) {
     try {
       const rows = (await api.pendingEnrollCodes()) ?? [];
-      update((s) => ({ ...s, server: rows, serverUnavailable: false }));
+      update((s) => ({ ...s, server: rows, serverUnavailable: false, serverLoaded: true }));
     } catch (e) {
       if (e instanceof ApiError && e.isExpired) return onExpired();
       update((s) => ({ ...s, server: [], serverUnavailable: true }));
@@ -107,8 +115,14 @@ export const pendingRows = derived(enrollments, ($e): PendingRow[] => {
     const key = pendingKey(entry);
     byKey.set(key, { ...entry, key, code: entry.code ?? $e.local[key]?.code ?? null });
   }
-  for (const [key, { entry, code }] of Object.entries($e.local)) {
-    if (!byKey.has(key)) byKey.set(key, { ...entry, key, code });
+  // ⚠️ La mémoire locale ne **crée** une ligne que tant que le hub n'a pas
+  // répondu. Sinon elle ressuscitait les codes consommés : le hub cesse de les
+  // lister dès qu'une sonde les a pris, mais la copie locale les réaffichait
+  // indéfiniment — une place réservée pour une sonde déjà arrivée.
+  if ($e.serverUnavailable || !$e.serverLoaded) {
+    for (const [key, { entry, code }] of Object.entries($e.local)) {
+      if (!byKey.has(key)) byKey.set(key, { ...entry, key, code });
+    }
   }
   return [...byKey.values()]
     .filter((r) => !$e.hidden.includes(r.key))
