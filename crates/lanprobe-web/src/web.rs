@@ -110,6 +110,8 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes", get(list_probes))
             .route("/api/probes/{id}/metrics", get(probe_metrics))
             .route("/api/probes/{id}/inventory", get(probe_inventory))
+            .route("/api/probes/{id}/sla.csv", get(probe_sla_csv))
+            .route("/api/probes/{id}/sla", get(probe_sla_samples))
             .route("/api/settings", get(get_settings))
             .route("/api/settings/influx-advertise", get(get_advertise))
             .route("/api/influx", get(influx_overview))
@@ -1829,6 +1831,271 @@ async fn probe_inventory(
         },
         _ => fail(StatusCode::BAD_REQUEST, "genre attendu : ports, discovery ou speedtest"),
     }
+}
+
+/// Relevés bruts par cible, pour un export au format de l'application.
+///
+/// ⚠️ Rendus **bruts**, pas agrégés. Le rapport de l'application ne se
+/// contente pas de moyennes : il liste les coupures avec leur durée et rend la
+/// série complète. Envoyer un résumé obligerait le hub à recalculer ce que
+/// l'application sait déjà faire, et les deux finiraient par diverger sur la
+/// définition d'une coupure.
+async fn probe_sla_samples(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MetricsQuery>,
+) -> Response {
+    let probe = match state.db.get_probe(&id) {
+        Ok(probe) => probe,
+        Err(e) => return error_response(e),
+    };
+    let range = query.range.unwrap_or_else(|| "-24h".into());
+    let bucket = state.settings.influx_bucket();
+    let flux = format!(
+        "from(bucket: {})\n  |> range(start: {})\n  \
+         |> filter(fn: (r) => r[\"probe_id\"] == {})\n  \
+         |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
+        flux_string(&bucket),
+        flux_duration(&range),
+        flux_string(&id),
+    );
+    let csv = match state.influx.query_flux(&flux).await {
+        Ok(csv) => csv,
+        Err(e) => return fail(StatusCode::BAD_GATEWAY, &e),
+    };
+    ok_json(json!({
+        "probe": probe.name,
+        "site": probe.site_name,
+        "range": range,
+        "targets": samples_from_flux_csv(&csv),
+    }))
+}
+
+/// Relevés ICMP recollés par cible et par instant.
+///
+/// ⚠️ `alive` et `latency_ms` arrivent sur DEUX lignes distinctes du CSV
+/// d'Influx. Les traiter séparément donnerait deux fois plus de relevés que
+/// la sonde n'en a pris, et une disponibilité calculée sur cette base serait
+/// fausse.
+fn samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    let mut by_ip: BTreeMap<String, BTreeMap<i64, (Option<bool>, Option<f64>)>> = BTreeMap::new();
+    let mut cols: Option<Vec<String>> = None;
+
+    for line in csv.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.is_empty() {
+            cols = None;
+            continue;
+        }
+        let cells: Vec<&str> = line.split(',').collect();
+        let Some(header) = cols.as_ref() else {
+            cols = Some(cells.iter().map(|c| c.trim().to_string()).collect());
+            continue;
+        };
+        let at = |name: &str| {
+            header
+                .iter()
+                .position(|c| c == name)
+                .and_then(|i| cells.get(i))
+                .map(|s| s.trim())
+        };
+        let (Some(ip), Some(time), Some(field), Some(value)) =
+            (at("ip"), at("_time"), at("_field"), at("_value"))
+        else {
+            continue;
+        };
+        let Some(ts) = rfc3339_to_millis(time) else {
+            continue;
+        };
+        // En secondes : c'est l'unité des relevés de l'application, et le
+        // rapport doit pouvoir mélanger les deux origines.
+        let slot = by_ip.entry(ip.to_string()).or_default().entry(ts / 1000).or_default();
+        match field {
+            "alive" => slot.0 = Some(value == "true" || value == "1"),
+            "latency_ms" => slot.1 = value.parse().ok(),
+            _ => {}
+        }
+    }
+
+    by_ip
+        .into_iter()
+        .map(|(ip, points)| {
+            let samples: Vec<serde_json::Value> = points
+                .into_iter()
+                .map(|(ts, (alive, latency_ms))| {
+                    json!({
+                        "timestamp": ts,
+                        // Pas de relevé `alive` : on retombe sur la présence
+                        // d'une latence, faute de mieux, plutôt que d'écarter
+                        // le point.
+                        "alive": alive.unwrap_or(latency_ms.is_some()),
+                        "latency_ms": latency_ms,
+                    })
+                })
+                .collect();
+            json!({ "ip": ip, "samples": samples })
+        })
+        .collect()
+}
+
+/// Rapport SLA d'une sonde, en CSV.
+///
+/// ⚠️ Calculé **depuis Influx**, pas depuis un cache : le SLA est une lecture
+/// de l'historique, et un chiffre calculé une fois puis conservé se met à
+/// mentir dès que la fenêtre change. C'est aussi pourquoi la fenêtre voyage
+/// dans l'URL : le rapport doit dire sur quoi il porte.
+async fn probe_sla_csv(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MetricsQuery>,
+) -> Response {
+    let probe = match state.db.get_probe(&id) {
+        Ok(probe) => probe,
+        Err(e) => return error_response(e),
+    };
+    let range = query.range.unwrap_or_else(|| "-24h".into());
+    let bucket = state.settings.influx_bucket();
+    let flux = format!(
+        "from(bucket: {})\n  |> range(start: {})\n           |> filter(fn: (r) => r[\"probe_id\"] == {})\n           |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
+        flux_string(&bucket),
+        flux_duration(&range),
+        flux_string(&id),
+    );
+    let csv = match state.influx.query_flux(&flux).await {
+        Ok(csv) => csv,
+        Err(e) => return fail(StatusCode::BAD_GATEWAY, &e),
+    };
+
+    let report = sla_from_flux_csv(&csv);
+    let mut out = String::from(
+        "sonde,site,fenetre,cible,disponibilite_pct,latence_moy_ms,\
+         latence_min_ms,latence_max_ms,latence_p95_ms,releves,echecs\n",
+    );
+    for row in &report {
+        out.push_str(&format!(
+            "{},{},{},{},{:.2},{},{},{},{},{},{}\n",
+            csv_cell(&probe.name),
+            csv_cell(&probe.site_name),
+            csv_cell(&range),
+            csv_cell(&row.ip),
+            row.uptime_pct,
+            row.avg_latency_ms.map(|v| format!("{v:.1}")).unwrap_or_default(),
+            row.min_latency_ms.map(|v| v.to_string()).unwrap_or_default(),
+            row.max_latency_ms.map(|v| v.to_string()).unwrap_or_default(),
+            row.p95_latency_ms.map(|v| v.to_string()).unwrap_or_default(),
+            row.total_samples,
+            row.failed_samples,
+        ));
+    }
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"sla-{}-{}.csv\"",
+                    slug(&probe.name),
+                    range.trim_start_matches('-')
+                ),
+            ),
+        ],
+        out,
+    )
+        .into_response()
+}
+
+/// Échappe une cellule CSV. Un nom de sonde peut contenir une virgule ; sans
+/// ça, une seule sonde mal nommée décale toutes les colonnes du fichier.
+fn csv_cell(value: &str) -> String {
+    if value.contains([',', '"', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// Nom de fichier sûr, sans espace ni accent problématique.
+fn slug(value: &str) -> String {
+    let s: String = value
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_lowercase();
+    if s.is_empty() { "sonde".into() } else { s }
+}
+
+/// Agrège les relevés ICMP d'Influx en un SLA par cible.
+///
+/// ⚠️ La disponibilité se calcule sur le champ `alive`, jamais sur la présence
+/// d'une latence : un hôte qui ne répond pas n'écrit pas de latence, et
+/// compter les latences ferait un uptime de 100 % sur un hôte mort.
+fn sla_from_flux_csv(csv: &str) -> Vec<lanprobe_core::sla::SlaStats> {
+    use std::collections::BTreeMap;
+
+    // Par cible, puis par instant : `alive` et `latency_ms` sont deux lignes
+    // distinctes du CSV et doivent être recollées avant d'être comptées.
+    let mut by_ip: BTreeMap<String, BTreeMap<String, (Option<bool>, Option<u64>)>> =
+        BTreeMap::new();
+    let mut cols: Option<Vec<String>> = None;
+
+    for line in csv.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.is_empty() {
+            cols = None;
+            continue;
+        }
+        let cells: Vec<&str> = line.split(',').collect();
+        let Some(header) = cols.as_ref() else {
+            cols = Some(cells.iter().map(|c| c.trim().to_string()).collect());
+            continue;
+        };
+        let at = |name: &str| {
+            header
+                .iter()
+                .position(|c| c == name)
+                .and_then(|i| cells.get(i))
+                .map(|s| s.trim())
+        };
+        let (Some(ip), Some(time), Some(field), Some(value)) =
+            (at("ip"), at("_time"), at("_field"), at("_value"))
+        else {
+            continue;
+        };
+        let slot = by_ip
+            .entry(ip.to_string())
+            .or_default()
+            .entry(time.to_string())
+            .or_default();
+        match field {
+            "alive" => slot.0 = Some(value == "true" || value == "1"),
+            "latency_ms" => slot.1 = value.parse::<f64>().ok().map(|v| v.round() as u64),
+            _ => {}
+        }
+    }
+
+    by_ip
+        .into_iter()
+        .map(|(ip, points)| {
+            let samples: Vec<lanprobe_core::sla::PingSample> = points
+                .into_values()
+                .map(|(alive, latency_ms)| lanprobe_core::sla::PingSample {
+                    alive: alive.unwrap_or(latency_ms.is_some()),
+                    latency_ms,
+                })
+                .collect();
+            lanprobe_core::sla::compute_sla(&ip, &samples)
+        })
+        .collect()
 }
 
 /// Commandes que le hub accepte de faire exécuter à une sonde.
@@ -3996,6 +4263,91 @@ mod tests {
             ))
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[test]
+    fn alive_and_latency_are_recollected_into_one_sample() {
+        // ⚠️ Ils arrivent sur DEUX lignes distinctes du CSV d'Influx. Les
+        // traiter séparément donnerait deux fois plus de relevés que la sonde
+        // n'en a pris, et fausserait toute disponibilité calculée dessus.
+        let csv = ",result,table,_time,_value,_field,ip\n\
+                   ,,0,2026-08-29T09:00:00Z,true,alive,10.0.0.1\n\
+                   ,,0,2026-08-29T09:00:00Z,12.5,latency_ms,10.0.0.1\n";
+        let targets = samples_from_flux_csv(csv);
+        assert_eq!(targets.len(), 1);
+        let samples = targets[0]["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 1, "un instant = un relevé : {samples:?}");
+        assert_eq!(samples[0]["alive"], true);
+        assert_eq!(samples[0]["latency_ms"], 12.5);
+    }
+
+    #[test]
+    fn a_host_that_never_answered_does_not_get_a_hundred_percent_uptime() {
+        // ⚠️ Un hôte qui ne répond pas n'écrit PAS de latence. Calculer la
+        // disponibilité sur la présence d'une latence donnerait 100 % sur un
+        // hôte mort — le chiffre exactement inverse de la vérité.
+        let csv = ",result,table,_time,_value,_field,ip\n\
+                   ,,0,2026-08-29T09:00:00Z,false,alive,10.0.0.9\n\
+                   ,,0,2026-08-29T09:00:01Z,false,alive,10.0.0.9\n";
+        let report = sla_from_flux_csv(csv);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].uptime_pct, 0.0);
+        assert_eq!(report[0].failed_samples, 2);
+    }
+
+    #[test]
+    fn sla_is_computed_per_target_not_merged() {
+        // Deux cibles fusionnées donneraient une disponibilité moyenne
+        // qu'aucune des deux n'a jamais eue.
+        let csv = ",result,table,_time,_value,_field,ip\n\
+                   ,,0,2026-08-29T09:00:00Z,true,alive,10.0.0.1\n\
+                   ,,0,2026-08-29T09:00:00Z,12,latency_ms,10.0.0.1\n\
+                   ,,0,2026-08-29T09:00:00Z,false,alive,8.8.8.8\n";
+        let report = sla_from_flux_csv(csv);
+        assert_eq!(report.len(), 2);
+        assert_eq!(report[0].ip, "10.0.0.1");
+        assert_eq!(report[0].uptime_pct, 100.0);
+        assert_eq!(report[1].ip, "8.8.8.8");
+        assert_eq!(report[1].uptime_pct, 0.0);
+    }
+
+    #[test]
+    fn a_probe_name_with_a_comma_does_not_shift_the_columns() {
+        // Une seule sonde mal nommée décalerait tout le fichier.
+        assert_eq!(csv_cell("Paris, bureau"), "\"Paris, bureau\"");
+        assert_eq!(csv_cell("Paris"), "Paris");
+        assert_eq!(csv_cell("dit \"Paris\""), "\"dit \"\"Paris\"\"\"");
+    }
+
+    #[tokio::test]
+    async fn the_sla_export_is_a_csv_named_after_the_probe() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let response = h
+            .router
+            .clone()
+            .oneshot(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/sla.csv?range=-24h")),
+                &session,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let disposition = response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(disposition.contains("sla-paris-24h.csv"), "{disposition}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        // L'en-tête doit être là même sans mesure : un fichier vide se lit
+        // comme un export raté.
+        assert!(text.starts_with("sonde,site,fenetre,cible,"), "{text}");
     }
 
     #[tokio::test]
