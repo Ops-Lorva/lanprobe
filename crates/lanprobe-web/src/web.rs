@@ -1863,12 +1863,105 @@ async fn probe_sla_samples(
         Ok(csv) => csv,
         Err(e) => return fail(StatusCode::BAD_GATEWAY, &e),
     };
+
+    // L'accès internet est une ligne du rapport au même titre qu'une cible :
+    // un client qui lit « 99,9 % sur la passerelle » veut aussi savoir si le
+    // lien vers l'extérieur tenait pendant ce temps-là.
+    let internet_flux = format!(
+        "from(bucket: {})\n  |> range(start: {})\n  \
+         |> filter(fn: (r) => r[\"probe_id\"] == {})\n  \
+         |> filter(fn: (r) => r[\"_measurement\"] == \"internet_status\")\n  \
+         |> filter(fn: (r) => r[\"_field\"] == \"state\" or r[\"_field\"] == \"icmp_ms\")",
+        flux_string(&bucket),
+        flux_duration(&range),
+        flux_string(&id),
+    );
+    let internet = match state.influx.query_flux(&internet_flux).await {
+        Ok(csv) => internet_samples_from_flux_csv(&csv),
+        // Un rapport sans le volet internet vaut mieux que pas de rapport :
+        // l'absence se verra à l'écran, elle ne fera pas échouer l'export.
+        Err(e) => {
+            tracing::warn!("volet internet du rapport SLA indisponible : {e}");
+            Vec::new()
+        }
+    };
+
+    let speedtests = state.db.speedtest_history(&id, 500).unwrap_or_default();
+
     ok_json(json!({
         "probe": probe.name,
         "site": probe.site_name,
         "range": range,
+        "generated_at": crate::db::now(),
         "targets": samples_from_flux_csv(&csv),
+        "internet": internet,
+        "speedtests": speedtests,
     }))
+}
+
+/// Relevés d'accès internet, ramenés à la même forme que les cibles ICMP.
+///
+/// ⚠️ `state` est un texte (`online` / `limited` / `offline`), pas un booléen.
+/// Le convertir en « vivant / mort » perdrait `limited`, qui est justement
+/// l'état qu'un client conteste — « ça marchait » alors que rien ne passait.
+fn internet_samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    let mut points: BTreeMap<i64, (Option<String>, Option<f64>)> = BTreeMap::new();
+    let mut cols: Option<Vec<String>> = None;
+
+    for line in csv.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.is_empty() {
+            cols = None;
+            continue;
+        }
+        let cells: Vec<&str> = line.split(',').collect();
+        let Some(header) = cols.as_ref() else {
+            cols = Some(cells.iter().map(|c| c.trim().to_string()).collect());
+            continue;
+        };
+        let at = |name: &str| {
+            header
+                .iter()
+                .position(|c| c == name)
+                .and_then(|i| cells.get(i))
+                .map(|s| s.trim())
+        };
+        let (Some(time), Some(field), Some(value)) = (at("_time"), at("_field"), at("_value"))
+        else {
+            continue;
+        };
+        let Some(ts) = rfc3339_to_millis(time) else {
+            continue;
+        };
+        let slot = points.entry(ts / 1000).or_default();
+        match field {
+            "state" => slot.0 = Some(value.to_string()),
+            "icmp_ms" => slot.1 = value.parse().ok(),
+            _ => {}
+        }
+    }
+
+    points
+        .into_iter()
+        .filter_map(|(ts, (state, latency_ms))| {
+            state.map(|state| {
+                json!({
+                    "timestamp": ts,
+                    "state": state,
+                    // `alive` pour que le rapport puisse traiter internet
+                    // comme une cible de plus ; `state` reste à côté pour
+                    // distinguer « limité » de « hors ligne ».
+                    "alive": state == "online",
+                    "latency_ms": latency_ms,
+                })
+            })
+        })
+        .collect()
 }
 
 /// Relevés ICMP recollés par cible et par instant.

@@ -455,6 +455,26 @@
     }
   }
 
+  // ── Rapport SLA ──────────────────────────────────────────────────────────
+  let slaBusy = $state(false);
+  let slaError = $state('');
+
+  async function exportSla() {
+    slaBusy = true;
+    slaError = '';
+    try {
+      // La fenêtre du rapport est celle affichée : on exporte ce qu'on regarde.
+      const payload = await api.sla(id, range);
+      const { downloadSlaReport } = await import('$lib/sla-report');
+      await downloadSlaReport(payload, (k, v) => $_(k, { values: v }), lang);
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      slaError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      slaBusy = false;
+    }
+  }
+
   let iperfServer = $state('');
   let discoveryCidr = $state('');
   let speedEngine = $state<'ookla' | 'iperf3'>('ookla');
@@ -822,6 +842,15 @@
           {$_(`probe.range_${r.replace('-', '')}`)}
         </button>
       {/each}
+    </div>
+    <!-- Le rapport porte sur la fenêtre affichée : on exporte ce qu'on
+         regarde, et la fenêtre est écrite dans le classeur. Un « 99,2 % »
+         sans période ne veut rien dire pour le client qui le reçoit. -->
+    <div class="slabox">
+      <button class="lp-btn ghost sm" onclick={exportSla} disabled={slaBusy}>
+        {slaBusy ? $_('sla.exporting') : $_('sla.export')}
+      </button>
+      {#if slaError}<span class="slaerr">{slaError}</span>{/if}
     </div>
   </div>
 
@@ -1786,6 +1815,17 @@
   .grid .srv {
     max-width: 240px;
     overflow-wrap: anywhere;
+  }
+
+  .slabox {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .slaerr {
+    font-size: 11px;
+    color: var(--ep-danger);
   }
 
   .runbox {

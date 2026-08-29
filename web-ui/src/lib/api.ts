@@ -723,6 +723,12 @@ export const api = {
       `/api/probes/${encodeURIComponent(id)}/inventory?kind=${kind}`,
     ),
 
+  /** Relevés bruts d'une fenêtre, pour le rapport SLA. */
+  sla: (id: string, range: string) =>
+    request<import('./sla-report').SlaPayload>(
+      `/api/probes/${encodeURIComponent(id)}/sla?range=${encodeURIComponent(range)}`,
+    ),
+
   commands: (id: string) =>
     request<{ commands: ProbeCommand[] }>(
       `/api/probes/${encodeURIComponent(id)}/commands`,
