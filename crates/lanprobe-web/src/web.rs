@@ -87,7 +87,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/probes/enroll", post(enroll))
         .route("/api/probes/{id}/write", post(write_metrics))
-        .route("/api/probes/{id}/heartbeat", post(heartbeat));
+        .route("/api/probes/{id}/heartbeat", post(heartbeat))
+        .route("/api/probes/{id}/scans", post(publish_scan));
 
     // `GET /api/sites` accepte aussi les identifiants du compte : la sonde
     // l'appelle avant l'enrôlement, quand elle n'a pas encore de session.
@@ -108,6 +109,7 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/me", get(me))
             .route("/api/probes", get(list_probes))
             .route("/api/probes/{id}/metrics", get(probe_metrics))
+            .route("/api/probes/{id}/inventory", get(probe_inventory))
             .route("/api/settings", get(get_settings))
             .route("/api/settings/influx-advertise", get(get_advertise))
             .route("/api/influx", get(influx_overview))
@@ -1758,6 +1760,62 @@ async fn revoke_probe(
 
 /// Rotation d'hygiène : le nouveau jeton attend d'être remis au prochain
 /// battement, l'ancien reste actif jusqu'à l'accusé.
+/// La sonde publie le résultat complet d'un scan (contrat § 12).
+///
+/// ⚠️ Le hub ne dérive **pas** le compteur Influx de ce message : la sonde
+/// continue de l'écrire elle-même. Deux chemins pour la même valeur finiraient
+/// par diverger, et on ne saurait plus lequel croire.
+async fn publish_scan(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(report): Json<crate::db::ScanReport>,
+) -> Response {
+    let Some(token) = bearer_token(&headers) else {
+        return fail(StatusCode::UNAUTHORIZED, "jeton de sonde requis");
+    };
+    if let Err(e) = state.db.authenticate_probe(&id, &token) {
+        return error_response(e);
+    }
+    if !matches!(report.kind.as_str(), "ports" | "discovery" | "speedtest") {
+        return fail(StatusCode::BAD_REQUEST, "genre de scan inconnu");
+    }
+    match state.db.record_scan(&id, &report) {
+        Ok(scan_id) => ok_json(json!({ "scan_id": scan_id })),
+        Err(e) => error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct InventoryQuery {
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// Dernier inventaire connu d'une sonde, et l'historique des tests de débit.
+async fn probe_inventory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<InventoryQuery>,
+) -> Response {
+    if state.db.get_probe(&id).is_err() {
+        return fail(StatusCode::NOT_FOUND, "sonde inconnue");
+    }
+    match query.kind.as_deref() {
+        Some("speedtest") => match state.db.speedtest_history(&id, 50) {
+            Ok(rows) => ok_json(json!({ "speedtests": rows })),
+            Err(e) => error_response(e),
+        },
+        Some(kind @ ("ports" | "discovery")) => match state.db.latest_scan(&id, kind) {
+            // `null` et non un scan vide : « jamais lancé » et « lancé, rien
+            // trouvé » appellent deux phrases différentes à l'écran.
+            Ok(scan) => ok_json(json!({ "scan": scan })),
+            Err(e) => error_response(e),
+        },
+        _ => fail(StatusCode::BAD_REQUEST, "genre attendu : ports, discovery ou speedtest"),
+    }
+}
+
 /// Commandes que le hub accepte de faire exécuter à une sonde.
 ///
 /// ⚠️ Liste **fermée**, et pas par prudence excessive : une commande part de
@@ -3626,6 +3684,149 @@ mod tests {
             ))
             .await;
         assert!(fleet[0]["internet_state"].is_null(), "{fleet}");
+    }
+
+    // ── Inventaire réseau (contrat § 12) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn a_probe_publishes_a_scan_and_the_interface_reads_it_back() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/scans"),
+                    serde_json::json!({
+                        "kind": "discovery",
+                        "started_at": 1_788_000_000,
+                        "cidr": "10.0.8.0/24",
+                        "hosts": [
+                            { "ip": "10.0.8.1", "hostname": "gw", "mac": "aa:bb", "vendor": "Ubiquiti" },
+                            { "ip": "10.0.8.50", "latency_ms": 2 }
+                        ]
+                    }),
+                ),
+                &token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (_, read, _) = h
+            .call(with_cookie(
+                json_request(
+                    "GET",
+                    &format!("/api/probes/{probe_id}/inventory?kind=discovery"),
+                    serde_json::json!({}),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(read["scan"]["cidr"], "10.0.8.0/24");
+        assert_eq!(read["scan"]["hosts"].as_array().unwrap().len(), 2);
+        assert_eq!(read["scan"]["hosts"][0]["vendor"], "Ubiquiti");
+    }
+
+    #[tokio::test]
+    async fn a_scan_never_launched_is_null_not_an_empty_scan() {
+        // « Jamais lancé » et « lancé, rien trouvé » appellent deux phrases
+        // différentes à l'écran. Rendre un scan vide dans les deux cas ferait
+        // écrire « aucune machine sur ce réseau » pour un scan qui n'a jamais
+        // eu lieu.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (_, read, _) = h
+            .call(with_cookie(
+                json_request(
+                    "GET",
+                    &format!("/api/probes/{probe_id}/inventory?kind=ports"),
+                    serde_json::json!({}),
+                ),
+                &session,
+            ))
+            .await;
+        assert!(read["scan"].is_null(), "{read}");
+    }
+
+    #[tokio::test]
+    async fn each_run_is_kept_so_history_can_be_read() {
+        // ⚠️ Un scan par exécution, jamais un état courant écrasé : sans ça on
+        // ne peut plus répondre à « quels ports étaient ouverts le 12 mars ».
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        for (at, dl) in [(1_788_000_000, 100.0), (1_788_000_600, 900.0)] {
+            h.call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/scans"),
+                    serde_json::json!({
+                        "kind": "speedtest",
+                        "started_at": at,
+                        "speedtest": { "engine": "ookla", "download_mbps": dl, "upload_mbps": 50.0 }
+                    }),
+                ),
+                &token,
+            ))
+            .await;
+        }
+
+        let (_, read, _) = h
+            .call(with_cookie(
+                json_request(
+                    "GET",
+                    &format!("/api/probes/{probe_id}/inventory?kind=speedtest"),
+                    serde_json::json!({}),
+                ),
+                &session,
+            ))
+            .await;
+        let rows = read["speedtests"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "les deux exécutions sont conservées : {read}");
+        // Du plus récent au plus ancien.
+        assert_eq!(rows[0]["download_mbps"], 900.0);
+    }
+
+    #[tokio::test]
+    async fn a_scan_without_a_probe_token_is_refused() {
+        // La route est ouverte au réseau des sondes : sans authentification,
+        // n'importe qui pourrait remplir l'inventaire d'un client.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, _, _) = h
+            .call(json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/scans"),
+                serde_json::json!({ "kind": "discovery", "started_at": 1 }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_scan_kind_is_refused() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, _, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/scans"),
+                    serde_json::json!({ "kind": "tout", "started_at": 1 }),
+                ),
+                &token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     // ── File de commandes (contrat § 14) ───────────────────────────────────

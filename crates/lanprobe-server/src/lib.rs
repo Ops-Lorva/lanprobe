@@ -17,6 +17,7 @@ pub mod commands;
 pub mod config;
 pub mod export_buffer;
 pub mod influxdb;
+pub mod inventory;
 pub mod monitor;
 pub mod hub;
 pub mod scheduler;

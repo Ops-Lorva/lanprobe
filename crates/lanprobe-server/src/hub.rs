@@ -852,6 +852,15 @@ fn looks_like_tls_failure(error: &reqwest::Error) -> bool {
 ///
 /// `source` à `None` = aucune interface sélectionnée : on laisse le système
 /// router, ce qui est le comportement attendu quand rien n'est imposé.
+/// Même client, exposé pour la publication d'inventaire : elle doit suivre
+/// exactement les mêmes règles de certificat et d'interface que le battement.
+pub fn http_client_for(
+    allow_self_signed: bool,
+    source: Option<std::net::Ipv4Addr>,
+) -> reqwest::Client {
+    http_client(allow_self_signed, source)
+}
+
 fn http_client(allow_self_signed: bool, source: Option<std::net::Ipv4Addr>) -> reqwest::Client {
     let builder = reqwest::Client::builder();
     let builder = if allow_self_signed {

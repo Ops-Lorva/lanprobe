@@ -132,6 +132,14 @@ fn start_sub_tasks(cfg: &SchedulerConfig, state: &AppState) -> Vec<tokio::task::
 /// (contrat § 14) : deux implémentations d'un même test finiraient par
 /// diverger sur la contrainte d'interface, qui est justement ce qui rend la
 /// mesure honnête.
+/// Clé de scellement, pour publier l'inventaire au hub.
+///
+/// Relue à chaque scan plutôt que gardée : les scans sont rares, et une clé
+/// tenue en mémoire pour la durée du processus survivrait à un ré-enrôlement.
+fn sealing_key(state: &AppState) -> Option<crate::secrets::SecretKey> {
+    crate::secrets::load_or_create_key(&state.config.dir()).ok()
+}
+
 pub async fn speedtest_once(state: &AppState) {
     let state = state.clone();
 
@@ -408,6 +416,34 @@ pub async fn discovery_once(state: &AppState, cidr: String) {
     );
     let _ = state.events.send(done_event(&effective_cidr, hosts_found));
 
+    if let Some(key) = sealing_key(&state) {
+        let hosts = state
+            .discovery
+            .snapshot()
+            .into_iter()
+            .map(|h| crate::inventory::ScanHost {
+                ip: h.ip,
+                hostname: h.hostname,
+                mac: h.mac,
+                vendor: h.vendor,
+                latency_ms: h.latency_ms.map(|v| v as i64),
+            })
+            .collect();
+        crate::inventory::publish(
+            &state,
+            &key,
+            crate::inventory::ScanReport {
+                kind: "discovery".into(),
+                started_at: crate::inventory::now(),
+                cidr: Some(effective_cidr.clone()),
+                hosts,
+                ports: Vec::new(),
+                speedtest: None,
+            },
+        )
+        .await;
+    }
+
     // Remettre scan_cancel à true (idle) une fois le scan terminé.
     state.scan_cancel.store(true, Ordering::SeqCst);
 }
@@ -447,6 +483,42 @@ pub async fn portscan_once(state: &AppState, ip: &str) -> Result<usize, String> 
         payload: serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null),
     });
     tracing::info!("scan de ports terminé sur {ip} — {} TCP ouverts", entry.tcp.len());
+
+    if let Some(key) = sealing_key(state) {
+        // Seuls les ports OUVERTS partent : publier les milliers de ports
+        // fermés d'un scan complet gonflerait l'inventaire sans rien apprendre.
+        let ports = entry
+            .tcp
+            .iter()
+            .chain(entry.udp.iter())
+            .filter(|p| p.open)
+            .map(|p| crate::inventory::ScanPort {
+                ip: ip.to_string(),
+                port: p.port,
+                proto: p.proto.clone(),
+                service: (!p.service.is_empty()).then(|| p.service.clone()),
+            })
+            .collect();
+        crate::inventory::publish(
+            state,
+            &key,
+            crate::inventory::ScanReport {
+                kind: "ports".into(),
+                started_at: crate::inventory::now(),
+                cidr: None,
+                hosts: vec![crate::inventory::ScanHost {
+                    ip: ip.to_string(),
+                    hostname: None,
+                    mac: None,
+                    vendor: None,
+                    latency_ms: None,
+                }],
+                ports,
+                speedtest: None,
+            },
+        )
+        .await;
+    }
     Ok(entry.tcp.len())
 }
 

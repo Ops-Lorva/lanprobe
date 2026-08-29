@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -233,7 +233,138 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE probes ADD COLUMN internet_state    TEXT;
     ALTER TABLE probes ADD COLUMN internet_state_at INTEGER;
     "#,
+    // v10 → v11 : inventaire réseau (contrat § 12).
+    //
+    // ⚠️ En SQLite, PAS dans Influx. Un scan de ports n'est pas une métrique,
+    // c'est un inventaire daté : « le port 22 est ouvert sur 192.168.1.5 » est
+    // un fait, pas une valeur par instant. Et Influx crée une série par
+    // combinaison d'étiquettes — avec `ip` + `port`, un /24 dont chaque
+    // machine expose vingt ports fabrique ~5 000 séries pour UN scan. C'est le
+    // mode de panne classique d'Influx, et il ne se voit pas avant qu'il soit
+    // trop tard.
+    //
+    // Un scan par exécution, jamais un état courant écrasé : c'est ce qui
+    // permet de répondre à « quels ports étaient ouverts le 12 mars » et
+    // « quelle machine est apparue cette semaine ».
+    r#"
+    CREATE TABLE scans (
+      scan_id    TEXT PRIMARY KEY,
+      probe_id   TEXT NOT NULL REFERENCES probes(probe_id) ON DELETE CASCADE,
+      kind       TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      cidr       TEXT
+    );
+    CREATE TABLE scan_hosts (
+      scan_id    TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+      ip         TEXT NOT NULL,
+      hostname   TEXT,
+      mac        TEXT,
+      vendor     TEXT,
+      latency_ms INTEGER,
+      PRIMARY KEY (scan_id, ip)
+    );
+    CREATE TABLE scan_ports (
+      scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+      ip      TEXT NOT NULL,
+      port    INTEGER NOT NULL,
+      proto   TEXT NOT NULL,
+      service TEXT,
+      PRIMARY KEY (scan_id, ip, port, proto)
+    );
+    CREATE TABLE speedtests (
+      scan_id       TEXT PRIMARY KEY REFERENCES scans(scan_id) ON DELETE CASCADE,
+      engine        TEXT,
+      server_name   TEXT,
+      download_mbps REAL,
+      upload_mbps   REAL,
+      latency_ms    INTEGER,
+      jitter_ms     REAL,
+      result_url    TEXT
+    );
+    CREATE INDEX scans_by_probe   ON scans(probe_id, kind, started_at DESC);
+    CREATE INDEX scan_ports_lookup ON scan_ports(port, proto);
+    CREATE INDEX scan_hosts_ip     ON scan_hosts(ip);
+    "#,
 ];
+
+/// Rapport de scan publié par une sonde (contrat § 12).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ScanReport {
+    /// `ports` | `discovery` | `speedtest`.
+    pub kind: String,
+    pub started_at: i64,
+    #[serde(default)]
+    pub cidr: Option<String>,
+    #[serde(default)]
+    pub hosts: Vec<ScanHost>,
+    #[serde(default)]
+    pub ports: Vec<ScanPort>,
+    #[serde(default)]
+    pub speedtest: Option<SpeedtestReport>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScanHost {
+    pub ip: String,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScanPort {
+    pub ip: String,
+    pub port: i64,
+    pub proto: String,
+    #[serde(default)]
+    pub service: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SpeedtestReport {
+    #[serde(default)]
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub server_name: Option<String>,
+    #[serde(default)]
+    pub download_mbps: Option<f64>,
+    #[serde(default)]
+    pub upload_mbps: Option<f64>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+    #[serde(default)]
+    pub jitter_ms: Option<f64>,
+    #[serde(default)]
+    pub result_url: Option<String>,
+}
+
+/// Un scan tel qu'il est rendu à l'interface.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Scan {
+    pub scan_id: String,
+    pub kind: String,
+    pub started_at: i64,
+    pub cidr: Option<String>,
+    pub hosts: Vec<ScanHost>,
+    pub ports: Vec<ScanPort>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpeedtestRow {
+    pub started_at: i64,
+    pub engine: Option<String>,
+    pub server_name: Option<String>,
+    pub download_mbps: Option<f64>,
+    pub upload_mbps: Option<f64>,
+    pub latency_ms: Option<i64>,
+    pub jitter_ms: Option<f64>,
+    pub result_url: Option<String>,
+}
 
 /// Remises d'une même commande avant de la déclarer échouée.
 ///
@@ -1876,6 +2007,163 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    // ── Inventaire réseau (contrat § 12) ───────────────────────────────────
+
+    /// Enregistre un scan complet, en une transaction.
+    ///
+    /// ⚠️ Tout ou rien : un scan à moitié écrit se lirait comme un scan qui
+    /// n'a rien trouvé, ce qui est une conclusion, pas une absence de donnée.
+    pub fn record_scan(&self, probe_id: &str, scan: &ScanReport) -> DbResult<String> {
+        let mut conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM probes WHERE probe_id = ?1",
+            rusqlite::params![probe_id],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(DbError::NotFound("sonde inconnue".into()));
+        }
+
+        let scan_id = uuid::Uuid::new_v4().to_string();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO scans (scan_id, probe_id, kind, started_at, cidr)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![scan_id, probe_id, scan.kind, scan.started_at, scan.cidr],
+        )?;
+        for host in &scan.hosts {
+            // `OR REPLACE` : une même adresse vue deux fois dans un scan n'est
+            // pas une erreur de la sonde, c'est une réponse en double sur le
+            // réseau. On garde la dernière plutôt que de rejeter tout le scan.
+            tx.execute(
+                "INSERT OR REPLACE INTO scan_hosts
+                    (scan_id, ip, hostname, mac, vendor, latency_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    scan_id, host.ip, host.hostname, host.mac, host.vendor, host.latency_ms
+                ],
+            )?;
+        }
+        for port in &scan.ports {
+            tx.execute(
+                "INSERT OR REPLACE INTO scan_ports (scan_id, ip, port, proto, service)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![scan_id, port.ip, port.port, port.proto, port.service],
+            )?;
+        }
+        if let Some(s) = &scan.speedtest {
+            tx.execute(
+                "INSERT INTO speedtests
+                    (scan_id, engine, server_name, download_mbps, upload_mbps,
+                     latency_ms, jitter_ms, result_url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    scan_id, s.engine, s.server_name, s.download_mbps, s.upload_mbps,
+                    s.latency_ms, s.jitter_ms, s.result_url
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(scan_id)
+    }
+
+    /// Le scan le plus récent d'un genre donné, avec son contenu.
+    ///
+    /// `None` quand la sonde n'en a jamais publié : l'interface doit dire
+    /// « jamais lancé » et non « aucun résultat », qui laisserait croire à un
+    /// scan blanc.
+    pub fn latest_scan(&self, probe_id: &str, kind: &str) -> DbResult<Option<Scan>> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let head: Option<(String, i64, Option<String>)> = conn
+            .query_row(
+                "SELECT scan_id, started_at, cidr FROM scans
+                  WHERE probe_id = ?1 AND kind = ?2
+                  ORDER BY started_at DESC LIMIT 1",
+                rusqlite::params![probe_id, kind],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((scan_id, started_at, cidr)) = head else {
+            return Ok(None);
+        };
+
+        let hosts = {
+            let mut stmt = conn.prepare(
+                "SELECT ip, hostname, mac, vendor, latency_ms FROM scan_hosts
+                  WHERE scan_id = ?1 ORDER BY ip",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![&scan_id], |r| {
+                Ok(ScanHost {
+                    ip: r.get(0)?,
+                    hostname: r.get(1)?,
+                    mac: r.get(2)?,
+                    vendor: r.get(3)?,
+                    latency_ms: r.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let ports = {
+            let mut stmt = conn.prepare(
+                "SELECT ip, port, proto, service FROM scan_ports
+                  WHERE scan_id = ?1 ORDER BY ip, port",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![&scan_id], |r| {
+                Ok(ScanPort {
+                    ip: r.get(0)?,
+                    port: r.get(1)?,
+                    proto: r.get(2)?,
+                    service: r.get(3)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(Some(Scan { scan_id, kind: kind.to_string(), started_at, cidr, hosts, ports }))
+    }
+
+    /// Historique des tests de débit, du plus récent au plus ancien.
+    pub fn speedtest_history(&self, probe_id: &str, limit: i64) -> DbResult<Vec<SpeedtestRow>> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT s.started_at, t.engine, t.server_name, t.download_mbps,
+                    t.upload_mbps, t.latency_ms, t.jitter_ms, t.result_url
+               FROM speedtests t
+               JOIN scans s ON s.scan_id = t.scan_id
+              WHERE s.probe_id = ?1
+              ORDER BY s.started_at DESC
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![probe_id, limit], |r| {
+            Ok(SpeedtestRow {
+                started_at: r.get(0)?,
+                engine: r.get(1)?,
+                server_name: r.get(2)?,
+                download_mbps: r.get(3)?,
+                upload_mbps: r.get(4)?,
+                latency_ms: r.get(5)?,
+                jitter_ms: r.get(6)?,
+                result_url: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Purge l'inventaire au-delà de la rétention. `0` = illimité.
+    ///
+    /// ⚠️ Supprime des données. L'appelant doit avoir obtenu une confirmation
+    /// explicite avant de réduire la rétention — c'est la même règle que pour
+    /// Influx, et pour la même raison : on ne récupère pas ce qui est parti.
+    pub fn prune_inventory(&self, days: i64) -> DbResult<usize> {
+        if days <= 0 {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let cutoff = now() - days * 86_400;
+        // Les tables filles partent par ON DELETE CASCADE.
+        conn.execute("PRAGMA foreign_keys = ON", [])?;
+        Ok(conn.execute("DELETE FROM scans WHERE started_at < ?1", rusqlite::params![cutoff])?)
     }
 
     /// Historique récent, du plus neuf au plus ancien.
