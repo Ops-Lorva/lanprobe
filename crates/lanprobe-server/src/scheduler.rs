@@ -489,7 +489,17 @@ async fn run_portscan_task(state: AppState, interval_min: u64, targets: Vec<Stri
 ///
 /// Mieux vaut une mesure absente, visible comme telle, qu'une mesure crédible
 /// prise sur le mauvais réseau.
-fn resolve_src(state: &AppState) -> Result<Option<Ipv4Addr>, String> {
+/// Adresse source imposée par l'interface sélectionnée.
+///
+/// ⚠️ **Tout** le trafic de la sonde passe par cette adresse — mesures comme
+/// battement de cœur. C'est une décision du propriétaire : on peut avoir
+/// internet sur `eth1` et pas sur `eth0`, et `eth0` est justement celui qu'on
+/// cherche à éprouver. Une ligne de vie qui sortirait par l'autre lien
+/// affirmerait que tout va bien sur une interface qu'elle n'a jamais empruntée.
+///
+/// `Err` quand une interface est choisie mais n'a pas d'IPv4 : il n'y a alors
+/// pas de source légitime, et il vaut mieux échouer que sortir par ailleurs.
+pub fn resolve_src(state: &AppState) -> Result<Option<Ipv4Addr>, String> {
     let name = state
         .selected_interface
         .lock()
@@ -605,6 +615,35 @@ pub async fn run(state: AppState) {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ConfigStore;
+    use std::sync::Arc;
+
+    fn state_on(interface: Option<&str>) -> AppState {
+        let state = AppState::new_headless(Arc::new(ConfigStore::load(
+            std::env::temp_dir().join("lanprobe-resolve-src-test.json"),
+        )));
+        *state.selected_interface.lock().unwrap() = interface.map(str::to_string);
+        state
+    }
+
+    #[test]
+    fn no_selected_interface_lets_the_system_route() {
+        // Rien d'imposé : on ne force aucune adresse source. C'est le
+        // comportement attendu tant que l'utilisateur n'a rien choisi.
+        assert_eq!(resolve_src(&state_on(None)), Ok(None));
+    }
+
+    #[test]
+    fn an_interface_without_an_address_fails_instead_of_falling_back() {
+        // ⚠️ Le cœur de la règle : tout le trafic de la sonde — mesures ET
+        // battement de cœur — passe par l'interface choisie. Retomber sur la
+        // route par défaut ferait mesurer un lien et répondre par un autre,
+        // et le hub affirmerait « en ligne » pour une interface qu'aucun
+        // paquet n'a traversée.
+        let err = resolve_src(&state_on(Some("interface-qui-nexiste-pas"))).unwrap_err();
+        assert!(err.contains("interface-qui-nexiste-pas"), "{err}");
+    }
+
     use super::*;
 
     #[test]

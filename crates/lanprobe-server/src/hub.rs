@@ -383,7 +383,11 @@ pub async fn enroll(
         site,
         name: (!name.is_empty()).then_some(name),
     };
-    let response = http_client(allow_self_signed)
+    // L'enrôlement suit la même règle que le reste : s'enrôler par un lien
+    // pour mesurer par un autre donnerait une sonde qui joint son hub à
+    // l'installation et plus jamais après.
+    let source = crate::scheduler::resolve_src(state)?;
+    let response = http_client(allow_self_signed, source)
         .post(format!("{hub_url}/api/probes/enroll"))
         .json(&body)
         .timeout(Duration::from_secs(20))
@@ -687,7 +691,13 @@ async fn beat(
     let identity = network_identity(state);
     refresh_public_ip(public_ip, &identity, Instant::now()).await;
 
-    let response = http_client(config.allow_self_signed)
+    // ⚠️ Une interface sélectionnée sans IPv4 fait échouer le battement plutôt
+    // que de le laisser sortir ailleurs. C'est voulu : la sonde doit alors
+    // apparaître « sans nouvelles », parce que c'est la vérité de l'interface
+    // qu'on observe.
+    let source = crate::scheduler::resolve_src(state).map_err(BeatError::Transient)?;
+
+    let response = http_client(config.allow_self_signed, source)
         .post(format!(
             "{}/api/probes/{}/heartbeat",
             config.url, config.probe_id
@@ -821,12 +831,26 @@ fn looks_like_tls_failure(error: &reqwest::Error) -> bool {
 /// peut se faire passer pour le hub et le récupérer. Elle n'est levée que si
 /// l'utilisateur a explicitement déclaré héberger un hub auto-signé — un choix
 /// qu'il pose lui-même, pas un défaut qu'il subit.
-fn http_client(allow_self_signed: bool) -> reqwest::Client {
+/// Client HTTP vers le hub, **lié à l'interface sélectionnée**.
+///
+/// ⚠️ `local_address` n'est pas un détail de confort : sans elle, le battement
+/// de cœur sortait par la route par défaut. Une sonde dont l'interface mesurée
+/// n'avait plus internet restait donc verte dans le parc, parce que sa ligne
+/// de vie empruntait un autre lien. Le hub affirmait « en ligne » pour une
+/// interface qu'aucun paquet n'avait traversée.
+///
+/// `source` à `None` = aucune interface sélectionnée : on laisse le système
+/// router, ce qui est le comportement attendu quand rien n'est imposé.
+fn http_client(allow_self_signed: bool, source: Option<std::net::Ipv4Addr>) -> reqwest::Client {
     let builder = reqwest::Client::builder();
     let builder = if allow_self_signed {
         builder.danger_accept_invalid_certs(true)
     } else {
         builder
+    };
+    let builder = match source {
+        Some(ip) => builder.local_address(std::net::IpAddr::V4(ip)),
+        None => builder,
     };
     builder.build().unwrap_or_default()
 }

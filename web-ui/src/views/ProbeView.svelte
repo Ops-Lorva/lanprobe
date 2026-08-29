@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { _, locale } from 'svelte-i18n';
   import { fleet } from '$lib/fleet';
@@ -38,9 +38,30 @@
   const lang = $derived($locale ?? 'en');
   const probe = $derived($fleet.probes.find((p) => p.probe_id === id) ?? null);
 
+  // ── Rafraîchissement automatique ─────────────────────────────────────────
+  //
+  // Même raison que dans le parc : le statut est dérivé du dernier battement,
+  // et une fiche laissée ouverte afficherait un « en ligne » vieux d'une
+  // heure. Ici les graphiques suivent aussi, sinon on regarde une courbe qui
+  // s'arrête sans que rien ne le dise.
+  //
+  // ⚠️ `quiet` sur les deux : un rechargement visible ferait clignoter la page
+  // toutes les trente secondes. La barre de rafraîchissement s'affiche déjà
+  // par `refreshing`, qui garde le rendu précédent pendant la lecture.
+  const REFRESH_MS = 30_000;
+  let timer: ReturnType<typeof setInterval> | null = null;
+
   onMount(() => {
     // Accès direct par URL : le parc n'est peut-être pas encore chargé.
     if ($fleet.probes.length === 0) void fleet.load(onExpired);
+    timer = setInterval(() => {
+      void fleet.load(onExpired, { quiet: true });
+      void loadMetrics();
+    }, REFRESH_MS);
+  });
+
+  onDestroy(() => {
+    if (timer) clearInterval(timer);
   });
 
   // ── Renommage en place ───────────────────────────────────────────────────

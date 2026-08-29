@@ -41,6 +41,7 @@ impl InfluxClient {
         token: &str,
         host_tag: String,
         allow_self_signed: bool,
+        source: Option<std::net::Ipv4Addr>,
     ) -> Self {
         Self {
             // Le hub peut porter un certificat auto-signé quand l'utilisateur
@@ -53,6 +54,15 @@ impl InfluxClient {
                     builder.danger_accept_invalid_certs(true)
                 } else {
                     builder
+                };
+                // Même contrainte que le battement de cœur : les mesures
+                // partent par l'interface sélectionnée, jamais par une autre.
+                // Sans ça, une sonde pouvait mesurer un lien mort et livrer
+                // ses relevés par un lien sain — le hub voyait des données
+                // arriver d'une interface qui ne portait rien.
+                let builder = match source {
+                    Some(ip) => builder.local_address(std::net::IpAddr::V4(ip)),
+                    None => builder,
                 };
                 builder.build().unwrap_or_default()
             },
@@ -273,6 +283,16 @@ async fn hub_client(state: &AppState, key: &crate::secrets::SecretKey) -> Option
     } else {
         cfg.name.clone()
     };
+    // Une interface sans IPv4 : on ne construit pas de client plutôt que d'en
+    // faire un qui sortirait par ailleurs. L'appelant réessaiera au prochain
+    // changement d'interface, et le tampon garde les points en attendant.
+    let source = match crate::scheduler::resolve_src(state) {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::warn!("export suspendu : {e}");
+            return None;
+        }
+    };
     tracing::info!("mesures envoyées au hub {} (sonde « {} »)", cfg.url, host_tag);
     Some(
         InfluxClient::for_hub(
@@ -281,6 +301,7 @@ async fn hub_client(state: &AppState, key: &crate::secrets::SecretKey) -> Option
             &token,
             host_tag,
             cfg.allow_self_signed,
+            source,
         )
         .await,
     )
@@ -340,12 +361,14 @@ async fn flush_tick(
 
 /// Boucle d'envoi commune aux deux destinations.
 async fn run_with(
-    _state: AppState,
+    state: AppState,
+    key: crate::secrets::SecretKey,
     mut rx: tokio::sync::broadcast::Receiver<BroadcastEvent>,
     client: InfluxClient,
     status: Option<std::sync::Arc<crate::hub::WriteStatus>>,
     mut buffer: ExportBuffer,
 ) {
+    let mut client = client;
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut backoff = Backoff::new();
@@ -354,6 +377,18 @@ async fn run_with(
     loop {
         tokio::select! {
             event = rx.recv() => match event {
+                // ⚠️ Le client porte l'adresse source de l'interface : il est
+                // périmé dès qu'on change d'interface. Sans cette
+                // reconstruction, les mesures continuaient de partir par
+                // l'ancien lien — y compris après l'avoir débranché.
+                Ok(event) if event.event == "interface:selected" || event.event == "config:update" => {
+                    match hub_client(&state, &key).await {
+                        Some(fresh) => client = fresh,
+                        None => tracing::warn!(
+                            "interface sans adresse source : l'export attend, le tampon garde les points"
+                        ),
+                    }
+                }
                 Ok(event) => {
                     let now = now_ns();
                     for line in event_to_points(&event, &client.host_tag) {
@@ -423,7 +458,7 @@ pub async fn run(
     let mut buffer = buffer;
     loop {
         if let Some(client) = hub_client(&state, &key).await {
-            run_with(state, rx, client, status, buffer).await;
+            run_with(state, key, rx, client, status, buffer).await;
             return;
         }
         match rx.recv().await {
@@ -475,6 +510,7 @@ mod tests {
             "jeton",
             "Windows".into(),
             false,
+            None,
         )
         .await;
         assert_eq!(
