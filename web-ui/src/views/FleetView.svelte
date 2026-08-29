@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
+  import { RANGES, type Range } from '$lib/metrics';
   import { _, locale } from 'svelte-i18n';
   import { fleet } from '$lib/fleet';
   import { flash } from '$lib/flash';
@@ -273,6 +275,62 @@
     }
   }
 
+  // ── Rapport SLA d'un site ────────────────────────────────────────────────
+  //
+  // ⚠️ Le rapport se demande depuis le SITE, parce que c'est l'unité qu'on
+  // remet à un client. On choisit les sondes à y faire figurer : toutes ne le
+  // concernent pas forcément, et un rapport qui expose une sonde d'un autre
+  // client serait pire qu'inutile.
+  let slaSiteId = $state('');
+  let slaSiteName = $state('');
+  let slaPicked = $state(new SvelteSet<string>());
+  let slaRange = $state<Range>('-7d');
+  let slaBusy = $state(false);
+  let slaError = $state('');
+
+  const slaCandidates = $derived(
+    $fleet.probes.filter((p) => p.site_id === slaSiteId),
+  );
+
+  function openSlaExport(siteId: string, siteName: string) {
+    slaSiteId = siteId;
+    slaSiteName = siteName;
+    slaError = '';
+    // Toutes cochées par défaut : le cas courant est « tout le site », et
+    // décocher est plus rapide que cocher trente lignes.
+    slaPicked = new SvelteSet(
+      $fleet.probes.filter((p) => p.site_id === siteId).map((p) => p.probe_id),
+    );
+  }
+
+  function togglePicked(probeId: string) {
+    if (slaPicked.has(probeId)) slaPicked.delete(probeId);
+    else slaPicked.add(probeId);
+  }
+
+  async function runSlaExport() {
+    slaBusy = true;
+    slaError = '';
+    try {
+      const chosen = slaCandidates.filter((p) => slaPicked.has(p.probe_id));
+      // Séquentiel : trente sondes en parallèle, ce sont trente requêtes Flux
+      // simultanées sur le même Influx, et un hub qui ne répond plus pendant
+      // qu'on produit un rapport.
+      const payloads = [];
+      for (const p of chosen) {
+        payloads.push(await api.sla(p.probe_id, slaRange));
+      }
+      const { downloadSlaWorkbook } = await import('$lib/sla-report');
+      await downloadSlaWorkbook(payloads, slaSiteName, (k, v) => $_(k, { values: v }), lang);
+      slaSiteId = '';
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      slaError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      slaBusy = false;
+    }
+  }
+
   // ── Cycle de vie ─────────────────────────────────────────────────────────
   let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -460,6 +518,7 @@
             [g.site.site_id]: !isExpanded(g.site.site_id, g.probes, groups.length),
           })}
         onrename={() => openRename(g.site.site_id, g.site.name)}
+        onexportSla={() => openSlaExport(g.site.site_id, g.site.name)}
         onfocusSite={() => fleet.selectSite(g.site.site_id, onExpired)}
         onadd={() => void addProbe(g.site.site_id, g.site.name)}
         addBusy={addBusySite === g.site.site_id}
@@ -472,6 +531,57 @@
     {/each}
   </div>
 {/if}
+
+<Modal
+  open={slaSiteId !== ''}
+  wide
+  title={$_('sla.export_title', { values: { name: slaSiteName } })}
+  onclose={() => (slaSiteId = '')}
+>
+  <p class="slalead">{$_('sla.export_lead')}</p>
+
+  <label class="lp-field">
+    {$_('probe.range')}
+    <select class="lp-input" bind:value={slaRange}>
+      {#each RANGES as r (r)}
+        <option value={r}>{$_(`probe.range_${r.replace('-', '')}`)}</option>
+      {/each}
+    </select>
+  </label>
+
+  <!-- ⚠️ Toutes cochées d'office : le cas courant est « tout le site », et
+       décocher deux lignes va plus vite que d'en cocher trente. Mais on peut
+       retirer une sonde — un rapport qui montre la sonde d'un autre client
+       serait pire qu'inutile. -->
+  <ul class="slapick">
+    {#each slaCandidates as p (p.probe_id)}
+      <li>
+        <label>
+          <input
+            type="checkbox"
+            checked={slaPicked.has(p.probe_id)}
+            onchange={() => togglePicked(p.probe_id)}
+          />
+          <span>{p.name}</span>
+          <span class="slastat">{$_(`status.${p.status}`)}</span>
+        </label>
+      </li>
+    {/each}
+  </ul>
+
+  {#if slaError}<p class="slaerr" role="alert">{slaError}</p>{/if}
+
+  {#snippet footer()}
+    <button class="lp-btn" onclick={() => (slaSiteId = '')}>{$_('common.cancel')}</button>
+    <button
+      class="lp-btn primary"
+      onclick={runSlaExport}
+      disabled={slaBusy || slaPicked.size === 0}
+    >
+      {slaBusy ? $_('sla.exporting') : $_('sla.export')}
+    </button>
+  {/snippet}
+</Modal>
 
 <Modal open={createOpen} title={$_('site.create_title')} onclose={() => (createOpen = false)}>
   <label class="lp-field">
@@ -523,6 +633,44 @@
 </Modal>
 
 <style>
+  .slalead {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--ep-text-secondary);
+  }
+  .slapick {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
+    max-height: 280px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .slapick label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .slapick label:hover {
+    background: var(--ep-bg-tertiary);
+  }
+  .slastat {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--ep-text-dim);
+  }
+  .slaerr {
+    margin: 10px 0 0;
+    font-size: 12px;
+    color: var(--ep-danger);
+  }
+
   .flash {
     display: flex;
     align-items: center;

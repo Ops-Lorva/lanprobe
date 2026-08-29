@@ -18,6 +18,8 @@
     ontoggle: () => void;
     onrename: () => void;
     onfocusSite: () => void;
+    /** Ouvre le rapport SLA du site — la sélection des sondes se fait là. */
+    onexportSla: () => void;
     /** Crée un code d'enrôlement POUR CE SITE : le site n'est jamais à choisir. */
     onadd: () => void;
     /** Génération en cours pour ce site : le « + » ne doit pas se cliquer deux fois. */
@@ -48,6 +50,7 @@
     onhidePending,
     pendingBusyKey = null,
     filtered,
+    onexportSla,
   }: Props = $props();
 
   const counts = $derived.by(() => {
@@ -95,6 +98,20 @@
       >
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M2 3h12l-4.6 5.4v4.2L6.6 14V8.4z" />
+        </svg>
+      </button>
+      <!-- Le rapport se demande depuis le SITE : c'est l'unité qu'on remet à
+           un client, pas la sonde. Une sonde seule reste exportable depuis sa
+           fiche. -->
+      <button
+        class="lp-btn ghost sm"
+        onclick={onexportSla}
+        title={$_('sla.export')}
+        aria-label={$_('sla.export')}
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2v8m0 0L5 7m3 3l3-3" />
+          <path d="M2.5 11v2.5h11V11" />
         </svg>
       </button>
       <button

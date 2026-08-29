@@ -158,26 +158,57 @@ export async function downloadSlaReport(
   t: Translate,
   locale: string,
 ): Promise<void> {
+  return downloadSlaWorkbook([payload], payload.probe, t, locale);
+}
+
+/**
+ * Rapport couvrant **plusieurs sondes** — celui qu'on remet à un client qui
+ * possède un site entier.
+ *
+ * ⚠️ Une seule synthèse en tête, toutes sondes confondues, avec une colonne
+ * « sonde ». Un classeur d'une feuille par sonde obligerait le lecteur à
+ * recomposer lui-même la vue d'ensemble, qui est justement ce qu'il ouvre le
+ * document pour voir.
+ */
+export async function downloadSlaWorkbook(
+  payloads: SlaPayload[],
+  title: string,
+  t: Translate,
+  locale: string,
+): Promise<void> {
+  if (payloads.length === 0) return;
+  const first = payloads[0];
   // Import à la demande : exceljs pèse lourd, et la plupart des visites du hub
   // ne produisent aucun rapport.
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   wb.creator = 'LanProbe';
-  wb.created = new Date(payload.generated_at * 1000);
+  wb.created = new Date(first.generated_at * 1000);
 
-  const window = windowLabel(payload.range, t);
-  const header = (ws: import('exceljs').Worksheet) => {
-    ws.addRow([t('sla.probe'), payload.probe]);
-    ws.addRow([t('sla.site'), payload.site]);
+  const window = windowLabel(first.range, t);
+  const header = (ws: import('exceljs').Worksheet, probe?: string) => {
+    if (probe) ws.addRow([t('sla.probe'), probe]);
+    ws.addRow([t('sla.site'), first.site]);
     ws.addRow([t('sla.window'), window]);
-    ws.addRow([t('sla.generated'), dt(payload.generated_at, locale)]);
+    ws.addRow([t('sla.generated'), dt(first.generated_at, locale)]);
     ws.addRow([]);
   };
 
+  interface Line {
+    probe: string;
+    label: string;
+    samples: Sample[];
+  }
+  const rows: Line[] = payloads.flatMap((p) => [
+    ...(p.internet.length ? [{ probe: p.probe, label: t('sla.internet'), samples: p.internet }] : []),
+    ...p.targets.map((tg) => ({ probe: p.probe, label: tg.ip, samples: tg.samples })),
+  ]);
+
   // ── Synthèse ────────────────────────────────────────────────────────────
   const sum = wb.addWorksheet(t('sla.sheet_summary'));
-  header(sum);
+  header(sum, payloads.length === 1 ? first.probe : undefined);
   sum.addRow([
+    t('sla.probe'),
     t('sla.col_target'),
     t('sla.col_uptime'),
     t('sla.col_avg'),
@@ -188,14 +219,10 @@ export async function downloadSlaReport(
     t('sla.col_outages'),
   ]);
 
-  const rows: { label: string; samples: Sample[] }[] = [
-    ...(payload.internet.length ? [{ label: t('sla.internet'), samples: payload.internet }] : []),
-    ...payload.targets.map((tg) => ({ label: tg.ip, samples: tg.samples })),
-  ];
-
   for (const r of rows) {
     const s = stats(r.samples);
     sum.addRow([
+      r.probe,
       r.label,
       +s.uptime_pct.toFixed(2),
       s.avg != null ? +s.avg.toFixed(1) : '—',
@@ -206,15 +233,24 @@ export async function downloadSlaReport(
       outages(r.samples).length,
     ]);
   }
-  sum.columns = [22, 12, 12, 10, 10, 10, 12, 12].map((width) => ({ width }));
+  sum.columns = [18, 22, 12, 12, 10, 10, 10, 12, 12].map((width) => ({ width }));
 
   // ── Une feuille par cible : incidents puis série ─────────────────────────
+  const used = new Set<string>();
   for (const r of rows) {
-    // Excel refuse ces caractères dans un nom d'onglet, et une adresse IPv6
-    // en contient. Sans ce nettoyage, le classeur entier échoue à l'écriture.
-    const name = r.label.replace(/[\\/*?:[\]]/g, '-').slice(0, 31);
+    // Excel refuse ces caractères dans un nom d'onglet, plafonne à 31
+    // caractères et rejette un doublon — deux sondes qui surveillent la même
+    // adresse, c'est le cas courant. Le classeur entier échouerait à
+    // l'écriture sur n'importe lequel des trois.
+    const base = (payloads.length > 1 ? `${r.probe} ${r.label}` : r.label)
+      .replace(/[\\/*?:[\]]/g, '-')
+      .slice(0, 31);
+    let name = base;
+    for (let n = 2; used.has(name); n++) name = `${base.slice(0, 28)}~${n}`;
+    used.add(name);
+
     const ws = wb.addWorksheet(name);
-    header(ws);
+    header(ws, r.probe);
 
     const s = stats(r.samples);
     ws.addRow([t('sla.col_uptime'), +s.uptime_pct.toFixed(2) + ' %']);
@@ -254,10 +290,14 @@ export async function downloadSlaReport(
   }
 
   // ── Débits ──────────────────────────────────────────────────────────────
-  if (payload.speedtests.length) {
+  const speedRows = payloads.flatMap((p) =>
+    p.speedtests.map((r) => ({ probe: p.probe, ...r })),
+  );
+  if (speedRows.length) {
     const ws = wb.addWorksheet(t('sla.sheet_speed'));
-    header(ws);
+    header(ws, payloads.length === 1 ? first.probe : undefined);
     ws.addRow([
+      t('sla.probe'),
       t('sla.col_time'),
       t('sla.col_engine'),
       t('sla.col_server'),
@@ -266,8 +306,9 @@ export async function downloadSlaReport(
       t('sla.col_latency'),
       t('sla.col_jitter'),
     ]);
-    for (const r of payload.speedtests) {
+    for (const r of speedRows) {
       ws.addRow([
+        r.probe,
         dt(r.started_at, locale),
         r.engine ?? '—',
         r.server_name ?? '—',
@@ -277,7 +318,7 @@ export async function downloadSlaReport(
         r.jitter_ms != null ? +r.jitter_ms.toFixed(1) : '—',
       ]);
     }
-    ws.columns = [24, 12, 30, 12, 12, 12, 12].map((width) => ({ width }));
+    ws.columns = [18, 24, 12, 30, 12, 12, 12, 12].map((width) => ({ width }));
   }
 
   const buffer = await wb.xlsx.writeBuffer();
@@ -286,9 +327,9 @@ export async function downloadSlaReport(
   });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  const slug = payload.probe.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+  const slug = title.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
   a.href = url;
-  a.download = `lanprobe-sla-${slug || 'sonde'}-${payload.range.replace('-', '')}.xlsx`;
+  a.download = `lanprobe-sla-${slug || 'rapport'}-${first.range.replace('-', '')}.xlsx`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

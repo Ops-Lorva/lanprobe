@@ -757,6 +757,8 @@
     "site": "Site",
     "window": "Période",
     "window_days": "{n, plural, one {dernier jour} other {# derniers jours}}",
-    "window_hours": "{n, plural, one {dernière heure} other {# dernières heures}}"
+    "window_hours": "{n, plural, one {dernière heure} other {# dernières heures}}",
+    "export_title": "Rapport SLA — {name}",
+    "export_lead": "Un classeur pour ce site : synthèse, coupures datées, relevés et débits. Décochez les sondes qui ne concernent pas le destinataire."
   }
 }

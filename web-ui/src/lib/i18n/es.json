@@ -757,6 +757,8 @@
     "site": "Sitio",
     "window": "Periodo",
     "window_days": "{n, plural, one {último día} other {últimos # días}}",
-    "window_hours": "{n, plural, one {última hora} other {últimas # horas}}"
+    "window_hours": "{n, plural, one {última hora} other {últimas # horas}}",
+    "export_title": "Informe SLA — {name}",
+    "export_lead": "Un libro para este sitio: resumen, cortes fechados, mediciones y caudales. Desmarque las sondas que no conciernen al destinatario."
   }
 }
