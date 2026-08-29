@@ -149,6 +149,7 @@
           <span>{$_('fleet.col_probe')}</span>
           <span>{$_('fleet.col_status')}</span>
           <span>{$_('fleet.col_last_seen')}</span>
+          <span class="c-pubip">{$_('fleet.col_public_ip')}</span>
           <span class="c-platform">{$_('fleet.col_platform')}</span>
           <span class="c-version">{$_('fleet.col_version')}</span>
           <span>{$_('fleet.col_buffer')}</span>
@@ -163,9 +164,14 @@
 </section>
 
 <style>
+  /* ⚠️ Les points de rupture doivent suivre EXACTEMENT ceux de `ProbeRow` :
+     l'en-tête et les lignes sont deux grilles indépendantes, et une colonne
+     de plus d'un côté décale tous les intitulés. Ils avaient été aplatis en
+     trois règles sans `@media` — la plus étroite gagnait à toute largeur, et
+     l'en-tête ne correspondait plus à rien. */
   .cols {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 118px 120px 92px 84px 78px 18px;
+    grid-template-columns: minmax(0, 1fr) 118px 120px 118px 92px 84px 78px 18px;
     gap: 10px;
     padding: 0 12px 6px 12px;
     font-size: 9px;
@@ -173,15 +179,24 @@
     letter-spacing: 0.8px;
     color: var(--ep-text-dim);
   }
+  @media (max-width: 1080px) {
     .cols {
-      grid-template-columns: minmax(0, 1fr) 118px 120px 84px 78px 18px;
+      grid-template-columns: minmax(0, 1fr) 118px 120px 118px 84px 78px 18px;
     }
+    .cols .c-platform { display: none; }
+  }
+  @media (max-width: 900px) {
     .cols {
       grid-template-columns: minmax(0, 1fr) 118px 110px 78px 18px;
     }
-    .cols {
-      display: none;
-    }
+    .cols .c-version,
+    .cols .c-pubip { display: none; }
+  }
+  @media (max-width: 640px) {
+    /* Les lignes passent en présentation empilée : un en-tête de colonnes
+       n'a plus rien à titrer. */
+    .cols { display: none; }
+  }
   .site {
     background: var(--ep-bg-secondary);
     border: 1px solid var(--ep-border);

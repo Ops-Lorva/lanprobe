@@ -16,6 +16,17 @@
 
   const lang = $derived($locale ?? 'en');
   const seen = $derived(relativeTime(probe.last_seen, lang, now));
+
+  /**
+   * `linux` → `Linux`, `macos` → `macOS`. Une simple capitalisation donnerait
+   * « Macos », qui est faux : les noms de plateformes ont une graphie, autant
+   * la respecter.
+   */
+  function platformLabel(p: string | null | undefined): string {
+    if (!p) return $_('common.none');
+    const known: Record<string, string> = { linux: 'Linux', windows: 'Windows', macos: 'macOS' };
+    return known[p.toLowerCase()] ?? p.charAt(0).toUpperCase() + p.slice(1);
+  }
 </script>
 
 <!--
@@ -44,7 +55,8 @@
     {probe.last_seen ? seen : $_('common.none')}
   </span>
 
-  <span class="platform lp-mono">{probe.platform || $_('common.none')}</span>
+  <span class="pubip lp-mono" title={probe.public_ip ?? ''}>{probe.public_ip || '—'}</span>
+  <span class="platform lp-mono">{platformLabel(probe.platform)}</span>
   <span class="version lp-mono">{probe.version || $_('common.none')}</span>
   <span class="buffer"><BufferBadge points={probe.buffered_points} /></span>
 
@@ -58,7 +70,7 @@
 <style>
   .row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 118px 120px 92px 84px 78px 18px;
+    grid-template-columns: minmax(0, 1fr) 118px 120px 118px 92px 84px 78px 18px;
     align-items: center;
     gap: 10px;
     padding: 9px 12px 9px 9px;
@@ -114,6 +126,7 @@
   }
 
   .seen,
+  .pubip,
   .platform,
   .version {
     color: var(--ep-text-secondary);
@@ -143,7 +156,7 @@
      la plateforme et la version bien avant le statut et le tampon. */
   @media (max-width: 1080px) {
     .row {
-      grid-template-columns: minmax(0, 1fr) 118px 120px 84px 78px 18px;
+      grid-template-columns: minmax(0, 1fr) 118px 120px 118px 84px 78px 18px;
     }
     .platform {
       display: none;
@@ -152,6 +165,7 @@
   @media (max-width: 900px) {
     .row {
       grid-template-columns: minmax(0, 1fr) 118px 110px 78px 18px;
+    .pubip { display: none; }
     }
     .version {
       display: none;

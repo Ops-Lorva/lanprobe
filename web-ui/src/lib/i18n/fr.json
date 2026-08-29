@@ -279,7 +279,8 @@
     "site_rename": "Renommer le site",
     "site_open": "N'afficher que ce site",
     "health_bar": "Répartition des statuts du site {name}",
-    "site_add": "Enrôler une sonde dans le site {name}"
+    "site_add": "Enrôler une sonde dans le site {name}",
+    "col_public_ip": "IP publique"
   },
   "status": {
     "online": "En ligne",

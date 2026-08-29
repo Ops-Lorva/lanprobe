@@ -279,7 +279,8 @@
     "site_rename": "Rename site",
     "site_open": "Show this site only",
     "health_bar": "Status breakdown for site {name}",
-    "site_add": "Enrol a probe into site {name}"
+    "site_add": "Enrol a probe into site {name}",
+    "col_public_ip": "Public IP"
   },
   "status": {
     "online": "Online",

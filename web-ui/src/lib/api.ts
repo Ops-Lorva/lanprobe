@@ -25,6 +25,12 @@ export interface Probe {
   status: ProbeStatus;
   buffered_points: number;
   created_at: number;
+  /** Identité réseau remontée par la sonde — contrat § 15. */
+  public_ip?: string | null;
+  public_ip_at?: number | null;
+  interface?: string | null;
+  local_ips?: string[];
+  gateway?: string | null;
   /**
    * Rotation de clé en attente de remise (contrat § 9). Champs facultatifs :
    * ils ne figurent pas encore dans l'exemple de `GET /api/probes`, l'interface
