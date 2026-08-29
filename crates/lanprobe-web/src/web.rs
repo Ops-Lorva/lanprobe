@@ -2905,7 +2905,8 @@ mod tests {
     }
 
     impl Harness {
-        /// Hub complet devant un faux Influx local, admin déjà créé.
+        /// Hub complet devant un faux Influx local, **sans compte**.
+        /// Pour un hub déjà installé, voir [`Harness::with_admin`].
         async fn start() -> Self {
             let fake = FakeInflux::start(true, true).await;
             let db = std::sync::Arc::new(crate::db::Db::open_in_memory().unwrap());
@@ -3523,6 +3524,191 @@ mod tests {
     }
 
     // ── Session ────────────────────────────────────────────────────────────
+
+    // ── File de commandes (contrat § 14) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn a_command_reaches_the_probe_through_its_heartbeat() {
+        // Le hub n'a aucune route vers la sonde : le battement est le seul
+        // canal dans ce sens. Si la commande ne voyage pas là, elle ne voyage
+        // nulle part.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    serde_json::json!({ "kind": "port_scan", "args": { "ip": "10.0.0.1" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["id"].as_i64().unwrap();
+
+        let (status, beat, _) = h
+            .call(with_bearer(
+                json_request("POST", &format!("/api/probes/{probe_id}/heartbeat"), serde_json::json!({})),
+                &token,
+                ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{beat}");
+        let commands = beat["commands"].as_array().unwrap();
+        assert_eq!(commands.len(), 1, "{beat}");
+        assert_eq!(commands[0]["id"], id);
+        assert_eq!(commands[0]["kind"], "port_scan");
+        assert_eq!(commands[0]["args"]["ip"], "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_command_is_not_sent_again() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        let (_, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    serde_json::json!({ "kind": "speedtest" }),
+                ),
+                &session,
+            ))
+            .await;
+        let id = body["id"].as_i64().unwrap();
+
+        h.call(with_bearer(
+            json_request("POST", &format!("/api/probes/{probe_id}/heartbeat"), serde_json::json!({})),
+            &token,
+            ))
+        .await;
+
+        let (_, beat, _) = h
+            .call(with_bearer(
+                json_request("POST", &format!("/api/probes/{probe_id}/heartbeat"), serde_json::json!({ "command_acks": [{ "id": id, "ok": true }] })),
+                &token,
+                ))
+            .await;
+        // ⚠️ L'accusé est traité AVANT la file : sans cet ordre, la commande
+        // repartirait dans le battement qui vient de l'accuser.
+        assert!(beat["commands"].as_array().unwrap().is_empty(), "{beat}");
+
+        let (_, listed, _) = h
+            .call(with_cookie(
+                json_request("GET", &format!("/api/probes/{probe_id}/commands"), serde_json::json!({})),
+                &session,
+            ))
+            .await;
+        assert_eq!(listed["commands"][0]["state"], "done");
+    }
+
+    #[tokio::test]
+    async fn a_failed_command_keeps_the_reason_the_probe_gave() {
+        // C'est ce texte que l'opérateur lira. « Échec » sans raison
+        // l'obligerait à aller lire les journaux de la machine distante.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        let (_, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    serde_json::json!({ "kind": "discovery" }),
+                ),
+                &session,
+            ))
+            .await;
+        let id = body["id"].as_i64().unwrap();
+        h.call(with_bearer(
+            json_request("POST", &format!("/api/probes/{probe_id}/heartbeat"), serde_json::json!({})),
+            &token,
+            ))
+        .await;
+        h.call(with_bearer(
+            json_request("POST", &format!("/api/probes/{probe_id}/heartbeat"), serde_json::json!({
+                "command_acks": [{ "id": id, "ok": false, "error": "interface sans adresse" }]
+            })),
+            &token,
+            ))
+        .await;
+
+        let (_, listed, _) = h
+            .call(with_cookie(
+                json_request("GET", &format!("/api/probes/{probe_id}/commands"), serde_json::json!({})),
+                &session,
+            ))
+            .await;
+        assert_eq!(listed["commands"][0]["state"], "failed");
+        assert_eq!(listed["commands"][0]["error"], "interface sans adresse");
+    }
+
+    #[tokio::test]
+    async fn an_arbitrary_command_kind_is_refused() {
+        // ⚠️ Une commande part de l'intérieur du LAN d'un client. Accepter un
+        // `kind` libre offrirait l'exécution de n'importe quoi à qui
+        // obtiendrait un compte opérateur.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    serde_json::json!({ "kind": "shell", "args": { "cmd": "rm -rf /" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_viewer_cannot_launch_a_command() {
+        // Lancer un scan est une action sur le réseau d'un client, pas une
+        // consultation.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let (probe_id, _) = h.enroll(&admin, "Durand", "Paris").await;
+        h.user("claire", Role::Viewer).await;
+        let viewer = h.login_as("claire").await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    serde_json::json!({ "kind": "speedtest" }),
+                ),
+                &viewer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn launching_a_command_writes_an_audit_line_naming_its_author() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+        h.call(with_cookie(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/commands"),
+                serde_json::json!({ "kind": "speedtest" }),
+            ),
+            &session,
+        ))
+        .await;
+        let lines = h.audit(&session, "probe.command").await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["actor"], "admin");
+        assert_eq!(lines[0]["target"], probe_id);
+    }
 
     #[tokio::test]
     async fn login_sets_a_hardened_cookie_that_logout_clears() {
