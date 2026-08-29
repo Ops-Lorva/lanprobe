@@ -25,6 +25,7 @@
   import ChartCard from '$lib/components/ChartCard.svelte';
   import TimeSeriesChart from '$lib/components/TimeSeriesChart.svelte';
   import StatusBand from '$lib/components/StatusBand.svelte';
+  import SeriesLegend from '$lib/components/SeriesLegend.svelte';
   import ValueTable from '$lib/components/ValueTable.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
@@ -395,42 +396,6 @@
     ),
   ]);
 
-  /**
-   * Min / moyenne / max par courbe.
-   *
-   * Un test de débit isolé ne dit presque rien : c'est la dispersion qui
-   * apprend quelque chose. Un lien qui donne 900 puis 200 puis 880 n'a pas le
-   * même problème qu'un lien stable à 660, et les deux ont la même moyenne.
-   */
-  function stats(points: { t: number; v: number }[]) {
-    if (points.length === 0) return null;
-    let min = Infinity;
-    let max = -Infinity;
-    let sum = 0;
-    for (const p of points) {
-      if (p.v < min) min = p.v;
-      if (p.v > max) max = p.v;
-      sum += p.v;
-    }
-    return { min, max, avg: sum / points.length, n: points.length };
-  }
-
-  interface CurveStats {
-    label: string;
-    color: string;
-    min: number;
-    max: number;
-    avg: number;
-    n: number;
-  }
-
-  const speedStats = $derived(
-    speedCurves.flatMap((c): CurveStats[] => {
-      const s = stats(c.points);
-      return s ? [{ label: c.label, color: c.color, ...s }] : [];
-    }),
-  );
-
   /** Serveur du dernier test — « 216 Mbit/s » ne dit rien sans lui. */
   const lastServer = $derived.by(() => {
     const curve = speed.curves.find((c) => c.field === 'server' && c.points.length > 0);
@@ -514,14 +479,7 @@
   const shownPing = $derived(pingCurves.filter((c) => !hidden.has(c.key)));
   const shownSpeed = $derived(speedCurves.filter((c) => !hidden.has(c.key)));
 
-  const speedLegend = $derived(
-    speedCurves.map((c) => ({ key: c.key, label: c.label, color: c.color, off: hidden.has(c.key) })),
-  );
-  const pingLegend = $derived(
-    pingCurves.length > 1
-      ? pingCurves.map((c) => ({ key: c.key, label: c.label, color: c.color, off: hidden.has(c.key) }))
-      : [],
-  );
+
 </script>
 
 <a class="back" href="#/">
@@ -725,14 +683,19 @@
       sub={$_('charts.latency_sub')}
       tone={pingTone}
       errorText={ping.error}
-      legend={pingLegend}
-      ontoggle={toggle}
       {refreshing}
     >
       <TimeSeriesChart
         series={shownPing}
         {domain}
         unit={$_('charts.unit_ms')}
+      />
+      <SeriesLegend
+        rows={pingCurves}
+        unit={$_('charts.unit_ms')}
+        decimals={0}
+        {hidden}
+        ontoggle={toggle}
       />
       {#snippet table()}
         <ValueTable
@@ -770,8 +733,6 @@
       sub={$_('charts.speed_sub')}
       tone={speedTone}
       errorText={speed.error}
-      legend={speedLegend}
-      ontoggle={toggle}
       {refreshing}
     >
       {#snippet action()}
@@ -785,23 +746,12 @@
         {/if}
       {/snippet}
       <TimeSeriesChart series={shownSpeed} unit={$_('charts.unit_mbps')} decimals={1} {domain} />
-      {#if speedStats.length}
-        <!-- La dispersion sous le graphique, pas dedans : elle se lit une
-             fois, alors que la courbe se parcourt. -->
-        <div class="stats">
-          {#each speedStats as s (s.label)}
-            <div class="stat">
-              <span class="stat-key"><span class="dot" style:background={s.color}></span>{s.label}</span>
-              <span class="stat-vals lp-mono">
-                <span>{$_('charts.stat_min')} {s.min.toFixed(1)}</span>
-                <span>{$_('charts.stat_avg')} {s.avg.toFixed(1)}</span>
-                <span>{$_('charts.stat_max')} {s.max.toFixed(1)}</span>
-                <span class="stat-n">{$_('charts.stat_runs', { values: { n: s.n } })}</span>
-              </span>
-            </div>
-          {/each}
-        </div>
-      {/if}
+      <SeriesLegend
+        rows={speedCurves}
+        unit={$_('charts.unit_mbps')}
+        {hidden}
+        ontoggle={toggle}
+      />
       {#if lastServer}
         <p class="server lp-mono">{$_('charts.speed_server')} {lastServer}</p>
       {/if}
@@ -1212,49 +1162,6 @@
   .err.top {
     margin: 0 0 14px;
   }
-  .stats {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-top: 10px;
-    padding-top: 10px;
-    border-top: 1px solid var(--ep-border);
-  }
-  .stat {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 4px 12px;
-    font-size: 11.5px;
-  }
-  .stat-key {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--ep-text-secondary);
-  }
-  .stat-key .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
-    flex: none;
-  }
-  .stat-vals {
-    display: flex;
-    gap: 12px;
-    font-variant-numeric: tabular-nums;
-  }
-  .stat-n {
-    color: var(--ep-text-dim);
-  }
-  .server {
-    margin: 8px 0 0;
-    font-size: 11px;
-    color: var(--ep-text-dim);
-    overflow-wrap: anywhere;
-  }
-
   .engine {
     font-size: 10px;
     letter-spacing: 0.4px;

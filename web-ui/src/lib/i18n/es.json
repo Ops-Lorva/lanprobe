@@ -405,7 +405,8 @@
     "stat_avg": "med",
     "stat_max": "máx",
     "stat_runs": "{n, plural, one {# prueba} other {# pruebas}}",
-    "speed_server": "Servidor:"
+    "speed_server": "Servidor:",
+    "toggle_hint": "Haga clic para ocultar o mostrar esta curva"
   },
   "revoke": {
     "action": "Quitar la sonda",

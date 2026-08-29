@@ -405,7 +405,8 @@
     "stat_avg": "avg",
     "stat_max": "max",
     "stat_runs": "{n, plural, one {# run} other {# runs}}",
-    "speed_server": "Server:"
+    "speed_server": "Server:",
+    "toggle_hint": "Click to hide or show this curve"
   },
   "revoke": {
     "action": "Remove probe",

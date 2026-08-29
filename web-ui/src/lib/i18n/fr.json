@@ -405,7 +405,8 @@
     "stat_avg": "moy",
     "stat_max": "max",
     "stat_runs": "{n, plural, one {# test} other {# tests}}",
-    "speed_server": "Serveur :"
+    "speed_server": "Serveur :",
+    "toggle_hint": "Cliquer pour masquer ou réafficher cette courbe"
   },
   "revoke": {
     "action": "Retirer la sonde",
