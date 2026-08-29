@@ -39,6 +39,14 @@
   async function loadPublicIp() {
     publicIpLoading = true;
     publicIpError = '';
+    // ⚠️ On oublie la valeur AVANT d'interroger.
+    //
+    // En cas d'échec, l'ancienne restait affichée : on passait de l'Ethernet
+    // au Wi-Fi coupé, la requête échouait, et l'écran continuait de montrer
+    // l'adresse publique de l'Ethernet. Une adresse plausible, attribuée à la
+    // mauvaise interface — pire qu'un champ vide, parce que personne ne la
+    // remet en cause.
+    publicIp = null;
     try {
       publicIp = await invoke<PublicIpInfo>('cmd_get_public_ip');
     } catch (e) {
