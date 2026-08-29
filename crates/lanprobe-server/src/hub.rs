@@ -263,7 +263,8 @@ struct EnrollRequest<'a> {
     password: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     site: Option<&'a str>,
-    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -350,10 +351,9 @@ pub async fn enroll(
     credentials: Option<(&str, &str, &str)>,
     allow_self_signed: bool,
 ) -> Result<HubConfig, String> {
+    // Le nom est facultatif : vide, le hub en choisit un, et un ré-enrôlement
+    // garde de toute façon celui qui est défini là-bas.
     let name = name.trim();
-    if name.is_empty() {
-        return Err("le nom de la sonde ne peut pas être vide".into());
-    }
     let hub_url = hub_url.trim().trim_end_matches('/');
     if hub_url.is_empty() {
         return Err("l'adresse du hub ne peut pas être vide".into());
@@ -367,7 +367,13 @@ pub async fn enroll(
         return Err("il faut un code d'enrôlement ou des identifiants".into());
     }
 
-    let body = EnrollRequest { code, username, password, site, name };
+    let body = EnrollRequest {
+        code,
+        username,
+        password,
+        site,
+        name: (!name.is_empty()).then_some(name),
+    };
     let response = http_client(allow_self_signed)
         .post(format!("{hub_url}/api/probes/enroll"))
         .json(&body)

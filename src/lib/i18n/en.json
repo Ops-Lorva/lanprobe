@@ -422,7 +422,9 @@
       "site": "Site",
       "forget": "Detach from hub",
       "forget_hint": "No measurement is deleted: those already sent stay in the hub.",
-      "error": "Attachment failed"
+      "error": "Attachment failed",
+      "name_ph": "Leave empty: the hub will choose",
+      "name_hint": "Optional. A re-enrolment keeps the name set in the hub."
     }
   },
   "scheduler": {

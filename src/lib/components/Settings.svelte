@@ -49,7 +49,9 @@
       await invoke('cmd_hub_enroll', {
         args: {
           url: hubUrl.trim(),
-          name: hubName.trim(),
+          // Facultatif : vide, c'est le hub qui nomme. Et un ré-enrôlement
+          // ignore ce champ de toute façon — il répare une sonde existante.
+          name: hubName.trim() || null,
           code: hubCode.trim() || null,
           allow_self_signed: hubSelfSigned,
         },
@@ -355,7 +357,8 @@
         </label>
         <label class="hub-field">
           {$_('settings.hub.name')}
-          <input type="text" bind:value={hubName} placeholder="Paris" disabled={readOnly} />
+          <input type="text" bind:value={hubName} placeholder={$_('settings.hub.name_ph')} disabled={readOnly} />
+          <span class="hub-hint">{$_('settings.hub.name_hint')}</span>
         </label>
         <label class="hub-field">
           {$_('settings.hub.code')}
@@ -376,7 +379,7 @@
           {$_('settings.hub.self_signed')}
         </label>
         <p class="hub-hint">{$_('settings.hub.self_signed_hint')}</p>
-        <button class="hub-btn" onclick={connectHub} disabled={readOnly || hubBusy || !hubUrl || !hubName || !hubCode}>
+        <button class="hub-btn" onclick={connectHub} disabled={readOnly || hubBusy || !hubUrl || !hubCode}>
           {hubBusy ? $_('settings.hub.connecting') : $_('settings.hub.connect')}
         </button>
         {#if hubError}

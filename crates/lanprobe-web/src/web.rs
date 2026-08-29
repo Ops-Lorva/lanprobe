@@ -1221,7 +1221,14 @@ async fn create_reenroll_code(
 
 #[derive(Deserialize)]
 struct EnrollBody {
-    name: String,
+    /// Facultatif. Un **ré-enrôlement l'ignore toujours** : il répare une sonde
+    /// existante, son nom appartient au hub. L'accepter renommait la sonde dès
+    /// qu'on saisissait autre chose sur la machine — un geste de réparation ne
+    /// doit pas changer l'identité de ce qu'il répare.
+    ///
+    /// Absent lors d'un premier enrôlement, le hub en choisit un.
+    #[serde(default)]
+    name: Option<String>,
     /// Chemin recommandé : un code court, à usage unique.
     #[serde(default)]
     code: Option<String>,
@@ -1253,10 +1260,10 @@ async fn enroll(
                 actor
                     .as_deref()
                     .map(str::to_string)
-                    .or_else(|| Some(format!("sonde {}", body.name.trim())))
+                    .or_else(|| body.name.as_deref().map(|n| format!("sonde {}", n.trim())))
                     .as_deref(),
                 "probe.enroll",
-                Some(body.name.trim()),
+                body.name.as_deref().map(str::trim),
                 Outcome::Failure,
                 Some(&e.to_string()),
             );
@@ -1265,6 +1272,16 @@ async fn enroll(
     };
 
     // 2. La sonde : réparation d'une existante, ou création.
+    // Le nom n'est demandé qu'au premier enrôlement, et il reste facultatif :
+    // c'est dans le hub qu'on nomme ses sondes, pas sur chaque machine.
+    let chosen_name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| default_probe_name(&state, &site.site_id));
+
     let (probe, probe_token) = match repairing.clone() {
         Some(probe_id) => {
             // La machine compromise a gardé une copie de sa clé d'écriture :
@@ -1281,7 +1298,7 @@ async fn enroll(
                 Err(e) => return error_response(e),
             }
         }
-        None => match state.db.enroll_probe(&site.site_id, &body.name) {
+        None => match state.db.enroll_probe(&site.site_id, &chosen_name) {
             Ok(pair) => pair,
             Err(e) => return error_response(e),
         },
@@ -1325,6 +1342,21 @@ async fn enroll(
 }
 
 /// Rend `(site, site_créé, sonde_à_réparer)`.
+/// Un nom libre dans le site, quand la machine n'en propose pas.
+///
+/// « Sonde 1 », « Sonde 2 »… Sans ça, un enrôlement sans nom échouerait sur la
+/// contrainte d'unicité dès la deuxième sonde du site.
+fn default_probe_name(state: &AppState, site_id: &str) -> String {
+    let existing = state.db.list_probes(Some(site_id)).unwrap_or_default();
+    for n in 1..=999 {
+        let candidate = format!("Sonde {n}");
+        if !existing.iter().any(|p| p.name.eq_ignore_ascii_case(&candidate)) {
+            return candidate;
+        }
+    }
+    format!("Sonde {}", crate::db::now())
+}
+
 fn resolve_enrollment_target(
     state: &AppState,
     body: &EnrollBody,

@@ -422,7 +422,9 @@
       "site": "Site",
       "forget": "Détacher du hub",
       "forget_hint": "Aucune mesure n'est supprimée : celles déjà envoyées restent dans le hub.",
-      "error": "Échec du rattachement"
+      "error": "Échec du rattachement",
+      "name_ph": "Laisser vide : le hub choisira",
+      "name_hint": "Facultatif. Un ré-enrôlement garde le nom défini dans le hub."
     }
   },
   "scheduler": {

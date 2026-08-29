@@ -745,7 +745,9 @@ fn cmd_server_mode_set_account(
 #[derive(serde::Deserialize)]
 struct HubEnrollArgs {
     url: String,
-    name: String,
+    /// Facultatif : vide, c'est le hub qui nomme la sonde.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
@@ -796,7 +798,7 @@ async fn cmd_hub_enroll(
         &state,
         &key,
         &args.url,
-        &args.name,
+        args.name.as_deref().unwrap_or(""),
         args.code.as_deref(),
         credentials,
         args.allow_self_signed,
