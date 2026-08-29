@@ -228,7 +228,21 @@ async fn refresh_public_ip(cache: &PublicIpCache, identity: &NetworkIdentity, no
     if !cache.needs_refresh(identity.interface.as_deref(), now) {
         return;
     }
-    let found = lanprobe_core::public_ip::get_public_ip(source_address(identity))
+    // ⚠️ Une interface choisie mais sans adresse ne doit produire AUCUNE IP
+    // publique.
+    //
+    // `get_public_ip(None)` sort par la route par défaut : sur un poste dont
+    // le Wi-Fi sélectionné est coupé mais qui garde un autre lien, la sonde
+    // remontait l'adresse publique de *cet autre* lien. Le parc affichait donc
+    // une IP plausible et fausse, pendant que tout le reste — scans,
+    // speedtest, état internet — échouait correctement. Une seule valeur
+    // mensongère au milieu de mesures honnêtes est pire que pas de valeur.
+    let source = source_address(identity);
+    if identity.interface.is_some() && source.is_none() {
+        cache.store(identity.interface.as_deref(), None, now);
+        return;
+    }
+    let found = lanprobe_core::public_ip::get_public_ip(source)
         .await
         .map(|info| info.ip)
         .inspect_err(|e| tracing::debug!("hub : IP publique indisponible ({e})"))
