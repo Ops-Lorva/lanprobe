@@ -1069,3 +1069,48 @@ pas : le hub reçoit la configuration expurgée, et la sonde garde les siens au
 retour. Remonter les secrets ferait du hub un dépôt de mots de passe de tous les
 sites, et de sa sauvegarde une cible autrement plus intéressante — pour un
 bénéfice nul, puisqu'une sonde ré-enrôlée peut les redemander à son opérateur.
+
+## 17. Portée par site d'un compte (non implémenté)
+
+Demandé le 29/08 : un compte doit pouvoir ne voir **que certains sites**, ou
+tous. C'est ce qui permet de montrer son parc à un client sans lui montrer ceux
+des autres.
+
+```sql
+CREATE TABLE user_sites (
+  username TEXT NOT NULL REFERENCES users(username),
+  site_id  TEXT NOT NULL REFERENCES sites(site_id),
+  PRIMARY KEY (username, site_id)
+);
+```
+
+**Aucune ligne = accès à tous les sites.** C'est le cas courant (une équipe qui
+gère tout) et il ne doit rien coûter à configurer. Des lignes = restriction à
+ceux-là.
+
+⚠️ **Le filtrage se fait en SQL, dans chaque requête**, jamais en écartant des
+résultats après coup côté interface. `GET /api/probes`, `/api/sites`,
+`/api/probes/{id}/metrics`, l'audit et les abonnements aux alertes doivent tous
+respecter la portée — et `GET /api/probes/{id}` d'une sonde hors portée répond
+`404`, pas `403` : dire « ça existe mais pas pour vous » révèle déjà l'existence
+du site d'un autre client.
+
+⚠️ Un `admin` n'est jamais restreint : il gère les comptes, donc il pourrait
+lever sa propre restriction en trois clics. Une limite qu'on peut retirer
+soi-même n'est pas une limite, et prétendre le contraire serait pire que ne rien
+promettre.
+
+## 18. Ce qu'un rôle ne peut pas faire ne s'affiche pas
+
+Demandé le 29/08 : « cacher les options qu'un user ne peut pas utiliser ».
+
+Un `viewer` voit aujourd'hui le « + » d'ajout de sonde. Il le tente, il se prend
+un refus. **Ne pas l'afficher vaut mieux** : un bouton qui refuse apprend une
+règle au prix d'une frustration ; un bouton absent ne pose pas la question.
+
+⚠️ **Ça ne remplace pas le contrôle côté serveur, ça s'y ajoute.** Le masquage
+est du confort ; la protection reste la vérification de rôle sur chaque route.
+Une interface qui cache sans que le serveur refuse ne protège rien du tout.
+
+`GET /api/me` donne le rôle avant le premier clic — c'est ce qui rend le
+masquage possible sans sonder une route interdite et salir le journal d'audit.
