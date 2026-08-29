@@ -852,7 +852,7 @@ mod tests {
             username: None,
             password: None,
             site: None,
-            name: "Paris",
+            name: Some("Paris"),
         };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json.as_object().unwrap().len(), 1, "{json}");
