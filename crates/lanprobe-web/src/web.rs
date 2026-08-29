@@ -1456,6 +1456,11 @@ struct HeartbeatBody {
     /// dernier connu plutôt que de l'effacer.
     #[serde(default)]
     internet_state: Option<String>,
+    /// Surveillances ICMP actives. Un tableau vide veut dire « je ne
+    /// surveille plus rien » — ce n'est pas la même chose qu'un champ absent,
+    /// qui vient d'une sonde antérieure à ce champ.
+    #[serde(default)]
+    monitors: Vec<serde_json::Value>,
     /// Identité réseau du site (contrat, section 15). Chaque champ est
     /// facultatif : une sonde sans accès internet bat **sans** IP publique
     /// plutôt que d'échouer, et un champ absent n'efface jamais ce que le hub
@@ -1544,6 +1549,10 @@ async fn heartbeat(
             .internet_state
             .map(|v| v.trim().to_lowercase())
             .filter(|v| matches!(v.as_str(), "online" | "limited" | "offline")),
+        // Réécrit à chaque battement, y compris vide : une sonde qui a cessé
+        // de surveiller doit pouvoir le dire. Sérialisé ici plutôt qu'en base
+        // pour que le hub n'ait pas à comprendre ce qu'il relaie.
+        monitors: serde_json::to_string(&body.monitors).ok(),
     };
     let change = match state.db.record_heartbeat(
         &id,
@@ -1689,6 +1698,12 @@ async fn list_probes(State(state): State<AppState>, Query(filter): Query<ProbeFi
                         // très bien mais ne mesure plus rien.
                         "internet_state": p.internet_state,
                         "internet_state_at": p.internet_state_at,
+                        // Ce que la sonde surveille MAINTENANT, par opposition
+                        // aux mesures présentes dans la fenêtre affichée.
+                        "monitors": p.monitors
+                            .as_deref()
+                            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok()),
+                        "monitors_at": p.monitors_at,
                     })
                 })
                 .collect(),
@@ -1859,6 +1874,18 @@ async fn create_command(
     } else {
         return fail(StatusCode::BAD_REQUEST, "les arguments doivent être un objet");
     };
+    // Refusé ici plutôt qu'à l'arrivée : une commande vouée à l'échec
+    // occuperait la file, serait remise trois fois, et l'opérateur lirait
+    // « échouée » une minute plus tard pour une faute de saisie.
+    if kind == "speedtest"
+        && args.get("engine").and_then(|v| v.as_str()) == Some("iperf3")
+        && args
+            .get("server")
+            .and_then(|v| v.as_str())
+            .is_none_or(|v| v.trim().is_empty())
+    {
+        return fail(StatusCode::BAD_REQUEST, "iperf3 demande un serveur");
+    }
 
     let probe = match state.db.get_probe(&id) {
         Ok(probe) => probe,
@@ -3969,6 +3996,99 @@ mod tests {
             ))
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_iperf_command_without_a_server_is_refused_by_the_hub() {
+        // ⚠️ Refusé ici, pas à l'arrivée : une commande vouée à l'échec
+        // occuperait la file, serait remise trois fois, et l'opérateur lirait
+        // « échouée » une minute plus tard pour une faute de saisie.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        for args in [
+            serde_json::json!({ "engine": "iperf3" }),
+            serde_json::json!({ "engine": "iperf3", "server": "   " }),
+        ] {
+            let (status, _, _) = h
+                .call(with_cookie(
+                    json_request(
+                        "POST",
+                        &format!("/api/probes/{probe_id}/commands"),
+                        serde_json::json!({ "kind": "speedtest", "args": args }),
+                    ),
+                    &session,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        // Ookla n'a pas de serveur à donner : il ne doit pas être bloqué.
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    serde_json::json!({ "kind": "speedtest", "args": { "engine": "ookla" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_fleet_reports_the_active_watches_the_probe_announced() {
+        // ⚠️ Le hub déduisait les cibles des mesures de la fenêtre affichée :
+        // une cible retirée continuait d'apparaître tant que ses points y
+        // restaient. Seule la sonde sait ce qui tourne à l'instant.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        h.call(with_bearer(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/heartbeat"),
+                serde_json::json!({
+                    "monitors": [
+                        { "ip": "10.0.0.1", "alive": true, "latency_ms": 1.2,
+                          "uptime_pct": 99.5, "samples": 200 }
+                    ]
+                }),
+            ),
+            &token,
+        ))
+        .await;
+
+        let (_, fleet, _) = h
+            .call(with_cookie(
+                json_request("GET", "/api/probes", serde_json::json!({})),
+                &session,
+            ))
+            .await;
+        assert_eq!(fleet[0]["monitors"][0]["ip"], "10.0.0.1");
+        assert_eq!(fleet[0]["monitors"][0]["uptime_pct"], 99.5);
+
+        // Une liste VIDE doit effacer : une sonde qui ne surveille plus rien
+        // doit pouvoir le dire, sinon l'écran affirme une surveillance morte.
+        h.call(with_bearer(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/heartbeat"),
+                serde_json::json!({ "monitors": [] }),
+            ),
+            &token,
+        ))
+        .await;
+        let (_, fleet, _) = h
+            .call(with_cookie(
+                json_request("GET", "/api/probes", serde_json::json!({})),
+                &session,
+            ))
+            .await;
+        assert_eq!(fleet[0]["monitors"].as_array().unwrap().len(), 0, "{fleet}");
     }
 
     #[tokio::test]

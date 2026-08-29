@@ -401,7 +401,15 @@
     "col_hostname": "Hostname",
     "col_mac": "MAC",
     "col_vendor": "Vendor",
-    "tab_commands": "Commands"
+    "tab_commands": "Commands",
+    "monitoring_unknown": "This probe does not report its watches yet — it predates this feature.",
+    "monitoring_stale": "Seen in the displayed window but no longer watched: {list}",
+    "monitor_alive": "Answering",
+    "monitor_down": "Not answering",
+    "col_state": "State",
+    "col_uptime": "Uptime",
+    "iperf_placeholder": "iperf3 server (e.g. 10.4.8.1)",
+    "discovery_placeholder": "Network, blank = auto (e.g. 10.0.8.0/24)"
   },
   "charts": {
     "latency_title": "Latency of monitored hosts",
@@ -699,13 +707,14 @@
     "kind_remove_monitor": "Remove a target",
     "kind_speedtest": "Speed test",
     "none": "No command has been sent to this probe.",
-    "queued": "Queued — the probe will run it on its next heartbeat, within {n} s",
+    "queued": "Queued · next heartbeat",
     "sending": "Sending…",
     "state_done": "Done",
     "state_failed": "Failed",
     "state_pending": "Pending",
     "title": "Commands",
     "sub": "What was asked of this probe from the hub, and what came of it.",
-    "col_target": "Target"
+    "col_target": "Target",
+    "queued_help": "The hub never reaches into the probe: the command travels in the reply to its next heartbeat, within {n} s."
   }
 }

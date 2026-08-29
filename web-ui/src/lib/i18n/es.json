@@ -401,7 +401,15 @@
     "col_hostname": "Nombre de host",
     "col_mac": "MAC",
     "col_vendor": "Fabricante",
-    "tab_commands": "Comandos"
+    "tab_commands": "Comandos",
+    "monitoring_unknown": "Esta sonda aún no anuncia sus vigilancias: es anterior a esta función.",
+    "monitoring_stale": "Vistos en la ventana mostrada pero ya no vigilados: {list}",
+    "monitor_alive": "Responde",
+    "monitor_down": "No responde",
+    "col_state": "Estado",
+    "col_uptime": "Disponibilidad",
+    "iperf_placeholder": "Servidor iperf3 (p. ej. 10.4.8.1)",
+    "discovery_placeholder": "Red, vacío = automático (p. ej. 10.0.8.0/24)"
   },
   "charts": {
     "latency_title": "Latencia de los hosts vigilados",
@@ -699,13 +707,14 @@
     "kind_remove_monitor": "Quitar un destino",
     "kind_speedtest": "Prueba de velocidad",
     "none": "No se ha enviado ningún comando a esta sonda.",
-    "queued": "En cola — la sonda la ejecutará en su próximo latido, dentro de {n} s",
+    "queued": "En cola · próximo latido",
     "sending": "Enviando…",
     "state_done": "Terminada",
     "state_failed": "Con error",
     "state_pending": "Pendiente",
     "title": "Comandos",
     "sub": "Lo que se pidió a esta sonda desde el hub, y qué resultó.",
-    "col_target": "Destino"
+    "col_target": "Destino",
+    "queued_help": "El hub nunca contacta con la sonda: el comando viaja en la respuesta a su próximo latido, dentro de {n} s."
   }
 }

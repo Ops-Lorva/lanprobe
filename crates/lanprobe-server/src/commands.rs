@@ -52,7 +52,19 @@ fn arg<'a>(command: &'a Command, name: &str) -> Option<&'a str> {
 pub async fn execute(state: &AppState, command: &Command) -> Ack {
     let result = match command.kind.as_str() {
         "speedtest" => {
-            scheduler::speedtest_once(state).await;
+            // Le hub peut imposer le moteur et le serveur. Sans surcharge, la
+            // sonde utilise sa propre configuration — c'est le cas du test
+            // planifié, qu'une commande ne doit pas modifier.
+            let engine = arg(command, "engine");
+            let server = arg(command, "server");
+            if engine == Some("iperf3") && server.is_none() {
+                return Ack {
+                    id: command.id,
+                    ok: false,
+                    error: Some("iperf3 demandé sans serveur".into()),
+                };
+            }
+            scheduler::speedtest_with(state, engine, server).await;
             Ok(())
         }
         "port_scan" => match arg(command, "ip") {
@@ -61,8 +73,8 @@ pub async fn execute(state: &AppState, command: &Command) -> Ack {
         },
         "discovery" => {
             // CIDR vide : la découverte le déduit de l'interface sélectionnée.
-            // C'est le comportement voulu depuis le hub, qui ne connaît pas le
-            // plan d'adressage du site.
+            // C'est le cas courant depuis le hub, qui ne connaît pas le plan
+            // d'adressage du site.
             scheduler::discovery_once(state, arg(command, "cidr").unwrap_or("").to_string()).await;
             Ok(())
         }
@@ -144,6 +156,20 @@ mod tests {
             execute(&state, &command("remove_monitor", serde_json::json!({"ip": "10.0.0.1"}))).await;
         assert!(remove.ok);
         assert!(!monitor::is_monitored(&state, "10.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn iperf_without_a_server_says_which_argument_is_missing() {
+        // ⚠️ « Échec » enverrait chercher du côté du réseau un problème qui
+        // est dans la commande. Et lancer iperf3 sans serveur n'aurait rien à
+        // mesurer : autant refuser tout de suite.
+        let ack = execute(
+            &state(),
+            &command("speedtest", serde_json::json!({ "engine": "iperf3" })),
+        )
+        .await;
+        assert!(!ack.ok);
+        assert!(ack.error.unwrap().contains("serveur"));
     }
 
     #[tokio::test]

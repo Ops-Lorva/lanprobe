@@ -141,13 +141,29 @@ fn sealing_key(state: &AppState) -> Option<crate::secrets::SecretKey> {
 }
 
 pub async fn speedtest_once(state: &AppState) {
+    speedtest_with(state, None, None).await
+}
+
+/// Idem, en imposant le moteur et le serveur.
+///
+/// ⚠️ Les surcharges viennent d'une commande du hub, et ne touchent PAS la
+/// configuration de la sonde : un test lancé à distance ne doit pas changer ce
+/// que fera le prochain test planifié. Le hub demande un test, il ne
+/// reconfigure pas la sonde.
+pub async fn speedtest_with(
+    state: &AppState,
+    engine_override: Option<&str>,
+    server_override: Option<&str>,
+) {
     let state = state.clone();
+    let engine_override = engine_override.map(str::to_string);
+    let server_override = server_override.map(str::to_string);
 
     // Lire l'engine et les paramètres depuis la config courante.
-    let engine = {
+    let engine = engine_override.unwrap_or_else(|| {
         let cfg_val = state.config.get();
         cfg_val["speedtestEngine"].as_str().unwrap_or("ookla").to_string()
-    };
+    });
 
     tracing::info!("Scheduler: running scheduled speedtest (engine={})", engine);
 
@@ -158,10 +174,17 @@ pub async fn speedtest_once(state: &AppState) {
     });
 
     let result = if engine == "iperf3" {
-        let server = {
+        let server = server_override.unwrap_or_else(|| {
             let cfg_val = state.config.get();
             cfg_val["iperfServer"].as_str().unwrap_or("").to_string()
-        };
+        });
+        if server.trim().is_empty() {
+            // Dire lequel manque : « échec » enverrait chercher du côté du
+            // réseau un problème qui est dans la commande.
+            tracing::warn!("iperf3 demandé sans serveur — test abandonné");
+            state.speedtest.mark_stopped();
+            return;
+        }
         // Résoudre l'IP source depuis l'interface sélectionnée.
         match resolve_src(&state) {
             Ok(src) => lanprobe_core::iperf::run_iperf3(&server, src).await,

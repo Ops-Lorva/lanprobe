@@ -39,6 +39,15 @@ export interface Probe {
   internet_state?: 'online' | 'limited' | 'offline' | null;
   internet_state_at?: number | null;
   /**
+   * Surveillances ICMP **actives**, telles que la sonde les a annoncées.
+   *
+   * ⚠️ À ne pas confondre avec les cibles présentes dans les mesures : une
+   * cible retirée garde ses points dans la fenêtre affichée, et se lirait
+   * comme encore surveillée. Cette liste-ci dit ce qui tourne maintenant.
+   */
+  monitors?: MonitorState[] | null;
+  monitors_at?: number | null;
+  /**
    * Rotation de clé en attente de remise (contrat § 9). Champs facultatifs :
    * ils ne figurent pas encore dans l'exemple de `GET /api/probes`, l'interface
    * ne les affiche donc que si le hub les fournit.
@@ -295,6 +304,14 @@ export interface ProbeCommand {
   delivered_count: number;
   settled_at: number | null;
   error: string | null;
+}
+
+export interface MonitorState {
+  ip: string;
+  alive: boolean;
+  latency_ms?: number | null;
+  uptime_pct: number;
+  samples: number;
 }
 
 export interface ScanHost {

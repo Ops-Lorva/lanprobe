@@ -401,7 +401,15 @@
     "col_hostname": "Nom d'hôte",
     "col_mac": "MAC",
     "col_vendor": "Constructeur",
-    "tab_commands": "Commandes"
+    "tab_commands": "Commandes",
+    "monitoring_unknown": "Cette sonde n'annonce pas encore ses surveillances — elle est plus ancienne que cette fonction.",
+    "monitoring_stale": "Vues dans la fenêtre affichée mais plus surveillées : {list}",
+    "monitor_alive": "Répond",
+    "monitor_down": "Ne répond pas",
+    "col_state": "État",
+    "col_uptime": "Disponibilité",
+    "iperf_placeholder": "Serveur iperf3 (ex. 10.4.8.1)",
+    "discovery_placeholder": "Réseau, vide = auto (ex. 10.0.8.0/24)"
   },
   "charts": {
     "latency_title": "Latence des hôtes suivis",
@@ -699,13 +707,14 @@
     "kind_remove_monitor": "Retirer une cible",
     "kind_speedtest": "Test de débit",
     "none": "Aucune commande lancée sur cette sonde.",
-    "queued": "En file — la sonde l'exécutera à son prochain battement, d'ici {n} s",
+    "queued": "En file · prochain battement",
     "sending": "Envoi…",
     "state_done": "Terminée",
     "state_failed": "Échouée",
     "state_pending": "En attente",
     "title": "Commandes",
     "sub": "Ce qui a été demandé à cette sonde depuis le hub, et ce qu'elle en a fait.",
-    "col_target": "Cible"
+    "col_target": "Cible",
+    "queued_help": "Le hub ne joint jamais la sonde : la commande part dans la réponse à son prochain battement de cœur, d'ici {n} s."
   }
 }

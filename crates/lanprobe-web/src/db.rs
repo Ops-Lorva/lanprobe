@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -284,6 +284,20 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX scans_by_probe   ON scans(probe_id, kind, started_at DESC);
     CREATE INDEX scan_ports_lookup ON scan_ports(port, proto);
     CREATE INDEX scan_hosts_ip     ON scan_hosts(ip);
+    "#,
+    // v11 → v12 : surveillances ICMP actives, remontées au battement.
+    //
+    // ⚠️ Le hub déduisait les cibles surveillées des mesures présentes dans la
+    // fenêtre affichée. Une cible retirée continuait donc d'apparaître tant
+    // que ses anciens points restaient dans la fenêtre : le hub affirmait une
+    // surveillance qui n'existait plus. Seule la sonde sait ce qui tourne à
+    // l'instant — c'est elle qui le dit, à chaque battement.
+    //
+    // JSON dans une colonne plutôt qu'une table : la liste est réécrite
+    // entièrement à chaque battement, jamais interrogée ligne à ligne.
+    r#"
+    ALTER TABLE probes ADD COLUMN monitors    TEXT;
+    ALTER TABLE probes ADD COLUMN monitors_at INTEGER;
     "#,
 ];
 
@@ -673,6 +687,10 @@ pub struct ProbeRecord {
     /// mesure fraîche — l'interface doit le présenter comme tel.
     pub internet_state: Option<String>,
     pub internet_state_at: Option<i64>,
+    /// Surveillances ICMP actives, telles que la sonde les a annoncées au
+    /// dernier battement. JSON brut : le hub le relaie sans l'interpréter.
+    pub monitors: Option<String>,
+    pub monitors_at: Option<i64>,
 }
 
 const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash, p.platform, \
@@ -680,7 +698,7 @@ const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash
                              p.influx_auth_id, p.influx_token_version, p.pending_influx_auth_id, \
                              p.pending_influx_token, p.pending_influx_token_version, \
                              p.public_ip, p.public_ip_at, p.interface, p.local_ips, p.gateway, \
-                             p.internet_state, p.internet_state_at";
+                             p.internet_state, p.internet_state_at, p.monitors, p.monitors_at";
 
 /// Ce qu'une sonde raconte de sa position réseau dans son battement.
 ///
@@ -699,6 +717,12 @@ pub struct ProbeIdentity {
     /// bat très bien mais ne mesure plus rien. Sans elle, le parc affichait un
     /// voyant vert pour un lien mort.
     pub internet_state: Option<String>,
+    /// Surveillances actives, sérialisées telles quelles.
+    ///
+    /// ⚠️ **Écrase** la valeur précédente, y compris par une liste vide : une
+    /// sonde qui ne surveille plus rien doit pouvoir le dire. C'est le seul
+    /// champ du battement qui n'est pas en `COALESCE`.
+    pub monitors: Option<String>,
 }
 
 /// Bascule d'IP publique observée à un battement — changement d'opérateur,
@@ -785,6 +809,8 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
         gateway: r.get(20)?,
         internet_state: r.get(21)?,
         internet_state_at: r.get(22)?,
+        monitors: r.get(23)?,
+        monitors_at: r.get(24)?,
     })
 }
 
@@ -1868,7 +1894,10 @@ impl Db {
                     gateway = COALESCE(?9, gateway),
                     internet_state = COALESCE(?10, internet_state),
                     internet_state_at = CASE WHEN ?10 IS NOT NULL
-                                             THEN ?2 ELSE internet_state_at END
+                                             THEN ?2 ELSE internet_state_at END,
+                    monitors = COALESCE(?11, monitors),
+                    monitors_at = CASE WHEN ?11 IS NOT NULL
+                                       THEN ?2 ELSE monitors_at END
              WHERE probe_id = ?1",
             rusqlite::params![
                 probe_id,
@@ -1881,6 +1910,7 @@ impl Db {
                 local_ips,
                 identity.gateway,
                 identity.internet_state,
+                identity.monitors,
             ],
         )?;
         if changed == 0 {
@@ -3604,6 +3634,7 @@ mod tests {
             local_ips: vec!["10.6.8.42/24".into()],
             gateway: Some("10.6.8.1".into()),
             internet_state: None,
+            monitors: None,
         };
         let change = db
             .record_heartbeat(&probe.probe_id, Some("1.2.0"), Some("linux"), 0, &identity)
@@ -3640,6 +3671,7 @@ mod tests {
                 local_ips: vec!["10.6.8.42/24".into()],
                 gateway: Some("10.6.8.1".into()),
                 internet_state: None,
+                monitors: None,
             },
         )
         .unwrap();

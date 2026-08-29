@@ -350,6 +350,52 @@ struct HeartbeatRequest<'a> {
     /// le lien mesuré est mort.
     #[serde(skip_serializing_if = "Option::is_none")]
     internet_state: Option<String>,
+    /// Cibles ICMP **actuellement** surveillées, avec leur dernier verdict.
+    ///
+    /// ⚠️ Le hub déduisait ces cibles des mesures présentes dans la fenêtre
+    /// affichée. Une cible retirée continuait donc d'apparaître tant que ses
+    /// anciens points restaient dans la fenêtre — le parc affirmait une
+    /// surveillance qui n'existait plus. Seule la sonde sait ce qui tourne à
+    /// l'instant ; elle le dit.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    monitors: Vec<MonitorState>,
+}
+
+/// Une cible surveillée, telle que la sonde la voit maintenant.
+#[derive(Debug, Serialize)]
+struct MonitorState {
+    ip: String,
+    alive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<f64>,
+    /// Part des relevés en vie sur ce que la sonde garde en mémoire.
+    uptime_pct: f64,
+    samples: usize,
+}
+
+/// Photographie des surveillances en cours.
+fn monitor_states(state: &AppState) -> Vec<MonitorState> {
+    let mut out: Vec<MonitorState> = state
+        .monitoring
+        .snapshot()
+        .into_iter()
+        // Une cible dont la boucle est arrêtée n'est plus surveillée, même si
+        // son historique n'a pas encore été purgé.
+        .filter(|(ip, samples)| !samples.is_empty() && crate::monitor::is_monitored(state, ip))
+        .map(|(ip, samples)| {
+            let alive_count = samples.iter().filter(|s| s.alive).count();
+            let last = samples.last();
+            MonitorState {
+                alive: last.map(|s| s.alive).unwrap_or(false),
+                latency_ms: last.and_then(|s| s.latency_ms).map(|v| v as f64),
+                uptime_pct: (alive_count as f64 / samples.len() as f64) * 100.0,
+                samples: samples.len(),
+                ip,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.ip.cmp(&b.ip));
+    out
 }
 
 /// Enrôle cette sonde auprès d'un hub et **persiste** le résultat scellé.
@@ -715,6 +761,7 @@ async fn beat(
             last_write_ok,
             influx_token_version: config.influx.token_version,
             command_acks,
+            monitors: monitor_states(state),
             internet_state: state.internet.snapshot().map(|t| {
                 serde_json::to_value(&t.state)
                     .ok()
@@ -1086,6 +1133,7 @@ mod tests {
             influx_token_version: 1,
             command_acks: Vec::new(),
             internet_state: None,
+            monitors: Vec::new(),
             public_ip: None,
             interface: None,
             local_ips: Vec::new(),
@@ -1109,6 +1157,7 @@ mod tests {
             influx_token_version: 1,
             command_acks: Vec::new(),
             internet_state: None,
+            monitors: Vec::new(),
             public_ip: Some("88.120.0.1".into()),
             interface: Some("en0".into()),
             local_ips: vec!["10.6.8.42/24".into()],

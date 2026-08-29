@@ -33,37 +33,43 @@
 </script>
 
 {#if allowed}
-  <div class="wrap">
+  <!--
+    ⚠️ Le retour passe SOUS le bouton, jamais à côté : à côté, il poussait le
+    bouton au moment même où on venait de cliquer dessus — et un bouton qui
+    bouge sous le curseur invite au double-clic, donc à une seconde commande.
+
+    Le texte reste court. Le détail (« le hub n'a pas de route vers la sonde,
+    la commande part au prochain battement ») est vrai mais se lit une fois ;
+    répété sous chaque bouton, il devient du bruit.
+  -->
+  <span class="wrap">
     <button class="lp-btn primary sm" onclick={run} disabled={busy}>
       {busy ? $_('commands.sending') : label}
     </button>
     {#if error}
-      <span class="err">{error}</span>
+      <span class="note err">{error}</span>
     {:else if queued != null}
-      <!--
-        ⚠️ Le dire explicitement. Le hub n'a aucune route vers la sonde : la
-        commande part dans la réponse au prochain battement de cœur. Sans ce
-        message, on clique, rien ne bouge, et on reclique — en empilant des
-        commandes qui s'exécuteront toutes.
-      -->
-      <span class="queued">{$_('commands.queued', { values: { n: queued } })}</span>
+      <span class="note" title={$_('commands.queued_help', { values: { n: queued } })}>
+        {$_('commands.queued')}
+      </span>
     {/if}
-  </div>
+  </span>
 {/if}
 
 <style>
   .wrap {
     display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
   }
-  .queued {
-    font-size: 11px;
+  .note {
+    font-size: 10.5px;
     color: var(--ep-text-dim);
+    max-width: 220px;
   }
   .err {
-    font-size: 11px;
     color: var(--ep-danger);
+    overflow-wrap: anywhere;
   }
 </style>

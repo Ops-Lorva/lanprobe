@@ -431,6 +431,58 @@
   );
 
   let newTarget = $state('');
+
+  /**
+   * Cible iperf3 et réseau à découvrir, retenus par sonde.
+   *
+   * ⚠️ Dans le navigateur, pas dans le hub : ce sont des préférences de
+   * saisie, pas de la configuration. Les mettre en base obligerait à une
+   * migration et à un droit d'écriture pour un champ qu'on retape en trois
+   * secondes ; les perdre à chaque visite est simplement pénible.
+   */
+  function remembered(suffix: string, fallback = ''): string {
+    try {
+      return localStorage.getItem(`lanprobe.hub.${suffix}.${id}`) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  function remember(suffix: string, value: string) {
+    try {
+      localStorage.setItem(`lanprobe.hub.${suffix}.${id}`, value);
+    } catch {
+      /* navigation privée, stockage bloqué : sans conséquence */
+    }
+  }
+
+  let iperfServer = $state('');
+  let discoveryCidr = $state('');
+  let speedEngine = $state<'ookla' | 'iperf3'>('ookla');
+
+  $effect(() => {
+    void id;
+    untrack(() => {
+      iperfServer = remembered('iperf');
+      discoveryCidr = remembered('cidr');
+      speedEngine = remembered('engine', 'ookla') === 'iperf3' ? 'iperf3' : 'ookla';
+    });
+  });
+
+  /**
+   * Surveillances actives annoncées par la sonde, complétées par ce que les
+   * mesures montrent.
+   *
+   * ⚠️ Les deux sources ne disent pas la même chose : la sonde dit ce qui
+   * tourne MAINTENANT, les mesures disent ce qui a tourné pendant la fenêtre.
+   * Une cible retirée apparaît dans la seconde et pas dans la première — c'est
+   * exactement ce qu'il faut montrer, mais en le disant.
+   */
+  const activeMonitors = $derived(probe?.monitors ?? null);
+  const staleTargets = $derived(
+    activeMonitors === null
+      ? []
+      : monitoredTargets.filter((ip) => !activeMonitors.some((m) => m.ip === ip)),
+  );
   const inetPoints = $derived(inet.curves.find((c) => c.field === 'state')?.points ?? []);
 
   // ── Débits ───────────────────────────────────────────────────────────────
@@ -881,26 +933,61 @@
             </div>
           </header>
 
-          <!-- Les cibles viennent des mesures elles-mêmes : c'est la seule
-               source qui dit ce que la sonde surveille VRAIMENT, plutôt que ce
-               qu'on lui a demandé de surveiller un jour. -->
-          {#if monitoredTargets.length === 0}
+          <!--
+            ⚠️ Deux listes, parce que ce sont deux faits différents. La sonde
+            annonce à chaque battement ce qu'elle surveille MAINTENANT ; les
+            mesures, elles, montrent ce qui a tourné pendant la fenêtre
+            affichée. Une cible retirée reste dans la seconde tant que ses
+            points sont dans la fenêtre — la confondre avec la première ferait
+            affirmer une surveillance qui n'existe plus.
+          -->
+          {#if activeMonitors === null}
+            <p class="empty">{$_('probe.monitoring_unknown')}</p>
+          {:else if activeMonitors.length === 0}
             <p class="empty">{$_('probe.monitoring_none')}</p>
           {:else}
-            <ul class="targets">
-              {#each monitoredTargets as ip (ip)}
-                <li>
-                  <span class="lp-mono">{ip}</span>
-                  <CommandButton
-                    probeId={id}
-                    kind="remove_monitor"
-                    args={{ ip }}
-                    label={$_('probe.monitoring_remove')}
-                    onsent={afterCommand}
-                  />
-                </li>
-              {/each}
-            </ul>
+            <div class="tablewrap">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>{$_('probe.col_ip')}</th>
+                    <th>{$_('probe.col_state')}</th>
+                    <th class="num">{$_('charts.latency')}</th>
+                    <th class="num">{$_('probe.col_uptime')}</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each activeMonitors as m (m.ip)}
+                    <tr>
+                      <td class="lp-mono">{m.ip}</td>
+                      <td>
+                        <span class="cstate {m.alive ? 'done' : 'failed'}">
+                          {$_(m.alive ? 'probe.monitor_alive' : 'probe.monitor_down')}
+                        </span>
+                      </td>
+                      <td class="num lp-mono">{m.latency_ms != null ? m.latency_ms.toFixed(1) : '—'}</td>
+                      <td class="num lp-mono">{m.uptime_pct.toFixed(1)} %</td>
+                      <td class="right">
+                        <CommandButton
+                          probeId={id}
+                          kind="remove_monitor"
+                          args={{ ip: m.ip }}
+                          label={$_('probe.monitoring_remove')}
+                          onsent={afterCommand}
+                        />
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+
+          {#if staleTargets.length}
+            <p class="stale-note">
+              {$_('probe.monitoring_stale', { values: { list: staleTargets.join(', ') } })}
+            </p>
           {/if}
 
           <form class="addrow" onsubmit={(e) => e.preventDefault()}>
@@ -929,12 +1016,43 @@
               <h2 class="lp-title">{$_('probe.tab_speedtest')}</h2>
               <p class="bsub">{$_('probe.speedtest_sub')}</p>
             </div>
-            <CommandButton
-              probeId={id}
-              kind="speedtest"
-              label={$_('probe.speedtest_run')}
-              onsent={afterCommand}
-            />
+            <div class="runbox">
+              <div class="engines" role="group" aria-label={$_('charts.table_engine')}>
+                <button
+                  class="chip"
+                  class:on={speedEngine === 'ookla'}
+                  onclick={() => { speedEngine = 'ookla'; remember('engine', 'ookla'); }}
+                >Speedtest.net</button>
+                <button
+                  class="chip"
+                  class:on={speedEngine === 'iperf3'}
+                  onclick={() => { speedEngine = 'iperf3'; remember('engine', 'iperf3'); }}
+                >iperf3</button>
+              </div>
+              {#if speedEngine === 'iperf3'}
+                <input
+                  class="lp-input"
+                  bind:value={iperfServer}
+                  onblur={() => remember('iperf', iperfServer)}
+                  placeholder={$_('probe.iperf_placeholder')}
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              {/if}
+              <!-- iperf3 sans serveur n'a rien à mesurer : le bouton n'existe
+                   pas plutôt que d'envoyer une commande vouée à l'échec. -->
+              {#if speedEngine === 'ookla' || iperfServer.trim()}
+                <CommandButton
+                  probeId={id}
+                  kind="speedtest"
+                  args={speedEngine === 'iperf3'
+                    ? { engine: 'iperf3', server: iperfServer.trim() }
+                    : { engine: 'ookla' }}
+                  label={$_('probe.speedtest_run')}
+                  onsent={afterCommand}
+                />
+              {/if}
+            </div>
           </header>
 
           {#if speedHistory === undefined}
@@ -1048,12 +1166,26 @@
               <h2 class="lp-title">{$_('probe.tab_discovery')}</h2>
               <p class="bsub">{$_('probe.discovery_sub')}</p>
             </div>
-            <CommandButton
-              probeId={id}
-              kind="discovery"
-              label={$_('probe.discovery_run')}
-              onsent={afterCommand}
-            />
+            <div class="runbox">
+              <!-- Vide = la sonde déduit le réseau de son interface. C'est le
+                   cas courant, et le hub ne connaît pas le plan d'adressage
+                   du site. -->
+              <input
+                class="lp-input"
+                bind:value={discoveryCidr}
+                onblur={() => remember('cidr', discoveryCidr)}
+                placeholder={$_('probe.discovery_placeholder')}
+                spellcheck="false"
+                autocomplete="off"
+              />
+              <CommandButton
+                probeId={id}
+                kind="discovery"
+                args={discoveryCidr.trim() ? { cidr: discoveryCidr.trim() } : {}}
+                label={$_('probe.discovery_run')}
+                onsent={afterCommand}
+              />
+            </div>
           </header>
 
           {#if discoveryScan === undefined}
@@ -1609,24 +1741,6 @@
     color: var(--ep-text-dim);
   }
 
-  .targets {
-    list-style: none;
-    margin: 0 0 12px;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .targets li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 6px 8px;
-    border-radius: 5px;
-    background: var(--ep-bg-tertiary);
-    font-size: 13px;
-  }
   .addrow,
   .inline {
     display: flex;
@@ -1672,6 +1786,28 @@
   .grid .srv {
     max-width: 240px;
     overflow-wrap: anywhere;
+  }
+
+  .runbox {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .runbox .lp-input {
+    max-width: 190px;
+  }
+  .engines {
+    display: flex;
+    gap: 2px;
+  }
+  .grid .right {
+    text-align: right;
+  }
+  .stale-note {
+    margin: 10px 0 0;
+    font-size: 11.5px;
+    color: var(--ep-text-dim);
   }
 
   .cstate {
