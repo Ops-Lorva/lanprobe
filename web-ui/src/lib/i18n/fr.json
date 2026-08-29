@@ -400,7 +400,8 @@
     "col_service": "Service",
     "col_hostname": "Nom d'hôte",
     "col_mac": "MAC",
-    "col_vendor": "Constructeur"
+    "col_vendor": "Constructeur",
+    "tab_commands": "Commandes"
   },
   "charts": {
     "latency_title": "Latence des hôtes suivis",
@@ -703,6 +704,8 @@
     "state_done": "Terminée",
     "state_failed": "Échouée",
     "state_pending": "En attente",
-    "title": "Commandes"
+    "title": "Commandes",
+    "sub": "Ce qui a été demandé à cette sonde depuis le hub, et ce qu'elle en a fait.",
+    "col_target": "Cible"
   }
 }

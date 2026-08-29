@@ -400,7 +400,8 @@
     "col_service": "Service",
     "col_hostname": "Hostname",
     "col_mac": "MAC",
-    "col_vendor": "Vendor"
+    "col_vendor": "Vendor",
+    "tab_commands": "Commands"
   },
   "charts": {
     "latency_title": "Latency of monitored hosts",
@@ -703,6 +704,8 @@
     "state_done": "Done",
     "state_failed": "Failed",
     "state_pending": "Pending",
-    "title": "Commands"
+    "title": "Commands",
+    "sub": "What was asked of this probe from the hub, and what came of it.",
+    "col_target": "Target"
   }
 }

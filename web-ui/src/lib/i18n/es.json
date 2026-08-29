@@ -400,7 +400,8 @@
     "col_service": "Servicio",
     "col_hostname": "Nombre de host",
     "col_mac": "MAC",
-    "col_vendor": "Fabricante"
+    "col_vendor": "Fabricante",
+    "tab_commands": "Comandos"
   },
   "charts": {
     "latency_title": "Latencia de los hosts vigilados",
@@ -703,6 +704,8 @@
     "state_done": "Terminada",
     "state_failed": "Con error",
     "state_pending": "Pendiente",
-    "title": "Comandos"
+    "title": "Comandos",
+    "sub": "Lo que se pidió a esta sonda desde el hub, y qué resultó.",
+    "col_target": "Destino"
   }
 }

@@ -61,7 +61,14 @@
   // La fiche reprend ce que fait LanProbe et permet de le déclencher à
   // distance. L'onglet vit dans le hash : recharger la page, ou envoyer le
   // lien à quelqu'un, doit rouvrir la même vue.
-  const TABS = ['dashboard', 'monitoring', 'speedtest', 'ports', 'discovery'] as const;
+  const TABS = [
+    'dashboard',
+    'monitoring',
+    'speedtest',
+    'ports',
+    'discovery',
+    'commands',
+  ] as const;
   type Tab = (typeof TABS)[number];
 
   let tab = $state<Tab>('dashboard');
@@ -391,7 +398,7 @@
       if (current === 'ports') void loadInventory('ports');
       else if (current === 'discovery') void loadInventory('discovery');
       else if (current === 'speedtest') void loadInventory('speedtest');
-      if (current !== 'dashboard') void loadCommands();
+      if (current === 'commands') void loadCommands();
     });
   });
 
@@ -1088,47 +1095,61 @@
             {/if}
           {/if}
         </section>
-      {/if}
+      {:else if tab === 'commands'}
+        <!--
+          ⚠️ Le journal a son propre onglet plutôt que d'être répété sous les
+          quatre autres. Répété, il donnait quatre fois la même table et
+          allongeait chaque vue d'un bloc qu'on ne lit qu'en cas de doute.
 
-      <!-- Le journal des commandes est commun aux quatre onglets : c'est là
-           qu'on voit qu'une commande attend le prochain battement, et c'est la
-           seule réponse à « j'ai cliqué, il ne se passe rien ». -->
-      <section class="lp-card block">
-        <h2 class="lp-title">{$_('commands.title')}</h2>
-        {#if commandLog.length === 0}
-          <p class="empty">{$_('commands.none')}</p>
-        {:else}
-          <div class="tablewrap">
-            <table class="grid">
-              <thead>
-                <tr>
-                  <th>{$_('commands.col_when')}</th>
-                  <th>{$_('commands.col_kind')}</th>
-                  <th>{$_('commands.col_state')}</th>
-                  <th>{$_('commands.col_by')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each commandLog as c (c.id)}
+          Le retour immédiat après un clic, lui, n'est pas perdu : c'est le
+          bouton qui l'annonce, sur place — « en file, la sonde l'exécutera à
+          son prochain battement ». C'est ce message qui empêche de recliquer,
+          pas la table.
+        -->
+        <section class="lp-card block">
+          <header class="bh">
+            <div>
+              <h2 class="lp-title">{$_('commands.title')}</h2>
+              <p class="bsub">{$_('commands.sub')}</p>
+            </div>
+          </header>
+          {#if commandLog.length === 0}
+            <p class="empty">{$_('commands.none')}</p>
+          {:else}
+            <div class="tablewrap">
+              <table class="grid">
+                <thead>
                   <tr>
-                    <td class="lp-mono">{logTime(c.created_at, lang)}</td>
-                    <td>{$_(`commands.kind_${c.kind}`)}</td>
-                    <td>
-                      <span class="cstate {c.state}">{$_(`commands.state_${c.state}`)}</span>
-                      {#if c.state === 'pending' && c.delivered_count > 0}
-                        <span class="cnote">{$_('commands.deliveries', { values: { n: c.delivered_count } })}</span>
-                      {:else if c.error}
-                        <span class="cnote">{c.error}</span>
-                      {/if}
-                    </td>
-                    <td>{c.created_by ?? '—'}</td>
+                    <th>{$_('commands.col_when')}</th>
+                    <th>{$_('commands.col_kind')}</th>
+                    <th>{$_('commands.col_target')}</th>
+                    <th>{$_('commands.col_state')}</th>
+                    <th>{$_('commands.col_by')}</th>
                   </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      </section>
+                </thead>
+                <tbody>
+                  {#each commandLog as c (c.id)}
+                    <tr>
+                      <td class="lp-mono">{logTime(c.created_at, lang)}</td>
+                      <td>{$_(`commands.kind_${c.kind}`)}</td>
+                      <td class="lp-mono">{typeof c.args?.ip === 'string' ? c.args.ip : '—'}</td>
+                      <td>
+                        <span class="cstate {c.state}">{$_(`commands.state_${c.state}`)}</span>
+                        {#if c.state === 'pending' && c.delivered_count > 0}
+                          <span class="cnote">{$_('commands.deliveries', { values: { n: c.delivered_count } })}</span>
+                        {:else if c.error}
+                          <span class="cnote">{c.error}</span>
+                        {/if}
+                      </td>
+                      <td>{c.created_by ?? '—'}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </section>
+      {/if}
     </div>
   {/if}
 
