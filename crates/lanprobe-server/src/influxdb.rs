@@ -548,10 +548,23 @@ pub async fn run(
     }
 
     // 3. Charger la config initiale et attendre qu'elle soit valide.
+    //
+    // ⚠️ On guette aussi le **rattachement à un hub** pendant cette attente.
+    // Sans ça, une sonde enrôlée alors que l'app tournait déjà n'envoyait
+    // jamais rien : le choix de destination était fait une seule fois au
+    // démarrage. Le battement de cœur, lui, relit sa configuration à chaque
+    // tour — d'où une sonde qui apparaît en ligne dans le parc sans qu'aucune
+    // mesure n'arrive. Il fallait redémarrer l'app pour que l'export parte.
     let mut cfg = load_config(&state);
     while !cfg.is_ready() {
         match rx.recv().await {
             Ok(event) if event.event == "config:update" => {
+                if let Some(key) = key.as_ref()
+                    && let Some(client) = hub_client(&state, key).await
+                {
+                    run_with(state, rx, client, status, buffer).await;
+                    return;
+                }
                 cfg = load_config(&state);
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
