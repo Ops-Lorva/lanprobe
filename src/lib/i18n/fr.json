@@ -391,7 +391,8 @@
       "forget_hint": "Aucune mesure n'est supprimée : celles déjà envoyées restent dans le hub.",
       "error": "Échec du rattachement",
       "name_ph": "Laisser vide : le hub choisira",
-      "name_hint": "Facultatif. Un ré-enrôlement garde le nom défini dans le hub."
+      "name_hint": "Facultatif. Un ré-enrôlement garde le nom défini dans le hub.",
+      "scheme_hint": "Cliquer pour basculer entre https:// et http://"
     }
   },
   "scheduler": {

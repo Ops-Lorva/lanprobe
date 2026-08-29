@@ -14,6 +14,32 @@
     enrolled: false, url: '', name: '', site: '',
   });
   let hubUrl = $state('');
+
+  // ── Adresse du hub : schéma séparé de l'hôte ─────────────────────────────
+  //
+  // Taper « https:// » au clavier est pénible et se rate — et une adresse
+  // fausse donne un enrôlement qui échoue sans dire pourquoi. Le schéma est
+  // donc un bouton à deux positions, l'hôte un champ de texte simple.
+  let scheme = $state<'https://' | 'http://'>('https://');
+  let hubHost = $state('');
+
+  function toggleScheme() {
+    scheme = scheme === 'https://' ? 'http://' : 'https://';
+  }
+
+  // Coller une URL complète dans le champ d'hôte est le geste naturel : on
+  // en extrait le schéma plutôt que de produire « https://https://… ».
+  $effect(() => {
+    const match = /^(https?:\/\/)(.*)$/i.exec(hubHost);
+    if (match) {
+      scheme = match[1].toLowerCase() as 'https://' | 'http://';
+      hubHost = match[2];
+    }
+  });
+
+  $effect(() => {
+    hubUrl = hubHost.trim() ? `${scheme}${hubHost.trim()}` : '';
+  });
   let hubName = $state('');
   let hubCode = $state('');
 
@@ -229,7 +255,28 @@
         <p class="hub-hint">{$_('settings.hub.lead')}</p>
         <label class="hub-field">
           {$_('settings.hub.url')}
-          <input type="url" bind:value={hubUrl} placeholder="https://lanprobe.exemple.fr" disabled={readOnly} />
+          <div class="url-row">
+            <!-- Le schéma est un bouton, pas un caractère à taper : c'est la
+                 partie de l'adresse qui ne varie qu'entre deux valeurs, et
+                 c'est celle qu'on tape le plus mal. -->
+            <button
+              type="button"
+              class="scheme"
+              class:secure={scheme === 'https://'}
+              onclick={toggleScheme}
+              disabled={readOnly}
+              title={$_('settings.hub.scheme_hint')}
+            >{scheme}</button>
+            <input
+              type="text"
+              bind:value={hubHost}
+              placeholder="lanprobe.exemple.fr"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              disabled={readOnly}
+            />
+          </div>
         </label>
         <label class="hub-field">
           {$_('settings.hub.name')}
@@ -491,6 +538,22 @@
   .hub-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 13px; }
   .hub-field input { padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border, #333);
     background: var(--input-bg, #1a1a1a); color: inherit; font-size: 13px; }
+  /* Le schéma et l'hôte forment un seul champ à l'œil : bordure commune,
+     coins arrondis aux extrémités seulement. Deux boîtes séparées se
+     liraient comme deux réglages sans rapport. */
+  .url-row { display: flex; }
+  .url-row input { flex: 1; min-width: 0; border-radius: 0 6px 6px 0; border-left: none; }
+  .scheme {
+    padding: 7px 9px; border: 1px solid var(--border, #333); border-radius: 6px 0 0 6px;
+    background: var(--input-bg, #1a1a1a); color: inherit;
+    font-family: var(--ep-font-mono, monospace); font-size: 13px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .scheme:hover:not(:disabled) { border-color: var(--accent, #6366f1); }
+  /* `https` porte une marque : le passage en clair doit se voir, pas se
+     deviner à la lecture de huit caractères. */
+  .scheme.secure { color: var(--ep-success, #22c55e); }
+  .scheme:disabled { opacity: .5; cursor: default; }
   .hub-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 4px 0; }
   .hub-hint { font-size: 12px; opacity: .65; margin: 2px 0 10px; }
   .hub-state { font-size: 13px; margin-bottom: 10px; }

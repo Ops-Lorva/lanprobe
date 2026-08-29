@@ -391,7 +391,8 @@
       "forget_hint": "No measurement is deleted: those already sent stay in the hub.",
       "error": "Attachment failed",
       "name_ph": "Leave empty: the hub will choose",
-      "name_hint": "Optional. A re-enrolment keeps the name set in the hub."
+      "name_hint": "Optional. A re-enrolment keeps the name set in the hub.",
+      "scheme_hint": "Click to switch between https:// and http://"
     }
   },
   "scheduler": {
