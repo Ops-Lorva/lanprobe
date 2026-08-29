@@ -287,8 +287,8 @@
     "stale": "Sans nouvelles",
     "offline": "Hors ligne",
     "online_help": "Battement reçu récemment.",
-    "stale_help": "Silencieuse depuis plus de trois intervalles, moins de 24 h.",
-    "offline_help": "Silencieuse depuis plus de 24 h.",
+    "stale_help": "Silencieuse depuis plus de trois intervalles, moins de deux heures.",
+    "offline_help": "Silencieuse depuis plus de deux heures.",
     "never_seen": "Aucun battement reçu depuis l'enrôlement."
   },
   "buffer": {
@@ -546,6 +546,7 @@
       "notify_test": "Notification de test envoyée",
       "notify_unconfigure": "Notification désactivée",
       "notify_webhook": "Webhook configuré",
+      "probe_command": "Commande envoyée à une sonde",
       "probe_down": "Sonde injoignable",
       "probe_enroll": "Sonde enrôlée",
       "probe_public_ip_changed": "IP publique changée",

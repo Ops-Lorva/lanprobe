@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -195,7 +195,64 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE probes ADD COLUMN local_ips    TEXT;
     ALTER TABLE probes ADD COLUMN gateway      TEXT;
     "#,
+    // v8 → v9 : file de commandes du hub vers la sonde (contrat § 14).
+    //
+    // ⚠️ Le hub ne joint JAMAIS la sonde : c'est la sonde qui bat. La file
+    // voyage donc dans la réponse au battement de cœur, et l'accusé revient
+    // au battement suivant. D'où `delivered_count` : une commande remise trois
+    // fois sans accusé est déclarée échouée, pas rejouée indéfiniment — un
+    // scan qui fait planter la sonde ne doit pas la faire replanter à chaque
+    // redémarrage.
+    //
+    // `created_by` porte le nom du compte : une commande est une action sur le
+    // réseau d'un client, on doit pouvoir dire qui l'a lancée même des mois
+    // après, y compris si le compte a depuis été désactivé.
+    r#"
+    CREATE TABLE probe_commands (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      probe_id        TEXT    NOT NULL REFERENCES probes(probe_id) ON DELETE CASCADE,
+      kind            TEXT    NOT NULL,
+      args            TEXT    NOT NULL DEFAULT '{}',
+      state           TEXT    NOT NULL DEFAULT 'pending',
+      created_at      INTEGER NOT NULL,
+      created_by      TEXT,
+      delivered_count INTEGER NOT NULL DEFAULT 0,
+      settled_at      INTEGER,
+      error           TEXT
+    );
+    CREATE INDEX idx_probe_commands_pending
+        ON probe_commands(probe_id, state, id);
+    "#,
 ];
+
+/// Remises d'une même commande avant de la déclarer échouée.
+///
+/// ⚠️ Trois, pas l'infini. Une commande qui fait planter la sonde reviendrait
+/// sinon à chaque redémarrage, et la sonde ne se relèverait jamais.
+pub const MAX_DELIVERIES: i64 = 3;
+
+/// Commande telle qu'elle part vers la sonde.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingCommand {
+    pub id: i64,
+    pub kind: String,
+    pub args: serde_json::Value,
+}
+
+/// Commande telle qu'elle est montrée dans l'interface.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommandRow {
+    pub id: i64,
+    pub kind: String,
+    pub args: serde_json::Value,
+    /// `pending` | `done` | `failed`.
+    pub state: String,
+    pub created_at: i64,
+    pub created_by: Option<String>,
+    pub delivered_count: i64,
+    pub settled_at: Option<i64>,
+    pub error: Option<String>,
+}
 
 /// Erreurs remontées jusqu'à la couche HTTP, qui les traduit en codes. Un
 /// `String` unique obligerait les handlers à deviner le code d'après le
@@ -1692,6 +1749,134 @@ impl Db {
         Ok(())
     }
 
+
+    // ── File de commandes (contrat § 14) ───────────────────────────────────
+
+    /// Empile une commande pour une sonde. Rend son identifiant.
+    pub fn enqueue_command(
+        &self,
+        probe_id: &str,
+        kind: &str,
+        args: &serde_json::Value,
+        actor: &str,
+    ) -> DbResult<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        // La sonde doit exister : une commande orpheline attendrait pour
+        // toujours un battement qui ne viendra jamais.
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM probes WHERE probe_id = ?1 AND revoked_at IS NULL",
+            rusqlite::params![probe_id],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(DbError::NotFound("sonde inconnue ou révoquée".into()));
+        }
+        conn.execute(
+            "INSERT INTO probe_commands (probe_id, kind, args, created_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![probe_id, kind, args.to_string(), now(), actor],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Commandes à remettre à la sonde, en incrémentant leur compteur de
+    /// remise. Au-delà de [`MAX_DELIVERIES`] sans accusé, la commande est
+    /// déclarée échouée plutôt que remise une fois de plus.
+    pub fn take_pending_commands(&self, probe_id: &str) -> DbResult<Vec<PendingCommand>> {
+        let mut conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "UPDATE probe_commands
+                SET state = 'failed',
+                    settled_at = ?2,
+                    error = 'aucun accusé après ' || delivered_count || ' remises'
+              WHERE probe_id = ?1 AND state = 'pending' AND delivered_count >= ?3",
+            rusqlite::params![probe_id, now(), MAX_DELIVERIES],
+        )?;
+
+        let rows: Vec<PendingCommand> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, kind, args FROM probe_commands
+                  WHERE probe_id = ?1 AND state = 'pending'
+                  ORDER BY id",
+            )?;
+            let mapped = stmt.query_map(rusqlite::params![probe_id], |r| {
+                Ok(PendingCommand {
+                    id: r.get(0)?,
+                    kind: r.get(1)?,
+                    args: serde_json::from_str(&r.get::<_, String>(2)?)
+                        .unwrap_or(serde_json::Value::Null),
+                })
+            })?;
+            mapped.collect::<Result<_, _>>()?
+        };
+
+        if !rows.is_empty() {
+            tx.execute(
+                "UPDATE probe_commands
+                    SET delivered_count = delivered_count + 1
+                  WHERE probe_id = ?1 AND state = 'pending'",
+                rusqlite::params![probe_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    /// Enregistre l'accusé d'une commande. Une commande déjà réglée n'est pas
+    /// retouchée : la sonde peut accuser deux fois si un battement se perd, et
+    /// écraser le premier verdict effacerait l'erreur qui l'explique.
+    pub fn settle_command(
+        &self,
+        probe_id: &str,
+        id: i64,
+        ok: bool,
+        error: Option<&str>,
+    ) -> DbResult<()> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "UPDATE probe_commands
+                SET state = ?3, settled_at = ?4, error = ?5
+              WHERE id = ?1 AND probe_id = ?2 AND state = 'pending'",
+            rusqlite::params![
+                id,
+                probe_id,
+                if ok { "done" } else { "failed" },
+                now(),
+                error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Historique récent, du plus neuf au plus ancien.
+    pub fn list_commands(&self, probe_id: &str, limit: i64) -> DbResult<Vec<CommandRow>> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, args, state, created_at, created_by,
+                    delivered_count, settled_at, error
+               FROM probe_commands
+              WHERE probe_id = ?1
+              ORDER BY id DESC
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![probe_id, limit], |r| {
+            Ok(CommandRow {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                args: serde_json::from_str(&r.get::<_, String>(2)?)
+                    .unwrap_or(serde_json::Value::Null),
+                state: r.get(3)?,
+                created_at: r.get(4)?,
+                created_by: r.get(5)?,
+                delivered_count: r.get(6)?,
+                settled_at: r.get(7)?,
+                error: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
 }
 
 /// Applique les migrations manquantes. Idempotent : à chaque démarrage du
@@ -1734,6 +1919,110 @@ mod tests {
 
     fn open_memory() -> Db {
         Db::open_in_memory().unwrap()
+    }
+
+    // ── File de commandes (contrat § 14) ───────────────────────────────────
+
+    fn db_with_probe() -> (Db, String) {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        (db, probe.probe_id)
+    }
+
+    #[test]
+    fn a_command_is_delivered_once_then_settled() {
+        let (db, probe_id) = db_with_probe();
+        let id = db
+            .enqueue_command(&probe_id, "speedtest", &serde_json::json!({}), "claire")
+            .unwrap();
+
+        let first = db.take_pending_commands(&probe_id).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, id);
+        assert_eq!(first[0].kind, "speedtest");
+
+        db.settle_command(&probe_id, id, true, None).unwrap();
+        assert!(
+            db.take_pending_commands(&probe_id).unwrap().is_empty(),
+            "une commande accusée ne doit plus repartir"
+        );
+        let row = &db.list_commands(&probe_id, 10).unwrap()[0];
+        assert_eq!(row.state, "done");
+        assert_eq!(row.created_by.as_deref(), Some("claire"));
+    }
+
+    #[test]
+    fn a_command_never_acknowledged_fails_instead_of_looping_forever() {
+        // ⚠️ Le cas qui compte : une commande qui fait planter la sonde
+        // repartirait à chaque redémarrage, et la sonde ne se relèverait
+        // jamais. Trois remises, puis on abandonne.
+        let (db, probe_id) = db_with_probe();
+        db.enqueue_command(&probe_id, "port_scan", &serde_json::json!({"ip": "10.0.0.1"}), "claire")
+            .unwrap();
+
+        for beat in 1..=MAX_DELIVERIES {
+            assert_eq!(
+                db.take_pending_commands(&probe_id).unwrap().len(),
+                1,
+                "elle doit être remise au battement {beat}"
+            );
+        }
+        assert!(
+            db.take_pending_commands(&probe_id).unwrap().is_empty(),
+            "au-delà de {MAX_DELIVERIES} remises, la commande est abandonnée"
+        );
+        let row = &db.list_commands(&probe_id, 10).unwrap()[0];
+        assert_eq!(row.state, "failed");
+        assert!(row.error.as_deref().unwrap_or("").contains("aucun accusé"));
+    }
+
+    #[test]
+    fn settling_twice_keeps_the_first_verdict() {
+        // Un battement perdu fait accuser deux fois. Écraser le premier
+        // verdict effacerait l'erreur qui explique l'échec.
+        let (db, probe_id) = db_with_probe();
+        let id = db
+            .enqueue_command(&probe_id, "discovery", &serde_json::json!({}), "claire")
+            .unwrap();
+        db.take_pending_commands(&probe_id).unwrap();
+        db.settle_command(&probe_id, id, false, Some("interface absente")).unwrap();
+        db.settle_command(&probe_id, id, true, None).unwrap();
+
+        let row = &db.list_commands(&probe_id, 10).unwrap()[0];
+        assert_eq!(row.state, "failed");
+        assert_eq!(row.error.as_deref(), Some("interface absente"));
+    }
+
+    #[test]
+    fn a_command_for_an_unknown_probe_is_refused() {
+        // Sans ça, la commande attendrait pour toujours un battement qui ne
+        // viendra jamais, et l'interface la montrerait « en attente ».
+        let db = open_memory();
+        assert!(matches!(
+            db.enqueue_command("inconnue", "speedtest", &serde_json::json!({}), "claire"),
+            Err(DbError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_revoked_probe_accepts_no_command() {
+        let (db, probe_id) = db_with_probe();
+        db.revoke_probe(&probe_id).unwrap();
+        assert!(matches!(
+            db.enqueue_command(&probe_id, "speedtest", &serde_json::json!({}), "claire"),
+            Err(DbError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_probe_never_sees_the_commands_of_another() {
+        let (db, first) = db_with_probe();
+        let site = db.create_site("Martin").unwrap();
+        let (other, _) = db.enroll_probe(&site.site_id, "Lyon").unwrap();
+        db.enqueue_command(&first, "speedtest", &serde_json::json!({}), "claire")
+            .unwrap();
+        assert!(db.take_pending_commands(&other.probe_id).unwrap().is_empty());
     }
 
     #[test]

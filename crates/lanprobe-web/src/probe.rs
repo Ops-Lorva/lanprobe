@@ -1,7 +1,13 @@
 //! Sonde vue par le hub, et dérivation de son statut.
 
 /// Au-delà de ce silence, une sonde n'est plus « en retard » mais absente.
-const OFFLINE_AFTER_SECS: i64 = 24 * 3600;
+///
+/// ⚠️ Deux heures, pas vingt-quatre. Le seuil ne décrit pas une panne, il
+/// décide **quand on doit se déplacer** : un redémarrage ou une mise à jour
+/// dépassent rarement vingt minutes, et une sonde muette depuis deux heures
+/// est un problème qu'on veut régler dans la journée, pas retrouver le
+/// lendemain matin.
+const OFFLINE_AFTER_SECS: i64 = 2 * 3600;
 
 /// Statut d'une sonde. **Dérivé du dernier battement, jamais stocké** :
 /// une colonne `status` obligerait quelqu'un à la tenir à jour, et une valeur
@@ -78,19 +84,30 @@ mod tests {
     }
 
     #[test]
-    fn status_is_still_stale_just_under_24h() {
+    fn status_is_still_stale_just_under_the_offline_threshold() {
         let now = 1_000_000;
         assert_eq!(
-            ProbeStatus::derive(Some(now - 86_399), now, INTERVAL),
+            ProbeStatus::derive(Some(now - (OFFLINE_AFTER_SECS - 1)), now, INTERVAL),
             ProbeStatus::Stale
         );
     }
 
     #[test]
-    fn status_becomes_offline_at_exactly_24h() {
+    fn a_reboot_or_an_update_never_reaches_offline() {
+        // Vingt minutes de silence, c'est une mise à jour. Passer « hors
+        // ligne » à ce stade enverrait quelqu'un sur place pour rien.
         let now = 1_000_000;
         assert_eq!(
-            ProbeStatus::derive(Some(now - 86_400), now, INTERVAL),
+            ProbeStatus::derive(Some(now - 20 * 60), now, INTERVAL),
+            ProbeStatus::Stale
+        );
+    }
+
+    #[test]
+    fn status_becomes_offline_at_exactly_the_threshold() {
+        let now = 1_000_000;
+        assert_eq!(
+            ProbeStatus::derive(Some(now - OFFLINE_AFTER_SECS), now, INTERVAL),
             ProbeStatus::Offline
         );
     }

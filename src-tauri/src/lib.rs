@@ -4,7 +4,7 @@ use updater::UpdateInfo;
 use lanprobe_core::interfaces::{get_interface_details, list_interfaces, InterfaceDetails};
 use lanprobe_core::configure::{apply_dhcp, apply_static, NetworkConfig};
 use lanprobe_core::permissions::{has_permissions, install_permissions};
-use lanprobe_core::ping::{self, ping_once};
+
 use lanprobe_core::discovery::{parse_cidr, get_hostname, read_arp_table, scan_interface, get_local_network_cidr, DiscoveredHost};
 use lanprobe_core::ping::ping_once_fast_retry;
 use lanprobe_core::ports::{scan_ports, scan_udp_ports, PortResult};
@@ -233,74 +233,16 @@ async fn cmd_start_ping(
     ip: String,
     state: tauri::State<'_, SharedState>,
 ) -> Result<(), String> {
-    {
-        let mut map = state.ping_stop.lock().unwrap_or_else(|p| p.into_inner());
-        map.insert(ip.clone(), false);
-    }
-    let shared = state.inner().clone();
-    let ip_clone = ip.clone();
-    tokio::spawn(async move {
-        loop {
-            {
-                let Ok(map) = shared.ping_stop.lock() else { break };
-                if *map.get(&ip_clone).unwrap_or(&true) { break; }
-            }
-            // Pendant un blackout (changement de profil réseau en cours),
-            // on ne fait rien — ni ping ni enregistrement — pour éviter
-            // d'inscrire de faux outages dans l'historique.
-            if shared.is_monitoring_blackout() {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            // Résolution de l'IP source in-place — on ne peut pas
-            // appeler `resolve_src_strict(&shared)` parce que la fonction
-            // prend une tauri::State, pas un SharedState direct.
-            let strict: Result<Option<Ipv4Addr>, ()> = {
-                let name_opt = shared.selected_interface.lock().unwrap_or_else(|p| p.into_inner()).clone();
-                match name_opt {
-                    None => Ok(None),
-                    Some(name) => {
-                        let d = get_interface_details(&name);
-                        match d.ip.and_then(|s| s.parse::<Ipv4Addr>().ok()) {
-                            Some(ip) => Ok(Some(ip)),
-                            None => Err(()),
-                        }
-                    }
-                }
-            };
-            let result = match strict {
-                Ok(src) => ping_once(&ip_clone, src).await,
-                Err(_) => ping::PingResult {
-                    ip: ip_clone.clone(),
-                    alive: false,
-                    latency_ms: None,
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                },
-            };
-            shared.monitoring.push(result.clone());
-            shared.emit(
-                "ping:tick",
-                serde_json::to_value(&result).unwrap_or(serde_json::Value::Null),
-            );
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
+    // La boucle vit dans `lanprobe-server` : la fenêtre et une commande venue
+    // du hub doivent démarrer exactement la même surveillance, avec la même
+    // contrainte d'interface.
+    lanprobe_server::monitor::start(state.inner(), &ip);
     Ok(())
 }
 
 #[tauri::command]
 async fn cmd_stop_ping(ip: String, state: tauri::State<'_, SharedState>) -> Result<(), String> {
-    {
-        let mut map = state.ping_stop.lock().unwrap_or_else(|p| p.into_inner());
-        map.insert(ip.clone(), true);
-    }
-    // Purge l'historique pour que cmd_get_monitoring_snapshot ne ré-injecte pas
-    // l'hôte au prochain (ré)hydratation du front (sinon il « réapparaît » après
-    // suppression du monitoring).
-    state.monitoring.clear_ip(&ip);
+    lanprobe_server::monitor::stop(state.inner(), &ip);
     Ok(())
 }
 

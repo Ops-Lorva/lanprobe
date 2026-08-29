@@ -287,8 +287,8 @@
     "stale": "No news",
     "offline": "Offline",
     "online_help": "Heartbeat received recently.",
-    "stale_help": "Silent for more than three intervals, less than 24 h.",
-    "offline_help": "Silent for more than 24 h.",
+    "stale_help": "Silent for more than three intervals, less than two hours.",
+    "offline_help": "Silent for more than two hours.",
     "never_seen": "No heartbeat received since enrolment."
   },
   "buffer": {
@@ -546,6 +546,7 @@
       "notify_test": "Test notification sent",
       "notify_unconfigure": "Notification disabled",
       "notify_webhook": "Webhook configured",
+      "probe_command": "Command sent to a probe",
       "probe_down": "Probe unreachable",
       "probe_enroll": "Probe enrolled",
       "probe_public_ip_changed": "Public IP changed",

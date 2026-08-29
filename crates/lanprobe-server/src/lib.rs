@@ -13,9 +13,11 @@
 //! headless partagent tout ça ; ils ne diffèrent que par la façon dont on
 //! les pilote — fenêtre Tauri d'un côté, ligne de commande de l'autre.
 
+pub mod commands;
 pub mod config;
 pub mod export_buffer;
 pub mod influxdb;
+pub mod monitor;
 pub mod hub;
 pub mod scheduler;
 pub mod secrets;

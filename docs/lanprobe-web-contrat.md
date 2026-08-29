@@ -225,8 +225,15 @@ graphes.
 
 `status` est **dérivé**, jamais stocké :
 - `online` — dernier battement < 3 × `heartbeat_interval_secs`
-- `stale` — < 24 h
+- `stale` — < 2 h
 - `offline` — au-delà
+
+⚠️ **Deux heures, pas vingt-quatre.** Le seuil ne décrit pas une panne, il
+décide quand quelqu'un doit se déplacer. Un redémarrage ou une mise à jour
+dépassent rarement vingt minutes ; une sonde muette depuis deux heures est un
+problème qu'on veut régler **dans la journée**, pas retrouver le lendemain
+matin. À vingt-quatre heures, l'état « hors ligne » arrivait toujours trop
+tard pour servir à quelque chose.
 
 Stocker un statut obligerait quelqu'un à le mettre à jour ; une valeur dérivée ne
 peut pas mentir sur sa propre fraîcheur.

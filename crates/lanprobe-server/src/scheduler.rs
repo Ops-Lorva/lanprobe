@@ -126,282 +126,329 @@ fn start_sub_tasks(cfg: &SchedulerConfig, state: &AppState) -> Vec<tokio::task::
 
 // ── Speedtest sub-task ─────────────────────────────────────────────────────
 
+/// Lance un test de débit **maintenant**, avec le moteur configuré.
+///
+/// Extraite de la tâche planifiée pour que le hub puisse la déclencher
+/// (contrat § 14) : deux implémentations d'un même test finiraient par
+/// diverger sur la contrainte d'interface, qui est justement ce qui rend la
+/// mesure honnête.
+pub async fn speedtest_once(state: &AppState) {
+    let state = state.clone();
+
+    // Lire l'engine et les paramètres depuis la config courante.
+    let engine = {
+        let cfg_val = state.config.get();
+        cfg_val["speedtestEngine"].as_str().unwrap_or("ookla").to_string()
+    };
+
+    tracing::info!("Scheduler: running scheduled speedtest (engine={})", engine);
+
+    state.speedtest.mark_running();
+    let _ = state.events.send(crate::state::BroadcastEvent {
+        event: "speedtest:running".into(),
+        payload: json!({ "running": true }),
+    });
+
+    let result = if engine == "iperf3" {
+        let server = {
+            let cfg_val = state.config.get();
+            cfg_val["iperfServer"].as_str().unwrap_or("").to_string()
+        };
+        // Résoudre l'IP source depuis l'interface sélectionnée.
+        match resolve_src(&state) {
+            Ok(src) => lanprobe_core::iperf::run_iperf3(&server, src).await,
+            Err(e) => Err(e),
+        }
+    } else {
+        // Ookla — run_speedtest gère l'interface sélectionnée elle-même.
+        //
+        // ⚠️ Abandonner plutôt que mesurer sans source : Ookla traite `-I`
+        // comme une indication contournable, et le pré-check de
+        // connectivité qui l'en empêche ne tourne que si une IP source est
+        // connue. Sans elle, le test partirait par la route par défaut et
+        // rendrait le débit du mauvais lien.
+        match resolve_src(&state) {
+            Ok(src) => {
+                let iface_name = get_selected_iface_name(&state);
+                let iface_for_cli = iface_name.as_ref().map(|n| {
+                    #[cfg(target_os = "macos")]
+                    { get_interface_details(n).bsd_name.unwrap_or(n.clone()) }
+                    #[cfg(not(target_os = "macos"))]
+                    { n.clone() }
+                });
+                lanprobe_core::speedtest::run_speedtest(src, iface_for_cli).await
+            }
+            Err(e) => Err(e),
+        }
+    };
+
+    match result {
+        Ok(r) => {
+            state.speedtest.set(r.clone());
+            let _ = state.events.send(crate::state::BroadcastEvent {
+                event: "speedtest:result".into(),
+                payload: serde_json::to_value(&r).unwrap_or(serde_json::Value::Null),
+            });
+            tracing::info!(
+                "Scheduler: speedtest done — dl={:.1} ul={:.1} lat={}ms",
+                r.download_mbps, r.upload_mbps, r.latency_ms
+            );
+        }
+        Err(e) => {
+            state.speedtest.mark_stopped();
+            let _ = state.events.send(crate::state::BroadcastEvent {
+                event: "speedtest:running".into(),
+                payload: json!({ "running": false }),
+            });
+            tracing::warn!("Scheduler: scheduled speedtest failed: {}", e);
+        }
+    }
+}
+
 async fn run_speedtest_task(state: AppState, interval_min: u64) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_min * 60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     loop {
         ticker.tick().await;
-
-        // Lire l'engine et les paramètres depuis la config courante.
-        let engine = {
-            let cfg_val = state.config.get();
-            cfg_val["speedtestEngine"].as_str().unwrap_or("ookla").to_string()
-        };
-
-        tracing::info!("Scheduler: running scheduled speedtest (engine={})", engine);
-
-        state.speedtest.mark_running();
-        let _ = state.events.send(crate::state::BroadcastEvent {
-            event: "speedtest:running".into(),
-            payload: json!({ "running": true }),
-        });
-
-        let result = if engine == "iperf3" {
-            let server = {
-                let cfg_val = state.config.get();
-                cfg_val["iperfServer"].as_str().unwrap_or("").to_string()
-            };
-            // Résoudre l'IP source depuis l'interface sélectionnée.
-            match resolve_src(&state) {
-                Ok(src) => lanprobe_core::iperf::run_iperf3(&server, src).await,
-                Err(e) => Err(e),
-            }
-        } else {
-            // Ookla — run_speedtest gère l'interface sélectionnée elle-même.
-            //
-            // ⚠️ Abandonner plutôt que mesurer sans source : Ookla traite `-I`
-            // comme une indication contournable, et le pré-check de
-            // connectivité qui l'en empêche ne tourne que si une IP source est
-            // connue. Sans elle, le test partirait par la route par défaut et
-            // rendrait le débit du mauvais lien.
-            match resolve_src(&state) {
-                Ok(src) => {
-                    let iface_name = get_selected_iface_name(&state);
-                    let iface_for_cli = iface_name.as_ref().map(|n| {
-                        #[cfg(target_os = "macos")]
-                        { get_interface_details(n).bsd_name.unwrap_or(n.clone()) }
-                        #[cfg(not(target_os = "macos"))]
-                        { n.clone() }
-                    });
-                    lanprobe_core::speedtest::run_speedtest(src, iface_for_cli).await
-                }
-                Err(e) => Err(e),
-            }
-        };
-
-        match result {
-            Ok(r) => {
-                state.speedtest.set(r.clone());
-                let _ = state.events.send(crate::state::BroadcastEvent {
-                    event: "speedtest:result".into(),
-                    payload: serde_json::to_value(&r).unwrap_or(serde_json::Value::Null),
-                });
-                tracing::info!(
-                    "Scheduler: speedtest done — dl={:.1} ul={:.1} lat={}ms",
-                    r.download_mbps, r.upload_mbps, r.latency_ms
-                );
-            }
-            Err(e) => {
-                state.speedtest.mark_stopped();
-                let _ = state.events.send(crate::state::BroadcastEvent {
-                    event: "speedtest:running".into(),
-                    payload: json!({ "running": false }),
-                });
-                tracing::warn!("Scheduler: scheduled speedtest failed: {}", e);
-            }
-        }
+        speedtest_once(&state).await;
     }
 }
 
 // ── Discovery sub-task ─────────────────────────────────────────────────────
 
+/// Lance une découverte réseau **maintenant** sur le CIDR donné (vide =
+/// déduit de l'interface sélectionnée).
+///
+/// Extraite pour que le hub puisse la déclencher (contrat § 14). Le garde
+/// anti-concurrence est conservé tel quel : deux découvertes simultanées se
+/// piétinent dans l'état partagé.
+pub async fn discovery_once(state: &AppState, cidr: String) {
+    let state = state.clone();
+
+    // Guard contre la concurrence : on utilise un CAS pour s'assurer
+    // qu'aucun autre scan (déclenché manuellement ou par le scheduler)
+    // n'est en cours. `scan_cancel == true` signifie "idle" ; `false`
+    // signifie "un scan tourne". On ne procède que si on peut passer
+    // atomiquement de `true` (idle) à `false` (scan actif).
+    //
+    // Si le CAS échoue c'est qu'un scan est déjà en cours → on saute
+    // ce tick plutôt que de clobber l'état partagé.
+    if state
+        .scan_cancel
+        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        tracing::warn!("Scheduler: discovery scan skipped — another scan is in progress");
+        return;
+    }
+
+    // Déterminer le CIDR effectif : configuré ou auto-détecté.
+    let effective_cidr = if cidr.is_empty() {
+        // Même logique que cmd_get_local_network_cidr dans routes.rs :
+        // d'abord depuis l'interface sélectionnée, sinon fallback `get_local_network_cidr`.
+        let from_iface = try_cidr_from_selected_iface(&state);
+        let detected = from_iface.or_else(get_local_network_cidr);
+        match detected {
+            Some(c) => c,
+            None => {
+                tracing::warn!("Scheduler discovery: failed to auto-detect CIDR, skipping");
+                // Remettre scan_cancel à true (idle) puisqu'on n'a pas démarré.
+                state.scan_cancel.store(true, Ordering::SeqCst);
+                return;
+            }
+        }
+    } else {
+        cidr.clone()
+    };
+
+    tracing::info!("Scheduler: running scheduled discovery on {}", effective_cidr);
+
+    let (first, last) = match parse_cidr(&effective_cidr) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Scheduler discovery: invalid CIDR {}: {}", effective_cidr, e);
+            state.scan_cancel.store(true, Ordering::SeqCst);
+            return;
+        }
+    };
+
+    let src = match resolve_src(&state) {
+        Ok(src) => src,
+        Err(e) => {
+            tracing::warn!("découverte planifiée abandonnée : {e}");
+            return;
+        }
+    };
+
+    // Réinitialiser le store de découverte pour ce nouveau scan.
+    state.discovery.clear();
+
+    // — La logique de scan tourne directement ici, dans la boucle, sans
+    //   inner `tokio::spawn`. Puisque `run_discovery_task` est déjà dans
+    //   sa propre sous-tâche, un second spawn créerait une course : la
+    //   boucle pourrait avancer au tick suivant avant la fin du scan
+    //   précédent et clobberer l'état partagé.
+
+    // Étape 1 : ARP initial, vu par l'interface choisie — une table ARP
+    // globale ferait passer les voisins d'un autre lien pour des hôtes du
+    // réseau planifié.
+    let scan_iface = scan_interface(get_selected_iface_name(&state).as_deref());
+    let arp_initial = read_arp_table(scan_iface.as_ref()).await;
+    if state.scan_cancel.load(Ordering::SeqCst) {
+        let _ = state.events.send(done_event(&effective_cidr, 0));
+        state.scan_cancel.store(true, Ordering::SeqCst);
+        return;
+    }
+    for (ip, mac) in &arp_initial {
+        if let Some(i) = parse_ip_u32(ip) {
+            if i >= first && i <= last {
+                let host = DiscoveredHost {
+                    ip: ip.clone(),
+                    hostname: None,
+                    mac: Some(mac.clone()),
+                    vendor: lanprobe_core::oui::vendor_for_mac(mac),
+                    latency_ms: None,
+                };
+                state.discovery.upsert(host.clone());
+                let _ = state.events.send(crate::state::BroadcastEvent {
+                    event: "discovery:host".into(),
+                    payload: serde_json::to_value(&host)
+                        .unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+    }
+
+    // Étape 2 : ping sweep en chunks parallèles.
+    #[cfg(target_os = "windows")]
+    let chunk_size = 32usize;
+    #[cfg(not(target_os = "windows"))]
+    let chunk_size = 128usize;
+
+    let all_ips: Vec<String> = (first..=last)
+        .map(|i| Ipv4Addr::from(i).to_string())
+        .collect();
+
+    for chunk in all_ips.chunks(chunk_size) {
+        if state.scan_cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let mut handles = vec![];
+        for ip in chunk {
+            let ip = ip.clone();
+            let arp_mac = arp_initial.get(&ip).cloned();
+            let events_c = state.events.clone();
+            let discovery_c = state.discovery.clone();
+            handles.push(tokio::spawn(async move {
+                if let Some(lat) =
+                    lanprobe_core::ping::ping_once_fast_retry(&ip, src, 3).await
+                {
+                    if arp_mac.is_none() {
+                        let hostname = get_hostname(&ip).await;
+                        let host = DiscoveredHost {
+                            ip: ip.clone(),
+                            hostname,
+                            mac: None,
+                            vendor: None,
+                            latency_ms: Some(lat),
+                        };
+                        discovery_c.upsert(host.clone());
+                        let _ = events_c.send(crate::state::BroadcastEvent {
+                            event: "discovery:host".into(),
+                            payload: serde_json::to_value(&host)
+                                .unwrap_or(serde_json::Value::Null),
+                        });
+                    } else {
+                        discovery_c.update_latency(&ip, lat);
+                        let _ = events_c.send(crate::state::BroadcastEvent {
+                            event: "discovery:host_latency".into(),
+                            payload: json!({ "ip": ip, "latency_ms": lat }),
+                        });
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
+    if state.scan_cancel.load(Ordering::SeqCst) {
+        let _ = state.events.send(done_event(&effective_cidr, 0));
+        state.scan_cancel.store(true, Ordering::SeqCst);
+        return;
+    }
+
+    // Étape 3 : ARP final pour récupérer les MACs des hôtes pingés.
+    let arp_after = read_arp_table(scan_iface.as_ref()).await;
+    for (ip, mac) in &arp_after {
+        if arp_initial.contains_key(ip) {
+            continue;
+        }
+        if let Some(i) = parse_ip_u32(ip) {
+            if i >= first && i <= last {
+                state.discovery.update_mac(ip, mac.clone());
+                let _ = state.events.send(crate::state::BroadcastEvent {
+                    event: "discovery:host_mac".into(),
+                    payload: json!({
+                        "ip": ip,
+                        "mac": mac,
+                        "vendor": lanprobe_core::oui::vendor_for_mac(mac),
+                    }),
+                });
+            }
+        }
+    }
+
+    let hosts_found = state.discovery.snapshot().len();
+    tracing::info!(
+        "Scheduler: discovery done on {} — {} hosts found",
+        effective_cidr,
+        hosts_found
+    );
+    let _ = state.events.send(done_event(&effective_cidr, hosts_found));
+
+    // Remettre scan_cancel à true (idle) une fois le scan terminé.
+    state.scan_cancel.store(true, Ordering::SeqCst);
+}
+
 async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_min * 60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     loop {
         ticker.tick().await;
-
-        // Guard contre la concurrence : on utilise un CAS pour s'assurer
-        // qu'aucun autre scan (déclenché manuellement ou par le scheduler)
-        // n'est en cours. `scan_cancel == true` signifie "idle" ; `false`
-        // signifie "un scan tourne". On ne procède que si on peut passer
-        // atomiquement de `true` (idle) à `false` (scan actif).
-        //
-        // Si le CAS échoue c'est qu'un scan est déjà en cours → on saute
-        // ce tick plutôt que de clobber l'état partagé.
-        if state
-            .scan_cancel
-            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            tracing::warn!("Scheduler: discovery scan skipped — another scan is in progress");
-            continue;
-        }
-
-        // Déterminer le CIDR effectif : configuré ou auto-détecté.
-        let effective_cidr = if cidr.is_empty() {
-            // Même logique que cmd_get_local_network_cidr dans routes.rs :
-            // d'abord depuis l'interface sélectionnée, sinon fallback `get_local_network_cidr`.
-            let from_iface = try_cidr_from_selected_iface(&state);
-            let detected = from_iface.or_else(get_local_network_cidr);
-            match detected {
-                Some(c) => c,
-                None => {
-                    tracing::warn!("Scheduler discovery: failed to auto-detect CIDR, skipping");
-                    // Remettre scan_cancel à true (idle) puisqu'on n'a pas démarré.
-                    state.scan_cancel.store(true, Ordering::SeqCst);
-                    continue;
-                }
-            }
-        } else {
-            cidr.clone()
-        };
-
-        tracing::info!("Scheduler: running scheduled discovery on {}", effective_cidr);
-
-        let (first, last) = match parse_cidr(&effective_cidr) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Scheduler discovery: invalid CIDR {}: {}", effective_cidr, e);
-                state.scan_cancel.store(true, Ordering::SeqCst);
-                continue;
-            }
-        };
-
-        let src = match resolve_src(&state) {
-            Ok(src) => src,
-            Err(e) => {
-                tracing::warn!("découverte planifiée abandonnée : {e}");
-                return;
-            }
-        };
-
-        // Réinitialiser le store de découverte pour ce nouveau scan.
-        state.discovery.clear();
-
-        // — La logique de scan tourne directement ici, dans la boucle, sans
-        //   inner `tokio::spawn`. Puisque `run_discovery_task` est déjà dans
-        //   sa propre sous-tâche, un second spawn créerait une course : la
-        //   boucle pourrait avancer au tick suivant avant la fin du scan
-        //   précédent et clobberer l'état partagé.
-
-        // Étape 1 : ARP initial, vu par l'interface choisie — une table ARP
-        // globale ferait passer les voisins d'un autre lien pour des hôtes du
-        // réseau planifié.
-        let scan_iface = scan_interface(get_selected_iface_name(&state).as_deref());
-        let arp_initial = read_arp_table(scan_iface.as_ref()).await;
-        if state.scan_cancel.load(Ordering::SeqCst) {
-            let _ = state.events.send(done_event(&effective_cidr, 0));
-            state.scan_cancel.store(true, Ordering::SeqCst);
-            continue;
-        }
-        for (ip, mac) in &arp_initial {
-            if let Some(i) = parse_ip_u32(ip) {
-                if i >= first && i <= last {
-                    let host = DiscoveredHost {
-                        ip: ip.clone(),
-                        hostname: None,
-                        mac: Some(mac.clone()),
-                        vendor: lanprobe_core::oui::vendor_for_mac(mac),
-                        latency_ms: None,
-                    };
-                    state.discovery.upsert(host.clone());
-                    let _ = state.events.send(crate::state::BroadcastEvent {
-                        event: "discovery:host".into(),
-                        payload: serde_json::to_value(&host)
-                            .unwrap_or(serde_json::Value::Null),
-                    });
-                }
-            }
-        }
-
-        // Étape 2 : ping sweep en chunks parallèles.
-        #[cfg(target_os = "windows")]
-        let chunk_size = 32usize;
-        #[cfg(not(target_os = "windows"))]
-        let chunk_size = 128usize;
-
-        let all_ips: Vec<String> = (first..=last)
-            .map(|i| Ipv4Addr::from(i).to_string())
-            .collect();
-
-        for chunk in all_ips.chunks(chunk_size) {
-            if state.scan_cancel.load(Ordering::SeqCst) {
-                break;
-            }
-            let mut handles = vec![];
-            for ip in chunk {
-                let ip = ip.clone();
-                let arp_mac = arp_initial.get(&ip).cloned();
-                let events_c = state.events.clone();
-                let discovery_c = state.discovery.clone();
-                handles.push(tokio::spawn(async move {
-                    if let Some(lat) =
-                        lanprobe_core::ping::ping_once_fast_retry(&ip, src, 3).await
-                    {
-                        if arp_mac.is_none() {
-                            let hostname = get_hostname(&ip).await;
-                            let host = DiscoveredHost {
-                                ip: ip.clone(),
-                                hostname,
-                                mac: None,
-                                vendor: None,
-                                latency_ms: Some(lat),
-                            };
-                            discovery_c.upsert(host.clone());
-                            let _ = events_c.send(crate::state::BroadcastEvent {
-                                event: "discovery:host".into(),
-                                payload: serde_json::to_value(&host)
-                                    .unwrap_or(serde_json::Value::Null),
-                            });
-                        } else {
-                            discovery_c.update_latency(&ip, lat);
-                            let _ = events_c.send(crate::state::BroadcastEvent {
-                                event: "discovery:host_latency".into(),
-                                payload: json!({ "ip": ip, "latency_ms": lat }),
-                            });
-                        }
-                    }
-                }));
-            }
-            for h in handles {
-                let _ = h.await;
-            }
-        }
-
-        if state.scan_cancel.load(Ordering::SeqCst) {
-            let _ = state.events.send(done_event(&effective_cidr, 0));
-            state.scan_cancel.store(true, Ordering::SeqCst);
-            continue;
-        }
-
-        // Étape 3 : ARP final pour récupérer les MACs des hôtes pingés.
-        let arp_after = read_arp_table(scan_iface.as_ref()).await;
-        for (ip, mac) in &arp_after {
-            if arp_initial.contains_key(ip) {
-                continue;
-            }
-            if let Some(i) = parse_ip_u32(ip) {
-                if i >= first && i <= last {
-                    state.discovery.update_mac(ip, mac.clone());
-                    let _ = state.events.send(crate::state::BroadcastEvent {
-                        event: "discovery:host_mac".into(),
-                        payload: json!({
-                            "ip": ip,
-                            "mac": mac,
-                            "vendor": lanprobe_core::oui::vendor_for_mac(mac),
-                        }),
-                    });
-                }
-            }
-        }
-
-        let hosts_found = state.discovery.snapshot().len();
-        tracing::info!(
-            "Scheduler: discovery done on {} — {} hosts found",
-            effective_cidr,
-            hosts_found
-        );
-        let _ = state.events.send(done_event(&effective_cidr, hosts_found));
-
-        // Remettre scan_cancel à true (idle) une fois le scan terminé.
-        state.scan_cancel.store(true, Ordering::SeqCst);
+        discovery_once(&state, cidr.clone()).await;
     }
 }
 
 // ── Port scan sub-task ─────────────────────────────────────────────────────
+
+/// Scanne les ports d'une cible **maintenant**.
+///
+/// Rend une erreur lisible plutôt que de scanner en silence par la mauvaise
+/// interface : un scan pris par le mauvais lien ne dit rien du réseau qu'on
+/// croit observer.
+pub async fn portscan_once(state: &AppState, ip: &str) -> Result<usize, String> {
+    if ip.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err(format!("« {ip} » n'est pas une adresse IPv4"));
+    }
+    let src = resolve_src(state)?;
+
+    state.portscan.mark_in_progress(ip, None);
+    let _ = state.events.send(crate::state::BroadcastEvent {
+        event: "portscan:update".into(),
+        payload: json!({ "ip": ip, "in_progress": true, "profile_id": null }),
+    });
+
+    let results = scan_ports(ip, src, None).await;
+    let entry = state.portscan.set_tcp(ip, results, now_secs(), None);
+    let _ = state.events.send(crate::state::BroadcastEvent {
+        event: "portscan:update".into(),
+        payload: serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null),
+    });
+    tracing::info!("scan de ports terminé sur {ip} — {} TCP ouverts", entry.tcp.len());
+    Ok(entry.tcp.len())
+}
 
 async fn run_portscan_task(state: AppState, interval_min: u64, targets: Vec<String>) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_min * 60));
@@ -409,50 +456,11 @@ async fn run_portscan_task(state: AppState, interval_min: u64, targets: Vec<Stri
 
     loop {
         ticker.tick().await;
-
-        tracing::info!("Scheduler: running scheduled port scan on {} targets", targets.len());
-
+        tracing::info!("scan de ports planifié sur {} cibles", targets.len());
         for target in &targets {
-            // Valider que la cible est une adresse IPv4 valide avant de lancer
-            // le scan. Une entrée malformée dans la config ferait échouer
-            // `scan_ports` silencieusement (tous les ports retournés open=false) ;
-            // mieux vaut loguer et ignorer explicitement.
-            if target.parse::<std::net::Ipv4Addr>().is_err() {
-                tracing::warn!("Scheduler: invalid portscan target {:?}, skipping", target);
-                continue;
+            if let Err(e) = portscan_once(&state, target).await {
+                tracing::warn!("scan de ports planifié sur {target} abandonné : {e}");
             }
-
-            let ip = target.clone();
-            let src = match resolve_src(&state) {
-                Ok(src) => src,
-                Err(e) => {
-                    tracing::warn!("scan de ports planifié abandonné : {e}");
-                    continue;
-                }
-            };
-
-            // Marquer le scan comme en cours et envoyer l'event.
-            state.portscan.mark_in_progress(&ip, None);
-            let _ = state.events.send(crate::state::BroadcastEvent {
-                event: "portscan:update".into(),
-                payload: json!({ "ip": ip, "in_progress": true, "profile_id": null }),
-            });
-
-            // Scanner les ports TCP (ports par défaut = None → profil par défaut).
-            let results = scan_ports(&ip, src, None).await;
-            let entry = state
-                .portscan
-                .set_tcp(&ip, results, now_secs(), None);
-            let _ = state.events.send(crate::state::BroadcastEvent {
-                event: "portscan:update".into(),
-                payload: serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null),
-            });
-
-            tracing::info!(
-                "Scheduler: port scan done on {} — {} TCP open",
-                ip,
-                entry.tcp.len()
-            );
         }
     }
 }

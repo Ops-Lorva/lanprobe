@@ -311,6 +311,10 @@ pub struct HeartbeatResponse {
     pub heartbeat_interval_secs: Option<u64>,
     #[serde(default)]
     pub influx: Option<InfluxResponse>,
+    /// Commandes à exécuter (contrat § 14). Un hub plus ancien que la file
+    /// n'envoie pas ce champ : la liste est alors simplement vide.
+    #[serde(default)]
+    pub commands: Vec<crate::commands::Command>,
 }
 
 /// Ce que la sonde raconte d'elle-même à chaque battement.
@@ -325,6 +329,11 @@ struct HeartbeatRequest<'a> {
     /// Accuse réception d'une rotation : tant que le hub ne le voit pas, il
     /// conserve l'ancienne clé.
     influx_token_version: u32,
+    /// Verdicts des commandes exécutées depuis le battement précédent.
+    /// Omis quand il n'y en a pas — c'est le cas de très loin le plus
+    /// fréquent, et un tableau vide à chaque battement n'apprend rien.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    command_acks: Vec<crate::commands::Ack>,
     /// Identité réseau du site. Omise plutôt que vide : une sonde sans accès
     /// internet doit pouvoir battre — c'est justement le moment où son
     /// battement compte. Voir section 15 du contrat.
@@ -620,6 +629,11 @@ pub async fn run(state: AppState, key: SecretKey, status: Arc<WriteStatus>) {
     // Vit aussi longtemps que la boucle : c'est ce qui fait qu'on n'appelle
     // pas le service d'IP publique à chaque battement.
     let public_ip = PublicIpCache::default();
+    // Les verdicts partent au battement SUIVANT, jamais à celui qui a apporté
+    // la commande : une commande peut durer plusieurs minutes, et attendre son
+    // exécution pour battre ferait passer la sonde pour hors ligne pendant
+    // qu'elle travaille.
+    let mut pending_acks: Vec<crate::commands::Ack> = Vec::new();
 
     loop {
         let config = load(&state);
@@ -632,12 +646,18 @@ pub async fn run(state: AppState, key: SecretKey, status: Arc<WriteStatus>) {
 
         let interval = Duration::from_secs(config.heartbeat_interval_secs.max(5));
         let (buffered_points, _) = status.read();
-        match beat(&state, &key, &config, &status, &public_ip).await {
+        let acks = std::mem::take(&mut pending_acks);
+        match beat(&state, &key, &config, &status, &public_ip, acks).await {
             Ok(response) => {
                 backoff = Duration::from_secs(5);
                 state.hub.record_success(buffered_points, unix_now());
+                let commands = response.commands.clone();
                 if let Err(e) = apply(&state, &key, &config, response) {
                     tracing::warn!("hub : mise à jour locale impossible : {e}");
+                }
+                for command in &commands {
+                    tracing::info!("hub : commande {} — {}", command.id, command.kind);
+                    pending_acks.push(crate::commands::execute(&state, command).await);
                 }
                 tokio::time::sleep(interval).await;
             }
@@ -657,6 +677,7 @@ async fn beat(
     config: &HubConfig,
     status: &WriteStatus,
     public_ip: &PublicIpCache,
+    command_acks: Vec<crate::commands::Ack>,
 ) -> Result<HeartbeatResponse, BeatError> {
     // Un secret local illisible ne se répare pas en réessayant : c'est un
     // ré-enrôlement qu'il faut, pas de la patience.
@@ -678,6 +699,7 @@ async fn beat(
             buffered_points,
             last_write_ok,
             influx_token_version: config.influx.token_version,
+            command_acks,
             public_ip: public_ip.value(),
             interface: identity.interface.clone(),
             local_ips: identity.local_ips.clone(),
@@ -1018,6 +1040,7 @@ mod tests {
             buffered_points: 0,
             last_write_ok: true,
             influx_token_version: 1,
+            command_acks: Vec::new(),
             public_ip: None,
             interface: None,
             local_ips: Vec::new(),
@@ -1039,6 +1062,7 @@ mod tests {
             buffered_points: 0,
             last_write_ok: true,
             influx_token_version: 1,
+            command_acks: Vec::new(),
             public_ip: Some("88.120.0.1".into()),
             interface: Some("en0".into()),
             local_ips: vec!["10.6.8.42/24".into()],

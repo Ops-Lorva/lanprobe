@@ -132,6 +132,10 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/rotate", post(rotate_token))
             .route("/api/probes/{id}/revoke-token", post(revoke_token_now))
             .route("/api/probes/{id}/reenroll-code", post(create_reenroll_code))
+            .route(
+                "/api/probes/{id}/commands",
+                get(list_commands).post(create_command),
+            )
             .route("/api/settings/influx-advertise/test", post(test_advertise))
             .route(
                 "/api/notifications/subscriptions",
@@ -1416,6 +1420,16 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
 
 // ── Battement de cœur ──────────────────────────────────────────────────────
 
+/// Verdict d'une commande, rendu par la sonde.
+#[derive(Deserialize)]
+struct CommandAck {
+    id: i64,
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct HeartbeatBody {
     #[serde(default)]
@@ -1430,6 +1444,11 @@ struct HeartbeatBody {
     /// l'accusé de réception qui autorise le hub à retirer l'ancien.
     #[serde(default)]
     influx_token_version: Option<i64>,
+    /// Accusés des commandes remises au battement précédent (contrat § 14).
+    /// Absent tant que la sonde n'a rien à accuser — une sonde plus ancienne
+    /// que la file n'envoie simplement jamais ce champ.
+    #[serde(default)]
+    command_acks: Vec<CommandAck>,
     /// Identité réseau du site (contrat, section 15). Chaque champ est
     /// facultatif : une sonde sans accès internet bat **sans** IP publique
     /// plutôt que d'échouer, et un champ absent n'efface jamais ce que le hub
@@ -1557,12 +1576,35 @@ async fn heartbeat(
         }
     }
 
+    // Les accusés d'abord : une commande réglée à ce battement ne doit pas
+    // repartir dans la file du même battement.
+    for ack in &body.command_acks {
+        if let Err(e) = state.db.settle_command(
+            &id,
+            ack.id,
+            ack.ok,
+            ack.error.as_deref().filter(|m| !m.trim().is_empty()),
+        ) {
+            tracing::warn!("accusé de commande {} non enregistré : {e}", ack.id);
+        }
+    }
+
+    // ⚠️ Le hub ne joint jamais la sonde : c'est ce battement qui porte les
+    // commandes. Les remettre échoue en silence plutôt que de faire échouer le
+    // battement — une file cassée ne doit pas faire passer une sonde saine
+    // pour hors ligne.
+    let commands = state.db.take_pending_commands(&id).unwrap_or_else(|e| {
+        tracing::warn!("file de commandes illisible pour {id} : {e}");
+        Vec::new()
+    });
+
     let mut response = json!({
         "ok": true,
         "name": probe.name,
         "site_id": probe.site_id,
         "site": probe.site_name,
         "heartbeat_interval_secs": state.settings.heartbeat_interval_secs(),
+        "commands": commands,
     });
 
     // Relecture : la rotation vient peut-être d'être accusée.
@@ -1699,6 +1741,84 @@ async fn revoke_probe(
 
 /// Rotation d'hygiène : le nouveau jeton attend d'être remis au prochain
 /// battement, l'ancien reste actif jusqu'à l'accusé.
+/// Commandes que le hub accepte de faire exécuter à une sonde.
+///
+/// ⚠️ Liste **fermée**, et pas par prudence excessive : une commande part de
+/// l'intérieur du LAN surveillé. Accepter un `kind` arbitraire reviendrait à
+/// offrir l'exécution de n'importe quoi sur le réseau d'un client à qui
+/// obtiendrait un compte opérateur.
+const COMMAND_KINDS: &[&str] = &[
+    "speedtest",
+    "port_scan",
+    "discovery",
+    "add_monitor",
+    "remove_monitor",
+];
+
+#[derive(Deserialize)]
+struct CommandBody {
+    kind: String,
+    #[serde(default)]
+    args: serde_json::Value,
+}
+
+/// Empile une commande pour une sonde (contrat § 14).
+///
+/// ⚠️ Journalisée avec son auteur : un scan de ports lancé d'ici part de
+/// l'intérieur du réseau d'un client. On doit pouvoir dire qui l'a demandé
+/// des mois après, même si le compte a été désactivé depuis.
+async fn create_command(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<CommandBody>,
+) -> Response {
+    let kind = body.kind.trim();
+    if !COMMAND_KINDS.contains(&kind) {
+        return fail(StatusCode::BAD_REQUEST, "commande inconnue");
+    }
+    let args = if body.args.is_null() {
+        json!({})
+    } else if body.args.is_object() {
+        body.args.clone()
+    } else {
+        return fail(StatusCode::BAD_REQUEST, "les arguments doivent être un objet");
+    };
+
+    let probe = match state.db.get_probe(&id) {
+        Ok(probe) => probe,
+        Err(e) => return error_response(e),
+    };
+    let command_id = match state.db.enqueue_command(&id, kind, &args, &actor.username) {
+        Ok(command_id) => command_id,
+        Err(e) => return error_response(e),
+    };
+    audit(
+        &state,
+        Some(&actor.username),
+        "probe.command",
+        Some(&id),
+        Outcome::Success,
+        Some(&format!("{kind} sur « {} »", probe.name)),
+    );
+    // La sonde ne l'exécutera qu'à son prochain battement : le dire évite
+    // qu'on croie la commande perdue pendant la minute qui suit.
+    ok_json(json!({
+        "id": command_id,
+        "kind": kind,
+        "state": "pending",
+        "heartbeat_interval_secs": state.settings.heartbeat_interval_secs(),
+    }))
+}
+
+/// Historique récent des commandes d'une sonde.
+async fn list_commands(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.db.list_commands(&id, 50) {
+        Ok(rows) => ok_json(json!({ "commands": rows })),
+        Err(e) => error_response(e),
+    }
+}
+
 async fn rotate_token(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,

@@ -307,6 +307,7 @@ export const AUDIT_ACTIONS: readonly string[] = [
   'backup.restore',
   'backup.retention',
   'user.password_reset_cli',
+  'probe.command',
 ];
 
 // ── Notifications (contrat § 13) ────────────────────────────────────────────
