@@ -385,18 +385,32 @@
   .card:hover { border-color: var(--ep-glass-border-strong); }
   .card-label-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
   .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--ep-text-muted); }
+  /* Le sélecteur d'interface ne se lisait pas comme un contrôle : bordure
+     presque invisible, pas de chevron, rien qui dise « ça s'ouvre ». Or c'est
+     LE réglage qui décide de tout ce que l'app mesure — le rater, c'est
+     mesurer la mauvaise interface sans le savoir. On lui donne donc un
+     chevron, une bordure lisible et une réaction au survol. */
   .iface-select {
+    -webkit-appearance: none;
+    appearance: none;
     background: var(--ep-bg-tertiary);
-    border: 1px solid var(--ep-glass-border);
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                      linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position: calc(100% - 15px) 52%, calc(100% - 10px) 52%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    border: 1px solid var(--ep-border, var(--ep-glass-border));
     color: var(--ep-text-primary);
     font-size: 12px;
-    font-weight: 500;
-    padding: 4px 10px;
+    font-weight: 600;
+    padding: 6px 30px 6px 12px;
     border-radius: 6px;
     cursor: pointer;
     max-width: 180px;
+    transition: border-color .12s ease, background-color .12s ease;
   }
-  .iface-select:focus { outline: none; border-color: var(--ep-accent); }
+  .iface-select:hover { border-color: var(--ep-accent); background-color: var(--ep-bg-secondary, var(--ep-bg-tertiary)); }
+  .iface-select:focus-visible { outline: 2px solid var(--ep-accent); outline-offset: 2px; }
   .card-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 12px; }
   .title-with-badge { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .card-title { font-size: 15px; font-weight: 700; }
