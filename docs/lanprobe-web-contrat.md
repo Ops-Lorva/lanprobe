@@ -1153,3 +1153,42 @@ un utilisateur qui perd sa clé garde son mot de passe.
 Confirmé par le propriétaire : on cache les boutons **et** on vérifie côté
 serveur. Le masquage évite la tentation ; la vérification évite l'accès. Sans la
 seconde, il suffit d'appeler la route à la main.
+
+## 20. Ce qui est testé, et ce qui ne l'est pas
+
+⚠️ **Il n'y a pas de CI de test.** `.github/workflows/release.yml` est déclenché
+par un tag et construit des binaires ; rien ne s'exécute sur un push. `cargo
+test` comme `npm test` sont donc des gestes **manuels**, à faire avant de
+déployer.
+
+### Rust — `cargo test`
+
+Couvre le hub et la sonde : routes, rôles, sauvegarde/restauration, conversion
+Flux, construction du line protocol. C'est la partie solide.
+
+### Interface — `npm test`
+
+`svelte-check` puis Vitest (`web-ui/vitest.config.ts`), sur les fonctions pures
+de `web-ui/src/lib` : `metrics.ts`, `charts.ts`, `format.ts`.
+
+Ces tests existent pour une raison datée. Le 29/08/2026, **trois défauts
+d'affichage** ont atteint la production alors que le backend rendait la bonne
+réponse et que tous les tests Rust passaient :
+
+1. Les en-têtes de colonnes de la vue de parc avaient disparu — en déplaçant
+   les règles `.cols`, leurs enveloppes `@media` avaient été perdues, et
+   l'en-tête affichait cinq colonnes quand les lignes en avaient sept.
+2. Les trois graphiques d'une sonde restaient vides malgré des milliers de
+   points en base : le hub décore le libellé d'une courbe de ses étiquettes
+   (`latency_ms · 10.0.30.12`) et l'interface cherchait `latency_ms`.
+3. Le second moteur de speedtest n'était jamais tracé — un `.find` là où il
+   fallait un `.filter`.
+
+Aucun n'était visible côté Rust. **Ce qui casse à cette frontière, c'est la
+lecture de la réponse, pas sa production** — d'où des tests sur des fonctions
+pures plutôt que sur des composants montés : un test de fonction pure ne dérive
+pas avec le rendu, et ces trois défauts y étaient tous attrapables.
+
+Le CSS, lui, reste hors de portée d'un test unitaire. Le défaut n°1 se serait
+vu à l'œil, pas dans une assertion : une capture avant/après reste nécessaire
+pour toute modification de mise en page.

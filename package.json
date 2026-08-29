@@ -12,7 +12,11 @@
     "tauri": "tauri",
     "dev:web": "vite dev --config web-ui/vite.config.ts",
     "build:web": "vite build --config web-ui/vite.config.ts",
-    "preview:web": "vite preview --config web-ui/vite.config.ts"
+    "preview:web": "vite preview --config web-ui/vite.config.ts",
+    "test:web": "vitest run --config web-ui/vitest.config.ts",
+    "test:web:watch": "vitest --config web-ui/vitest.config.ts",
+    "check:web": "svelte-check --tsconfig ./web-ui/tsconfig.json",
+    "test": "npm run check:web && npm run test:web"
   },
   "license": "MIT",
   "dependencies": {
@@ -31,6 +35,7 @@
     "svelte": "^5.55.3",
     "svelte-check": "^4.4.6",
     "typescript": "^6.0.2",
-    "vite": "^8.0.8"
+    "vite": "^8.0.8",
+    "vitest": "^4.1.11"
   }
 }
