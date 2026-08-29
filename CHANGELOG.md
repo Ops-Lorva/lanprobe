@@ -6,15 +6,171 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
-## [Unreleased]
+## [2.1.0] - 2026-08-29
 
 ### English
-- Security: InfluxDB credentials (v2 token, v1 password) are now encrypted at rest in `app_config.json` (AES-256-GCM, fresh nonce per write), and the file is `0600`. Non-secret fields stay readable. Existing cleartext configs are read as-is and encrypted on the next write. The key comes from `LANPROBE_SECRET_KEY` (base64, 32 bytes — nothing is then written to the volume) or from a `0600` `secret.key` in the config dir. With no usable key, the server refuses to write a secret instead of silently storing it in cleartext.
-- Docs: added a "Security model" section stating exactly what is protected and from what — passwords are hashed (argon2id) and never encrypted, where the encryption key lives and the limits of the default location, and that TLS beyond the LAN is the operator's reverse proxy job. Documented the setup token in the first-run steps.
+
+**The probe no longer runs a web server.** It used to serve its own HTTPS
+interface on 8443, with its own accounts, setup token and self-signed
+certificate. That role belongs to the hub: a probe exposing its own interface
+as well would be a second surface to secure for the very same measurements.
+
+⚠️ **Two things will surprise you when upgrading a headless probe:**
+
+1. **`https://<probe>:8443` no longer answers anything.** Attach the probe to
+   your hub instead — `lanprobe-server enroll --hub <url> --code <code>`.
+2. **`--host` and `--port` are gone.** The package replaces its systemd unit,
+   so a standard install upgrades cleanly — but a `systemctl edit` override
+   keeps the old flags and **the service will refuse to start**. Remove the
+   override, or point it at `lanprobe-server --config-dir … run`.
+
+A headless probe that is not attached to a hub still measures: it piles its
+readings into its local buffer and says so in the logs. It loses nothing and
+catches up on attachment.
+
+- The headless probe is driven from the command line: `run` (default),
+  `enroll`, `status`, `forget`. It listens on no port — nothing to open
+  inbound, it only needs to reach the hub outbound.
+- **All of a probe's traffic now leaves through the selected interface** —
+  measurements, heartbeat, and delivery of readings. Previously the heartbeat
+  used the default route: a probe whose measured link had lost internet stayed
+  green in the fleet, because its lifeline travelled over another link. You can
+  have internet on `eth1` and none on `eth0`, and `eth0` is precisely the one
+  under test. A selected interface with no address now makes the heartbeat
+  fail, and the probe turns "no news" — which is the truth of that interface.
+- Direct InfluxDB export removed from the app for the same reason: it asked
+  every probe to know Influx and carry a write token, which is exactly what the
+  hub avoids. Everything goes through the hub.
+- The headless probe can finally **watch ICMP targets**: that loop only existed
+  in the desktop layer.
+- Probes execute commands sent by the hub (speed test, port scan, discovery,
+  add/remove a monitored target), carried in the heartbeat response.
+- The speed test result URL now reaches the hub, which offers a link to the
+  public Ookla result.
+- Fleet: the "offline" threshold drops from 24 h to 2 h. The threshold decides
+  when someone has to travel; a reboot or an update rarely exceeds twenty
+  minutes, and a probe silent for two hours is a problem you want to fix the
+  same day.
+- Hub interface: Spanish, human-readable audit actions, real timestamps in the
+  log instead of "2 h ago", public IP column, per-engine speed-test curves, and
+  curves that break across gaps instead of drawing a straight line through a
+  period nobody measured.
+- App: the speed test card no longer clips its upload figure, the hub status
+  pill sits next to the title, and the hub address has an http/https toggle.
 
 ### Français
-- Sécurité : les identifiants InfluxDB (jeton v2, mot de passe v1) sont désormais chiffrés au repos dans `app_config.json` (AES-256-GCM, nonce tiré à chaque écriture), et le fichier est en `0600`. Les champs non secrets restent lisibles. Une config existante en clair est relue telle quelle puis chiffrée à la première écriture. La clé vient de `LANPROBE_SECRET_KEY` (base64, 32 octets — rien n'est alors écrit sur le volume) ou d'un `secret.key` en `0600` dans le config-dir. Sans clé utilisable, le serveur refuse d'écrire un secret au lieu de le stocker silencieusement en clair.
-- Docs : ajout d'une section « Modèle de sécurité » qui dit exactement ce qui est protégé et contre quoi — les mots de passe sont hachés (argon2id) et jamais chiffrés, où vit la clé de chiffrement et les limites de son emplacement par défaut, et que le TLS au-delà du LAN relève du reverse proxy de l'opérateur. Le token de setup est documenté dans les étapes de premier démarrage.
+
+**La sonde n'embarque plus de serveur web.** Elle servait sa propre interface
+HTTPS sur 8443, avec ses comptes, son jeton de configuration et son certificat
+auto-signé. Ce rôle appartient au hub : une sonde qui exposerait la sienne en
+plus serait une seconde surface à sécuriser pour montrer les mêmes mesures.
+
+⚠️ **Deux choses vont surprendre à la mise à jour d'une sonde headless :**
+
+1. **`https://<sonde>:8443` ne répond plus rien.** Rattachez la sonde à votre
+   hub — `lanprobe-server enroll --hub <url> --code <code>`.
+2. **`--host` et `--port` n'existent plus.** Le paquet remplace son unité
+   systemd, donc une installation standard se met à jour sans rien faire — mais
+   un override posé par `systemctl edit` garde les anciens flags et **le
+   service refusera de démarrer**. Retirez l'override, ou pointez-le sur
+   `lanprobe-server --config-dir … run`.
+
+Une sonde headless non rattachée mesure quand même : elle empile ses relevés
+dans son tampon local et le dit dans les logs. Elle ne perd rien et rattrape
+au rattachement.
+
+- La sonde headless se pilote en ligne de commande : `run` (défaut), `enroll`,
+  `status`, `forget`. Elle n'écoute sur aucun port — rien à ouvrir en entrée,
+  il lui faut seulement joindre le hub en sortie.
+- **Tout le trafic d'une sonde sort désormais par l'interface sélectionnée** —
+  mesures, battement de cœur et envoi des relevés. Le battement passait avant
+  par la route par défaut : une sonde dont le lien mesuré n'avait plus internet
+  restait verte dans le parc, parce que sa ligne de vie empruntait un autre
+  lien. On peut avoir internet sur `eth1` et pas sur `eth0`, et `eth0` est
+  justement celui qu'on éprouve. Une interface sélectionnée sans adresse fait
+  maintenant échouer le battement, et la sonde passe « sans nouvelles » — ce qui
+  est la vérité de cette interface.
+- Export InfluxDB direct retiré de l'application pour la même raison : il
+  demandait à chaque sonde de connaître Influx et de porter un jeton
+  d'écriture, exactement ce que le hub évite. Tout passe par le hub.
+- La sonde headless peut enfin **surveiller des cibles ICMP** : cette boucle
+  n'existait que dans la couche desktop.
+- Les sondes exécutent les commandes envoyées par le hub (test de débit, scan
+  de ports, découverte, ajout/retrait d'une cible surveillée), transportées
+  dans la réponse au battement de cœur.
+- L'URL du résultat de speedtest remonte au hub, qui propose un lien vers le
+  résultat public Ookla.
+- Parc : le seuil « hors ligne » passe de 24 h à 2 h. Le seuil décide quand
+  quelqu'un doit se déplacer ; un redémarrage ou une mise à jour dépassent
+  rarement vingt minutes, et une sonde muette depuis deux heures est un
+  problème qu'on veut régler dans la journée.
+- Interface du hub : espagnol, actions d'audit en clair, horodatage réel dans
+  le journal au lieu de « il y a 2 h », colonne IP publique, courbes de
+  speedtest séparées par moteur, et courbes qui se coupent sur les
+  interruptions au lieu de tracer une droite au travers d'une période où
+  personne ne mesurait.
+- Application : la carte de speedtest ne coupe plus le débit montant, la
+  pastille de rattachement suit le titre, et l'adresse du hub a un bouton
+  http/https.
+
+## [2.0.1] - 2026-08-28
+
+### English
+- Public IP is no longer reported when the selected interface has no address —
+  the value stayed on screen after switching to a dead interface, describing a
+  link the probe was no longer using.
+- Hub: `reset-password` command, run from inside the container, for a lost
+  administrator password. Self-hosting has no recovery e-mail; the operation is
+  written to the audit log because it bypasses sign-in.
+
+### Français
+- L'IP publique n'est plus remontée quand l'interface sélectionnée n'a pas
+  d'adresse — la valeur restait affichée après un passage sur une interface
+  morte, décrivant un lien que la sonde n'empruntait plus.
+- Hub : commande `reset-password`, lancée depuis le conteneur, pour un mot de
+  passe administrateur perdu. L'auto-hébergement n'a pas d'e-mail de
+  récupération ; l'opération est journalisée parce qu'elle contourne la
+  connexion.
+
+## [2.0.0] - 2026-08-28
+
+### English
+- **The LanProbe hub**: one self-hosted Docker container gathering a fleet of
+  probes behind a single address and a single authentication — sites, probes,
+  accounts with roles, audit log, e-mail and webhook alerts, automatic backup
+  and restore. Probes never talk to InfluxDB directly; the hub relays.
+- Probes attach with a short code, valid 15 minutes, used once. No password
+  reaches the monitored machine.
+- Security: InfluxDB credentials are encrypted at rest in `app_config.json`
+  (AES-256-GCM, fresh nonce per write), file mode `0600`. Existing cleartext
+  configs are read as-is and encrypted on the next write. The key comes from
+  `LANPROBE_SECRET_KEY` (base64, 32 bytes — nothing is then written to the
+  volume) or from a `0600` `secret.key`. With no usable key, the probe refuses
+  to write a secret rather than silently storing it in cleartext.
+- Docs: a "Security model" section stating exactly what is protected and from
+  what — passwords are hashed (argon2id) and never encrypted, where the key
+  lives and the limits of its default location, and that TLS beyond the LAN is
+  the operator's reverse proxy job.
+
+### Français
+- **Le hub LanProbe** : un conteneur Docker auto-hébergé qui rassemble un parc
+  de sondes derrière une seule adresse et une seule authentification — sites,
+  sondes, comptes avec rôles, journal d'audit, alertes e-mail et webhook,
+  sauvegarde et restauration automatiques. Les sondes ne parlent jamais
+  directement à InfluxDB ; le hub relaie.
+- Les sondes se rattachent avec un code court, valable 15 minutes, à usage
+  unique. Aucun mot de passe n'atteint la machine surveillée.
+- Sécurité : les identifiants InfluxDB sont chiffrés au repos dans
+  `app_config.json` (AES-256-GCM, nonce tiré à chaque écriture), fichier en
+  `0600`. Une config existante en clair est relue telle quelle puis chiffrée à
+  la première écriture. La clé vient de `LANPROBE_SECRET_KEY` (base64, 32
+  octets — rien n'est alors écrit sur le volume) ou d'un `secret.key` en
+  `0600`. Sans clé utilisable, la sonde refuse d'écrire un secret au lieu de le
+  stocker silencieusement en clair.
+- Docs : section « Modèle de sécurité » qui dit exactement ce qui est protégé
+  et contre quoi — les mots de passe sont hachés (argon2id) et jamais chiffrés,
+  où vit la clé et les limites de son emplacement par défaut, et que le TLS
+  au-delà du LAN relève du reverse proxy de l'opérateur.
 
 ## [1.1.5] - 2026-07-02
 

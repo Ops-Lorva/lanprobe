@@ -4,15 +4,15 @@
 
 # LanProbe
 
-**Network monitoring & debugging — desktop app and headless server**
+**Network monitoring and diagnostics — probes, and a hub to drive them**
 
-*Interface Profiles · Ping Monitor · SLA · Network Discovery · Port Scan · Speed Test · Self-hosted Hub*
+*Interface Profiles · Ping Monitor · SLA · Discovery · Port Scan · Speed Test · Self-hosted Hub*
 
-[![Latest Release](https://img.shields.io/github/v/release/Benjamin-Chianese/lanprobe?label=release&style=flat-square)](https://github.com/Benjamin-Chianese/lanprobe/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/Benjamin-Chianese/lanprobe?label=release&style=flat-square)](https://github.com/Benjamin-Chianese/lanprobe/releases/latest)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri&logoColor=white&style=flat-square)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-1.85+-CE422B?logo=rust&logoColor=white&style=flat-square)](https://rustlang.org)
 [![Svelte](https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte&logoColor=white&style=flat-square)](https://svelte.dev)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-6366f1?style=flat-square)](#compatibility)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-6366f1?style=flat-square)](#-compatibility)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)](LICENSE)
 
 </div>
@@ -21,29 +21,42 @@
 
 ## 🖧 What is LanProbe?
 
-LanProbe replaces a handful of separate network utilities with one coherent interface. Built for engineers who switch between interfaces frequently, debug connectivity issues, or need to monitor multiple hosts at once.
+LanProbe replaces a handful of separate network utilities with one coherent tool, for people who switch interfaces often, debug connectivity, or watch several hosts at once.
 
-- 🔀 **Switch network profiles in one click** — no more typing static IPs into system dialogs
-- 📡 **Watch multiple hosts in real time** with latency history and SLA statistics
-- 🔍 **Scan your network** to discover who's on the subnet
-- ⚡ **Test throughput** bound to a specific interface — no OS routing surprises
-- 🗄️ **Deploy headless** on a Debian server or Raspberry Pi — access the full UI from any browser on the LAN
+It comes in **two pieces**, and the split is worth knowing before installing anything:
+
+| | Role |
+|---|---|
+| **The probe** | Measures. Desktop app (Windows / macOS / Linux) or headless service. It pings, scans and speed-tests — from inside the network being watched. |
+| **The hub** | Watches. A Docker container on your own machine, gathering every probe behind **one address and one authentication**. |
+
+A probe on its own is perfectly usable: open the window, it measures. The hub earns its place as soon as there are several sites, several machines, or a need to look without sitting in front of the screen.
+
+⚠️ **The direction of the connection matters.** The hub never reaches into a probe — it has no route to its network, and that is the point. The probe calls the hub, outbound. So there is **no inbound port to open** on the monitored network, and no VPN to set up.
 
 ---
 
 ## 🧩 Features
 
-| Module | What it does |
+| Module | Description |
 |--------|-------------|
-| 🔀 **Network Profiles** | Save named static-IP or DHCP configurations, apply them in one click |
-| 📡 **Ping Monitor** | Continuous ICMP monitoring of multiple hosts, real-time latency graph, configurable alert thresholds |
-| 📊 **SLA Export** | Per-host uptime %, avg / min / max / P95 latency — exportable to CSV |
-| 🔍 **Network Discovery** | Fast async CIDR scan returning IP, hostname and MAC address of live hosts |
-| 🔌 **Port Scan** | TCP scan with built-in profiles (common, web, full) and custom profiles |
-| ⚡ **Speed Test** | Ookla CLI speed test bound to the selected interface via `IP_BOUND_IF` / `SO_BINDTODEVICE` |
-| 🌐 **Self-hosted hub** | The whole fleet behind one address: sites, probes, accounts, alerts, backups. Replaces the web server each probe used to carry |
-| 🛡️ **Internet Status** | Dual-probe (ICMP + HTTP) internet health with public-IP info and uptime percentage |
-| 🎨 **Color Palettes** | 6 accent palettes (Indigo, Cyan, Emerald, Rose, Amber, Slate) — dark and light mode |
+| 🔀 **Interface profiles** | Named static-IP or DHCP configurations, applied in one click |
+| 📡 **Ping Monitor** | Continuous ICMP watch over several hosts, live latency, configurable thresholds |
+| 📊 **SLA export** | Uptime % per host, avg / min / max / P95 latency — CSV export |
+| 🔍 **Network discovery** | Async CIDR sweep: IP, hostname, MAC address |
+| 🔌 **Port Scan** | TCP scan with built-in profiles (common, web, full) and custom ones |
+| ⚡ **Speed Test** | Ookla or iperf3, **bound to the selected interface** |
+| 🛡️ **Internet status** | Dual ICMP + HTTP probe, public IP, uptime percentage |
+| 🌐 **Self-hosted hub** | Sites, probes, accounts, roles, audit log, alerts, backups |
+| 🎨 **Theme** | Dark / light / system, 6 accent palettes |
+
+### The rule that governs everything: the selected interface
+
+⚠️ **All of a probe's traffic leaves through the interface you picked.** The measurements, but also its heartbeat to the hub and the delivery of its readings.
+
+This is not an implementation detail. You can have internet on `eth1` and none on `eth0`, and `eth0` is precisely the one under test. A probe that measured a dead link while reporting “all good” over another link would be asserting something it never checked.
+
+The consequence to know: if the selected interface loses its address, the probe **stops beating** and turns “no news” in the fleet. That is the truth of the interface being watched, not a fault in the probe.
 
 ---
 
@@ -51,79 +64,41 @@ LanProbe replaces a handful of separate network utilities with one coherent inte
 
 ### 💻 Desktop app
 
-Pre-built installers are published on **[GitHub Releases](https://github.com/Benjamin-Chianese/lanprobe/releases/latest)**.
+From the [releases](https://github.com/Benjamin-Chianese/lanprobe/releases/latest):
 
-| OS | File | Notes |
-|----|------|-------|
-| Windows 10 / 11 | `lanprobe_vX.Y.Z_x64-setup.exe` | NSIS installer, UAC required for network config |
-| macOS (Intel + Apple Silicon) | `lanprobe_vX.Y.Z_universal.pkg` | Signed + notarized, provisions sudoers entry automatically |
-| macOS (Intel + Apple Silicon) | `lanprobe_vX.Y.Z_universal.dmg` | Drag-to-Applications, password prompted on first profile apply |
-| Linux (Debian / Ubuntu) | `lanprobe_vX.Y.Z_amd64.deb` | Desktop app with WebKit2GTK |
+| Platform | File |
+|---|---|
+| Windows | `lanprobe_vX.Y.Z_x64-setup.exe` |
+| macOS | `lanprobe_vX.Y.Z_universal.pkg` (signed + notarized) |
+| Linux | `lanprobe_vX.Y.Z_amd64.deb` |
 
-The app ships an **auto-updater** — subsequent updates are one click from the notification banner.
-
-> **macOS** — use the `.pkg` installer for the smoothest experience: it signs the sudoers entry so applying network profiles never prompts for a password.
+On macOS the `.pkg` provisions the sudoers rights needed to change an IP. On Linux the package sets `CAP_NET_RAW` and `CAP_NET_ADMIN` on the binary: raw ICMP pings and interface changes work without root.
 
 ---
 
-### 🗄️ Headless server on Debian / Ubuntu (no GUI required)
+### 🗄️ Headless probe on Debian / Ubuntu
 
-`lanprobe-server` is a standalone binary that serves the full LanProbe web UI over HTTPS. It requires no desktop environment and runs as a systemd service.
-
-#### 1 — Install or update with the one-liner
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Benjamin-Chianese/lanprobe/main/install-server.sh | sudo bash
-```
-
-The script automatically fetches the latest release, installs the `.deb`, and restarts the service if it was already running.
-To install a specific version:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Benjamin-Chianese/lanprobe/main/install-server.sh | sudo bash -s -- --version v0.6.10
-```
-
-Or download and run locally:
+For a Raspberry Pi, a VM, or a server with no desktop.
 
 ```bash
 curl -fsSL -o install-server.sh https://raw.githubusercontent.com/Benjamin-Chianese/lanprobe/main/install-server.sh
 sudo bash install-server.sh
 ```
 
-The package automatically:
-- Creates a dedicated `lanprobe` system user
-- Sets `CAP_NET_RAW` + `CAP_NET_ADMIN` on the binary (ICMP + interface config without running as root)
-- Registers and starts `lanprobe-server.service` via systemd
+⚠️ **The headless probe listens on no port.** It used to serve its own web interface over HTTPS on 8443, with its own accounts and self-signed certificate. That role now belongs to the hub: a probe exposing its own interface as well would be a second surface to secure for the very same measurements. So you drive it from the command line, and you look at it from the hub.
 
-#### 2 — Attach the probe to the hub
-
-⚠️ **The probe listens on no port.** It used to serve its own web interface
-over HTTPS on 8443, with its own accounts and self-signed certificate. That
-role now belongs to the **hub**: the hub shows the fleet and carries
-authentication. A probe exposing its own interface as well would be a second
-surface to secure for the very same measurements.
-
-In the hub, create an enrolment code (Fleet → “+” on a site), then, on the
-machine you want to monitor:
+**Attaching.** In the hub, create an enrolment code (Fleet → “+” on a site), then:
 
 ```bash
 sudo -u lanprobe lanprobe-server --config-dir /var/lib/lanprobe \
      enroll --hub https://hub.example.com --code A1B2-C3D4
-```
 
-The code lasts 15 minutes and works once. For scripted deployment,
-`--username`, `--password` and `--site` replace `--code`.
-
-#### 3 — Start the service
-
-```bash
 sudo systemctl enable --now lanprobe-server
-sudo journalctl -u lanprobe-server -f
 ```
 
-The probe shows up in the fleet on its first heartbeat, so under a minute.
+The code lasts 15 minutes and works once. The probe shows up in the fleet on its first heartbeat, so under a minute.
 
-#### Commands
+**Commands:**
 
 ```bash
 lanprobe-server run       # measure and send, until Ctrl-C (default action)
@@ -132,123 +107,82 @@ lanprobe-server status    # show the attachment
 lanprobe-server forget    # detach — the hub keeps the measurements
 ```
 
-`--config-dir` applies to every command. Default: `~/.config/lanprobe`, and
-`/var/lib/lanprobe` for the systemd service.
+`--config-dir` applies to every command. Default: `~/.config/lanprobe`, and `/var/lib/lanprobe` for the systemd service.
 
-#### Firewall
+For scripted deployment, `--username`, `--password` and `--site` replace `--code`. Avoid it on a machine you do not control: a compromised host should not receive the hub's credentials.
 
-Nothing to open inbound. The probe is a **client** of the hub: all it needs
-is to reach the hub's address outbound.
+**Firewall:** nothing to open inbound. The probe only needs to reach the hub's address outbound.
 
-#### Update
+**Sealing key.** The probe's local secrets — its hub token — are encrypted at rest. The key is created on first start inside the config directory. To supply your own (immutable container, secret manager):
 
 ```bash
-curl -LO https://github.com/Benjamin-Chianese/lanprobe/releases/latest/download/lanprobe-server_vX.Y.Z_amd64.deb
-sudo dpkg -i lanprobe-server_vX.Y.Z_amd64.deb
-# dpkg stops, replaces, and restarts the service automatically
-```
-
-#### Uninstall
-
-```bash
-sudo apt remove lanprobe-server
-```
-
-#### 🔒 Security model — what is protected, and from what
-
-LanProbe is **self-hosted only**. There is no central service, no account directory and no relay: your account and your data live in *your* instance. That also means the security boundary is yours to set. Here is the exact measure, without overselling it.
-
-| Data | At rest | Notes |
-|---|---|---|
-| User passwords (`users.json`) | **Hashed**, argon2id + per-user salt | Never encrypted — a reversible password is a flaw, not a feature. File is `0600`. |
-| InfluxDB token / password (`app_config.json`) | **Encrypted**, AES-256-GCM, fresh nonce per write | File is `0600`. Non-secret fields (URL, org, bucket, username) stay readable so you can diagnose an instance. |
-| Session tokens | In memory only | 32 random bytes, 7-day TTL, `HttpOnly` + `SameSite=Strict` + `Secure` cookie. Lost on restart, by design. |
-
-**Where the encryption key lives — read this before trusting it.** By default the key is `secret.key` (`0600`) in the same `--config-dir` as `app_config.json`. Be clear-eyed about what that buys you: it protects a **copy of the config file alone** — a backup that leaks, an exported volume, a config pasted into a bug report. It does **not** protect against someone who already has the machine or the whole volume: they read both files.
-
-For a real gain, keep the key off the volume by passing it in the environment:
-
-```bash
-# 32 random bytes, base64
-openssl rand -base64 32
-
-# systemd drop-in, Docker secret, or your secret manager
-sudo systemctl edit lanprobe-server
+head -c 32 /dev/urandom | base64        # 32 random bytes
+# then, as a systemd drop-in:
 # [Service]
 # Environment=LANPROBE_SECRET_KEY=<base64-32-bytes>
 ```
 
-When `LANPROBE_SECRET_KEY` is set, **no key file is ever written**. Keep a copy of that key: lose it and the stored InfluxDB credentials become unreadable and must be re-entered. If no usable key is available, the server **refuses to write a secret** rather than silently downgrading it to cleartext.
-
-**Transport.** The built-in HTTPS uses a **self-signed** certificate — enough for a LAN, not a substitute for a real one. If you expose the instance beyond your LAN, put it behind your own reverse proxy (Caddy, Traefik, nginx) and let that terminate TLS with a trusted certificate. LanProbe does not obtain or renew certificates for you.
-
 ---
 
-### 🐳 Self-hosted Web Hub (Docker) — for a fleet of probes
+### 🐳 Self-hosted hub (Docker)
 
-🚧 **In development** on `feature/lanprobe-web`, built against [`docs/lanprobe-web-contrat.md`](docs/lanprobe-web-contrat.md) — not merged to `main`, not released yet.
-
-One container, its own SQLite database, an embedded InfluxDB. Probes never talk to InfluxDB directly — they report to the hub over **one address, one login, one certificate**, and the hub relays their measurements. **We host nothing**: it runs on a machine you control, end to end.
+One container: the hub, its SQLite database, and an embedded InfluxDB. **We host nothing** — it all runs on a machine you control.
 
 ```bash
 git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
 docker compose up -d
-docker compose logs lanprobe-web | grep -i token   # the setup token only lives here
+docker compose logs lanprobe-web | grep -i "setup token"
 ```
 
-Open the hub, paste the setup token, create the admin account — it's consumed on first use. Then **Enrol a probe**: the hub gives you a short code, valid 15 minutes. In LanProbe, go to **Settings → Server connection** and enter the hub address and that code. No admin password ever leaves the browser.
+Open the hub, paste the token, create the administrator account — the token is consumed on first use. Then **Enrol a probe**: the hub gives you a short code, valid 15 minutes. In LanProbe, **Settings → Server connection**, enter the hub address and that code. No password ever reaches the monitored machine.
 
-Accounts carry a role (`admin` / `operator` / `viewer`), every action is written to an audit log, and probe up/down alerts can go out over email or a generic webhook (Slack, Discord, ntfy…). See the [interface contract](docs/lanprobe-web-contrat.md) for the full API.
+Accounts carry a role (`admin` / `operator` / `viewer`), every action is written to the audit log, and offline / online transitions can go out by e-mail or webhook (Slack, Discord, ntfy…). The [full API lives in the contract](docs/lanprobe-web-contrat.md).
 
-**Two things that will cost you ten minutes if you don't know them:**
-- the setup token is **only** in `docker logs` — the UI never shows it;
-- if this host was ever reached over HTTPS, the browser keeps a `Secure` cookie that silently blocks logging in over plain HTTP afterwards — login appears to succeed, then bounces back to the login screen, no error shown. Use a private window, or clear the site's cookies.
+**Two traps that cost ten minutes:**
+- the setup token is readable **only** in `docker logs` — the interface never shows it;
+- if that machine was ever reached over HTTPS, the browser keeps a `Secure` cookie that silently blocks the later HTTP session: sign-in appears to succeed, then bounces back to the login screen, **with no error**. Private window, or clear the site's cookies.
 
-The hub serves **plain HTTP by default** — it's meant to sit behind your own reverse proxy. Pass `--tls` if you don't have one (self-signed, fine for a LAN). InfluxDB's port (`8086`) is optional: open it only if you want to point Grafana at it directly, probes never need it.
+The hub serves **in plain HTTP by default**, meant to live behind your own reverse proxy. `--tls` produces a self-signed certificate, fine on a LAN. The InfluxDB port (`8086`) is closed by default: only open it to point Grafana at it — probes never need it.
 
-The hub versions itself independently of the desktop app — currently `1.0.0`.
+The hub carries **its own version**, independent of the app.
 
-#### Back up
+#### Backup
 
-Two Docker volumes, nothing else:
+The hub backs itself up, Sonarr-style: a complete archive in its backup folder, and restoring means handing the file back. Configured under **Settings → Storage** (interval, archives kept).
 
-| Volume | Contains |
-|---|---|
-| `lanprobe_data` | SQLite database — accounts, roles, probes, sites, settings, audit log — plus the hub's TLS certificate if `--tls` is used |
-| `influxdb_data` | Time-series measurements |
+⚠️ **An archive contains `secret.key`**, which decrypts notification passwords and webhook URLs. Treat that folder as a secret.
+
+From the command line, for a cron on the host:
 
 ```bash
-docker compose stop lanprobe-web
-docker run --rm -v lanprobe_data:/from -v "$PWD":/to alpine tar czf /to/lanprobe_data.tar.gz -C /from .
-docker run --rm -v influxdb_data:/from -v "$PWD":/to alpine tar czf /to/influxdb_data.tar.gz -C /from .
-docker compose start lanprobe-web
+docker exec lanprobe-web lanprobe-web backup     # produces an archive, applies retention
+docker exec lanprobe-web lanprobe-web backups    # lists them
 ```
 
+Restoring is done **with the hub stopped** — that is the only moment it takes effect without a restart.
+
+#### Lost administrator password
+
+This is self-hosted: there is no recovery e-mail. The way back in goes through the container.
+
+```bash
+docker exec lanprobe-web lanprobe-web reset-password admin <new-password>
+```
+
+The account is re-enabled if it was disabled, and the operation is written to the audit log — this command bypasses sign-in, so it must leave a trace.
+
 ---
 
-### 🌐 Viewing remotely: the hub
-
-The desktop app used to double as a web server and serve its own interface on
-the LAN. **That mode has been removed.** It asked every probe to carry
-accounts, a self-signed certificate and a listening surface, all to show one
-machine's measurements.
-
-The [LanProbe hub](#-self-hosted-hub) does the same job for a whole fleet
-behind **one address and one authentication**: attach the probe from
-**Settings → Server connection**, and it shows up in the fleet on its first
-heartbeat.
----
-
-## 🔧 Build from source
+## 🔧 Building from source
 
 **Prerequisites**
 
 - [Rust](https://rustup.rs/) ≥ 1.85 (edition 2024)
 - [Node.js](https://nodejs.org/) ≥ 18
 - **Linux desktop:** `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev`
-- **Linux server only:** `libssl-dev pkg-config` (no GUI deps needed)
+- **Linux server only:** `libssl-dev pkg-config` (no GUI dependencies)
 - **macOS:** `xcode-select --install`
-- **Windows:** [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11)
+- **Windows:** [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (preinstalled on Windows 11)
 
 ```bash
 git clone https://github.com/Benjamin-Chianese/lanprobe.git
@@ -257,62 +191,54 @@ npm install
 ```
 
 ```bash
-# Desktop app (Tauri)
-npm run tauri build
-
-# Headless server binary only (no GUI deps)
-npm run build                          # build frontend (embedded in server binary)
-cargo build -p lanprobe-server --release
-# Binary → target/release/lanprobe-server
+npm run tauri build                      # desktop app
+cargo build --release -p lanprobe-server # headless probe, no GUI
+npm run build:web && cargo build --release -p lanprobe-web  # hub
 ```
+
+⚠️ `npm run build:web` **before** the hub: the interface is embedded in the binary, and a hub built without it starts up and then answers an explicit error in place of the page.
 
 ---
 
 ## 🛠️ Development
 
 ```bash
-# Hot-reload desktop dev mode
-npm run tauri dev
-
-# TypeScript / Svelte type check
-npm run check
-
-# Rust unit tests
-cargo test -p lanprobe-core
-
-# Run headless server locally
-npm run build
-cargo run -p lanprobe-server -- run
+npm run tauri dev        # desktop, hot reload
+npm run dev:web          # hub interface, proxied to a local hub
+npm run check            # TypeScript / Svelte, app
+npm test                 # svelte-check + Vitest, hub interface
+cargo test --workspace   # Rust
 ```
+
+⚠️ **There is no test CI.** The only workflow is triggered by a tag and merely builds. `cargo test` and `npm test` are **manual** steps, to run before deploying. What each suite covers, and why the interface tests exist at all, is written up in § 20 of the [contract](docs/lanprobe-web-contrat.md).
 
 ---
 
-## 🏗️ Tech Stack
+## 🏗️ Technical stack
 
 ```
-Backend   →  Rust (Tauri 2 · tokio · reqwest · axum)
-Frontend  →  Svelte 5 + TypeScript
-Icons     →  Inline SVG (Lucide-style, no runtime dep)
-Theme     →  CSS custom properties · OS-adaptive + manual override · 6 palettes
-Storage   →  JSON via tauri-plugin-store (desktop) / /var/lib/lanprobe (server)
-i18n      →  svelte-i18n — English · French · Spanish
-Bundles   →  .exe NSIS · .dmg / .pkg · .deb · headless .deb
+Probes    →  Rust (Tauri 2 · tokio · reqwest) — no HTTP server
+Hub       →  Rust (axum · rusqlite · InfluxDB 2)
+Interface →  Svelte 5 + TypeScript, two separate frontends
+Theme     →  CSS custom properties · dark / light / system · 6 palettes
+i18n      →  svelte-i18n — English · French · Spanish, on both sides
+Bundles   →  NSIS .exe · .dmg / .pkg · .deb · headless .deb · Docker image
 ```
 
-### Crate workspace
+### Cargo workspace
 
 ```
 lanprobe/
-├── src-tauri/                  # Tauri shell — command registration, app lifecycle
+├── src-tauri/                  # Tauri shell — commands, app lifecycle
 ├── crates/
-│   ├── lanprobe-core/          # Shared async logic: ping, discovery, ports, speedtest, SLA
-│   └── lanprobe-server/        # Standalone headless HTTPS server (served UI over LAN)
-└── src/                        # Svelte 5 frontend (embedded in both desktop and server)
-    └── lib/
-        ├── components/         # One component per module
-        ├── stores/             # Svelte stores (profiles, monitoring, settings)
-        └── i18n/               # en / fr / es translation files
+│   ├── lanprobe-core/          # Measurement: ping, discovery, ports, speedtest, SLA
+│   ├── lanprobe-server/        # Probe core: scheduler, export buffer, hub attachment
+│   └── lanprobe-web/           # Hub: API, SQLite, InfluxDB, backups
+├── src/                        # App interface (Svelte 5)
+└── web-ui/                     # Hub interface (Svelte 5), embedded in its binary
 ```
+
+⚠️ `lanprobe-server` is **no longer a server** despite its name: it listens on no port. It carries the measurement scheduler, the export buffer and the hub attachment, shared between the desktop app and the headless binary.
 
 ---
 
@@ -323,13 +249,14 @@ lanprobe/
 | Windows | 10, 11 | x64 |
 | macOS | 12 Monterey+ | Intel · Apple Silicon · universal |
 | Linux (desktop) | Debian 12+ · Ubuntu 22.04+ | x64 |
-| Linux (server) | Debian 11+ · Ubuntu 20.04+ · any systemd distro | x64 |
+| Linux (headless probe) | Debian 11+ · Ubuntu 20.04+ · any systemd distro | x64 |
+| Hub | Any machine with Docker | x64 · arm64 |
 
 ---
 
-## 🚀 CI / Release Pipeline
+## 🚀 Release
 
-One GitHub Actions workflow builds all platforms in parallel and publishes a single GitHub Release:
+One GitHub Actions workflow builds every platform in parallel and publishes a single GitHub Release:
 
 | Job | Runner | Artifacts |
 |-----|--------|-----------|
@@ -337,38 +264,42 @@ One GitHub Actions workflow builds all platforms in parallel and publishes a sin
 | `build-linux-server` | `ubuntu-24.04` | `lanprobe-server_vX.Y.Z_amd64.deb` |
 | `build-windows` | `windows-latest` | `lanprobe_vX.Y.Z_x64-setup.exe` |
 | `build-macos` | `macos-latest` | `universal.dmg` + `universal.pkg` (signed + notarized) |
-| `release` | `ubuntu-22.04` | collects all artifacts · publishes GitHub Release |
-
-Cut a release by pushing a version tag:
+| `release` | `ubuntu-22.04` | collects artifacts, publishes the Release |
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+git tag v2.1.0 && git push origin v2.1.0
 ```
+
+The version comes from the tag; it is not written in `Cargo.toml`, which stays at `0.0.0`.
 
 ---
 
 ## 🗺️ Roadmap
 
-- [x] Network profile management (static IP / DHCP)
-- [x] Real-time multi-host ping monitor with latency graphs
-- [x] Network discovery (CIDR scan — IP / hostname / MAC)
-- [x] TCP port scan with built-in and custom profiles
-- [x] SLA monitoring — uptime %, avg / min / max / P95 latency
-- [x] SLA export to CSV
-- [x] Speed test bound to selected interface (Ookla + iperf3)
-- [x] Glass & Depth UI — dark / light / system theme
-- [x] Self-hosted hub — one URL for the whole fleet, replacing the probe's own web server
-- [x] Headless `.deb` with systemd service, capabilities, auto-start
+- [x] Interface profiles (static IP / DHCP)
+- [x] Multi-host ping monitor with latency charts
+- [x] Network discovery (CIDR — IP / hostname / MAC)
+- [x] TCP port scan, built-in and custom profiles
+- [x] SLA — uptime %, avg / min / max / P95 latency, CSV export
+- [x] Speed test bound to the selected interface (Ookla + iperf3)
+- [x] Dark / light / system theme, 6 palettes
 - [x] i18n — English, French, Spanish
-- [x] macOS signed + notarized `.pkg` with sudoers provisioning
-- [x] 6 color palettes (dark + light)
-- [ ] Self-hosted Web Hub — Docker, embedded InfluxDB, multi-probe fleet enrollment
+- [x] Signed + notarized macOS `.pkg` with sudoers provisioning
+- [x] Headless `.deb` with systemd service and capabilities
+- [x] **Self-hosted hub** — Docker, embedded InfluxDB, sites, accounts, roles, audit
+- [x] **Alerts** — e-mail and webhook, subscription per site and per probe
+- [x] **Backup and restore** of the hub, automatic
+- [x] **All traffic bound to the selected interface**, heartbeat included
+- [x] Removal of the probe's web server — one place to secure
+- [ ] The five per-probe tabs in the hub, and remote triggering
+- [ ] Per-site scoping on accounts
+- [ ] 2FA and passkeys on hub accounts
 
 ---
 
 ## 🤝 Contributing
 
-Pull requests are welcome. For significant changes please open an issue first to discuss the approach.
+Pull requests are welcome. For a significant change, open an issue first to discuss the approach.
 
 ---
 
