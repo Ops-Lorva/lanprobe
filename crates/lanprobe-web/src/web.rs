@@ -1466,8 +1466,23 @@ async fn write_metrics(
         // pendant son intervalle a le droit de le dire sans être rejetée.
         return ok_json(json!({ "ok": true, "written": 0 }));
     }
-    let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
-    match state.influx.write_line_protocol(body).await {
+    // ⚠️ **Le hub étiquette les points lui-même.**
+    //
+    // La sonde n'écrit que `host=<nom machine>` : sans `probe_id`, le hub ne
+    // retrouvait plus ses propres mesures — elles arrivaient bien dans Influx,
+    // mais toutes les requêtes filtrent sur `probe_id` et ne trouvaient rien.
+    // Une sonde en ligne, des écritures en 200, et des graphes vides.
+    //
+    // Le faire ici plutôt que dans la sonde a un second mérite : l'étiquette
+    // vient du jeton présenté, pas de ce que la sonde déclare. Une sonde ne
+    // peut donc pas écrire sous l'identité d'une autre.
+    let probe = match state.db.get_probe(&id) {
+        Ok(p) => p,
+        Err(e) => return error_response(e),
+    };
+    let tagged = tag_lines(&body, &probe.probe_id, &probe.site_id);
+    let lines = tagged.lines().filter(|l| !l.trim().is_empty()).count();
+    match state.influx.write_line_protocol(tagged).await {
         Ok(()) => ok_json(json!({ "ok": true, "written": lines })),
         // 502 et non 500 : la panne est en aval du hub. La sonde doit
         // conserver son lot et réessayer, pas le jeter comme s'il était
@@ -1799,6 +1814,38 @@ async fn probe_metrics(
         })),
         Err(e) => fail(StatusCode::BAD_GATEWAY, &e),
     }
+}
+
+/// Insère `probe_id` et `site_id` dans le jeu d'étiquettes de chaque ligne.
+///
+/// Le line protocol place les étiquettes entre le nom de mesure et le premier
+/// espace non échappé : `mesure,tag=v champ=1 horodatage`. On les ajoute donc
+/// juste avant cet espace. Une ligne malformée est laissée telle quelle —
+/// Influx la refusera et le dira, ce qui vaut mieux qu'un silence.
+fn tag_lines(body: &str, probe_id: &str, site_id: &str) -> String {
+    let extra = format!(",probe_id={probe_id},site_id={site_id}");
+    let mut out = String::with_capacity(body.len() + body.lines().count() * extra.len());
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Premier espace non précédé d'une barre oblique inverse : la fin du
+        // bloc « mesure + étiquettes ».
+        let split = line
+            .char_indices()
+            .find(|(i, c)| *c == ' ' && !line[..*i].ends_with('\\'))
+            .map(|(i, _)| i);
+        match split {
+            Some(i) => {
+                out.push_str(&line[..i]);
+                out.push_str(&extra);
+                out.push_str(&line[i..]);
+            }
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Convertit le CSV annoté d'InfluxDB en séries JSON.
@@ -4285,6 +4332,28 @@ mod tests {
         let (status, body, _) = h.call(request).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["written"], 1);
+    }
+
+    #[test]
+    fn relayed_points_carry_the_probe_identity() {
+        // Sans ces étiquettes, le hub écrit bien dans Influx mais ne retrouve
+        // plus ses propres mesures : toutes ses requêtes filtrent sur
+        // `probe_id`. Sonde en ligne, écritures en 200, graphes vides.
+        let out = tag_lines(
+            "ping_latency,host=Windows,ip=1.1.1.1 latency_ms=12i 1787788800000000000",
+            "p-1",
+            "s-1",
+        );
+        assert_eq!(
+            out.trim(),
+            "ping_latency,host=Windows,ip=1.1.1.1,probe_id=p-1,site_id=s-1 latency_ms=12i 1787788800000000000"
+        );
+    }
+
+    #[test]
+    fn a_measurement_without_tags_still_gets_the_identity() {
+        let out = tag_lines("speedtest download_mbps=100 1787788800000000000", "p-1", "s-1");
+        assert!(out.starts_with("speedtest,probe_id=p-1,site_id=s-1 "), "{out}");
     }
 
     #[tokio::test]
