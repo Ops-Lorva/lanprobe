@@ -224,6 +224,32 @@ pub async fn speedtest_with(
                 "Scheduler: speedtest done — dl={:.1} ul={:.1} lat={}ms",
                 r.download_mbps, r.upload_mbps, r.latency_ms
             );
+            // Le détail part au hub ; le compteur reste écrit dans Influx par
+            // le chemin habituel. Deux chemins pour la même valeur finiraient
+            // par diverger, et on ne saurait plus lequel croire.
+            if let Some(key) = sealing_key(&state) {
+                crate::inventory::publish(
+                    &state,
+                    &key,
+                    crate::inventory::ScanReport {
+                        kind: "speedtest".into(),
+                        started_at: crate::inventory::now(),
+                        cidr: None,
+                        hosts: Vec::new(),
+                        ports: Vec::new(),
+                        speedtest: Some(crate::inventory::SpeedtestReport {
+                            engine: r.engine.clone(),
+                            server_name: r.server_name.clone(),
+                            download_mbps: r.download_mbps,
+                            upload_mbps: r.upload_mbps,
+                            latency_ms: r.latency_ms,
+                            jitter_ms: r.jitter_ms,
+                            result_url: r.result_url.clone(),
+                        }),
+                    },
+                )
+                .await;
+            }
         }
         Err(e) => {
             state.speedtest.mark_stopped();

@@ -6,6 +6,60 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.1.1] - 2026-08-29
+
+### English
+
+The hub gained five per-probe tabs and a client-facing SLA report in
+2.1.x; this release is what the probe has to send for them to show
+anything. Without it the hub can trigger a scan, but its results never
+come back.
+
+- The probe **publishes its inventory** after every discovery, port scan
+  and speed test: hosts seen, open ports, throughput results with their
+  server. Only OPEN ports are sent — the thousands of closed ones would
+  bloat the inventory without teaching anything.
+- The probe **reports its internet verdict** at every heartbeat. The
+  fleet can now flag a probe that beats perfectly while the link it
+  measures is dead — until now that showed as a plain green light.
+- The probe **reports what it is actually watching**. ⚠️ The hub used to
+  infer watched targets from the measurements in the displayed window, so
+  a removed target stayed on screen until its points aged out. Restarting
+  the app left ghost watches in the hub.
+- The hub can impose the **engine and iperf3 server** of a speed test.
+  These overrides do not touch the probe's configuration: the hub asks
+  for a test, it does not reconfigure the probe, and the next scheduled
+  test stays the one it had planned.
+- The speed test **server name** now reaches InfluxDB. "216 Mbit/s" says
+  nothing without knowing what it was measured against.
+
+### Français
+
+Le hub a gagné cinq onglets par sonde et un rapport SLA remettable à un
+client en 2.1.x ; cette version est ce que la sonde doit envoyer pour
+qu'ils aient quelque chose à montrer. Sans elle, le hub sait déclencher
+un scan, mais ses résultats ne reviennent jamais.
+
+- La sonde **publie son inventaire** après chaque découverte, scan de
+  ports et test de débit : machines vues, ports ouverts, résultats de
+  débit avec leur serveur. Seuls les ports OUVERTS partent — les milliers
+  de ports fermés gonfleraient l'inventaire sans rien apprendre.
+- La sonde **remonte son verdict internet** à chaque battement. Le parc
+  peut enfin signaler une sonde qui bat parfaitement alors que le lien
+  qu'elle mesure est mort — jusqu'ici, cela s'affichait comme un simple
+  voyant vert.
+- La sonde **annonce ce qu'elle surveille réellement**. ⚠️ Le hub
+  déduisait les cibles des mesures présentes dans la fenêtre affichée :
+  une cible retirée restait à l'écran tant que ses points n'en étaient
+  pas sortis. Redémarrer l'application laissait des surveillances
+  fantômes dans le hub.
+- Le hub peut imposer le **moteur et le serveur iperf3** d'un test de
+  débit. Ces surcharges ne touchent pas la configuration de la sonde : le
+  hub demande un test, il ne la reconfigure pas, et le prochain test
+  planifié reste celui qu'elle avait prévu.
+- Le **nom du serveur** de speedtest atteint désormais InfluxDB.
+  « 216 Mbit/s » ne veut rien dire sans savoir contre quoi.
+
 ## [2.1.0] - 2026-08-29
 
 ### English
