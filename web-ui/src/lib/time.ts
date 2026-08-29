@@ -46,6 +46,22 @@ export function absoluteTime(seconds: number | null | undefined, locale: string)
   );
 }
 
+/**
+ * Horodatage d'une ligne de journal : date courte, heure à la seconde.
+ *
+ * `dateStyle: 'medium'` écrirait « 29 août 2026 à 09:51:36 » — trop long pour
+ * une colonne, et l'année en toutes lettres n'apprend rien dans un journal
+ * qu'on parcourt. La seconde, elle, est indispensable : c'est par elle qu'on
+ * recoupe une ligne avec les logs du conteneur.
+ */
+export function logTime(seconds: number | null | undefined, locale: string): string {
+  if (seconds == null) return '—';
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: 'short',
+    timeStyle: 'medium',
+  }).format(new Date(seconds * 1000));
+}
+
 /** Date seule : pour « enrôlée le », l'heure à la seconde n'apprend rien. */
 export function dateOnly(seconds: number | null | undefined, locale: string): string {
   if (seconds == null) return '—';

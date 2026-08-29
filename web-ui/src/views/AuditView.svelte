@@ -3,7 +3,7 @@
   import { _, locale } from 'svelte-i18n';
   import { api, ApiError, AUDIT_ACTIONS, type AuditEntry } from '$lib/api';
   import StateBlock from '$lib/components/StateBlock.svelte';
-  import { absoluteTime, relativeTime, now } from '$lib/time';
+  import { absoluteTime, logTime, relativeTime, now } from '$lib/time';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
   const lang = $derived($locale ?? 'en');
@@ -240,8 +240,16 @@
           <!-- `Math.max` : une ligne d'audit est toujours dans le passé. Une
                seconde d'écart entre l'horloge du hub et celle du poste
                affichait « dans 2 s » sur l'entrée qu'on vient de provoquer. -->
-          <span class="when lp-mono" title={absoluteTime(e.at, lang)}>
-            {relativeTime(e.at, lang, Math.max($now, e.at * 1000))}
+          <!-- ⚠️ Horodatage réel, pas « il y a 2 h ». Un journal d'audit se
+               recoupe avec d'autres traces — logs du conteneur, journal d'un
+               pare-feu, récit d'un utilisateur : une durée relative oblige à
+               refaire le calcul de tête à chaque ligne, et elle change pendant
+               qu'on lit. Le relatif reste en infobulle, où il aide à situer. -->
+          <span
+            class="when lp-mono"
+            title={`${absoluteTime(e.at, lang)} — ${relativeTime(e.at, lang, Math.max($now, e.at * 1000))}`}
+          >
+            {logTime(e.at, lang)}
           </span>
 
           <span class="actor">
@@ -347,7 +355,7 @@
   }
   .row {
     display: grid;
-    grid-template-columns: 92px 130px 170px minmax(0, 1fr) 84px;
+    grid-template-columns: 142px 122px 210px minmax(0, 1fr) 84px;
     align-items: baseline;
     gap: 4px 10px;
     padding: 8px 14px 8px 11px;
@@ -451,7 +459,7 @@
      compte. À 390 px il reste l'essentiel — quand, qui, quoi, et le verdict. */
   @media (max-width: 900px) {
     .row {
-      grid-template-columns: 92px 120px minmax(0, 1fr) 78px;
+      grid-template-columns: 142px 112px minmax(0, 1fr) 78px;
     }
     .target,
     .row.header span:nth-child(4) {
