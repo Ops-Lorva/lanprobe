@@ -75,6 +75,22 @@ enum Command {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Réinitialise le mot de passe d'un compte, et le réactive s'il était
+    /// désactivé. ⚠️ Nécessite l'accès au conteneur ou au volume.
+    ///
+    /// C'est le **seul** chemin de récupération d'un hub auto-hébergé : pas
+    /// d'e-mail, pas de support. Sans lui, un administrateur qui perd son mot
+    /// de passe perd son parc, et la seule issue serait d'éditer SQLite à la
+    /// main.
+    ResetPassword {
+        /// Compte à réinitialiser.
+        username: String,
+        /// Nouveau mot de passe.
+        password: String,
+        /// Remet aussi le compte en rôle administrateur.
+        #[arg(long, default_value_t = false)]
+        promote: bool,
+    },
 }
 
 #[tokio::main]
@@ -298,6 +314,34 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
                 );
             }
             Ok(())
+        }
+        Command::ResetPassword { username, password, promote } => {
+            let db = open_volume(args)?;
+            db.reset_user_password(username, password)
+                .map_err(|e| e.to_string())?;
+            // Un compte désactivé qu'on réinitialise sans le réactiver reste
+            // inutilisable : la commande de secours doit rendre l'accès, pas
+            // un mot de passe qui ne sert à rien.
+            let _ = db.set_user_disabled("système", username, false);
+            if *promote {
+                db.set_user_role("système", username, lanprobe_web::db::Role::Admin)
+                    .map_err(|e| e.to_string())?;
+            }
+            // ⚠️ Journalisé comme le reste : cette commande contourne la
+            // connexion, elle doit laisser une trace. Quelqu'un qui la lance
+            // légitimement n'a rien à cacher ; quelqu'un d'autre, si.
+            db.record_audit(
+                Some("système"),
+                "user.password_reset_cli",
+                Some(username),
+                lanprobe_web::db::Outcome::Success,
+                Some("réinitialisation depuis la ligne de commande"),
+            );
+            println!("mot de passe de « {username} » réinitialisé, compte actif");
+            if *promote {
+                println!("  rôle porté à administrateur");
+            }
+            return Ok(());
         }
         Command::Restore { archive, force } => {
             // ⚠️ **Aucune ouverture de base avant la restauration.** Ouvrir
