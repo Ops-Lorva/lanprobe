@@ -5,8 +5,14 @@
   import { fleet } from '$lib/fleet';
   import { flash } from '$lib/flash';
   import { go } from '$lib/router';
-  import { now, relativeTime, absoluteTime, dateOnly, tooltipTime } from '$lib/time';
-  import { api, ApiError } from '$lib/api';
+  import { now, relativeTime, absoluteTime, dateOnly, tooltipTime, logTime } from '$lib/time';
+  import {
+    api,
+    ApiError,
+    type ProbeCommand,
+    type Scan,
+    type SpeedtestRow,
+  } from '$lib/api';
   import {
     MEASUREMENT,
     RANGES,
@@ -26,6 +32,7 @@
   import TimeSeriesChart from '$lib/components/TimeSeriesChart.svelte';
   import StatusBand from '$lib/components/StatusBand.svelte';
   import SeriesLegend from '$lib/components/SeriesLegend.svelte';
+  import CommandButton from '$lib/components/CommandButton.svelte';
   import ValueTable from '$lib/components/ValueTable.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
@@ -49,6 +56,16 @@
   // ⚠️ `quiet` sur les deux : un rechargement visible ferait clignoter la page
   // toutes les trente secondes. La barre de rafraîchissement s'affiche déjà
   // par `refreshing`, qui garde le rendu précédent pendant la lecture.
+  // ── Onglets (contrat § 14) ───────────────────────────────────────────────
+  //
+  // La fiche reprend ce que fait LanProbe et permet de le déclencher à
+  // distance. L'onglet vit dans le hash : recharger la page, ou envoyer le
+  // lien à quelqu'un, doit rouvrir la même vue.
+  const TABS = ['dashboard', 'monitoring', 'speedtest', 'ports', 'discovery'] as const;
+  type Tab = (typeof TABS)[number];
+
+  let tab = $state<Tab>('dashboard');
+
   const REFRESH_MS = 30_000;
   let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -331,6 +348,62 @@
   // occupent toute la largeur et on croit lire six heures de données.
   const domain = $derived({ from: loadedAt - rangeMillis(range), to: loadedAt });
 
+  // ── Inventaire (contrat § 12) ────────────────────────────────────────────
+  //
+  // Chargé à la demande, pas au montage : trois requêtes de plus à chaque
+  // ouverture de fiche pour des onglets qu'on ne consulte pas toujours.
+  let portsScan = $state<Scan | null | undefined>(undefined);
+  let discoveryScan = $state<Scan | null | undefined>(undefined);
+  let speedHistory = $state<SpeedtestRow[] | undefined>(undefined);
+  let commandLog = $state<ProbeCommand[]>([]);
+  let inventoryError = $state('');
+
+  async function loadInventory(kind: 'ports' | 'discovery' | 'speedtest') {
+    inventoryError = '';
+    try {
+      if (kind === 'speedtest') {
+        const r = await api.inventory<{ speedtests: SpeedtestRow[] }>(id, 'speedtest');
+        speedHistory = r.speedtests;
+      } else {
+        const r = await api.inventory<{ scan: Scan | null }>(id, kind);
+        if (kind === 'ports') portsScan = r.scan;
+        else discoveryScan = r.scan;
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      inventoryError = e instanceof ApiError ? e.message : String(e);
+    }
+  }
+
+  async function loadCommands() {
+    try {
+      commandLog = (await api.commands(id)).commands;
+    } catch {
+      /* le journal des commandes est un confort : son absence n'empêche rien */
+    }
+  }
+
+  // Recharge ce que l'onglet ouvert a besoin de montrer, et lui seul.
+  $effect(() => {
+    const current = tab;
+    void id;
+    untrack(() => {
+      if (current === 'ports') void loadInventory('ports');
+      else if (current === 'discovery') void loadInventory('discovery');
+      else if (current === 'speedtest') void loadInventory('speedtest');
+      if (current !== 'dashboard') void loadCommands();
+    });
+  });
+
+  /**
+   * ⚠️ Une commande n'agit qu'au prochain battement. Recharger juste après
+   * l'envoi ne montrerait rien de neuf — c'est le journal des commandes qui
+   * rend l'attente visible, pas la liste des cibles.
+   */
+  function afterCommand() {
+    void loadCommands();
+  }
+
   // Une courbe par cible pinguée : le hub les sépare déjà, les rassembler
   // dessinerait une latence moyenne qu'aucune machine n'a jamais mesurée.
   const pingCurves = $derived.by(() => {
@@ -344,6 +417,13 @@
     }));
   });
   const pingPoints = $derived(pingCurves.flatMap((c) => c.points));
+
+  /** Cibles ICMP surveillées, telles que les mesures les nomment. */
+  const monitoredTargets = $derived(
+    [...new Set(pingCurves.map((c) => c.key.replace(/^latency_ms\s*·\s*/, '')))].sort(),
+  );
+
+  let newTarget = $state('');
   const inetPoints = $derived(inet.curves.find((c) => c.field === 'state')?.points ?? []);
 
   // ── Débits ───────────────────────────────────────────────────────────────
@@ -666,6 +746,15 @@
     </div>
   {/if}
 
+  <nav class="tabs" aria-label={$_('probe.tabs_aria')}>
+    {#each TABS as t (t)}
+      <button class="tab" class:on={tab === t} onclick={() => (tab = t)}>
+        {$_(`probe.tab_${t}`)}
+      </button>
+    {/each}
+  </nav>
+
+  {#if tab === 'dashboard'}
   <div class="rangebar">
     <span class="lp-label">{$_('probe.range')}</span>
     <div class="chips" role="group" aria-label={$_('probe.range')}>
@@ -768,6 +857,280 @@
       {/snippet}
     </ChartCard>
   </div>
+  {/if}
+
+  {#if tab !== 'dashboard'}
+    <div class="panel">
+      {#if inventoryError}
+        <StateBlock tone="error" title={$_('charts.error')} body={inventoryError} />
+      {/if}
+
+      {#if tab === 'monitoring'}
+        <section class="lp-card block">
+          <header class="bh">
+            <div>
+              <h2 class="lp-title">{$_('probe.tab_monitoring')}</h2>
+              <p class="bsub">{$_('probe.monitoring_sub')}</p>
+            </div>
+          </header>
+
+          <!-- Les cibles viennent des mesures elles-mêmes : c'est la seule
+               source qui dit ce que la sonde surveille VRAIMENT, plutôt que ce
+               qu'on lui a demandé de surveiller un jour. -->
+          {#if monitoredTargets.length === 0}
+            <p class="empty">{$_('probe.monitoring_none')}</p>
+          {:else}
+            <ul class="targets">
+              {#each monitoredTargets as ip (ip)}
+                <li>
+                  <span class="lp-mono">{ip}</span>
+                  <CommandButton
+                    probeId={id}
+                    kind="remove_monitor"
+                    args={{ ip }}
+                    label={$_('probe.monitoring_remove')}
+                    onsent={afterCommand}
+                  />
+                </li>
+              {/each}
+            </ul>
+          {/if}
+
+          <form class="addrow" onsubmit={(e) => e.preventDefault()}>
+            <input
+              class="lp-input"
+              bind:value={newTarget}
+              placeholder={$_('probe.monitoring_placeholder')}
+              spellcheck="false"
+              autocomplete="off"
+            />
+            {#if newTarget.trim()}
+              <CommandButton
+                probeId={id}
+                kind="add_monitor"
+                args={{ ip: newTarget.trim() }}
+                label={$_('probe.monitoring_add')}
+                onsent={() => { newTarget = ''; afterCommand(); }}
+              />
+            {/if}
+          </form>
+        </section>
+      {:else if tab === 'speedtest'}
+        <section class="lp-card block">
+          <header class="bh">
+            <div>
+              <h2 class="lp-title">{$_('probe.tab_speedtest')}</h2>
+              <p class="bsub">{$_('probe.speedtest_sub')}</p>
+            </div>
+            <CommandButton
+              probeId={id}
+              kind="speedtest"
+              label={$_('probe.speedtest_run')}
+              onsent={afterCommand}
+            />
+          </header>
+
+          {#if speedHistory === undefined}
+            <p class="empty">{$_('charts.loading')}</p>
+          {:else if speedHistory.length === 0}
+            <p class="empty">{$_('probe.speedtest_none')}</p>
+          {:else}
+            <div class="tablewrap">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>{$_('charts.table_time')}</th>
+                    <th>{$_('charts.table_engine')}</th>
+                    <th>{$_('charts.speed_server')}</th>
+                    <th class="num">{$_('charts.download')}</th>
+                    <th class="num">{$_('charts.upload')}</th>
+                    <th class="num">{$_('charts.latency')}</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each speedHistory as r (r.started_at)}
+                    <tr>
+                      <td class="lp-mono">{logTime(r.started_at, lang)}</td>
+                      <td>{r.engine ?? '—'}</td>
+                      <td class="srv">{r.server_name ?? '—'}</td>
+                      <td class="num lp-mono">{r.download_mbps?.toFixed(1) ?? '—'}</td>
+                      <td class="num lp-mono">{r.upload_mbps?.toFixed(1) ?? '—'}</td>
+                      <td class="num lp-mono">{r.latency_ms ?? '—'}</td>
+                      <td>
+                        {#if r.result_url}
+                          <a href={r.result_url} target="_blank" rel="noopener noreferrer">
+                            {$_('charts.speed_result_link')}
+                          </a>
+                        {/if}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </section>
+      {:else if tab === 'ports'}
+        <section class="lp-card block">
+          <header class="bh">
+            <div>
+              <h2 class="lp-title">{$_('probe.tab_ports')}</h2>
+              <p class="bsub">{$_('probe.ports_sub')}</p>
+            </div>
+            <form class="inline" onsubmit={(e) => e.preventDefault()}>
+              <input
+                class="lp-input"
+                bind:value={newTarget}
+                placeholder={$_('probe.ports_placeholder')}
+                spellcheck="false"
+                autocomplete="off"
+              />
+              {#if newTarget.trim()}
+                <CommandButton
+                  probeId={id}
+                  kind="port_scan"
+                  args={{ ip: newTarget.trim() }}
+                  label={$_('probe.ports_run')}
+                  onsent={afterCommand}
+                />
+              {/if}
+            </form>
+          </header>
+
+          {#if portsScan === undefined}
+            <p class="empty">{$_('charts.loading')}</p>
+          {:else if portsScan === null}
+            <!-- ⚠️ « Jamais lancé » et « lancé, rien trouvé » ne se disent pas
+                 pareil : le second est une conclusion sur le réseau. -->
+            <p class="empty">{$_('probe.ports_never')}</p>
+          {:else}
+            <p class="scanmeta">{$_('probe.scan_at', { values: { when: logTime(portsScan.started_at, lang) } })}</p>
+            {#if portsScan.ports.length === 0}
+              <p class="empty">{$_('probe.ports_empty')}</p>
+            {:else}
+              <div class="tablewrap">
+                <table class="grid">
+                  <thead>
+                    <tr>
+                      <th>{$_('probe.col_ip')}</th>
+                      <th class="num">{$_('probe.col_port')}</th>
+                      <th>{$_('probe.col_proto')}</th>
+                      <th>{$_('probe.col_service')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each portsScan.ports as p (`${p.ip}:${p.port}/${p.proto}`)}
+                      <tr>
+                        <td class="lp-mono">{p.ip}</td>
+                        <td class="num lp-mono">{p.port}</td>
+                        <td class="lp-mono">{p.proto}</td>
+                        <td>{p.service ?? '—'}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {/if}
+          {/if}
+        </section>
+      {:else if tab === 'discovery'}
+        <section class="lp-card block">
+          <header class="bh">
+            <div>
+              <h2 class="lp-title">{$_('probe.tab_discovery')}</h2>
+              <p class="bsub">{$_('probe.discovery_sub')}</p>
+            </div>
+            <CommandButton
+              probeId={id}
+              kind="discovery"
+              label={$_('probe.discovery_run')}
+              onsent={afterCommand}
+            />
+          </header>
+
+          {#if discoveryScan === undefined}
+            <p class="empty">{$_('charts.loading')}</p>
+          {:else if discoveryScan === null}
+            <p class="empty">{$_('probe.discovery_never')}</p>
+          {:else}
+            <p class="scanmeta">
+              {$_('probe.scan_at', { values: { when: logTime(discoveryScan.started_at, lang) } })}
+              {#if discoveryScan.cidr}<span class="lp-mono"> · {discoveryScan.cidr}</span>{/if}
+            </p>
+            {#if discoveryScan.hosts.length === 0}
+              <p class="empty">{$_('probe.discovery_empty')}</p>
+            {:else}
+              <div class="tablewrap">
+                <table class="grid">
+                  <thead>
+                    <tr>
+                      <th>{$_('probe.col_ip')}</th>
+                      <th>{$_('probe.col_hostname')}</th>
+                      <th>{$_('probe.col_mac')}</th>
+                      <th>{$_('probe.col_vendor')}</th>
+                      <th class="num">{$_('charts.latency')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each discoveryScan.hosts as h (h.ip)}
+                      <tr>
+                        <td class="lp-mono">{h.ip}</td>
+                        <td>{h.hostname ?? '—'}</td>
+                        <td class="lp-mono">{h.mac ?? '—'}</td>
+                        <td>{h.vendor ?? '—'}</td>
+                        <td class="num lp-mono">{h.latency_ms ?? '—'}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {/if}
+          {/if}
+        </section>
+      {/if}
+
+      <!-- Le journal des commandes est commun aux quatre onglets : c'est là
+           qu'on voit qu'une commande attend le prochain battement, et c'est la
+           seule réponse à « j'ai cliqué, il ne se passe rien ». -->
+      <section class="lp-card block">
+        <h2 class="lp-title">{$_('commands.title')}</h2>
+        {#if commandLog.length === 0}
+          <p class="empty">{$_('commands.none')}</p>
+        {:else}
+          <div class="tablewrap">
+            <table class="grid">
+              <thead>
+                <tr>
+                  <th>{$_('commands.col_when')}</th>
+                  <th>{$_('commands.col_kind')}</th>
+                  <th>{$_('commands.col_state')}</th>
+                  <th>{$_('commands.col_by')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each commandLog as c (c.id)}
+                  <tr>
+                    <td class="lp-mono">{logTime(c.created_at, lang)}</td>
+                    <td>{$_(`commands.kind_${c.kind}`)}</td>
+                    <td>
+                      <span class="cstate {c.state}">{$_(`commands.state_${c.state}`)}</span>
+                      {#if c.state === 'pending' && c.delivered_count > 0}
+                        <span class="cnote">{$_('commands.deliveries', { values: { n: c.delivered_count } })}</span>
+                      {:else if c.error}
+                        <span class="cnote">{c.error}</span>
+                      {/if}
+                    </td>
+                    <td>{c.created_by ?? '—'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </section>
+    </div>
+  {/if}
 
   <Modal
     open={killOpen}
@@ -1162,6 +1525,157 @@
   .err.top {
     margin: 0 0 14px;
   }
+  /* ── Onglets ──────────────────────────────────────────────────────────── */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    margin: 18px 0 14px;
+    border-bottom: 1px solid var(--ep-border);
+    overflow-x: auto;
+  }
+  .tab {
+    padding: 8px 14px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--ep-text-secondary);
+    font: inherit;
+    font-size: 13px;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .tab:hover {
+    color: var(--ep-text-primary);
+  }
+  .tab.on {
+    color: var(--ep-text-primary);
+    border-bottom-color: var(--ep-accent);
+  }
+  .tab:focus-visible {
+    outline: 2px solid var(--ep-accent);
+    outline-offset: -2px;
+  }
+
+  .panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .block {
+    padding: 16px 18px;
+  }
+  .bh {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .bsub {
+    margin: 3px 0 0;
+    font-size: 12px;
+    color: var(--ep-text-dim);
+  }
+  .empty {
+    margin: 0;
+    font-size: 13px;
+    color: var(--ep-text-dim);
+  }
+  .scanmeta {
+    margin: 0 0 10px;
+    font-size: 11.5px;
+    color: var(--ep-text-dim);
+  }
+
+  .targets {
+    list-style: none;
+    margin: 0 0 12px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .targets li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    background: var(--ep-bg-tertiary);
+    font-size: 13px;
+  }
+  .addrow,
+  .inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .addrow .lp-input,
+  .inline .lp-input {
+    max-width: 240px;
+  }
+
+  /* Un tableau large défile dans sa boîte : la page, elle, ne défile jamais
+     horizontalement. */
+  .tablewrap {
+    overflow-x: auto;
+  }
+  .grid {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  .grid th {
+    text-align: left;
+    padding: 6px 10px 6px 0;
+    border-bottom: 1px solid var(--ep-border);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--ep-text-dim);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .grid td {
+    padding: 6px 10px 6px 0;
+    border-bottom: 1px solid var(--ep-border);
+    vertical-align: top;
+  }
+  .grid .num {
+    text-align: right;
+    padding-right: 14px;
+  }
+  .grid .srv {
+    max-width: 240px;
+    overflow-wrap: anywhere;
+  }
+
+  .cstate {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--ep-border);
+    white-space: nowrap;
+  }
+  .cstate.done {
+    color: var(--ep-success);
+    border-color: var(--ep-success);
+  }
+  .cstate.failed {
+    color: var(--ep-danger);
+    border-color: var(--ep-danger);
+  }
+  .cnote {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--ep-text-dim);
+    overflow-wrap: anywhere;
+  }
+
   .engine {
     font-size: 10px;
     letter-spacing: 0.4px;

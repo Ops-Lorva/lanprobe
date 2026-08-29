@@ -276,6 +276,62 @@ export interface AuditPage {
  * peupler le filtre : une saisie libre laisserait une faute de frappe rendre
  * une liste vide sans dire pourquoi.
  */
+/** Commandes que le hub accepte de faire exécuter à une sonde (§ 14). */
+export type CommandKind =
+  | 'speedtest'
+  | 'port_scan'
+  | 'discovery'
+  | 'add_monitor'
+  | 'remove_monitor';
+
+export interface ProbeCommand {
+  id: number;
+  kind: CommandKind | string;
+  args: Record<string, unknown>;
+  /** `pending` | `done` | `failed`. */
+  state: string;
+  created_at: number;
+  created_by: string | null;
+  delivered_count: number;
+  settled_at: number | null;
+  error: string | null;
+}
+
+export interface ScanHost {
+  ip: string;
+  hostname?: string | null;
+  mac?: string | null;
+  vendor?: string | null;
+  latency_ms?: number | null;
+}
+
+export interface ScanPort {
+  ip: string;
+  port: number;
+  proto: string;
+  service?: string | null;
+}
+
+export interface Scan {
+  scan_id: string;
+  kind: string;
+  started_at: number;
+  cidr: string | null;
+  hosts: ScanHost[];
+  ports: ScanPort[];
+}
+
+export interface SpeedtestRow {
+  started_at: number;
+  engine: string | null;
+  server_name: string | null;
+  download_mbps: number | null;
+  upload_mbps: number | null;
+  latency_ms: number | null;
+  jitter_ms: number | null;
+  result_url: string | null;
+}
+
 export const AUDIT_ACTIONS: readonly string[] = [
   'auth.setup',
   'auth.login',
@@ -642,6 +698,30 @@ export const api = {
    */
   testAdvertise: () =>
     request<AdvertiseTest>('/api/settings/influx-advertise/test', { method: 'POST' }),
+
+  // ── Inventaire et commandes (contrat § 12 et § 14) ───────────────────────
+
+  inventory: <T>(id: string, kind: 'ports' | 'discovery' | 'speedtest') =>
+    request<T>(
+      `/api/probes/${encodeURIComponent(id)}/inventory?kind=${kind}`,
+    ),
+
+  commands: (id: string) =>
+    request<{ commands: ProbeCommand[] }>(
+      `/api/probes/${encodeURIComponent(id)}/commands`,
+    ),
+
+  /**
+   * Empile une commande. ⚠️ Elle n'est PAS exécutée tout de suite : le hub
+   * n'a aucune route vers la sonde, la commande part dans la réponse au
+   * prochain battement de cœur. L'interface doit le dire, sinon on croit la
+   * commande perdue pendant la minute qui suit.
+   */
+  runCommand: (id: string, kind: CommandKind, args: Record<string, unknown> = {}) =>
+    request<{ id: number; kind: string; state: string; heartbeat_interval_secs: number }>(
+      `/api/probes/${encodeURIComponent(id)}/commands`,
+      { method: 'POST', body: JSON.stringify({ kind, args }) },
+    ),
 
   metrics: (id: string, measurement: string, range: string) =>
     request<unknown>(
