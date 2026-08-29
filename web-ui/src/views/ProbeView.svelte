@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { _, locale } from 'svelte-i18n';
   import { fleet } from '$lib/fleet';
   import { flash } from '$lib/flash';
@@ -431,9 +432,31 @@
     inet.tone === 'ready' && inetPoints.length === 0 ? 'empty' : inet.tone,
   );
 
-  const speedLegend = $derived(speedCurves.map((c) => ({ label: c.label, color: c.color })));
+  /**
+   * Courbes masquées à la main, par clé. Plusieurs cibles pinguées se
+   * superposent vite : pouvoir en éteindre une rend les autres lisibles sans
+   * changer la fenêtre ni recharger.
+   *
+   * L'état est volontairement local à la page : il vaut pour un coup d'œil,
+   * pas pour une préférence. Le retenir ferait revenir sur une sonde avec des
+   * courbes manquantes sans qu'on se souvienne de les avoir éteintes.
+   */
+  let hidden = $state(new SvelteSet<string>());
+  function toggle(key: string) {
+    if (hidden.has(key)) hidden.delete(key);
+    else hidden.add(key);
+  }
+
+  const shownPing = $derived(pingCurves.filter((c) => !hidden.has(c.key)));
+  const shownSpeed = $derived(speedCurves.filter((c) => !hidden.has(c.key)));
+
+  const speedLegend = $derived(
+    speedCurves.map((c) => ({ key: c.key, label: c.label, color: c.color, off: hidden.has(c.key) })),
+  );
   const pingLegend = $derived(
-    pingCurves.length > 1 ? pingCurves.map((c) => ({ label: c.label, color: c.color })) : [],
+    pingCurves.length > 1
+      ? pingCurves.map((c) => ({ key: c.key, label: c.label, color: c.color, off: hidden.has(c.key) }))
+      : [],
   );
 </script>
 
@@ -639,10 +662,11 @@
       tone={pingTone}
       errorText={ping.error}
       legend={pingLegend}
+      ontoggle={toggle}
       {refreshing}
     >
       <TimeSeriesChart
-        series={pingCurves}
+        series={shownPing}
         {domain}
         unit={$_('charts.unit_ms')}
       />
@@ -683,6 +707,7 @@
       tone={speedTone}
       errorText={speed.error}
       legend={speedLegend}
+      ontoggle={toggle}
       {refreshing}
     >
       {#snippet action()}
@@ -695,7 +720,7 @@
           </a>
         {/if}
       {/snippet}
-      <TimeSeriesChart series={speedCurves} unit={$_('charts.unit_mbps')} decimals={1} {domain} />
+      <TimeSeriesChart series={shownSpeed} unit={$_('charts.unit_mbps')} decimals={1} {domain} />
       {#snippet table()}
         <ValueTable
           columns={[

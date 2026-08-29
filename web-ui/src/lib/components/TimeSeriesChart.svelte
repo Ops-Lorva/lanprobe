@@ -1,7 +1,7 @@
 <script lang="ts">
   import { locale } from 'svelte-i18n';
   import { axisTime, tooltipTime } from '$lib/time';
-  import type { Serie } from '$lib/charts';
+  import { segments, type Serie } from '$lib/charts';
 
   interface Props {
     series: Serie[];
@@ -131,13 +131,28 @@
       // Un point isolé n'a pas de ligne : on le rend visible par son marqueur.
       return `M${x(points[0].t)},${y(points[0].v)}L${x(points[0].t)},${y(points[0].v)}`;
     }
-    return points.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+    return segments(points)
+      .map((seg) =>
+        seg.length === 1
+          ? `M${x(seg[0].t).toFixed(1)},${y(seg[0].v).toFixed(1)}L${x(seg[0].t).toFixed(1)},${y(seg[0].v).toFixed(1)}`
+          : seg.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(''),
+      )
+      .join(' ');
   }
 
   function areaPath(points: { t: number; v: number }[]) {
     if (points.length < 2) return '';
     const base = PAD.top + plotH;
-    return `${path(points)}L${x(points[points.length - 1].t).toFixed(1)},${base}L${x(points[0].t).toFixed(1)},${base}Z`;
+    // Une aire par segment : refermer d'un bout à l'autre repeindrait le trou.
+    return segments(points)
+      .filter((seg) => seg.length >= 2)
+      .map((seg) => {
+        const line = seg
+          .map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`)
+          .join('');
+        return `${line}L${x(seg[seg.length - 1].t).toFixed(1)},${base}L${x(seg[0].t).toFixed(1)},${base}Z`;
+      })
+      .join(' ');
   }
 
   const xTicks = $derived.by(() => {
