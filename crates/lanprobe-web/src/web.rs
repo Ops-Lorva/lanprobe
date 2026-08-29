@@ -1250,7 +1250,11 @@ async fn enroll(
         Err(e) => {
             audit(
                 &state,
-                actor.as_deref(),
+                actor
+                    .as_deref()
+                    .map(str::to_string)
+                    .or_else(|| Some(format!("sonde {}", body.name.trim())))
+                    .as_deref(),
                 "probe.enroll",
                 Some(body.name.trim()),
                 Outcome::Failure,
@@ -1291,7 +1295,11 @@ async fn enroll(
 
     audit(
         &state,
-        actor.as_deref(),
+        actor
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| Some(format!("sonde {}", probe.name)))
+            .as_deref(),
         if repairing.is_some() { "probe.reenroll" } else { "probe.enroll" },
         Some(&probe.probe_id),
         Outcome::Success,
@@ -1474,9 +1482,13 @@ async fn heartbeat(
     // reste. L'acteur est la sonde elle-même, pas un opérateur.
     if let Some(change) = change {
         let previous = change.previous.as_deref().unwrap_or("(inconnue)");
+        // L'acteur est la sonde, pas « anonyme ». Un journal qui dit
+        // « anonyme » là où il connaît le nom oblige à recouper la cible pour
+        // savoir qui a agi — et rend illisible la seule colonne qu'on lit en
+        // diagonale quand on cherche ce qui s'est passé.
         audit(
             &state,
-            None,
+            Some(&format!("sonde {}", probe.name)),
             "probe.public_ip_changed",
             Some(&id),
             Outcome::Success,
