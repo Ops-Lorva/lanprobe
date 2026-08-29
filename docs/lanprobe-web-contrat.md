@@ -1114,3 +1114,42 @@ Une interface qui cache sans que le serveur refuse ne protège rien du tout.
 
 `GET /api/me` donne le rôle avant le premier clic — c'est ce qui rend le
 masquage possible sans sonder une route interdite et salir le journal d'audit.
+
+## 19. Mon compte : mot de passe, 2FA, passkeys (non implémenté)
+
+Un onglet « Mon compte » dans les réglages, accessible à **tous les rôles** :
+changer son mot de passe, activer une double authentification, gérer ses clés
+d'accès. Aujourd'hui seul un `admin` peut réinitialiser un mot de passe, et
+personne ne peut changer le sien.
+
+### Par ordre de faisabilité
+
+**1. Changer son propre mot de passe** — petit, et manquant. Exiger l'ancien :
+une session volée ne doit pas suffire à verrouiller le compte de son
+propriétaire.
+
+**2. TOTP** — secret scellé (`secrets.rs`), vérifié à la connexion.
+
+⚠️ **Des codes de secours, ou rien.** Un hub auto-hébergé n'a **aucun** chemin
+de réinitialisation : pas d'e-mail de récupération, pas de support. Un
+administrateur qui perd son téléphone perd son hub, et la seule issue est
+d'éditer SQLite dans le conteneur. Les codes de secours ne sont pas un confort,
+ils sont la condition pour que la fonctionnalité soit acceptable.
+
+**3. Passkeys (WebAuthn)** — le plus gros, et **il ne marchera pas partout** :
+
+⚠️ WebAuthn exige un **contexte sécurisé** — HTTPS, ou `localhost`. Or le hub
+sert **en clair par défaut**, derrière le reverse proxy de l'utilisateur. Sur une
+instance jointe par `http://10.0.30.12:18080`, le navigateur refusera de créer
+une clé, quelle que soit la qualité de notre code.
+
+La fonctionnalité doit donc se désactiver d'elle-même et **dire pourquoi** —
+« les clés d'accès demandent une connexion HTTPS » — plutôt que d'échouer avec
+une erreur de navigateur incompréhensible. Et elle n'est jamais le seul facteur :
+un utilisateur qui perd sa clé garde son mot de passe.
+
+### Le masquage ne dispense pas du contrôle
+
+Confirmé par le propriétaire : on cache les boutons **et** on vérifie côté
+serveur. Le masquage évite la tentation ; la vérification évite l'accès. Sans la
+seconde, il suffit d'appeler la route à la main.
