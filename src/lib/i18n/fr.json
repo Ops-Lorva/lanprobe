@@ -345,22 +345,6 @@
       "exported": "Exporté : {profiles} profil(s) réseau, {portscan} profil(s) de ports.",
       "imported": "Importé : {profiles} profil(s) réseau, {portscan} profil(s) de ports."
     },
-    "server_mode": {
-      "title": "Mode serveur",
-      "label": "Exposer LanProbe sur le réseau",
-      "start": "Démarrer le serveur",
-      "stop": "Arrêter le serveur",
-      "port": "Port",
-      "account_title": "Compte serveur",
-      "username": "Nom d'utilisateur",
-      "password": "Mot de passe",
-      "save_account": "Enregistrer",
-      "account_saved": "Identifiants enregistrés.",
-      "account_hint": "Les identifiants sont sauvegardés localement (Argon2id). Vous pouvez les modifier ici à tout moment.",
-      "listening": "À l'écoute sur {addr}",
-      "listening_prefix": "À l'écoute sur",
-      "hint": "Expose l'interface LanProbe en HTTPS pour que n'importe quel poste du LAN puisse accéder aux outils réseau de cette machine. Le certificat TLS est auto-signé — le navigateur demandera à lui faire confiance une fois."
-    },
     "about": {
       "title": "À propos",
       "application": "Application",
@@ -375,25 +359,6 @@
       "english": "Anglais",
       "french": "Français",
       "spanish": "Espagnol"
-    },
-    "influxdb": {
-      "title": "Export InfluxDB",
-      "enabled": "Activer l'export InfluxDB",
-      "version": "Version",
-      "url": "URL",
-      "url_placeholder": "http://influxdb:8086",
-      "instance_label": "Label d'instance",
-      "instance_label_placeholder": "Laisser vide pour utiliser le hostname",
-      "v1_database": "Base de données",
-      "v1_username": "Utilisateur",
-      "v1_password": "Mot de passe",
-      "v2_org": "Organisation",
-      "v2_bucket": "Bucket",
-      "v2_token": "Token",
-      "test_btn": "Tester la connexion",
-      "test_ok": "Connecté",
-      "test_fail": "Échec de connexion",
-      "hint": "Pousse les métriques vers InfluxDB en temps réel. Supporte InfluxDB v1 et v2."
     },
     "scheduler": {
       "title": "Planificateur",

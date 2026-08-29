@@ -6,7 +6,7 @@
 
 **Network monitoring & debugging — desktop app and headless server**
 
-*Interface Profiles · Ping Monitor · SLA · Network Discovery · Port Scan · Speed Test · Web Server Mode*
+*Interface Profiles · Ping Monitor · SLA · Network Discovery · Port Scan · Speed Test · Self-hosted Hub*
 
 [![Latest Release](https://img.shields.io/github/v/release/Benjamin-Chianese/lanprobe?label=release&style=flat-square)](https://github.com/Benjamin-Chianese/lanprobe/releases/latest)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri&logoColor=white&style=flat-square)](https://tauri.app)
@@ -41,7 +41,7 @@ LanProbe replaces a handful of separate network utilities with one coherent inte
 | 🔍 **Network Discovery** | Fast async CIDR scan returning IP, hostname and MAC address of live hosts |
 | 🔌 **Port Scan** | TCP scan with built-in profiles (common, web, full) and custom profiles |
 | ⚡ **Speed Test** | Ookla CLI speed test bound to the selected interface via `IP_BOUND_IF` / `SO_BINDTODEVICE` |
-| 🌐 **Web Server Mode** | Expose the full LanProbe UI over HTTPS on the LAN — desktop app or standalone headless binary |
+| 🌐 **Self-hosted hub** | The whole fleet behind one address: sites, probes, accounts, alerts, backups. Replaces the web server each probe used to carry |
 | 🛡️ **Internet Status** | Dual-probe (ICMP + HTTP) internet health with public-IP info and uptime percentage |
 | 🎨 **Color Palettes** | 6 accent palettes (Indigo, Cyan, Emerald, Rose, Amber, Slate) — dark and light mode |
 
@@ -95,62 +95,50 @@ The package automatically:
 - Sets `CAP_NET_RAW` + `CAP_NET_ADMIN` on the binary (ICMP + interface config without running as root)
 - Registers and starts `lanprobe-server.service` via systemd
 
-#### 2 — Check the service
+#### 2 — Attach the probe to the hub
+
+⚠️ **The probe listens on no port.** It used to serve its own web interface
+over HTTPS on 8443, with its own accounts and self-signed certificate. That
+role now belongs to the **hub**: the hub shows the fleet and carries
+authentication. A probe exposing its own interface as well would be a second
+surface to secure for the very same measurements.
+
+In the hub, create an enrolment code (Fleet → “+” on a site), then, on the
+machine you want to monitor:
 
 ```bash
-sudo systemctl status lanprobe-server
-# Listening on https://0.0.0.0:8443 by default
+sudo -u lanprobe lanprobe-server --config-dir /var/lib/lanprobe \
+     enroll --hub https://hub.example.com --code A1B2-C3D4
+```
 
-# Follow logs
+The code lasts 15 minutes and works once. For scripted deployment,
+`--username`, `--password` and `--site` replace `--code`.
+
+#### 3 — Start the service
+
+```bash
+sudo systemctl enable --now lanprobe-server
 sudo journalctl -u lanprobe-server -f
 ```
 
-#### 3 — First-time setup
+The probe shows up in the fleet on its first heartbeat, so under a minute.
 
-On first access the UI shows a **setup screen** where you create the admin username and password. Open a browser on any machine on the same LAN:
-
-```
-https://<server-ip>:8443
-```
-
-The setup screen also asks for a **setup token**, generated on first boot and readable on the server:
+#### Commands
 
 ```bash
-sudo cat /var/lib/lanprobe/setup-token
-# or: sudo journalctl -u lanprobe-server | grep -i token
+lanprobe-server run       # measure and send, until Ctrl-C (default action)
+lanprobe-server enroll    # attach to a hub
+lanprobe-server status    # show the attachment
+lanprobe-server forget    # detach — the hub keeps the measurements
 ```
 
-> **Why a token?** Without it, anyone who reaches the instance between service start and your first login could claim the admin account. Once the account exists, the token is consumed, the setup route is closed **server-side** for good, and `/api/setup` answers `409` on every later attempt — there is no "re-run setup" path.
+`--config-dir` applies to every command. Default: `~/.config/lanprobe`, and
+`/var/lib/lanprobe` for the systemd service.
 
-> The server generates a self-signed TLS certificate on first boot. Your browser will show a security warning — accept the exception. The cert is stored in `/var/lib/lanprobe/`.
+#### Firewall
 
-#### 4 — Open the firewall (if needed)
-
-```bash
-sudo ufw allow 8443/tcp
-```
-
-#### ⚙️ Configuration
-
-The service file at `/lib/systemd/system/lanprobe-server.service` passes these defaults:
-
-```
---host 0.0.0.0   # listen on all interfaces
---port 8443      # HTTPS port
---config-dir /var/lib/lanprobe   # users + TLS cert storage
-```
-
-To change the port, edit the service and reload:
-
-```bash
-sudo systemctl edit lanprobe-server
-# Add:
-# [Service]
-# ExecStart=
-# ExecStart=/usr/bin/lanprobe-server --host 0.0.0.0 --port 9443 --config-dir /var/lib/lanprobe
-
-sudo systemctl daemon-reload && sudo systemctl restart lanprobe-server
-```
+Nothing to open inbound. The probe is a **client** of the hub: all it needs
+is to reach the hub's address outbound.
 
 #### Update
 
@@ -238,10 +226,17 @@ docker compose start lanprobe-web
 
 ---
 
-### 🌐 Web Server Mode (desktop app)
+### 🌐 Viewing remotely: the hub
 
-The desktop app can also act as a server — enable it from **Settings → Server Mode**. This streams live data from your desktop machine to any browser on the LAN without installing a separate package.
+The desktop app used to double as a web server and serve its own interface on
+the LAN. **That mode has been removed.** It asked every probe to carry
+accounts, a self-signed certificate and a listening surface, all to show one
+machine's measurements.
 
+The [LanProbe hub](#-self-hosted-hub) does the same job for a whole fleet
+behind **one address and one authentication**: attach the probe from
+**Settings → Server connection**, and it shows up in the fleet on its first
+heartbeat.
 ---
 
 ## 🔧 Build from source
@@ -287,7 +282,7 @@ cargo test -p lanprobe-core
 
 # Run headless server locally
 npm run build
-cargo run -p lanprobe-server -- --host 0.0.0.0 --port 8443
+cargo run -p lanprobe-server -- run
 ```
 
 ---
@@ -362,7 +357,7 @@ git tag v1.0.0 && git push origin v1.0.0
 - [x] SLA export to CSV
 - [x] Speed test bound to selected interface (Ookla + iperf3)
 - [x] Glass & Depth UI — dark / light / system theme
-- [x] Web server mode — share UI over HTTPS on the LAN
+- [x] Self-hosted hub — one URL for the whole fleet, replacing the probe's own web server
 - [x] Headless `.deb` with systemd service, capabilities, auto-start
 - [x] i18n — English, French, Spanish
 - [x] macOS signed + notarized `.pkg` with sudoers provisioning

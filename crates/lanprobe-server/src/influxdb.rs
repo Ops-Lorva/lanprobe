@@ -8,67 +8,11 @@
 //! `app_config.json`). Le module attend silencieusement un `config:update`
 //! valide avant de démarrer l'envoi.
 
-use base64::{engine::general_purpose::STANDARD as B64_STANDARD, Engine};
 
 use crate::export_buffer::{flush_once, Backoff, ExportBuffer, PointWriter};
 use crate::state::{AppState, BroadcastEvent};
 
 // ── Config structs ─────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct InfluxConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    /// "v1" or "v2"
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub url: String,
-    /// Surcharge le hostname détecté automatiquement pour le tag `host=`.
-    #[serde(default)]
-    pub instance_label: String,
-    #[serde(default)]
-    pub v1: V1Config,
-    #[serde(default)]
-    pub v2: V2Config,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct V1Config {
-    #[serde(default)]
-    pub database: String,
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub password: String,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct V2Config {
-    #[serde(default)]
-    pub org: String,
-    #[serde(default)]
-    pub bucket: String,
-    #[serde(default)]
-    pub token: String,
-}
-
-impl InfluxConfig {
-    pub fn is_ready(&self) -> bool {
-        if !self.enabled || self.url.is_empty() {
-            return false;
-        }
-        match self.version.as_str() {
-            "v1" => !self.v1.database.is_empty(),
-            "v2" | "" => {
-                !self.v2.org.is_empty()
-                    && !self.v2.bucket.is_empty()
-                    && !self.v2.token.is_empty()
-            }
-            _ => false,
-        }
-    }
-}
 
 // ── HTTP client ────────────────────────────────────────────────────────────
 
@@ -87,8 +31,10 @@ impl InfluxClient {
     /// authentification, un seul certificat — et Influx n'a pas besoin d'être
     /// joignable depuis le réseau de la sonde.
     ///
-    /// L'export direct vers Influx reste entièrement fonctionnel pour qui
-    /// n'utilise pas de hub : on ajoute un chemin, on n'en retire pas.
+    /// ⚠️ C'est désormais le SEUL client. L'export direct vers Influx —
+    /// URL, organisation, bucket et jeton saisis dans l'application — a été
+    /// retiré : il demandait à chaque sonde de connaître Influx et de porter
+    /// un jeton d'écriture, exactement ce que le hub évite.
     async fn for_hub(
         hub_url: &str,
         probe_id: &str,
@@ -120,46 +66,6 @@ impl InfluxClient {
         }
     }
 
-    async fn new(cfg: &InfluxConfig) -> Self {
-        let host_tag = resolve_host_tag_async(cfg).await;
-
-        let (base_url, auth_header) = if cfg.version == "v1" {
-            let mut url = reqwest::Url::parse(&format!("{}/write", cfg.url.trim_end_matches('/')))
-                .expect("invalid InfluxDB URL");
-            url.query_pairs_mut()
-                .append_pair("db", &cfg.v1.database)
-                .append_pair("precision", "ns");
-            let auth = if !cfg.v1.username.is_empty() {
-                let encoded =
-                    B64_STANDARD.encode(format!("{}:{}", cfg.v1.username, cfg.v1.password));
-                Some(format!("Basic {}", encoded))
-            } else {
-                None
-            };
-            (url.to_string(), auth)
-        } else {
-            let mut url = reqwest::Url::parse(&format!("{}/api/v2/write", cfg.url.trim_end_matches('/')))
-                .expect("invalid InfluxDB URL");
-            url.query_pairs_mut()
-                .append_pair("org", &cfg.v2.org)
-                .append_pair("bucket", &cfg.v2.bucket)
-                .append_pair("precision", "ns");
-            let auth = if !cfg.v2.token.is_empty() {
-                Some(format!("Token {}", cfg.v2.token))
-            } else {
-                None
-            };
-            (url.to_string(), auth)
-        };
-
-        Self {
-            http: reqwest::Client::new(),
-            base_url,
-            auth_header,
-            host_tag,
-        }
-    }
-
     async fn write(&self, body: String) -> Result<(), String> {
         let mut req = self.http
             .post(&self.base_url)
@@ -186,10 +92,9 @@ impl PointWriter for InfluxClient {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-async fn resolve_host_tag_async(cfg: &InfluxConfig) -> String {
-    if !cfg.instance_label.is_empty() {
-        return cfg.instance_label.clone();
-    }
+/// Nom de machine, utilisé comme étiquette `host=` quand le hub n'a pas
+/// encore nommé la sonde.
+async fn resolve_host_tag_async() -> String {
     if let Ok(h) = std::env::var("HOSTNAME") {
         if !h.is_empty() {
             return h;
@@ -355,53 +260,6 @@ fn event_to_points(event: &BroadcastEvent, host: &str) -> Vec<String> {
     }
 }
 
-// ── Config loader ──────────────────────────────────────────────────────────
-
-fn load_config(state: &AppState) -> InfluxConfig {
-    let cfg_value = state.config.get();
-    cfg_value
-        .get("influxdb")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default()
-}
-
-// ── Public API ─────────────────────────────────────────────────────────────
-
-/// Teste la connectivité vers l'endpoint InfluxDB configuré.
-/// Retourne `Ok(())` si le serveur répond avec 200 ou 204, une erreur
-/// descriptive sinon.
-pub async fn test_connection(state: AppState) -> Result<(), String> {
-    let cfg = load_config(&state);
-    if !cfg.enabled {
-        return Err("InfluxDB is not enabled".to_string());
-    }
-    if cfg.url.is_empty() {
-        return Err("InfluxDB URL is not configured".to_string());
-    }
-    let ping_url = if cfg.version == "v1" {
-        format!("{}/ping", cfg.url.trim_end_matches('/'))
-    } else {
-        format!("{}/api/v2/ping", cfg.url.trim_end_matches('/'))
-    };
-    let client = InfluxClient::new(&cfg).await;
-    let mut req = client.http.get(&ping_url);
-    if let Some(auth) = &client.auth_header {
-        req = req.header("Authorization", auth);
-    }
-    let resp = req
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let status = resp.status();
-    if status.is_success() {
-        Ok(())
-    } else {
-        Err(format!("Unexpected status: {}", status))
-    }
-}
-
-/// Construit le client visant le hub, si la sonde y est rattachée.
 async fn hub_client(state: &AppState, key: &crate::secrets::SecretKey) -> Option<InfluxClient> {
     let cfg = crate::hub::load(state);
     if !cfg.is_enrolled() {
@@ -411,7 +269,7 @@ async fn hub_client(state: &AppState, key: &crate::secrets::SecretKey) -> Option
     // Le tag lisible reste le nom donné à la sonde dans le hub : c'est celui
     // que l'utilisateur reconnaîtra dans Grafana.
     let host_tag = if cfg.name.is_empty() {
-        resolve_host_tag_async(&InfluxConfig::default()).await
+        resolve_host_tag_async().await
     } else {
         cfg.name.clone()
     };
@@ -535,114 +393,58 @@ pub async fn run(
     key: Option<crate::secrets::SecretKey>,
     status: Option<std::sync::Arc<crate::hub::WriteStatus>>,
 ) {
-    // 1. S'abonner avant de lire la config.
+    // S'abonner AVANT de lire la configuration : entre les deux, une mesure
+    // pourrait naître et se perdre.
     let mut rx = state.events.subscribe();
 
-    // 2. Reprendre ce qu'une exécution précédente n'a pas pu livrer. Le
-    //    tampon survit à la coupure de courant : sinon, la panne efface la
-    //    trace de la panne.
-    let mut buffer = ExportBuffer::open_at(
+    // Reprendre ce qu'une exécution précédente n'a pas pu livrer. Le tampon
+    // survit à la coupure de courant : sinon, la panne efface la trace de la
+    // panne.
+    let buffer = ExportBuffer::open_at(
         ExportBuffer::default_path(&state.config.dir()),
         now_ns(),
     );
 
-    // Rattachée à un hub : c'est lui qui reçoit les mesures, et il n'y a rien
-    // d'autre à configurer. Ce chemin court-circuite l'export direct, qui
-    // reste disponible pour qui n'utilise pas de hub.
-    if let Some(key) = key.as_ref() {
-        if let Some(client) = hub_client(&state, key).await {
+    let Some(key) = key else {
+        tracing::error!("clé de scellement absente : les mesures ne peuvent pas partir");
+        return;
+    };
+
+    // ⚠️ Il faut guetter le rattachement, pas seulement le lire au démarrage.
+    // Une sonde enrôlée alors que l'application tournait déjà n'envoyait
+    // jamais rien : la destination était choisie une seule fois. Le battement
+    // de cœur, lui, relit sa configuration à chaque tour — d'où une sonde qui
+    // apparaît en ligne dans le parc sans qu'aucune mesure n'arrive, et qu'il
+    // fallait redémarrer pour débloquer.
+    //
+    // Pendant cette attente les mesures continuent d'être empilées : c'est
+    // tout l'intérêt du tampon, et c'est ce qui fait qu'un enrôlement tardif
+    // ne perd pas la matinée.
+    let mut buffer = buffer;
+    loop {
+        if let Some(client) = hub_client(&state, &key).await {
             run_with(state, rx, client, status, buffer).await;
             return;
         }
-    }
-
-    // 3. Charger la config initiale et attendre qu'elle soit valide.
-    //
-    // ⚠️ On guette aussi le **rattachement à un hub** pendant cette attente.
-    // Sans ça, une sonde enrôlée alors que l'app tournait déjà n'envoyait
-    // jamais rien : le choix de destination était fait une seule fois au
-    // démarrage. Le battement de cœur, lui, relit sa configuration à chaque
-    // tour — d'où une sonde qui apparaît en ligne dans le parc sans qu'aucune
-    // mesure n'arrive. Il fallait redémarrer l'app pour que l'export parte.
-    let mut cfg = load_config(&state);
-    while !cfg.is_ready() {
         match rx.recv().await {
-            Ok(event) if event.event == "config:update" => {
-                if let Some(key) = key.as_ref()
-                    && let Some(client) = hub_client(&state, key).await
-                {
-                    run_with(state, rx, client, status, buffer).await;
-                    return;
+            Ok(event) if event.event == "config:update" => continue,
+            Ok(event) => {
+                // Pas encore de nom de sonde : `host=` sera réécrit par le hub
+                // à la réception, qui étiquette de toute façon chaque point.
+                let now = now_ns();
+                let host = state.config.get()
+                    .get("hub")
+                    .and_then(|h| h.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                for line in event_to_points(&event, &host) {
+                    buffer.push_at(line, now);
                 }
-                cfg = load_config(&state);
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("InfluxDB: broadcast lagged, {} events dropped", n);
-            }
-            _ => {}
-        }
-    }
-
-    // 4. Construire le client.
-    let mut client = InfluxClient::new(&cfg).await;
-
-    // 5. Ticker de flush à 1 s. Le repli, lui, espace les tentatives quand
-    //    la destination ne répond plus.
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut backoff = Backoff::new();
-    let mut ticks = 0u32;
-
-    loop {
-        tokio::select! {
-            event_result = rx.recv() => {
-                match event_result {
-                    Ok(event) => {
-                        if event.event == "config:update" {
-                            let new_cfg = load_config(&state);
-                            if new_cfg.is_ready() {
-                                client = InfluxClient::new(&new_cfg).await;
-                            } else {
-                                // InfluxDB désactivé ou config incomplète → on
-                                // abandonne le tampon (c'est une décision de
-                                // l'utilisateur, pas une panne) et on attend la
-                                // réactivation.
-                                buffer.discard_all();
-                                persist_buffer(&mut buffer, &mut ticks, true);
-                                cfg = new_cfg;
-                                while !cfg.is_ready() {
-                                    match rx.recv().await {
-                                        Ok(e) if e.event == "config:update" => {
-                                            cfg = load_config(&state);
-                                        }
-                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                            tracing::warn!("InfluxDB: broadcast lagged, {} events dropped", n);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                client = InfluxClient::new(&cfg).await;
-                            }
-                        } else {
-                            let now = now_ns();
-                            for line in event_to_points(&event, &client.host_tag) {
-                                buffer.push_at(line, now);
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        persist_buffer(&mut buffer, &mut ticks, true);
-                        return;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("InfluxDB: broadcast lagged, {} events dropped", n);
-                    }
-                }
-            }
-            _ = ticker.tick() => {
-                flush_tick(&client, &mut buffer, &mut backoff, status.as_ref(), &mut ticks).await;
+                tracing::warn!("export : {n} événements perdus dans le bus");
             }
         }
     }
@@ -662,43 +464,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_influx_config_default() {
-        assert!(!InfluxConfig::default().is_ready());
-    }
-
-    #[test]
-    fn test_influx_config_v1_ready() {
-        let cfg = InfluxConfig {
-            enabled: true,
-            version: "v1".to_string(),
-            url: "http://localhost:8086".to_string(),
-            instance_label: String::new(),
-            v1: V1Config {
-                database: "mydb".to_string(),
-                username: String::new(),
-                password: String::new(),
-            },
-            v2: V2Config::default(),
-        };
-        assert!(cfg.is_ready());
-    }
-
-    #[test]
-    fn test_influx_config_v2_ready() {
-        let cfg = InfluxConfig {
-            enabled: true,
-            version: "v2".to_string(),
-            url: "http://localhost:8086".to_string(),
-            instance_label: String::new(),
-            v1: V1Config::default(),
-            v2: V2Config {
-                org: "myorg".to_string(),
-                bucket: "mybucket".to_string(),
-                token: "mytoken".to_string(),
-            },
-        };
-        assert!(cfg.is_ready());
+    #[tokio::test]
+    async fn the_hub_url_is_the_probe_write_endpoint() {
+        // Le seul client qui reste. Si cette URL change de forme, la sonde
+        // écrit dans le vide sans que rien ne le dise : le hub répondrait 404
+        // et le tampon grossirait en silence.
+        let client = InfluxClient::for_hub(
+            "https://hub.exemple.fr/",
+            "13f1af69-6f84-41c5-a1c4-cf742b02b71d",
+            "jeton",
+            "Windows".into(),
+            false,
+        )
+        .await;
+        assert_eq!(
+            client.base_url,
+            "https://hub.exemple.fr/api/probes/13f1af69-6f84-41c5-a1c4-cf742b02b71d/write"
+        );
+        assert_eq!(client.auth_header.as_deref(), Some("Bearer jeton"));
     }
 
     #[test]

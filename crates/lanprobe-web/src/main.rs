@@ -330,13 +330,19 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
             // ⚠️ Journalisé comme le reste : cette commande contourne la
             // connexion, elle doit laisser une trace. Quelqu'un qui la lance
             // légitimement n'a rien à cacher ; quelqu'un d'autre, si.
-            db.record_audit(
+            // Le `Result` est examiné : une trace d'audit qu'on croit écrite
+            // alors qu'elle ne l'est pas vaut moins que pas de trace du tout.
+            // On ne fait pas échouer la commande pour autant — le mot de passe
+            // EST changé, le taire serait pire.
+            if let Err(e) = db.record_audit(
                 Some("système"),
                 "user.password_reset_cli",
                 Some(username),
                 lanprobe_web::db::Outcome::Success,
                 Some("réinitialisation depuis la ligne de commande"),
-            );
+            ) {
+                eprintln!("⚠️  mot de passe changé, mais le journal d'audit n'a pas pu l'enregistrer : {e}");
+            }
             println!("mot de passe de « {username} » réinitialisé, compte actif");
             if *promote {
                 println!("  rôle porté à administrateur");

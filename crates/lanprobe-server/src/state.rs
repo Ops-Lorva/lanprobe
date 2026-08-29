@@ -21,7 +21,6 @@ use lanprobe_core::speedtest::SpeedResult;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::auth::AuthStore;
 use crate::config::ConfigStore;
 
 pub type SelectedInterface = Arc<Mutex<Option<String>>>;
@@ -268,12 +267,10 @@ pub struct AppState {
     pub portscan: PortScanState,
     pub speedtest: SpeedTestState,
     pub events: broadcast::Sender<BroadcastEvent>,
-    pub auth: Arc<AuthStore>,
     pub config: Arc<ConfigStore>,
-    /// `true` quand l'AppState est créé par le binaire `lanprobe-server`
-    /// standalone (mode headless). `false` quand il est créé par le shell
-    /// Tauri et partagé entre le desktop et un serveur web embarqué —
-    /// dans ce cas l'update est gérée par l'app desktop elle-même.
+    /// `true` quand l'état est créé par le binaire `lanprobe-server`, `false`
+    /// quand il l'est par le shell Tauri. Sert notamment à savoir qui gère la
+    /// mise à jour : l'app desktop la fait elle-même.
     pub is_headless: bool,
     /// Fenêtre pendant laquelle les pings ne sont pas enregistrés dans
     /// l'historique de monitoring — évite les faux outages lors d'un
@@ -286,13 +283,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(auth: Arc<AuthStore>, config: Arc<ConfigStore>) -> Self {
-        Self::new_with_mode(auth, config, false)
+    pub fn new(config: Arc<ConfigStore>) -> Self {
+        Self::new_with_mode(config, false)
     }
-    pub fn new_headless(auth: Arc<AuthStore>, config: Arc<ConfigStore>) -> Self {
-        Self::new_with_mode(auth, config, true)
+    pub fn new_headless(config: Arc<ConfigStore>) -> Self {
+        Self::new_with_mode(config, true)
     }
-    fn new_with_mode(auth: Arc<AuthStore>, config: Arc<ConfigStore>, is_headless: bool) -> Self {
+    fn new_with_mode(config: Arc<ConfigStore>, is_headless: bool) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             selected_interface: Arc::new(Mutex::new(None)),
@@ -308,7 +305,6 @@ impl AppState {
             portscan: Arc::new(PortScanStateInner::default()),
             speedtest: Arc::new(SpeedTestStateInner::default()),
             events,
-            auth,
             config,
             is_headless,
             monitoring_blackout_until: Arc::new(Mutex::new(None)),

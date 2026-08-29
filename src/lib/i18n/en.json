@@ -345,22 +345,6 @@
       "exported": "Exported: {profiles} network profile(s), {portscan} port profile(s).",
       "imported": "Imported: {profiles} network profile(s), {portscan} port profile(s)."
     },
-    "server_mode": {
-      "title": "Server mode",
-      "label": "Expose LanProbe on the network",
-      "start": "Start server",
-      "stop": "Stop server",
-      "port": "Port",
-      "account_title": "Server account",
-      "username": "Username",
-      "password": "Password",
-      "save_account": "Save",
-      "account_saved": "Credentials saved.",
-      "account_hint": "Credentials are saved locally (Argon2id). You can change them here at any time.",
-      "listening": "Listening on {addr}",
-      "listening_prefix": "Listening on",
-      "hint": "Serves the LanProbe UI over HTTPS so any machine on the LAN can access the network tools of this host. TLS certificate is self-signed — the browser will ask to trust it once."
-    },
     "about": {
       "title": "About",
       "application": "Application",
@@ -375,25 +359,6 @@
       "english": "English",
       "french": "French",
       "spanish": "Spanish"
-    },
-    "influxdb": {
-      "title": "InfluxDB Export",
-      "enabled": "Enable InfluxDB export",
-      "version": "Version",
-      "url": "URL",
-      "url_placeholder": "http://influxdb:8086",
-      "instance_label": "Instance label",
-      "instance_label_placeholder": "Leave empty to use hostname",
-      "v1_database": "Database",
-      "v1_username": "Username",
-      "v1_password": "Password",
-      "v2_org": "Organization",
-      "v2_bucket": "Bucket",
-      "v2_token": "Token",
-      "test_btn": "Test connection",
-      "test_ok": "Connected",
-      "test_fail": "Connection failed",
-      "hint": "Push metrics to InfluxDB in real time. Supported: InfluxDB v1 and v2."
     },
     "scheduler": {
       "title": "Scheduler",

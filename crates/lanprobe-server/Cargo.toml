@@ -20,33 +20,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 
-# HTTP + WebSocket
-axum = { version = "0.8", features = ["ws", "macros"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-hyper = { version = "1", features = ["http1", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-
-# Embedded static assets
-rust-embed = { version = "8", features = ["interpolate-folder-path"] }
-mime_guess = "2"
-
-# Auth — le hachage argon2id vit dans `lanprobe-core::passwords`
+# ⚠️ Plus aucune pile HTTP serveur ici. La sonde n'écoute sur aucun port :
+# axum, hyper, tower, rustls/rcgen (certificat auto-signé), rust-embed
+# (interface embarquée) et cookie (session) sont partis avec le serveur web,
+# dont le rôle appartient maintenant au hub. `reqwest` reste : la sonde est
+# cliente du hub, elle ne l'attend pas.
 rand = { workspace = true }
 getrandom = "0.2"
 base64 = "0.22"
-cookie = { version = "0.18", features = ["percent-encode"] }
 # AEAD pour le chiffrement au repos des secrets applicatifs (app_config.json).
-# `ring` est déjà dans l'arbre via rustls — pas de nouvelle dépendance réelle.
 ring = "0.17"
-
-# Self-signed TLS + protocol sniffing
-rcgen = "0.13"
-tokio-rustls = "0.26"
-rustls = "0.23"
-rustls-pemfile = "2"
 
 # CLI args + logging
 clap = { version = "4", features = ["derive"] }

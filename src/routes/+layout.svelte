@@ -24,7 +24,6 @@
   import { applyRemoteConfig } from '$lib/stores/configStore';
   import { initI18n } from '$lib/i18n';
   import { isLoading } from 'svelte-i18n';
-  import { loadServerMode } from '$lib/stores/serverMode';
   import SetupScreen from '$lib/components/SetupScreen.svelte';
   import LoginScreen from '$lib/components/LoginScreen.svelte';
 
@@ -93,19 +92,6 @@
       }
     });
 
-    // Auto-start du mode serveur si l'utilisateur l'avait activé avant de
-    // quitter l'app. Uniquement en desktop — en web on est déjà connecté
-    // à un serveur distant, il n'y a rien à relancer ici.
-    if (!isWeb) {
-      try {
-        const cfg = await loadServerMode();
-        if (cfg.enabled) {
-          await invoke('cmd_server_mode_start', {
-            args: { host: cfg.host, port: cfg.port },
-          }).catch(() => {});
-        }
-      } catch {}
-    }
   }
 
   onMount(async () => {

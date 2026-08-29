@@ -6,9 +6,7 @@
   import { portscanProfiles, type PortScanProfile } from '../stores/portscanProfiles';
   import { profiles, type Profile } from '../stores/profiles';
   import { get } from 'svelte/store';
-  import { loadServerMode, saveServerMode } from '../stores/serverMode';
   import { selectedInterface } from '../stores/selectedInterface';
-  import { influxDb, type InfluxDbConfig } from '../stores/influxdb';
   import { scheduler } from '../stores/scheduler';
 
   // ── Rattachement à un hub ───────────────────────────────────────────────
@@ -92,119 +90,6 @@
   let installType = $state<'pkg' | 'dmg' | 'unknown' | 'headless-server'>('unknown');
   let serverPlatform = $state<'windows' | 'macos' | 'linux' | null>(null);
 
-  // Mode serveur : expose l'UI LanProbe sur un port HTTPS pour que d'autres
-  // postes du LAN puissent s'y connecter via navigateur. Utile quand on
-  // veut piloter LanProbe installé sur un Pi/serveur sans GUI depuis son
-  // poste courant, sans changer de VLAN.
-  let serverRunning = $state(false);
-  let serverAddr = $state<string | null>(null);
-  let serverPort = $state(8443);
-  let serverHost = $state('0.0.0.0');
-  let serverError = $state('');
-  let serverBusy = $state(false);
-
-  // InfluxDB config
-  let influxCfg = $state<InfluxDbConfig>({ ...$influxDb, v1: { ...$influxDb.v1 }, v2: { ...$influxDb.v2 } });
-  let influxTestStatus = $state<'idle' | 'testing' | 'ok' | 'fail'>('idle');
-  let influxTestError = $state('');
-
-  $effect(() => {
-    influxCfg = { ...$influxDb, v1: { ...$influxDb.v1 }, v2: { ...$influxDb.v2 } };
-  });
-
-  async function saveInflux() {
-    await influxDb.save(influxCfg);
-  }
-
-  async function testInflux() {
-    await saveInflux();    // flush current form state to backend config first
-    influxTestStatus = 'testing';
-    influxTestError = '';
-    try {
-      const res = await invoke<{ ok: boolean; error?: string }>('cmd_test_influxdb', {});
-      if (res.ok) {
-        influxTestStatus = 'ok';
-      } else {
-        influxTestStatus = 'fail';
-        influxTestError = res.error ?? '';
-      }
-    } catch (e) {
-      influxTestStatus = 'fail';
-      influxTestError = String(e);
-    }
-  }
-
-  // Compte serveur (username/password)
-  let accountUsername = $state('');
-  let accountPassword = $state('');
-  let accountBusy = $state(false);
-  let accountFeedback = $state('');
-  let accountFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function flashAccountFeedback(msg: string) {
-    accountFeedback = msg;
-    if (accountFeedbackTimer) clearTimeout(accountFeedbackTimer);
-    accountFeedbackTimer = setTimeout(() => { accountFeedback = ''; accountFeedbackTimer = null; }, 4000);
-  }
-
-  async function saveAccount() {
-    if (!accountUsername.trim()) return;
-    if (accountPassword.length < 8) return;
-    accountBusy = true;
-    try {
-      await invoke('cmd_server_mode_set_account', {
-        args: { username: accountUsername.trim(), password: accountPassword }
-      });
-      accountPassword = '';
-      flashAccountFeedback($_('settings.server_mode.account_saved'));
-    } catch (e) {
-      flashAccountFeedback(`${$_('common.error')}: ${e}`);
-    }
-    accountBusy = false;
-  }
-
-  // Remplace 0.0.0.0 dans l'adresse du serveur par l'IP réelle de
-  // l'interface active — plus lisible pour l'utilisateur qui veut
-  // communiquer l'URL à un autre poste du LAN.
-  async function resolveServerAddr(raw: string | null): Promise<string | null> {
-    if (!raw || !raw.includes('0.0.0.0')) return raw;
-    try {
-      const iface = $selectedInterface;
-      if (!iface) return raw;
-      const details = await invoke<{ ip: string | null }>('cmd_get_interface_details', { name: iface });
-      if (details?.ip) return raw.replace('0.0.0.0', details.ip);
-    } catch {}
-    return raw;
-  }
-
-  async function refreshServerStatus() {
-    try {
-      const s = await invoke<{ running: boolean; addr: string | null }>('cmd_server_mode_status');
-      serverRunning = s.running;
-      serverAddr = await resolveServerAddr(s.addr);
-    } catch (e) { serverError = String(e); }
-  }
-  async function toggleServer() {
-    serverBusy = true; serverError = '';
-    try {
-      if (serverRunning) {
-        await invoke('cmd_server_mode_stop');
-        await saveServerMode({ enabled: false, host: serverHost, port: serverPort });
-      } else {
-        // Le compte est créé via la page web au premier accès (setup page),
-        // comme sur la version headless. Pas de formulaire dans les Settings.
-        const s = await invoke<{ running: boolean; addr: string | null }>('cmd_server_mode_start', {
-          args: { host: serverHost, port: serverPort }
-        });
-        serverRunning = s.running;
-        serverAddr = await resolveServerAddr(s.addr);
-        await saveServerMode({ enabled: true, host: serverHost, port: serverPort });
-      }
-      await refreshServerStatus();
-    } catch (e) { serverError = String(e); }
-    serverBusy = false;
-  }
-
   onMount(refreshHub);
 
   onMount(async () => {
@@ -214,16 +99,7 @@
       try { serverPlatform = await invoke<'windows' | 'macos' | 'linux'>('cmd_get_platform'); } catch {}
     }
     await portscanProfiles.init();
-    await influxDb.init();
     await scheduler.init();
-    // Restaure la dernière config mode serveur pour que l'UI reflète
-    // ce qui a été auto-lancé au boot de l'app.
-    try {
-      const cfg = await loadServerMode();
-      serverHost = cfg.host;
-      serverPort = cfg.port;
-    } catch {}
-    await refreshServerStatus();
   });
 
   const themes: { value: Theme; labelKey: string; descKey: string }[] = [
@@ -574,125 +450,6 @@
     </section>
   </div>
 
-  {#if !isWeb}
-  <!-- Serveur web dans sa propre carte -->
-  <div class="group">
-  <!-- Compte serveur (username/password) — toujours visible -->
-  <section class="section">
-    <div class="section-head">{$_('settings.server_mode.account_title')}</div>
-    <div class="row-control">
-      <span class="row-label">{$_('settings.server_mode.username')}</span>
-      <input type="text" bind:value={accountUsername} placeholder="admin" autocomplete="username" />
-    </div>
-    <div class="row-control" style="margin-top: 6px;">
-      <span class="row-label">{$_('settings.server_mode.password')}</span>
-      <input type="password" bind:value={accountPassword} placeholder="••••••••" autocomplete="new-password" />
-    </div>
-    <div style="margin-top: 8px; display: flex; align-items: center; gap: 10px;">
-      <button
-        class="action-btn"
-        onclick={saveAccount}
-        disabled={accountBusy || !accountUsername.trim() || accountPassword.length < 8}
-      >
-        {$_('settings.server_mode.save_account')}
-      </button>
-      {#if accountFeedback}
-        <span class="account-feedback">{accountFeedback}</span>
-      {/if}
-    </div>
-    <p class="hint">{$_('settings.server_mode.account_hint')}</p>
-  </section>
-  <section class="section">
-    <div class="section-head">{$_('settings.server_mode.title')}</div>
-    <div class="row-control">
-      <span class="row-label">{$_('settings.server_mode.label')}</span>
-      <button class="action-btn {serverRunning ? 'server-stop' : 'server-start'}" onclick={toggleServer} disabled={serverBusy}>
-        {serverRunning ? $_('settings.server_mode.stop') : $_('settings.server_mode.start')}
-      </button>
-    </div>
-    {#if !serverRunning}
-      <div class="row-control" style="margin-top: 6px;">
-        <span class="row-label">{$_('settings.server_mode.port')}</span>
-        <input type="text" bind:value={serverPort} style="min-width: 100px;" />
-      </div>
-    {/if}
-    {#if serverRunning && serverAddr}
-      <p class="hint hint-success">
-        {$_('settings.server_mode.listening_prefix')}
-        <button class="addr-link" onclick={() => invoke('cmd_open_url', { url: serverAddr })}>{serverAddr}</button>
-      </p>
-    {/if}
-    {#if serverError}
-      <p class="hint hint-danger">{serverError}</p>
-    {/if}
-    <p class="hint">{$_('settings.server_mode.hint')}</p>
-  </section>
-  </div>
-  {/if}
-
-  <!-- InfluxDB Export -->
-  <div class="group">
-    <section class="section">
-      <div class="section-head">{$_('settings.influxdb.title')}</div>
-      <div class="row-control">
-        <span class="row-label">{$_('settings.influxdb.enabled')}</span>
-        <input type="checkbox" bind:checked={influxCfg.enabled} onchange={saveInflux} />
-      </div>
-      <div class="row-control" style="margin-top: 6px;">
-        <span class="row-label">{$_('settings.influxdb.version')}</span>
-        <select bind:value={influxCfg.version} onchange={saveInflux}>
-          <option value="v2">InfluxDB v2</option>
-          <option value="v1">InfluxDB v1</option>
-        </select>
-      </div>
-      <div class="row-control" style="margin-top: 6px;">
-        <span class="row-label">{$_('settings.influxdb.url')}</span>
-        <input type="text" bind:value={influxCfg.url} placeholder={$_('settings.influxdb.url_placeholder')} onblur={saveInflux} />
-      </div>
-      <div class="row-control" style="margin-top: 6px;">
-        <span class="row-label">{$_('settings.influxdb.instance_label')}</span>
-        <input type="text" bind:value={influxCfg.instance_label} placeholder={$_('settings.influxdb.instance_label_placeholder')} onblur={saveInflux} />
-      </div>
-      {#if influxCfg.version === 'v1'}
-        <div class="row-control" style="margin-top: 6px;">
-          <span class="row-label">{$_('settings.influxdb.v1_database')}</span>
-          <input type="text" bind:value={influxCfg.v1.database} onblur={saveInflux} />
-        </div>
-        <div class="row-control" style="margin-top: 6px;">
-          <span class="row-label">{$_('settings.influxdb.v1_username')}</span>
-          <input type="text" bind:value={influxCfg.v1.username} onblur={saveInflux} />
-        </div>
-        <div class="row-control" style="margin-top: 6px;">
-          <span class="row-label">{$_('settings.influxdb.v1_password')}</span>
-          <input type="password" bind:value={influxCfg.v1.password} onblur={saveInflux} />
-        </div>
-      {:else}
-        <div class="row-control" style="margin-top: 6px;">
-          <span class="row-label">{$_('settings.influxdb.v2_org')}</span>
-          <input type="text" bind:value={influxCfg.v2.org} onblur={saveInflux} />
-        </div>
-        <div class="row-control" style="margin-top: 6px;">
-          <span class="row-label">{$_('settings.influxdb.v2_bucket')}</span>
-          <input type="text" bind:value={influxCfg.v2.bucket} onblur={saveInflux} />
-        </div>
-        <div class="row-control" style="margin-top: 6px;">
-          <span class="row-label">{$_('settings.influxdb.v2_token')}</span>
-          <input type="password" bind:value={influxCfg.v2.token} onblur={saveInflux} />
-        </div>
-      {/if}
-      <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px;">
-        <button class="action-btn" onclick={testInflux} disabled={influxTestStatus === 'testing' || !influxCfg.enabled}>
-          {$_('settings.influxdb.test_btn')}
-        </button>
-        {#if influxTestStatus === 'ok'}
-          <span style="color: var(--ep-success, #22c55e);">{$_('settings.influxdb.test_ok')}</span>
-        {:else if influxTestStatus === 'fail'}
-          <span style="color: var(--ep-danger, #ef4444);">{$_('settings.influxdb.test_fail')}{#if influxTestError}: {influxTestError}{/if}</span>
-        {/if}
-      </div>
-      <p class="hint">{$_('settings.influxdb.hint')}</p>
-    </section>
-  </div>
 
   <!-- À propos -->
   <div class="group">
@@ -803,17 +560,6 @@
   .row-label { font-size: 13px; font-weight: 600; }
   .row-control select,
   .row-control input[type="text"],
-  .row-control input[type="password"] {
-    background: var(--ep-bg-tertiary);
-    border: 1px solid var(--ep-glass-border-strong);
-    color: var(--ep-text-primary);
-    padding: 6px 10px;
-    border-radius: var(--ep-radius-md);
-    font-size: 12.5px;
-    font-family: var(--ep-font-mono);
-    min-width: 180px;
-    transition: border-color 0.12s;
-  }
   .row-control select:focus,
   .row-control input:focus { outline: none; border-color: var(--ep-accent); }
   .row-control select:disabled,

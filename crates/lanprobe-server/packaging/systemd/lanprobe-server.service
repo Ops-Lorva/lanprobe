@@ -1,11 +1,15 @@
 [Unit]
-Description=LanProbe headless server (HTTPS UI for network tools)
+Description=Sonde LanProbe (mesure et envoi au hub)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/lanprobe-server --host 0.0.0.0 --port 8443 --config-dir /var/lib/lanprobe
+# ⚠️ N'écoute sur aucun port : la sonde est cliente du hub. Le rattachement
+# se fait à la main, une fois, avant d'activer le service :
+#   sudo -u lanprobe lanprobe-server --config-dir /var/lib/lanprobe \
+#        enroll --hub https://hub.exemple.fr --code A1B2-C3D4
+ExecStart=/usr/bin/lanprobe-server --config-dir /var/lib/lanprobe run
 Restart=on-failure
 RestartSec=5
 

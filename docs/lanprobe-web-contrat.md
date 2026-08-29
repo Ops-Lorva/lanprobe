@@ -357,7 +357,7 @@ pourrait rien configurer du tout :
 
 | | Rôle |
 |---|---|
-| `--host`, `--port` | où écouter. Défauts `0.0.0.0`, `8443`. |
+| `--host`, `--port` | où écouter. Défauts `0.0.0.0`, `8080`. |
 | `--config-dir` | où vit la base. Défaut `/data/lanprobe`. |
 | `<config-dir>/influx-operator-token` | jeton opérateur Influx, **lu dans un fichier du volume**, pas dans l'environnement — il est généré au premier démarrage par l'entrypoint, ce n'est pas un réglage utilisateur. **Ne sort jamais du hub.** |
 

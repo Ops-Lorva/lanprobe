@@ -14,7 +14,6 @@ use lanprobe_core::iperf::run_iperf3;
 use lanprobe_core::internet::{run_internet_monitor, InternetTick};
 use lanprobe_core::public_ip::{get_public_ip, PublicIpInfo};
 use lanprobe_server::state::{AppState, BroadcastEvent};
-use lanprobe_server::AuthStore;
 use tauri::Emitter;
 use serde::Deserialize;
 use std::net::Ipv4Addr;
@@ -22,12 +21,10 @@ use std::time::Duration;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::AppHandle;
-use tokio::sync::Mutex as AsyncMutex;
 
 /// Handle du serveur HTTPS embarqué, quand le toggle "Mode serveur" est ON.
 /// `None` = serveur arrêté. Stocké dans un `AsyncMutex` parce que
 /// `shutdown()` est async.
-type ServerModeState = Arc<AsyncMutex<Option<lanprobe_server::ServerHandle>>>;
 
 #[tauri::command]
 async fn cmd_check_update() -> Result<UpdateInfo, String> {
@@ -653,93 +650,6 @@ fn cmd_open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct ServerStartArgs {
-    host: Option<String>,
-    port: Option<u16>,
-}
-
-#[derive(serde::Serialize)]
-struct ServerStatus {
-    running: bool,
-    addr: Option<String>,
-}
-
-#[tauri::command]
-async fn cmd_server_mode_status(state: tauri::State<'_, ServerModeState>) -> Result<ServerStatus, String> {
-    let guard = state.inner().lock().await;
-    Ok(match guard.as_ref() {
-        Some(h) => ServerStatus {
-            running: true,
-            addr: Some(format!("https://{}", h.addr)),
-        },
-        None => ServerStatus { running: false, addr: None },
-    })
-}
-
-#[tauri::command]
-async fn cmd_server_mode_start(
-    args: ServerStartArgs,
-    state: tauri::State<'_, ServerModeState>,
-    shared: tauri::State<'_, SharedState>,
-) -> Result<ServerStatus, String> {
-    let mut guard = state.inner().lock().await;
-    if guard.is_some() {
-        return Err("server already running".into());
-    }
-    let host = args.host.unwrap_or_else(|| "0.0.0.0".into());
-    let port = args.port.unwrap_or(8443);
-    let addr: std::net::SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .map_err(|e: std::net::AddrParseError| e.to_string())?;
-    let handle = lanprobe_server::start(lanprobe_server::StartConfig {
-        addr,
-        config_dir: lanprobe_server::default_config_dir(),
-        shared_state: Some((**shared.inner()).clone()),
-    })
-    .await?;
-    let status = ServerStatus {
-        running: true,
-        addr: Some(format!("https://{}", handle.addr)),
-    };
-    *guard = Some(handle);
-    Ok(status)
-}
-
-#[tauri::command]
-async fn cmd_server_mode_stop(state: tauri::State<'_, ServerModeState>) -> Result<(), String> {
-    let mut guard = state.inner().lock().await;
-    if let Some(handle) = guard.take() {
-        handle.shutdown().await?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn cmd_server_mode_has_account(shared: tauri::State<'_, SharedState>) -> bool {
-    !shared.auth.needs_setup()
-}
-
-#[derive(Deserialize)]
-struct SetAccountArgs {
-    username: String,
-    password: String,
-}
-
-#[tauri::command]
-fn cmd_server_mode_set_account(
-    args: SetAccountArgs,
-    shared: tauri::State<'_, SharedState>,
-) -> Result<(), String> {
-    if args.username.trim().is_empty() {
-        return Err("username required".into());
-    }
-    if args.password.len() < 8 {
-        return Err("password must be ≥ 8 characters".into());
-    }
-    shared.auth.set_or_update_credentials(args.username.trim(), &args.password)
-}
-
 // ── Rattachement à un hub ──────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -822,19 +732,14 @@ fn cmd_hub_forget(state: tauri::State<'_, SharedState>) -> Result<(), String> {
 pub fn run() {
     let config_dir = lanprobe_server::default_config_dir();
     let _ = std::fs::create_dir_all(&config_dir);
-    let auth = AuthStore::load(lanprobe_server::users_file_path(&config_dir))
-        .map(Arc::new)
-        .expect("failed to load auth store");
     let config = Arc::new(lanprobe_server::config::ConfigStore::load(
         lanprobe_server::config::default_config_path(&config_dir),
     ));
-    let shared: SharedState = Arc::new(AppState::new(auth, config));
-    let server_mode: ServerModeState = Arc::new(AsyncMutex::new(None));
+    let shared: SharedState = Arc::new(AppState::new(config));
     let shared_for_setup = shared.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(shared)
-        .manage(server_mode)
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let shared = shared_for_setup.clone();
@@ -928,11 +833,6 @@ pub fn run() {
             cmd_reset_internet_monitor,
             cmd_get_public_ip,
             cmd_open_url,
-            cmd_server_mode_status,
-            cmd_server_mode_start,
-            cmd_server_mode_stop,
-            cmd_server_mode_has_account,
-            cmd_server_mode_set_account,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -6,7 +6,7 @@
 
 **Monitoring et diagnostic réseau — application desktop et serveur headless**
 
-*Profils réseau · Ping Monitor · SLA · Découverte réseau · Port Scan · Speed Test · Mode serveur web*
+*Profils réseau · Ping Monitor · SLA · Découverte réseau · Port Scan · Speed Test · Hub auto-hébergé*
 
 [![Dernière version](https://img.shields.io/github/v/release/Benjamin-Chianese/lanprobe?label=release&style=flat-square)](https://github.com/Benjamin-Chianese/lanprobe/releases/latest)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri&logoColor=white&style=flat-square)](https://tauri.app)
@@ -41,7 +41,7 @@ LanProbe remplace une poignée d'utilitaires réseau séparés par une interface
 | 🔍 **Découverte réseau** | Scan CIDR asynchrone rapide retournant IP, hostname et adresse MAC des hôtes actifs |
 | 🔌 **Port Scan** | Scan TCP avec profils intégrés (common, web, full) et profils personnalisés |
 | ⚡ **Speed Test** | Test de débit Ookla CLI lié à l'interface sélectionnée via `IP_BOUND_IF` / `SO_BINDTODEVICE` |
-| 🌐 **Mode serveur web** | Expose l'UI LanProbe complète en HTTPS sur le LAN — application desktop ou binaire headless standalone |
+| 🌐 **Hub auto-hébergé** | Tout le parc derrière une seule adresse : sites, sondes, comptes, alertes, sauvegardes. Remplace le serveur web que portait chaque sonde |
 | 🛡️ **Statut internet** | Double sonde (ICMP + HTTP) avec IP publique et pourcentage d'uptime |
 | 🎨 **Palettes de couleurs** | 6 palettes d'accent (Indigo, Cyan, Emerald, Rose, Amber, Slate) — mode sombre et clair |
 
@@ -95,62 +95,52 @@ Le paquet crée automatiquement :
 - Les capabilities `CAP_NET_RAW` + `CAP_NET_ADMIN` sur le binaire (ICMP + config interface sans root)
 - L'enregistrement et le démarrage de `lanprobe-server.service` via systemd
 
-#### 2 — Vérifier le service
+#### 2 — Rattacher la sonde au hub
+
+⚠️ **La sonde n'écoute sur aucun port.** Elle servait autrefois sa propre
+interface web en HTTPS sur 8443, avec ses comptes et son certificat
+auto-signé. Ce rôle appartient maintenant au **hub** : c'est lui qui affiche
+le parc et porte l'authentification. Une sonde qui exposerait sa propre
+interface en plus serait une seconde surface à sécuriser pour montrer les
+mêmes mesures.
+
+Dans le hub, créez un code d'enrôlement (Parc → « + » sur un site), puis, sur
+la machine à surveiller :
 
 ```bash
-sudo systemctl status lanprobe-server
-# En écoute sur https://0.0.0.0:8443 par défaut
+sudo -u lanprobe lanprobe-server --config-dir /var/lib/lanprobe \
+     enroll --hub https://hub.exemple.fr --code A1B2-C3D4
+```
 
-# Suivre les logs
+Le code vaut 15 minutes et ne sert qu'une fois. Pour un déploiement scripté,
+`--username`, `--password` et `--site` remplacent `--code`.
+
+#### 3 — Démarrer le service
+
+```bash
+sudo systemctl enable --now lanprobe-server
 sudo journalctl -u lanprobe-server -f
 ```
 
-#### 3 — Premier démarrage
+La sonde apparaît dans le parc au premier battement de cœur, donc en moins
+d'une minute.
 
-Au premier accès, l'UI affiche un **écran de configuration** pour créer le compte administrateur. Ouvrir un navigateur depuis n'importe quelle machine du même LAN :
-
-```
-https://<ip-du-serveur>:8443
-```
-
-L'écran demande aussi un **token de setup**, généré au premier démarrage et lisible sur le serveur :
+#### Commandes
 
 ```bash
-sudo cat /var/lib/lanprobe/setup-token
-# ou : sudo journalctl -u lanprobe-server | grep -i token
+lanprobe-server run       # mesure et envoie, jusqu'à Ctrl-C (action par défaut)
+lanprobe-server enroll    # rattache à un hub
+lanprobe-server status    # affiche le rattachement
+lanprobe-server forget    # détache — le hub garde les mesures
 ```
 
-> **Pourquoi un token ?** Sans lui, n'importe qui atteignant l'instance entre le démarrage du service et votre première connexion pourrait s'attribuer le compte admin. Une fois le compte créé, le token est consommé, la route d'installation est fermée **côté serveur** définitivement, et `/api/setup` répond `409` à toute tentative ultérieure — il n'existe aucun chemin pour « rejouer » l'installation.
+`--config-dir` s'applique à toutes les commandes. Défaut : `~/.config/lanprobe`,
+et `/var/lib/lanprobe` pour le service systemd.
 
-> Le serveur génère un certificat TLS auto-signé au premier démarrage. Le navigateur affichera un avertissement de sécurité — accepter l'exception. Le certificat est stocké dans `/var/lib/lanprobe/`.
+#### Pare-feu
 
-#### 4 — Ouvrir le pare-feu (si nécessaire)
-
-```bash
-sudo ufw allow 8443/tcp
-```
-
-#### ⚙️ Configuration
-
-Le fichier de service `/lib/systemd/system/lanprobe-server.service` utilise ces valeurs par défaut :
-
-```
---host 0.0.0.0   # écoute sur toutes les interfaces
---port 8443      # port HTTPS
---config-dir /var/lib/lanprobe   # stockage users + certificat TLS
-```
-
-Pour changer le port, éditer le service et recharger :
-
-```bash
-sudo systemctl edit lanprobe-server
-# Ajouter :
-# [Service]
-# ExecStart=
-# ExecStart=/usr/bin/lanprobe-server --host 0.0.0.0 --port 9443 --config-dir /var/lib/lanprobe
-
-sudo systemctl daemon-reload && sudo systemctl restart lanprobe-server
-```
+Rien à ouvrir en entrée. La sonde est **cliente** du hub : il lui faut
+seulement pouvoir joindre son adresse en sortie.
 
 #### Mettre à jour
 
@@ -238,9 +228,17 @@ docker compose start lanprobe-web
 
 ---
 
-### 🌐 Mode serveur web (application desktop)
+### 🌐 Consulter à distance : le hub
 
-L'application desktop peut également agir comme serveur — l'activer depuis **Paramètres → Mode serveur**. Cela diffuse les données en direct depuis votre machine desktop vers n'importe quel navigateur du LAN sans installer de paquet séparé.
+L'application desktop pouvait autrefois se transformer en serveur web et
+diffuser sa propre interface sur le LAN. **Ce mode a été retiré.** Il
+demandait à chaque sonde de porter des comptes, un certificat auto-signé et
+une surface d'écoute, pour montrer les mesures d'une seule machine.
+
+Le [hub LanProbe](#-hub-auto-hébergé) fait le même travail pour tout un parc,
+derrière **une seule adresse et une seule authentification** : rattachez la
+sonde depuis **Paramètres → Connexion au serveur**, et elle apparaît dans le
+parc au premier battement de cœur.
 
 ---
 
@@ -287,7 +285,7 @@ cargo test -p lanprobe-core
 
 # Lancer le serveur headless en local
 npm run build
-cargo run -p lanprobe-server -- --host 0.0.0.0 --port 8443
+cargo run -p lanprobe-server -- run
 ```
 
 ---
@@ -362,7 +360,7 @@ git tag v1.0.0 && git push origin v1.0.0
 - [x] Export SLA en CSV
 - [x] Speed test lié à l'interface sélectionnée (Ookla + iperf3)
 - [x] UI Glass & Depth — thème sombre / clair / système
-- [x] Mode serveur web — partage de l'UI en HTTPS sur le LAN
+- [x] Hub auto-hébergé — tout le parc derrière une seule adresse, en remplacement du serveur web de chaque sonde
 - [x] `.deb` headless avec service systemd, capabilities, démarrage automatique
 - [x] i18n — Anglais, Français, Espagnol
 - [x] `.pkg` macOS signé + notarisé avec provisionnement sudoers

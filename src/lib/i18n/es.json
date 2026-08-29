@@ -345,22 +345,6 @@
       "exported": "Exportado: {profiles} perfil(es) de red, {portscan} perfil(es) de puertos.",
       "imported": "Importado: {profiles} perfil(es) de red, {portscan} perfil(es) de puertos."
     },
-    "server_mode": {
-      "title": "Modo servidor",
-      "label": "Exponer LanProbe en la red",
-      "start": "Iniciar servidor",
-      "stop": "Detener servidor",
-      "port": "Puerto",
-      "account_title": "Cuenta del servidor",
-      "username": "Nombre de usuario",
-      "password": "Contraseña",
-      "save_account": "Guardar",
-      "account_saved": "Credenciales guardadas.",
-      "account_hint": "Las credenciales se guardan localmente (Argon2id). Puedes cambiarlas aquí en cualquier momento.",
-      "listening": "Escuchando en {addr}",
-      "listening_prefix": "Escuchando en",
-      "hint": "Expone la interfaz LanProbe por HTTPS para que cualquier equipo de la LAN acceda a las herramientas de red de esta máquina. El certificado TLS es autofirmado — el navegador pedirá confiar en él una vez."
-    },
     "about": {
       "title": "Acerca de",
       "application": "Aplicación",
@@ -375,25 +359,6 @@
       "english": "Inglés",
       "french": "Francés",
       "spanish": "Español"
-    },
-    "influxdb": {
-      "title": "Exportación InfluxDB",
-      "enabled": "Activar exportación InfluxDB",
-      "version": "Versión",
-      "url": "URL",
-      "url_placeholder": "http://influxdb:8086",
-      "instance_label": "Etiqueta de instancia",
-      "instance_label_placeholder": "Dejar vacío para usar el hostname",
-      "v1_database": "Base de datos",
-      "v1_username": "Usuario",
-      "v1_password": "Contraseña",
-      "v2_org": "Organización",
-      "v2_bucket": "Bucket",
-      "v2_token": "Token",
-      "test_btn": "Probar conexión",
-      "test_ok": "Conectado",
-      "test_fail": "Error de conexión",
-      "hint": "Envía métricas a InfluxDB en tiempo real. Compatible con InfluxDB v1 y v2."
     },
     "scheduler": {
       "title": "Planificador",
