@@ -20,6 +20,12 @@ export const SERIES = {
   two: 'var(--lp-series-2)',
 } as const;
 
+/** Couleur de la n-ième courbe d'un même graphique — cycle si on dépasse. */
+export function seriesColor(index: number): string {
+  const n = (index % 5) + 1;
+  return `var(--lp-series-${n})`;
+}
+
 /** États internet écrits par la sonde (`crates/lanprobe-core/src/internet.rs`). */
 export type InternetState = 'online' | 'limited' | 'offline' | 'unknown';
 

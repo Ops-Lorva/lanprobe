@@ -55,6 +55,12 @@ body {
 :root {
   --lp-series-1: #6366f1;
   --lp-series-2: #14a3bd;
+  /* Étendues au-delà du couple validé : la sonde peut surveiller plusieurs
+     cibles, et chacune veut sa courbe. Teintes espacées en ton pour rester
+     distinguables en deutéranopie. */
+  --lp-series-3: #d97757;
+  --lp-series-4: #16a34a;
+  --lp-series-5: #a855f7;
   --lp-chart-surface: var(--ep-bg-secondary);
   --lp-grid: rgba(255, 255, 255, 0.07);
   --lp-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
@@ -63,6 +69,9 @@ body {
 [data-theme='light'] {
   --lp-series-1: #4f46e5;
   --lp-series-2: #0891b2;
+  --lp-series-3: #c2410c;
+  --lp-series-4: #15803d;
+  --lp-series-5: #7e22ce;
   --lp-grid: rgba(15, 18, 32, 0.1);
   --lp-shadow: 0 1px 2px rgba(15, 18, 32, 0.06);
 }
@@ -71,6 +80,9 @@ body {
   :root:not([data-theme='dark']) {
     --lp-series-1: #4f46e5;
     --lp-series-2: #0891b2;
+    --lp-series-3: #c2410c;
+    --lp-series-4: #15803d;
+    --lp-series-5: #7e22ce;
     --lp-grid: rgba(15, 18, 32, 0.1);
     --lp-shadow: 0 1px 2px rgba(15, 18, 32, 0.06);
   }

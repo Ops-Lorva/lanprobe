@@ -11,12 +11,12 @@
     RANGES,
     DEFAULT_RANGE,
     MetricsShapeError,
-    normalizeMetrics,
+    normalizeCurves,
     numeric,
     type Range,
-    type SeriesMap,
+    type Curve,
   } from '$lib/metrics';
-  import { SERIES, normalizeState } from '$lib/charts';
+  import { SERIES, seriesColor, normalizeState } from '$lib/charts';
   import StatusMark from '$lib/components/StatusMark.svelte';
   import BufferBadge from '$lib/components/BufferBadge.svelte';
   import ChartCard from '$lib/components/ChartCard.svelte';
@@ -226,9 +226,9 @@
   interface ChartState {
     tone: 'loading' | 'error' | 'empty' | 'ready';
     error?: string;
-    data: SeriesMap;
+    curves: Curve[];
   }
-  const blank: ChartState = { tone: 'loading', data: {} };
+  const blank: ChartState = { tone: 'loading', curves: [] };
 
   let range = $state<Range>(DEFAULT_RANGE);
   let ping = $state<ChartState>({ ...blank });
@@ -239,26 +239,26 @@
   async function fetchOne(measurement: string, fallbackField: string): Promise<ChartState> {
     try {
       const raw = await api.metrics(id, measurement, range);
-      const data = normalizeMetrics(raw, fallbackField);
-      const empty = Object.values(data).every((pts) => pts.length === 0);
-      return { tone: empty ? 'empty' : 'ready', data };
+      const curves = normalizeCurves(raw, fallbackField);
+      const empty = curves.every((c) => c.points.length === 0);
+      return { tone: empty ? 'empty' : 'ready', curves };
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) {
         onExpired();
-        return { tone: 'error', data: {}, error: $_('auth.expired') };
+        return { tone: 'error', curves: [], error: $_('auth.expired') };
       }
       if (e instanceof MetricsShapeError) {
         // On nomme les clés reçues : le message doit permettre de corriger le
         // backend, pas seulement de constater l'échec.
         return {
           tone: 'error',
-          data: {},
+          curves: [],
           error: $_('charts.error_shape', { values: { keys: e.observed } }),
         };
       }
       return {
         tone: 'error',
-        data: {},
+        curves: [],
         error: e instanceof ApiError ? e.message : String(e),
       };
     }
@@ -294,10 +294,30 @@
     untrack(() => void loadMetrics());
   });
 
-  const pingPoints = $derived(numeric(ping.data['latency_ms']));
-  const inetPoints = $derived(inet.data['state'] ?? []);
-  const dlPoints = $derived(numeric(speed.data['download_mbps']));
-  const ulPoints = $derived(numeric(speed.data['upload_mbps']));
+  /** Points d'un champ donné, toutes étiquettes confondues. */
+  function pointsOf(state: ChartState, field: string) {
+    return numeric(state.curves.find((c) => c.field === field)?.points);
+  }
+
+  // Une courbe par cible pinguée : le hub les sépare déjà, les rassembler
+  // dessinerait une latence moyenne qu'aucune machine n'a jamais mesurée.
+  const pingCurves = $derived(
+    ping.curves
+      .filter((c) => c.field === 'latency_ms' && c.points.length > 0)
+      .map((c, i) => ({
+        key: c.label,
+        // Une seule cible : pas la peine d'afficher son adresse en légende.
+        label: ping.curves.filter((o) => o.field === 'latency_ms').length > 1
+          ? c.label.replace(/^latency_ms\s*·\s*/, '')
+          : $_('charts.latency'),
+        color: seriesColor(i),
+        points: numeric(c.points),
+      })),
+  );
+  const pingPoints = $derived(pingCurves.flatMap((c) => c.points));
+  const inetPoints = $derived(inet.curves.find((c) => c.field === 'state')?.points ?? []);
+  const dlPoints = $derived(pointsOf(speed, 'download_mbps'));
+  const ulPoints = $derived(pointsOf(speed, 'upload_mbps'));
 
   const speedTone = $derived(
     speed.tone === 'ready' && dlPoints.length === 0 && ulPoints.length === 0 ? 'empty' : speed.tone,
@@ -519,14 +539,7 @@
       {refreshing}
     >
       <TimeSeriesChart
-        series={[
-          {
-            key: 'latency',
-            label: $_('charts.latency'),
-            color: SERIES.one,
-            points: pingPoints,
-          },
-        ]}
+        series={pingCurves}
         unit={$_('charts.unit_ms')}
       />
       {#snippet table()}

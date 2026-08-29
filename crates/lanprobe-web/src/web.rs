@@ -1901,14 +1901,20 @@ fn series_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
         //
         // Les booléens (`alive`, `icmp_ok`…) deviennent 1/0 : ce sont des
         // séries qu'on veut tracer, et savoir si l'hôte répondait est
-        // l'information la plus utile d'un ping. Les champs texte (`state`)
-        // sont écartés : ils n'ont pas de représentation sur un axe.
+        // l'information la plus utile d'un ping.
+        //
+        // Les champs texte (`state` d'`internet_status`) sont rendus tels
+        // quels, pas écartés : ils n'ont pas de place sur un axe, mais la
+        // bande d'état de l'onglet sonde ne trace justement pas — elle
+        // colorie des intervalles nommés. Les écarter laissait cette bande
+        // définitivement vide.
         let v = match value {
-            "true" => 1.0,
-            "false" => 0.0,
+            "" => continue,
+            "true" => serde_json::Value::from(1.0),
+            "false" => serde_json::Value::from(0.0),
             other => match other.parse::<f64>() {
-                Ok(n) => n,
-                Err(_) => continue,
+                Ok(n) => serde_json::Value::from(n),
+                Err(_) => serde_json::Value::from(other),
             },
         };
         let Some(t) = rfc3339_to_millis(time) else {
@@ -2708,10 +2714,39 @@ mod tests {
                    ,,0,2026-08-27T00:00:01Z,false,alive\n\
                    ,,0,2026-08-27T00:00:02Z,dégradé,state\n";
         let series = series_from_flux_csv(csv);
-        assert_eq!(series.len(), 1, "le champ texte n'est pas traçable");
-        let points = series[0]["points"].as_array().unwrap();
+        let alive = series.iter().find(|s| s["field"] == "alive").unwrap();
+        let points = alive["points"].as_array().unwrap();
         assert_eq!(points[0]["v"], 1.0);
         assert_eq!(points[1]["v"], 0.0);
+    }
+
+    #[test]
+    fn flux_csv_keeps_text_values_instead_of_dropping_them() {
+        // `state` d'`internet_status` est du texte : il n'a pas de place sur
+        // un axe, mais la bande d'état de l'onglet sonde ne trace pas — elle
+        // colorie des intervalles nommés. L'écarter la laissait vide en
+        // permanence, alors qu'Influx contenait des milliers de points.
+        let csv = ",result,table,_time,_value,_field\n\
+                   ,,0,2026-08-27T00:00:00Z,online,state\n\
+                   ,,0,2026-08-27T00:00:01Z,offline,state\n";
+        let series = series_from_flux_csv(csv);
+        let points = series[0]["points"].as_array().unwrap();
+        assert_eq!(points[0]["v"], "online");
+        assert_eq!(points[1]["v"], "offline");
+    }
+
+    #[test]
+    fn a_tagged_series_still_names_its_bare_field() {
+        // Le libellé se décore de l'étiquette (`latency_ms · 10.0.30.12`)
+        // pour distinguer deux cibles pinguées en parallèle. L'interface, elle,
+        // cherche ses points par le nom NU du champ : si `measure` disparaît,
+        // le graphique reste vide sans qu'aucune erreur ne soit levée — c'est
+        // exactement ce qui est arrivé.
+        let csv = ",result,table,_time,_value,_field,ip\n\
+                   ,,0,2026-08-27T00:00:00Z,12.5,latency_ms,10.0.30.12\n";
+        let series = series_from_flux_csv(csv);
+        assert_eq!(series[0]["measure"], "latency_ms");
+        assert_eq!(series[0]["field"], "latency_ms · 10.0.30.12");
     }
 
     #[test]

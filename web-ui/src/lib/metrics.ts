@@ -181,6 +181,66 @@ export function normalizeMetrics(payload: unknown, fallbackField = 'value'): Ser
   throw new MetricsShapeError(Object.keys(obj).slice(0, 6).join(', ') || '{}');
 }
 
+/**
+ * Une courbe à tracer : un champ Influx pour un jeu d'étiquettes donné.
+ *
+ * ⚠️ `field` est le nom NU du champ (`latency_ms`), `label` ce qu'on affiche
+ * (`latency_ms · 10.0.30.12`). La distinction n'est pas cosmétique : le hub
+ * scinde une mesure en autant de courbes qu'il y a de cibles surveillées, et
+ * décore alors le libellé. Un écran qui cherchait ses points sous `latency_ms`
+ * n'en trouvait plus aucun dès qu'une étiquette existait — c'est exactement
+ * comme ça que les trois graphiques de l'onglet sonde sont restés vides alors
+ * qu'Influx contenait des milliers de points.
+ */
+export interface Curve {
+  field: string;
+  label: string;
+  points: Point[];
+}
+
+/**
+ * Normalise vers une liste de courbes, en préservant la séparation par
+ * étiquettes. Deux cibles pinguées en parallèle donnent deux courbes ; les
+ * fusionner entrelacerait leurs points et dessinerait une latence qui
+ * n'existe nulle part.
+ */
+export function normalizeCurves(payload: unknown, fallbackField = 'value'): Curve[] {
+  const entries =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>).series
+      : undefined;
+
+  if (Array.isArray(entries)) {
+    const out: Curve[] = [];
+    let understood = false;
+    for (const raw of entries as Record<string, unknown>[]) {
+      if (!raw || typeof raw !== 'object' || !Array.isArray(raw.points)) continue;
+      const label = typeof raw.field === 'string' ? raw.field : fallbackField;
+      const field = typeof raw.measure === 'string' ? raw.measure : label;
+      const points: Point[] = [];
+      for (const p of raw.points as unknown[]) {
+        if (!p || typeof p !== 'object') continue;
+        const row = p as Record<string, unknown>;
+        const t = toMillis(pick(row, TIME_KEYS));
+        const v = pick(row, VALUE_KEYS);
+        if (t != null && (typeof v === 'number' || typeof v === 'string')) points.push({ t, v });
+      }
+      points.sort((a, b) => a.t - b.t);
+      out.push({ field, label, points });
+      understood = true;
+    }
+    // Une enveloppe `series` d'une autre forme (colonnes/valeurs) retombe sur
+    // le normaliseur générique plutôt que de rendre une liste vide.
+    if (understood || entries.length === 0) return out;
+  }
+
+  return Object.entries(normalizeMetrics(payload, fallbackField)).map(([field, points]) => ({
+    field,
+    label: field,
+    points,
+  }));
+}
+
 function sortSeries(map: SeriesMap): SeriesMap {
   for (const key of Object.keys(map)) map[key].sort((a, b) => a.t - b.t);
   return map;
