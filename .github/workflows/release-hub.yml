@@ -1,0 +1,89 @@
+name: Release (hub)
+
+# ⚠️ Le hub et l'application ne sortent pas ensemble et n'ont pas la même
+# version. Un tag `v1.0.0` ne dirait pas lequel il désigne : le hub sort sous
+# `hub-1.0.0`, l'application sous `app-v2.1.0`.
+#
+# Ce workflow publie une image Docker. Le hub n'a pas d'installeur : on le
+# déploie avec `docker compose`, et une image épinglée est ce qui permet de
+# revenir en arrière sans reconstruire.
+on:
+  push:
+    tags:
+      - 'hub-*.*.*'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  image:
+    name: Build and publish the hub image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Version from the tag
+        id: version
+        env:
+          TAG_RAW: ${{ github.ref_name }}
+        run: |
+          set -e
+          VERSION="${TAG_RAW#hub-}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # La version affichée dans l'interface vient du binaire : sans cette
+          # injection, un hub publié en 1.1.0 continuerait d'annoncer 1.0.0,
+          # et une sauvegarde porterait la mauvaise version dans son manifeste.
+          sed -i.bak "0,/^version = \".*\"/s//version = \"${VERSION}\"/" \
+            crates/lanprobe-web/Cargo.toml && rm crates/lanprobe-web/Cargo.toml.bak
+          grep -m1 '^version' crates/lanprobe-web/Cargo.toml
+
+      - name: Repository name in lower case
+        id: repo
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # ⚠️ Pas de `latest` mouvant : une image qui change sous les pieds
+          # d'un `docker compose pull` est exactement la façon dont on saute
+          # une version majeure sans le vouloir. Seule la version est publiée.
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/lanprobe-web:${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Hub ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          body: |
+            Image : `${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/lanprobe-web:${{ steps.version.outputs.version }}`
+
+            ```yaml
+            services:
+              lanprobe-web:
+                image: ${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/lanprobe-web:${{ steps.version.outputs.version }}
+            ```
+
+            ⚠️ Épinglez la version. Un tag mouvant fait sauter une majeure sans
+            qu'on le voie venir, et une migration de schéma ne se rejoue pas
+            à l'envers.

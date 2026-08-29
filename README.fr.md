@@ -266,11 +266,27 @@ Un workflow GitHub Actions compile toutes les plateformes en parallèle et publi
 | `build-macos` | `macos-latest` | `universal.dmg` + `universal.pkg` (signé + notarisé) |
 | `release` | `ubuntu-22.04` | collecte les artefacts, publie la Release |
 
+⚠️ **Deux produits, deux tags.** L'application et le hub ne sortent pas
+ensemble et n'ont pas la même version — un tag `v1.0.0` ne dirait pas lequel
+il désigne.
+
 ```bash
-git tag v2.1.0 && git push origin v2.1.0
+git tag app-v2.1.0 && git push origin app-v2.1.0   # application
+git tag hub-1.0.0  && git push origin hub-1.0.0    # hub (image Docker)
 ```
 
-La version vient du tag ; elle n'est pas écrite dans `Cargo.toml`, qui reste à `0.0.0`.
+La version vient du tag ; elle n'est pas écrite dans `Cargo.toml`, qui reste à
+`0.0.0` pour l'application.
+
+⚠️ La forme ancienne `v2.1.0` reste acceptée pour l'application, et le restera
+tant que des versions 2.0.x tournent : leur updater embarqué ne reconnaît
+qu'elle, et le retirer les couperait des mises à jour **sans le moindre
+message**. Les fichiers publiés gardent toujours la forme `lanprobe_v2.1.0_…`,
+quel que soit le préfixe du tag.
+
+Le hub publie une image Docker sur `ghcr.io`, épinglée à sa version. Pas de
+`latest` : une image qui change sous les pieds d'un `docker compose pull` est
+exactement la façon dont on saute une majeure sans le vouloir.
 
 ---
 

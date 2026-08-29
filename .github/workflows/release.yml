@@ -1,9 +1,18 @@
-name: Release
+name: Release (application)
 
+# ⚠️ Deux produits vivent dans ce dépôt et ne sortent pas ensemble :
+# l'application (sondes) et le hub. Un tag `v1.2.3` ne dirait pas lequel il
+# désigne — d'où le préfixe. Ce workflow ne réagit qu'aux tags `app-v*`, et
+# `release-hub.yml` aux tags `hub-*`.
 on:
   push:
     tags:
+      # ⚠️ `v*` reste accepté : les versions déjà installées embarquent un
+      # updater qui ne reconnaît que cette forme. Le retirer les couperait des
+      # mises à jour sans le moindre message. On le gardera tant que des 2.0.x
+      # tournent dans la nature.
       - 'v*.*.*'
+      - 'app-v*.*.*'
   workflow_dispatch:
 
 jobs:
@@ -19,7 +28,8 @@ jobs:
       - name: Set version from tag
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#app-}"
+          VERSION="${VERSION#v}"
           sed -i.bak "s/^version = \"0\.0\.0\"/version = \"${VERSION}\"/" Cargo.toml && rm Cargo.toml.bak
           sed -i.bak "s/\"version\": \"0\.0\.0\"/\"version\": \"${VERSION}\"/" src-tauri/tauri.conf.json && rm src-tauri/tauri.conf.json.bak
 
@@ -74,8 +84,11 @@ jobs:
       - name: Collect artifacts
         id: artifacts
         env:
-          TAG: ${{ github.ref_name }}
+          TAG_RAW: ${{ github.ref_name }}
         run: |
+          # Le nom publié reste `v2.1.0` quel que soit le préfixe du tag : un
+          # client ancien cherche `lanprobe_v2.1.0_amd64.deb` et doit le trouver.
+          TAG="${TAG_RAW#app-}"
           set -e
           DEB=$(find target/release/bundle/deb -name "*.deb" | head -1)
           cp "$DEB" "lanprobe_${TAG}_amd64.deb"
@@ -110,7 +123,8 @@ jobs:
       - name: Set version from tag
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#app-}"
+          VERSION="${VERSION#v}"
           sed -i.bak "s/^version = \"0\.0\.0\"/version = \"${VERSION}\"/" Cargo.toml && rm Cargo.toml.bak
           sed -i.bak "s/\"version\": \"0\.0\.0\"/\"version\": \"${VERSION}\"/" src-tauri/tauri.conf.json && rm src-tauri/tauri.conf.json.bak
 
@@ -152,8 +166,11 @@ jobs:
       - name: Collect artifact
         id: artifacts
         env:
-          TAG: ${{ github.ref_name }}
+          TAG_RAW: ${{ github.ref_name }}
         run: |
+          # Le nom publié reste `v2.1.0` quel que soit le préfixe du tag : un
+          # client ancien cherche `lanprobe_v2.1.0_amd64.deb` et doit le trouver.
+          TAG="${TAG_RAW#app-}"
           set -e
           DEB=$(find target/debian -name "lanprobe-server*.deb" | head -1)
           DEST="lanprobe-server_${TAG}_amd64.deb"
@@ -179,7 +196,8 @@ jobs:
       - name: Set version from tag
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#app-}"
+          VERSION="${VERSION#v}"
           sed -i.bak "s/^version = \"0\.0\.0\"/version = \"${VERSION}\"/" Cargo.toml && rm Cargo.toml.bak
           sed -i.bak "s/\"version\": \"0\.0\.0\"/\"version\": \"${VERSION}\"/" src-tauri/tauri.conf.json && rm src-tauri/tauri.conf.json.bak
 
@@ -212,8 +230,11 @@ jobs:
         id: artifacts
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          TAG_RAW: ${{ github.ref_name }}
         run: |
+          # Le nom publié reste `v2.1.0` quel que soit le préfixe du tag : un
+          # client ancien cherche `lanprobe_v2.1.0_amd64.deb` et doit le trouver.
+          TAG="${TAG_RAW#app-}"
           set -e
           NSIS=$(find target/release/bundle/nsis -name "*-setup.exe" | head -1)
           DEST="lanprobe_${TAG}_x64-setup.exe"
@@ -249,7 +270,8 @@ jobs:
       - name: Set version from tag
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#app-}"
+          VERSION="${VERSION#v}"
           sed -i.bak "s/^version = \"0\.0\.0\"/version = \"${VERSION}\"/" Cargo.toml && rm Cargo.toml.bak
           sed -i.bak "s/\"version\": \"0\.0\.0\"/\"version\": \"${VERSION}\"/" src-tauri/tauri.conf.json && rm src-tauri/tauri.conf.json.bak
 
@@ -351,8 +373,11 @@ jobs:
       - name: Build signed .pkg with postinstall sudoers
         id: pkg
         env:
-          TAG: ${{ github.ref_name }}
+          TAG_RAW: ${{ github.ref_name }}
         run: |
+          # Le nom publié reste `v2.1.0` quel que soit le préfixe du tag : un
+          # client ancien cherche `lanprobe_v2.1.0_amd64.deb` et doit le trouver.
+          TAG="${TAG_RAW#app-}"
           set -e
           APP_PATH=$(ls -d target/universal-apple-darwin/release/bundle/macos/*.app | head -1)
           echo "app: $APP_PATH"
@@ -424,9 +449,12 @@ jobs:
       - name: Collect artifacts (DMG + PKG)
         id: artifacts
         env:
-          TAG: ${{ github.ref_name }}
+          TAG_RAW: ${{ github.ref_name }}
           PKG: ${{ steps.pkg.outputs.pkg }}
         run: |
+          # Le nom publié reste `v2.1.0` quel que soit le préfixe du tag : un
+          # client ancien cherche `lanprobe_v2.1.0_amd64.deb` et doit le trouver.
+          TAG="${TAG_RAW#app-}"
           set -e
           DMG_ORIG=$(ls target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -1)
           DMG_DEST="lanprobe_${TAG}_universal.dmg"
