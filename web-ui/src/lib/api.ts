@@ -32,6 +32,13 @@ export interface Probe {
   local_ips?: string[];
   gateway?: string | null;
   /**
+   * Verdict internet de la sonde. ⚠️ C'est le DERNIER connu, pas une mesure
+   * fraîche : une sonde hors ligne garde le sien. L'interface doit donc le
+   * présenter en fonction du statut, pas seul.
+   */
+  internet_state?: 'online' | 'limited' | 'offline' | null;
+  internet_state_at?: number | null;
+  /**
    * Rotation de clé en attente de remise (contrat § 9). Champs facultatifs :
    * ils ne figurent pas encore dans l'exemple de `GET /api/probes`, l'interface
    * ne les affiche donc que si le hub les fournit.

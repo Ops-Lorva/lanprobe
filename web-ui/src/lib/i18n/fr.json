@@ -280,7 +280,8 @@
     "site_open": "N'afficher que ce site",
     "health_bar": "Répartition des statuts du site {name}",
     "site_add": "Enrôler une sonde dans le site {name}",
-    "col_public_ip": "IP publique"
+    "col_public_ip": "IP publique",
+    "net_help": "La sonde bat, mais son accès internet ne répond pas — ses mesures n'aboutissent probablement plus."
   },
   "status": {
     "online": "En ligne",
@@ -297,7 +298,8 @@
     "pending": "{n, plural, one {# point en attente d'écriture} other {# points en attente d'écriture}}",
     "warn_title": "{n, plural, one {# sonde accumule} other {# sondes accumulent}} des mesures sans les écrire",
     "warn_body": "L'écriture vers InfluxDB échoue : les courbes de ces sondes ont un trou.",
-    "warn_cta": "Voir les sondes concernées"
+    "warn_cta": "Voir les sondes concernées",
+    "stale": "valeur figée, la sonde ne répond plus"
   },
   "site": {
     "create_title": "Nouveau site",
@@ -398,7 +400,12 @@
     "internet_unknown": "Inconnu",
     "table_target": "Cible",
     "table_engine": "Moteur",
-    "speed_result_link": "Voir le résultat"
+    "speed_result_link": "Voir le résultat",
+    "stat_min": "min",
+    "stat_avg": "moy",
+    "stat_max": "max",
+    "stat_runs": "{n, plural, one {# test} other {# tests}}",
+    "speed_server": "Serveur :"
   },
   "revoke": {
     "action": "Retirer la sonde",

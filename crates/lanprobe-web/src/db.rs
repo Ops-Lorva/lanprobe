@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -222,6 +222,16 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_probe_commands_pending
         ON probe_commands(probe_id, state, id);
+    "#,
+    // v9 → v10 : état internet vu par la sonde, remonté au battement.
+    //
+    // ⚠️ Sans lui, le parc affichait « En ligne » pour une sonde dont le lien
+    // mesuré était mort : le battement passe, donc le voyant est vert, et rien
+    // à l'écran ne dit que plus aucune mesure n'aboutit. La sonde le sait —
+    // elle teste internet en permanence — il suffisait de le lui demander.
+    r#"
+    ALTER TABLE probes ADD COLUMN internet_state    TEXT;
+    ALTER TABLE probes ADD COLUMN internet_state_at INTEGER;
     "#,
 ];
 
@@ -527,13 +537,19 @@ pub struct ProbeRecord {
     /// portées — jamais vidée ensuite.
     pub local_ips: Vec<String>,
     pub gateway: Option<String>,
+    /// Dernier verdict internet remonté par la sonde, et sa date. Conservé
+    /// quand elle ne répond plus : c'est le dernier état connu, pas une
+    /// mesure fraîche — l'interface doit le présenter comme tel.
+    pub internet_state: Option<String>,
+    pub internet_state_at: Option<i64>,
 }
 
 const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash, p.platform, \
                              p.version, p.last_seen, p.buffered_points, p.created_at, p.revoked_at, \
                              p.influx_auth_id, p.influx_token_version, p.pending_influx_auth_id, \
                              p.pending_influx_token, p.pending_influx_token_version, \
-                             p.public_ip, p.public_ip_at, p.interface, p.local_ips, p.gateway";
+                             p.public_ip, p.public_ip_at, p.interface, p.local_ips, p.gateway, \
+                             p.internet_state, p.internet_state_at";
 
 /// Ce qu'une sonde raconte de sa position réseau dans son battement.
 ///
@@ -546,6 +562,12 @@ pub struct ProbeIdentity {
     pub interface: Option<String>,
     pub local_ips: Vec<String>,
     pub gateway: Option<String>,
+    /// Verdict internet de la sonde : `online` / `limited` / `offline`.
+    ///
+    /// ⚠️ C'est la seule chose qui distingue une sonde saine d'une sonde qui
+    /// bat très bien mais ne mesure plus rien. Sans elle, le parc affichait un
+    /// voyant vert pour un lien mort.
+    pub internet_state: Option<String>,
 }
 
 /// Bascule d'IP publique observée à un battement — changement d'opérateur,
@@ -630,6 +652,8 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default(),
         gateway: r.get(20)?,
+        internet_state: r.get(21)?,
+        internet_state_at: r.get(22)?,
     })
 }
 
@@ -1710,7 +1734,10 @@ impl Db {
                                         THEN ?2 ELSE public_ip_at END,
                     interface = COALESCE(?7, interface),
                     local_ips = COALESCE(?8, local_ips),
-                    gateway = COALESCE(?9, gateway)
+                    gateway = COALESCE(?9, gateway),
+                    internet_state = COALESCE(?10, internet_state),
+                    internet_state_at = CASE WHEN ?10 IS NOT NULL
+                                             THEN ?2 ELSE internet_state_at END
              WHERE probe_id = ?1",
             rusqlite::params![
                 probe_id,
@@ -1722,6 +1749,7 @@ impl Db {
                 identity.interface,
                 local_ips,
                 identity.gateway,
+                identity.internet_state,
             ],
         )?;
         if changed == 0 {
@@ -3287,6 +3315,7 @@ mod tests {
             interface: Some("en0".into()),
             local_ips: vec!["10.6.8.42/24".into()],
             gateway: Some("10.6.8.1".into()),
+            internet_state: None,
         };
         let change = db
             .record_heartbeat(&probe.probe_id, Some("1.2.0"), Some("linux"), 0, &identity)
@@ -3322,6 +3351,7 @@ mod tests {
                 interface: Some("en0".into()),
                 local_ips: vec!["10.6.8.42/24".into()],
                 gateway: Some("10.6.8.1".into()),
+                internet_state: None,
             },
         )
         .unwrap();

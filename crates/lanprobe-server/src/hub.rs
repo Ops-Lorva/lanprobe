@@ -345,6 +345,11 @@ struct HeartbeatRequest<'a> {
     local_ips: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway: Option<String>,
+    /// Verdict internet vu par la sonde. C'est la seule chose qui distingue,
+    /// dans le parc, une sonde saine d'une sonde qui bat très bien mais dont
+    /// le lien mesuré est mort.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    internet_state: Option<String>,
 }
 
 /// Enrôle cette sonde auprès d'un hub et **persiste** le résultat scellé.
@@ -710,6 +715,12 @@ async fn beat(
             last_write_ok,
             influx_token_version: config.influx.token_version,
             command_acks,
+            internet_state: state.internet.snapshot().map(|t| {
+                serde_json::to_value(&t.state)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "offline".into())
+            }),
             public_ip: public_ip.value(),
             interface: identity.interface.clone(),
             local_ips: identity.local_ips.clone(),
@@ -1065,6 +1076,7 @@ mod tests {
             last_write_ok: true,
             influx_token_version: 1,
             command_acks: Vec::new(),
+            internet_state: None,
             public_ip: None,
             interface: None,
             local_ips: Vec::new(),
@@ -1087,6 +1099,7 @@ mod tests {
             last_write_ok: true,
             influx_token_version: 1,
             command_acks: Vec::new(),
+            internet_state: None,
             public_ip: Some("88.120.0.1".into()),
             interface: Some("en0".into()),
             local_ips: vec!["10.6.8.42/24".into()],

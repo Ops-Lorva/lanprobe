@@ -42,7 +42,25 @@
     {#if showSite}<span class="site">{probe.site}</span>{/if}
   </span>
 
-  <span class="status"><StatusMark status={probe.status} /></span>
+  <!-- ⚠️ Le repère vit DANS la cellule de statut, il n'ajoute pas de colonne :
+       une cellule conditionnelle décalerait toute la grille quand elle
+       apparaît, et l'en-tête ne correspondrait plus aux lignes.
+
+       Une sonde peut battre parfaitement alors que son lien mesuré est mort —
+       battement et mesures ne passent pas par la même requête. Un voyant vert
+       seul cacherait exactement ce cas. Le repère ne s'affiche que sur une
+       sonde EN LIGNE : sur une sonde muette, l'état internet est une valeur
+       figée qui n'apprend rien de plus que le statut. -->
+  <span class="status">
+    <StatusMark status={probe.status} />
+    {#if probe.status === 'online' && probe.internet_state && probe.internet_state !== 'online'}
+      <span
+        class="netflag"
+        class:limited={probe.internet_state === 'limited'}
+        title={$_('fleet.net_help')}
+      >{$_(`charts.internet_${probe.internet_state}`)}</span>
+    {/if}
+  </span>
 
   <span
     class="seen lp-mono"
@@ -54,7 +72,7 @@
   <span class="pubip lp-mono" title={probe.public_ip ?? ''}>{probe.public_ip || '—'}</span>
   <span class="platform lp-mono">{platformLabel(probe.platform, $_('common.none'))}</span>
   <span class="version lp-mono">{probe.version || $_('common.none')}</span>
-  <span class="buffer"><BufferBadge points={probe.buffered_points} /></span>
+  <span class="buffer"><BufferBadge points={probe.buffered_points} live={probe.status === 'online'} /></span>
 
   <span class="chev" aria-hidden="true">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -122,6 +140,26 @@
   }
 
   .seen,
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
+  .netflag {
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    color: var(--ep-danger);
+    border: 1px solid var(--ep-danger);
+  }
+  .netflag.limited {
+    color: var(--ep-warning, #f59e0b);
+    border-color: var(--ep-warning, #f59e0b);
+  }
   .pubip,
   .platform,
   .version {

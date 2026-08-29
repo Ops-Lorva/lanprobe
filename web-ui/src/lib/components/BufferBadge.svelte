@@ -6,8 +6,17 @@
     points: number;
     /** Au-delà, le tampon n'est plus un hoquet mais un incident. */
     alertThreshold?: number;
+    /**
+     * `false` quand la sonde ne répond plus.
+     *
+     * ⚠️ La valeur est alors **figée** : le tampon n'est connu que par le
+     * battement, et une sonde muette ne le met plus à jour. Affichée pleine
+     * couleur, elle se lirait comme une mesure fraîche et on chercherait une
+     * panne d'écriture là où il n'y a qu'une sonde absente.
+     */
+    live?: boolean;
   }
-  let { points, alertThreshold = 1000 }: Props = $props();
+  let { points, alertThreshold = 1000, live = true }: Props = $props();
 
   const lang = $derived($locale ?? 'en');
   const level = $derived(points === 0 ? 'ok' : points < alertThreshold ? 'warn' : 'alert');
@@ -19,7 +28,13 @@
   (un tiret ne se lit pas comme une alerte) ; dès qu'il monte il prend une
   barre de remplissage et une couleur, et au-delà du seuil il passe en rouge.
 -->
-<span class="buf {level}" title={points > 0 ? $_('buffer.pending', { values: { n: points } }) : ''}>
+<span
+  class="buf {level}"
+  class:stale={!live}
+  title={points > 0
+    ? `${$_('buffer.pending', { values: { n: points } })}${live ? '' : ` — ${$_('buffer.stale')}`}`
+    : ''}
+>
   {#if points === 0}
     <span class="dash" aria-hidden="true">—</span>
     <span class="lp-sr">{$_('buffer.empty')}</span>
@@ -40,6 +55,11 @@
   }
   .dash {
     color: var(--ep-text-dim);
+  }
+  /* Valeur figée : elle reste lisible mais cesse de réclamer l'attention. */
+  .buf.stale {
+    opacity: 0.4;
+    filter: grayscale(1);
   }
   .bar {
     width: 34px;

@@ -207,19 +207,30 @@ fn event_to_points(event: &BroadcastEvent, host: &str) -> Vec<String> {
             // L'URL du résultat Ookla est un CHAMP, jamais une étiquette :
             // elle est unique à chaque test, et une étiquette unique fait
             // exploser la cardinalité de la série. iperf3 n'en produit pas.
+            // Le serveur mesuré est une information de lecture, pas un axe :
+            // « 216 Mbit/s » ne veut rien dire sans savoir contre quoi. Pour
+            // iperf3 c'est l'adresse du serveur, pour Ookla le datacenter.
+            // En CHAMP, comme l'URL : il change à chaque test Ookla, et une
+            // étiquette qui change fait exploser la cardinalité.
+            let server = p["server_name"]
+                .as_str()
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| format!(",server=\"{}\"", escape_field_str(v)))
+                .unwrap_or_default();
             let result_url = p["result_url"]
                 .as_str()
                 .filter(|u| !u.is_empty())
                 .map(|u| format!(",result_url=\"{}\"", escape_field_str(u)))
                 .unwrap_or_default();
             vec![format!(
-                "speedtest,host={},engine={} download_mbps={},upload_mbps={},latency_ms={}i,jitter_ms={}{} {}",
+                "speedtest,host={},engine={} download_mbps={},upload_mbps={},latency_ms={}i,jitter_ms={}{}{} {}",
                 host_tag,
                 escape_tag(engine),
                 dl,
                 ul,
                 lat,
                 jitter,
+                server,
                 result_url,
                 ts
             )]
@@ -598,15 +609,22 @@ mod tests {
                 "upload_mbps": 360.2,
                 "latency_ms": 12,
                 "jitter_ms": 1.5,
+                "server_name": "Paris — Île-de-France, FR",
                 "result_url": "https://www.speedtest.net/result/c/abc-123"
             }),
         );
         let points = event_to_points(&event, "testhost");
         let (tags, fields) = points[0].split_once(' ').unwrap();
         assert!(!tags.contains("result_url"), "l'URL ne doit pas être une étiquette : {tags}");
+        assert!(!tags.contains("server="), "le serveur non plus : {tags}");
         assert!(
             fields.contains(r#"result_url="https://www.speedtest.net/result/c/abc-123""#),
             "URL absente des champs : {fields}"
+        );
+        // « 216 Mbit/s » ne veut rien dire sans savoir contre quoi.
+        assert!(
+            fields.contains(r#"server="Paris — Île-de-France, FR""#),
+            "serveur absent des champs : {fields}"
         );
     }
 

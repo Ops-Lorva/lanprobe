@@ -280,7 +280,8 @@
     "site_open": "Show this site only",
     "health_bar": "Status breakdown for site {name}",
     "site_add": "Enrol a probe into site {name}",
-    "col_public_ip": "Public IP"
+    "col_public_ip": "Public IP",
+    "net_help": "The probe is beating, but its internet access is not answering — its measurements are probably no longer landing."
   },
   "status": {
     "online": "Online",
@@ -297,7 +298,8 @@
     "pending": "{n, plural, one {# point waiting to be written} other {# points waiting to be written}}",
     "warn_title": "{n, plural, one {# probe is piling up} other {# probes are piling up}} measurements without writing them",
     "warn_body": "Writing to InfluxDB is failing: these probes' charts have a hole.",
-    "warn_cta": "Show the affected probes"
+    "warn_cta": "Show the affected probes",
+    "stale": "frozen value, the probe is no longer answering"
   },
   "site": {
     "create_title": "New site",
@@ -398,7 +400,12 @@
     "internet_unknown": "Unknown",
     "table_target": "Target",
     "table_engine": "Engine",
-    "speed_result_link": "View result"
+    "speed_result_link": "View result",
+    "stat_min": "min",
+    "stat_avg": "avg",
+    "stat_max": "max",
+    "stat_runs": "{n, plural, one {# run} other {# runs}}",
+    "speed_server": "Server:"
   },
   "revoke": {
     "action": "Remove probe",

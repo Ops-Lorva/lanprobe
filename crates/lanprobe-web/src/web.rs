@@ -1449,6 +1449,11 @@ struct HeartbeatBody {
     /// que la file n'envoie simplement jamais ce champ.
     #[serde(default)]
     command_acks: Vec<CommandAck>,
+    /// Verdict internet vu par la sonde (`online` / `limited` / `offline`).
+    /// Absent d'une sonde antérieure à ce champ : le hub garde alors le
+    /// dernier connu plutôt que de l'effacer.
+    #[serde(default)]
+    internet_state: Option<String>,
     /// Identité réseau du site (contrat, section 15). Chaque champ est
     /// facultatif : une sonde sans accès internet bat **sans** IP publique
     /// plutôt que d'échouer, et un champ absent n'efface jamais ce que le hub
@@ -1530,6 +1535,13 @@ async fn heartbeat(
         interface: body.interface.filter(|v| !v.trim().is_empty()),
         local_ips: body.local_ips,
         gateway: body.gateway.filter(|v| !v.trim().is_empty()),
+        // ⚠️ Liste fermée : la sonde décide de son verdict, pas de son
+        // vocabulaire. Une valeur inattendue serait affichée telle quelle dans
+        // le parc, sans couleur ni sens.
+        internet_state: body
+            .internet_state
+            .map(|v| v.trim().to_lowercase())
+            .filter(|v| matches!(v.as_str(), "online" | "limited" | "offline")),
     };
     let change = match state.db.record_heartbeat(
         &id,
@@ -1670,6 +1682,11 @@ async fn list_probes(State(state): State<AppState>, Query(filter): Query<ProbeFi
                         "interface": p.interface,
                         "local_ips": p.local_ips,
                         "gateway": p.gateway,
+                        // Le dernier verdict internet de la sonde. C'est ce
+                        // qui distingue une sonde saine d'une sonde qui bat
+                        // très bien mais ne mesure plus rien.
+                        "internet_state": p.internet_state,
+                        "internet_state_at": p.internet_state_at,
                     })
                 })
                 .collect(),
@@ -3524,6 +3541,92 @@ mod tests {
     }
 
     // ── Session ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn the_fleet_reports_the_internet_verdict_the_probe_gave() {
+        // ⚠️ Le cas que ça rend visible : une sonde qui bat parfaitement alors
+        // que son lien mesuré est mort. Battement et mesures ne passent pas
+        // par la même requête — sans ce champ, le parc affiche un voyant vert
+        // pour une sonde qui n'écrit plus rien.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        h.call(with_bearer(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/heartbeat"),
+                serde_json::json!({ "internet_state": "offline" }),
+            ),
+            &token,
+        ))
+        .await;
+
+        let (_, fleet, _) = h
+            .call(with_cookie(
+                json_request("GET", "/api/probes", serde_json::json!({})),
+                &session,
+            ))
+            .await;
+        assert_eq!(fleet[0]["internet_state"], "offline");
+        assert!(fleet[0]["internet_state_at"].is_i64());
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_without_an_internet_verdict_erases_nothing() {
+        // Une sonde plus ancienne que ce champ ne l'envoie pas. Prendre son
+        // silence pour « je ne sais plus » effacerait un état connu.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        for body in [
+            serde_json::json!({ "internet_state": "limited" }),
+            serde_json::json!({}),
+        ] {
+            h.call(with_bearer(
+                json_request("POST", &format!("/api/probes/{probe_id}/heartbeat"), body),
+                &token,
+            ))
+            .await;
+        }
+
+        let (_, fleet, _) = h
+            .call(with_cookie(
+                json_request("GET", "/api/probes", serde_json::json!({})),
+                &session,
+            ))
+            .await;
+        assert_eq!(fleet[0]["internet_state"], "limited");
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_internet_verdict_is_dropped() {
+        // La sonde décide de son verdict, pas de son vocabulaire : une valeur
+        // inattendue s'afficherait telle quelle dans le parc, sans couleur ni
+        // sens.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        h.call(with_bearer(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/heartbeat"),
+                serde_json::json!({ "internet_state": "peut-être" }),
+            ),
+            &token,
+        ))
+        .await;
+
+        let (_, fleet, _) = h
+            .call(with_cookie(
+                json_request("GET", "/api/probes", serde_json::json!({})),
+                &session,
+            ))
+            .await;
+        assert!(fleet[0]["internet_state"].is_null(), "{fleet}");
+    }
 
     // ── File de commandes (contrat § 14) ───────────────────────────────────
 
