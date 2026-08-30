@@ -56,6 +56,9 @@ pub struct AppState {
     /// Alertes : évaluation des transitions et envoi sur les canaux. Ses
     /// secrets sont scellés et ne sortent par aucune route.
     pub notifier: crate::notify::Notifier,
+    /// Magasin scellé (`enc:v1:`). Porte les secrets des canaux de
+    /// notification et, depuis le second facteur, celui de chaque compte.
+    pub secrets: crate::secrets::Secrets,
     /// Vrai quand le hub termine lui-même le TLS. Faux quand il sert en clair
     /// derrière un reverse proxy — le cas courant en auto-hébergement.
     pub tls: bool,
@@ -109,6 +112,9 @@ pub fn build_router(state: AppState) -> Router {
         Router::new()
             .route("/api/me", get(me))
             .route("/api/me/password", post(change_own_password))
+            .route("/api/me/totp", get(totp_status).delete(disable_own_totp))
+            .route("/api/me/totp/start", post(start_own_totp))
+            .route("/api/me/totp/confirm", post(confirm_own_totp))
             .route("/api/probes", get(list_probes))
             .route("/api/settings", get(get_settings))
             .route("/api/settings/influx-advertise", get(get_advertise))
@@ -363,6 +369,25 @@ async fn setup(State(state): State<AppState>, Json(body): Json<SetupBody>) -> Re
 struct Credentials {
     username: String,
     password: String,
+    /// Code du second facteur, quand le compte en exige un (contrat § 19).
+    ///
+    /// Absent au premier envoi : le hub répond alors `totp_required` et le
+    /// formulaire réclame le code. Renvoyer le mot de passe avec le code
+    /// évite d'entretenir un état « connexion à moitié faite » côté hub —
+    /// un état qui expire, qu'il faut nettoyer, et qui devient une file de
+    /// sessions à demi ouvertes qu'un attaquant peut remplir.
+    #[serde(default)]
+    code: Option<String>,
+}
+
+/// Clé du secret TOTP d'un compte dans le magasin scellé.
+fn totp_key(username: &str) -> String {
+    format!("totp:{username}")
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredTotp {
+    secret: String,
 }
 
 async fn login(
@@ -371,7 +396,69 @@ async fn login(
     Json(body): Json<Credentials>,
 ) -> Response {
     let secure = is_https(&state, &headers);
-    match state.auth.login(&body.username, &body.password) {
+
+    // Le mot de passe d'abord, le second facteur ensuite : sans cet ordre, un
+    // code valide renseignerait sur l'existence du compte avant même qu'un
+    // mot de passe soit exigé.
+    let verified = state.db.verify_credentials(&body.username, &body.password);
+    if let Ok(username) = &verified {
+        if state.db.totp_enabled(username).unwrap_or(false) {
+            let Some(code) = body.code.as_deref().filter(|c| !c.trim().is_empty()) else {
+                // Pas une ligne d'audit : c'est la moitié normale d'une
+                // connexion à deux facteurs, pas un échec. La journaliser
+                // remplirait le journal d'échecs qui n'en sont pas, et
+                // noierait ceux qui comptent.
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "code à usage unique requis", "totp_required": true })),
+                )
+                    .into_response();
+            };
+            let stored: Option<StoredTotp> = state.secrets.get_json(&totp_key(username));
+            let Some(stored) = stored else {
+                // 🔴 Fail **closed**. Le drapeau dit que ce compte exige un
+                // second facteur ; le secret ne s'ouvre pas — volume restauré
+                // sans son `secret.key`, typiquement. Laisser passer sur le
+                // seul mot de passe désactiverait le second facteur en
+                // silence, exactement le jour où l'on a des raisons de s'en
+                // méfier. Le message dit la sortie de secours.
+                audit(
+                    &state,
+                    Some(username.as_str()),
+                    "auth.login",
+                    None,
+                    Outcome::Failure,
+                    Some("secret TOTP illisible"),
+                );
+                return fail(
+                    StatusCode::FORBIDDEN,
+                    "le second facteur de ce compte est illisible (clé du volume perdue ?). \
+                     Depuis le conteneur : `lanprobe-web disable-totp <compte>`.",
+                );
+            };
+            let last = state.db.totp_last_step(username).unwrap_or(None);
+            match crate::totp::verify(&stored.secret, code, crate::db::now(), last) {
+                Some(step) => {
+                    // 🔴 Retenu AVANT d'ouvrir la session : un code vaut
+                    // trente secondes, et sans cette mémoire il se rejoue.
+                    let _ = state.db.set_totp_last_step(username, step);
+                }
+                None => {
+                    audit(
+                        &state,
+                        Some(username.as_str()),
+                        "auth.login",
+                        None,
+                        Outcome::Failure,
+                        Some("code à usage unique invalide"),
+                    );
+                    return fail(StatusCode::UNAUTHORIZED, "code à usage unique invalide");
+                }
+            }
+        }
+    }
+
+    match verified.and_then(|username| state.auth.start_session(username)) {
         Ok(token) => {
             audit(
                 &state,
@@ -404,6 +491,152 @@ async fn login(
             error_response(e)
         }
     }
+}
+
+// ── Second facteur (contrat § 19) ──────────────────────────────────────────
+
+/// Ce que le hub a le droit d'annoncer : actif ou non. Jamais le secret.
+async fn totp_status(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Response {
+    let enabled = state.db.totp_enabled(&identity.username).unwrap_or(false);
+    // Un secret posé mais jamais confirmé n'est pas « actif » : tant que
+    // personne n'a prouvé que son application génère les bons codes, activer
+    // le second facteur reviendrait à s'enfermer dehors.
+    let pending = !enabled && state.secrets.is_set(&totp_key(&identity.username));
+    ok_json(json!({ "enabled": enabled, "pending": pending }))
+}
+
+/// Tire un secret et rend de quoi l'enrôler : QR, URI et secret en clair.
+///
+/// ⚠️ Le secret ne sort qu'ICI, une seule fois, et le second facteur n'est PAS
+/// encore actif. Il le devient à la confirmation — c'est-à-dire quand le
+/// compte a prouvé que son application produit les bons codes. Activer dès la
+/// génération enfermerait dehors quiconque scanne mal son QR.
+async fn start_own_totp(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Response {
+    if state.db.totp_enabled(&identity.username).unwrap_or(false) {
+        return fail(
+            StatusCode::CONFLICT,
+            "le second facteur est déjà actif sur ce compte — désactivez-le d'abord",
+        );
+    }
+    let secret = match crate::totp::generate_secret() {
+        Ok(s) => s,
+        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    if let Err(e) = state
+        .secrets
+        .put_json(&totp_key(&identity.username), &StoredTotp { secret: secret.clone() })
+    {
+        return error_response(e);
+    }
+    let uri = crate::totp::provisioning_uri("LanProbe Hub", &identity.username, &secret);
+    let qr = crate::totp::qr_svg(&uri).unwrap_or_default();
+    // Pas de ligne d'audit ici : rien n'a changé pour la sécurité du compte
+    // tant que la confirmation n'a pas eu lieu. C'est celle-là qu'on veut
+    // voir dans le journal, pas les essais.
+    ok_json(json!({ "secret": secret, "uri": uri, "qr_svg": qr }))
+}
+
+#[derive(Deserialize)]
+struct TotpCode {
+    code: String,
+}
+
+/// Active le second facteur après avoir vérifié un premier code.
+async fn confirm_own_totp(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(body): Json<TotpCode>,
+) -> Response {
+    let Some(stored) = state
+        .secrets
+        .get_json::<StoredTotp>(&totp_key(&identity.username))
+    else {
+        return fail(
+            StatusCode::CONFLICT,
+            "aucun secret en attente — relancez la configuration",
+        );
+    };
+    let Some(step) = crate::totp::verify(&stored.secret, &body.code, crate::db::now(), None) else {
+        audit(
+            &state,
+            Some(&identity.username),
+            "auth.totp.enable",
+            None,
+            Outcome::Failure,
+            Some("code invalide"),
+        );
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "code invalide — vérifiez l'heure de l'appareil qui le génère",
+        );
+    };
+    if let Err(e) = state.db.set_totp_enabled(&identity.username, true) {
+        return error_response(e);
+    }
+    // Le code qui vient de servir à confirmer ne doit pas servir à se
+    // connecter dans la foulée : c'est le même rejeu, à une seconde près.
+    let _ = state.db.set_totp_last_step(&identity.username, step);
+    audit(
+        &state,
+        Some(&identity.username),
+        "auth.totp.enable",
+        None,
+        Outcome::Success,
+        None,
+    );
+    ok_json(json!({ "enabled": true }))
+}
+
+#[derive(Deserialize)]
+struct DisableTotpBody {
+    /// Le mot de passe courant. ⚠️ Exigé : sans lui, une session volée
+    /// suffirait à retirer le second facteur, c'est-à-dire à annuler
+    /// précisément ce contre quoi il protège.
+    password: String,
+}
+
+async fn disable_own_totp(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(body): Json<DisableTotpBody>,
+) -> Response {
+    if state
+        .db
+        .verify_credentials(&identity.username, &body.password)
+        .is_err()
+    {
+        audit(
+            &state,
+            Some(&identity.username),
+            "auth.totp.disable",
+            None,
+            Outcome::Failure,
+            Some("mot de passe invalide"),
+        );
+        return fail(StatusCode::UNAUTHORIZED, "mot de passe invalide");
+    }
+    if let Err(e) = state.db.set_totp_enabled(&identity.username, false) {
+        return error_response(e);
+    }
+    // Le secret part avec : le garder scellé sans qu'il serve à rien ne
+    // protège personne et ferait revenir un ancien code au prochain
+    // « activer », sur un QR que l'utilisateur croit neuf.
+    let _ = state.secrets.clear(&totp_key(&identity.username));
+    audit(
+        &state,
+        Some(&identity.username),
+        "auth.totp.disable",
+        None,
+        Outcome::Success,
+        None,
+    );
+    ok_json(json!({ "enabled": false }))
 }
 
 /// Qui est connecté, et avec quel rôle.
@@ -3764,13 +3997,14 @@ mod tests {
             // volume où poser un `secret.key`.
             let secrets = crate::secrets::Secrets::ephemeral(db.clone()).unwrap();
             let notifier =
-                crate::notify::Notifier::new(db.clone(), secrets, settings.clone());
+                crate::notify::Notifier::new(db.clone(), secrets.clone(), settings.clone());
             let state = AppState {
                 db,
                 auth,
                 settings,
                 influx,
                 notifier,
+                secrets,
                 // Les tests jouent le cas courant : hub en clair derrière un
                 // proxy. Le cookie `Secure` est vérifié via `X-Forwarded-Proto`.
                 tls: false,
@@ -7056,6 +7290,231 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK);
         assert!(h.state.db.notify_enabled_for_probe(&probe_id).unwrap());
+    }
+
+    // ── Second facteur (contrat § 19) ─────────────────────────────────────
+
+    /// Active le TOTP sur un compte et rend son secret.
+    async fn enable_totp(h: &Harness, session: &str) -> String {
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("POST", "/api/me/totp/start"), session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let secret = body["secret"].as_str().unwrap().to_string();
+        assert!(body["qr_svg"].as_str().unwrap().contains("<svg"));
+
+        let code = current_code(&secret);
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/me/totp/confirm", serde_json::json!({ "code": code })),
+                session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        secret
+    }
+
+    fn current_code(secret: &str) -> String {
+        code_for(secret, 0)
+    }
+
+    /// Le code du pas SUIVANT, accepté par la tolérance d'un pas.
+    ///
+    /// ⚠️ Nécessaire après une confirmation : celle-ci retient le pas qui
+    /// vient de servir, et rejouer le même code serait — à raison — refusé.
+    /// C'est aussi ce que vivra l'utilisateur qui se déconnecte et se
+    /// reconnecte dans les trente secondes.
+    fn next_code(secret: &str) -> String {
+        code_for(secret, 1)
+    }
+
+    fn code_for(secret: &str, ahead: u64) -> String {
+        // On rejoue le calcul du hub plutôt que de figer une valeur : un code
+        // en dur expirerait trente secondes après avoir été écrit.
+        let bytes = crate::totp::base32_decode(secret).unwrap();
+        let step = crate::totp::step_of(crate::db::now()) + ahead;
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &bytes);
+        let tag = ring::hmac::sign(&key, &step.to_be_bytes());
+        let d = tag.as_ref();
+        let o = (d[d.len() - 1] & 0x0f) as usize;
+        let v = ((u32::from(d[o]) & 0x7f) << 24)
+            | (u32::from(d[o + 1]) << 16)
+            | (u32::from(d[o + 2]) << 8)
+            | u32::from(d[o + 3]);
+        format!("{:06}", v % 1_000_000)
+    }
+
+    #[tokio::test]
+    async fn the_secret_alone_does_not_arm_the_second_factor() {
+        // 🔴 Activer dès la génération enfermerait dehors quiconque scanne mal
+        // son QR : le compte exigerait un code que rien ne sait produire.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (_, body, _) = h
+            .call(with_cookie(empty_request("POST", "/api/me/totp/start"), &session))
+            .await;
+        assert!(body["secret"].is_string());
+
+        let (_, status_body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/me/totp"), &session))
+            .await;
+        assert_eq!(status_body["enabled"], false, "pas encore actif");
+        assert_eq!(status_body["pending"], true, "mais en attente de preuve");
+
+        // Et la connexion par mot de passe seul marche encore.
+        let (status, _, _) = h
+            .call(json_request(
+                "POST",
+                "/api/login",
+                serde_json::json!({ "username": "admin", "password": PASSWORD }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn once_armed_the_password_alone_no_longer_opens_a_session() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let secret = enable_totp(&h, &session).await;
+
+        let (status, body, cookies) = h
+            .call(json_request(
+                "POST",
+                "/api/login",
+                serde_json::json!({ "username": "admin", "password": PASSWORD }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["totp_required"], true, "le formulaire doit savoir quoi demander");
+        assert!(
+            cookies.is_empty(),
+            "aucun cookie de session ne doit partir avant le second facteur"
+        );
+
+        // Un code faux ne passe pas davantage.
+        let (status, _, _) = h
+            .call(json_request(
+                "POST",
+                "/api/login",
+                serde_json::json!({
+                    "username": "admin", "password": PASSWORD, "code": "000000"
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Le bon code, lui, ouvre la session.
+        let (status, _, cookies) = h
+            .call(json_request(
+                "POST",
+                "/api/login",
+                serde_json::json!({
+                    "username": "admin",
+                    "password": PASSWORD,
+                    "code": next_code(&secret),
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!cookies.is_empty(), "la session s'ouvre avec le bon code");
+    }
+
+    #[tokio::test]
+    async fn a_code_that_worked_cannot_be_replayed() {
+        // 🔴 Un code vaut trente secondes. Sans mémoire du pas accepté, un
+        // code intercepté rouvre une session autant de fois qu'on veut.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let secret = enable_totp(&h, &session).await;
+        // Le pas suivant : celui de la confirmation est déjà consommé.
+        let code = next_code(&secret);
+
+        let (first, _, _) = h
+            .call(json_request(
+                "POST",
+                "/api/login",
+                serde_json::json!({
+                    "username": "admin", "password": PASSWORD, "code": code
+                }),
+            ))
+            .await;
+        assert_eq!(first, StatusCode::OK);
+
+        let (second, _, cookies) = h
+            .call(json_request(
+                "POST",
+                "/api/login",
+                serde_json::json!({
+                    "username": "admin", "password": PASSWORD, "code": code
+                }),
+            ))
+            .await;
+        assert_eq!(second, StatusCode::UNAUTHORIZED, "le rejeu doit être refusé");
+        assert!(cookies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_secret_closes_the_door_instead_of_opening_it() {
+        // 🔴 Volume restauré sans son `secret.key` : le drapeau dit « second
+        // facteur exigé », le secret ne s'ouvre plus. Laisser passer sur le
+        // mot de passe seul désactiverait la protection en silence, le jour
+        // précis où l'on a des raisons de s'en méfier.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        enable_totp(&h, &session).await;
+        h.state.secrets.clear("totp:admin").unwrap();
+
+        let (status, body, _) = h
+            .call(json_request(
+                "POST",
+                "/api/login",
+                serde_json::json!({
+                    "username": "admin", "password": PASSWORD, "code": "123456"
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body["error"].as_str().unwrap().contains("disable-totp"),
+            "le refus doit nommer la sortie de secours : {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_the_second_factor_requires_the_password() {
+        // Sans le mot de passe, une session volée suffirait à retirer le
+        // second facteur — c'est-à-dire à annuler ce contre quoi il protège.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        enable_totp(&h, &session).await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request("DELETE", "/api/me/totp", serde_json::json!({ "password": "faux" })),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(h.state.db.totp_enabled("admin").unwrap(), "toujours actif");
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "DELETE",
+                    "/api/me/totp",
+                    serde_json::json!({ "password": PASSWORD }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!h.state.db.totp_enabled("admin").unwrap());
+        assert!(
+            !h.state.secrets.is_set("totp:admin"),
+            "le secret part avec : un ancien code ne doit pas revivre sur un QR qu'on croit neuf"
+        );
     }
 
     // ── Portée par site (contrat § 17) ────────────────────────────────────

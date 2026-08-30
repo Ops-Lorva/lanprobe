@@ -82,6 +82,17 @@ enum Command {
     /// d'e-mail, pas de support. Sans lui, un administrateur qui perd son mot
     /// de passe perd son parc, et la seule issue serait d'éditer SQLite à la
     /// main.
+    /// Retire le second facteur d'un compte. ⚠️ Nécessite l'accès au
+    /// conteneur ou au volume.
+    ///
+    /// C'est la **seule** sortie de secours d'un téléphone perdu sur un hub
+    /// auto-hébergé : pas d'e-mail de récupération, pas de support. Sans
+    /// elle, un second facteur activé et un appareil cassé enfermeraient le
+    /// compte dehors définitivement.
+    DisableTotp {
+        /// Compte dont on retire le second facteur.
+        username: String,
+    },
     ResetPassword {
         /// Compte à réinitialiser.
         username: String,
@@ -179,7 +190,7 @@ async fn main() -> Result<(), String> {
             Secrets::ephemeral(db.clone()).map_err(|e| e.to_string())?
         }
     };
-    let notifier = notify::Notifier::new(db.clone(), secrets, settings.clone());
+    let notifier = notify::Notifier::new(db.clone(), secrets.clone(), settings.clone());
 
     // Boucle d'alerte. Le pas est court devant le délai : c'est le délai qui
     // décide de la réactivité, pas la cadence de la boucle.
@@ -241,6 +252,7 @@ async fn main() -> Result<(), String> {
         settings,
         influx,
         notifier,
+        secrets,
         tls: tls_on,
         config_dir: args.config_dir.clone(),
         backup_dir: args.backup_dir.clone(),
@@ -380,6 +392,25 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
                 println!("  rôle porté à administrateur");
             }
             return Ok(());
+        }
+        Command::DisableTotp { username } => {
+            let db = open_volume(args)?;
+            db.set_totp_enabled(username, false)
+                .map_err(|e| e.to_string())?;
+            // Le secret scellé part avec le drapeau : le garder ne protège
+            // personne et ferait revenir un ancien code sur un QR que
+            // l'utilisateur croira neuf.
+            let secrets = lanprobe_web::secrets::Secrets::load(db.clone(), &args.config_dir)?;
+            let _ = secrets.clear(&format!("totp:{username}"));
+            let _ = db.record_audit(
+                None,
+                "auth.totp.disable",
+                Some(username.as_str()),
+                lanprobe_web::db::Outcome::Success,
+                Some("ligne de commande"),
+            );
+            println!("second facteur retiré du compte « {username} »");
+            Ok(())
         }
         Command::Restore { archive, force } => {
             // ⚠️ **Aucune ouverture de base avant la restauration.** Ouvrir

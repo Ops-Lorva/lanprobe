@@ -520,9 +520,29 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /**
+     * Le corps de la réponse, tel quel.
+     *
+     * Le message suffit à afficher un refus ; il ne suffit pas à savoir QUOI
+     * FAIRE ensuite. Un 401 de connexion qui porte `totp_required` demande un
+     * champ de plus, pas « mauvais identifiants » — deviner la nuance depuis
+     * le texte du message serait une analyse de chaîne, donc un bug de plus
+     * à chaque reformulation.
+     */
+    readonly body: unknown = null,
   ) {
     super(message);
     this.name = 'ApiError';
+  }
+
+  /** Le hub réclame le second facteur : ce n'est pas un mauvais mot de passe. */
+  get needsTotp() {
+    return (
+      this.status === 401 &&
+      typeof this.body === 'object' &&
+      this.body !== null &&
+      (this.body as { totp_required?: boolean }).totp_required === true
+    );
   }
 
   /**
@@ -600,7 +620,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         : typeof body === 'string' && body.trim()
           ? body.trim()
           : `HTTP ${res.status}`;
-    throw new ApiError(res.status, msg);
+    throw new ApiError(res.status, msg, body);
   }
 
   return body as T;
@@ -616,10 +636,43 @@ export const api = {
       body: JSON.stringify({ setup_token, username, password }),
     }),
 
-  login: (username: string, password: string) =>
+  /**
+   * ⚠️ Le code du second facteur part avec le mot de passe, pas dans un
+   * second appel qui s'appuierait sur une « connexion à moitié faite » côté
+   * hub : un tel état expire, se nettoie, et devient une file de sessions à
+   * demi ouvertes qu'on peut remplir de l'extérieur.
+   */
+  login: (username: string, password: string, code?: string) =>
     request<unknown>('/api/login', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(code ? { username, password, code } : { username, password }),
+    }),
+
+  /** Second facteur du compte connecté (contrat § 19). */
+  totpStatus: () => request<{ enabled: boolean; pending: boolean }>('/api/me/totp'),
+
+  /**
+   * Tire un secret et rend de quoi l'enrôler.
+   *
+   * ⚠️ Le secret ne sort qu'ICI, une fois, et le second facteur n'est PAS
+   * encore actif : il le devient à la confirmation.
+   */
+  totpStart: () =>
+    request<{ secret: string; uri: string; qr_svg: string }>('/api/me/totp/start', {
+      method: 'POST',
+    }),
+
+  totpConfirm: (code: string) =>
+    request<{ enabled: boolean }>('/api/me/totp/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+
+  /** Le mot de passe est exigé : une session volée ne doit pas suffire. */
+  totpDisable: (password: string) =>
+    request<{ enabled: boolean }>('/api/me/totp', {
+      method: 'DELETE',
+      body: JSON.stringify({ password }),
     }),
 
   /** Qui est connecté, et avec quel rôle. `401` si la session ne tient plus. */

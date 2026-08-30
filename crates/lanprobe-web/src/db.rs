@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -328,6 +328,22 @@ const MIGRATIONS: &[&str] = &[
       site_id  TEXT NOT NULL REFERENCES sites(site_id)  ON DELETE CASCADE,
       PRIMARY KEY (username, site_id)
     );
+    "#,
+    // v14 → v15 : second facteur TOTP (contrat § 19).
+    //
+    // ⚠️ **Le drapeau est en clair, le secret est scellé.** Le secret vit dans
+    // le magasin chiffré (`enc:v1:`), pas ici. Mais l'état « ce compte exige
+    // un second facteur » doit rester lisible même si la clé du volume a
+    // disparu : sinon un volume restauré sans son `secret.key` désactiverait
+    // le second facteur en silence, et la connexion repasserait au mot de
+    // passe seul sans que personne ne le voie. Séparés, le hub refuse la
+    // connexion et dit quoi faire.
+    //
+    // `totp_last_step` retient le dernier pas de temps accepté : un code TOTP
+    // vaut trente secondes, et sans cette mémoire il se rejoue.
+    r#"
+    ALTER TABLE users ADD COLUMN totp_enabled   INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN totp_last_step INTEGER;
     "#,
 ];
 
@@ -1210,6 +1226,61 @@ impl Db {
         )
         .optional()?
         .ok_or_else(|| DbError::NotFound("compte inconnu".into()))
+    }
+
+    /// Ce compte exige-t-il un second facteur ?
+    ///
+    /// ⚠️ Lu en clair, exprès : voir la migration v15. L'état doit survivre à
+    /// la perte de la clé de scellement, sinon le second facteur se
+    /// désactiverait tout seul au pire moment.
+    pub fn totp_enabled(&self, username: &str) -> DbResult<bool> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT totp_enabled FROM users WHERE username = ?1",
+                [username],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            != 0)
+    }
+
+    pub fn set_totp_enabled(&self, username: &str, enabled: bool) -> DbResult<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE users SET totp_enabled = ?2, totp_last_step = NULL WHERE username = ?1",
+            rusqlite::params![username, i64::from(enabled)],
+        )?;
+        if changed == 0 {
+            return Err(DbError::NotFound("compte inconnu".into()));
+        }
+        Ok(())
+    }
+
+    /// Le dernier pas de temps accepté pour ce compte.
+    pub fn totp_last_step(&self, username: &str) -> DbResult<Option<u64>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT totp_last_step FROM users WHERE username = ?1",
+                [username],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|v| v.max(0) as u64))
+    }
+
+    /// Retient le pas qui vient de servir. 🔴 Sans cet appel, le code accepté
+    /// se rejoue pendant toute sa fenêtre de validité.
+    pub fn set_totp_last_step(&self, username: &str, step: u64) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE users SET totp_last_step = ?2 WHERE username = ?1",
+            rusqlite::params![username, step as i64],
+        )?;
+        Ok(())
     }
 
     pub fn role_of(&self, username: &str) -> DbResult<Option<Role>> {

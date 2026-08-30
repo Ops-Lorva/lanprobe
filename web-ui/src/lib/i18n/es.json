@@ -246,7 +246,10 @@
     "failed": "Usuario o contraseña incorrectos.",
     "expired": "Su sesión ha caducado. Vuelva a iniciar sesión.",
     "unreachable": "El hub no respondió. Compruebe que el contenedor está en marcha.",
-    "cookie_blocked": "Sesión iniciada, pero su navegador rechazó la cookie de sesión. Abra una ventana privada o borre las cookies de este sitio: una cookie dejada por una visita HTTPS anterior a la misma dirección bloquea la nueva."
+    "cookie_blocked": "Sesión iniciada, pero su navegador rechazó la cookie de sesión. Abra una ventana privada o borre las cookies de este sitio: una cookie dejada por una visita HTTPS anterior a la misma dirección bloquea la nueva.",
+    "totp_label": "Código de un solo uso",
+    "totp_hint": "Los 6 dígitos que muestra su aplicación de autenticación.",
+    "totp_bad": "Código rechazado. Compruebe la hora del dispositivo que lo genera y espere al siguiente código."
   },
   "fleet": {
     "title": "Parque",
@@ -822,11 +825,22 @@
     "current": "Contraseña actual",
     "identity": "Identidad",
     "next": "Nueva contraseña",
-    "passkey_warning": "⚠️ Las claves de acceso exigirán una conexión HTTPS: en un hub accedido en claro, el navegador las rechazará igualmente.",
+    "passkey_warning": "⚠️ Las llaves de acceso exigirán una conexión HTTPS: en un hub servido en claro, el navegador las rechazará pase lo que pase. El interruptor HTTPS está en Ajustes → General.",
     "password": "Contraseña",
     "password_hint": "Se exige la contraseña anterior: sin ella, una sesión robada bastaría para apoderarse de la cuenta.",
     "role_hint": "Su rol lo fija un administrador. Decide lo que puede hacer en el hub.",
     "second_factor": "Segundo factor",
-    "second_factor_todo": "TOTP y claves de acceso aún no están disponibles."
+    "second_factor_todo": "Las llaves de acceso todavía no están disponibles.",
+    "totp_lead": "Un código de seis dígitos, además de la contraseña, generado por una aplicación en su teléfono (Aegis, Google Authenticator, 1Password, Bitwarden…).",
+    "totp_enable": "Activar el segundo factor",
+    "totp_scan": "Escanee este código QR con su aplicación de autenticación y escriba el código que muestre.",
+    "totp_manual": "Si no puede escanear, escriba este secreto a mano:",
+    "totp_code": "Código mostrado por la aplicación",
+    "totp_confirm_hint": "Mientras no se verifique este código, el segundo factor sigue inactivo — eso es lo que evita quedarse fuera con un QR mal escaneado.",
+    "totp_activate": "Verificar y activar",
+    "totp_on": "El segundo factor está activo en esta cuenta.",
+    "totp_pending": "Se generó un secreto pero nunca se confirmó: el segundo factor no está activo. Empiece de nuevo para obtener uno nuevo.",
+    "totp_disable": "Desactivar el segundo factor",
+    "totp_lost_device": "⚠️ ¿Teléfono perdido? Desde el contenedor del hub: «lanprobe-web disable-totp <cuenta>». Es la única salida — no hay correo de recuperación ni soporte."
   }
 }

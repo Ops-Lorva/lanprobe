@@ -16,4 +16,5 @@ pub mod secrets;
 pub mod settings;
 pub mod smtp;
 pub mod tls;
+pub mod totp;
 pub mod web;

@@ -97,6 +97,16 @@ impl Auth {
 
     pub fn login(&self, username: &str, password: &str) -> DbResult<String> {
         let username = self.db.verify_credentials(username, password)?;
+        self.start_session(username)
+    }
+
+    /// Ouvre une session pour un compte **déjà vérifié**.
+    ///
+    /// ⚠️ N'appelle aucune vérification : c'est à l'appelant d'avoir validé le
+    /// mot de passe ET, le cas échéant, le second facteur. Existe pour que le
+    /// TOTP puisse s'intercaler entre les deux — sans quoi `login` aurait rendu
+    /// une session valide avant même que le code soit demandé.
+    pub fn start_session(&self, username: String) -> DbResult<String> {
         let token = generate_token();
         let mut sessions = self
             .sessions

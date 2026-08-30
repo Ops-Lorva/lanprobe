@@ -246,7 +246,10 @@
     "failed": "Identifiant ou mot de passe incorrect.",
     "expired": "Votre session a expiré. Reconnectez-vous.",
     "unreachable": "Le hub n'a pas répondu. Vérifiez que le conteneur tourne.",
-    "cookie_blocked": "Connexion acceptée, mais votre navigateur a refusé le cookie de session. Ouvrez une fenêtre privée, ou supprimez les cookies de ce site — un cookie laissé par une visite précédente en HTTPS sur la même adresse empêche le nouveau de s'installer."
+    "cookie_blocked": "Connexion acceptée, mais votre navigateur a refusé le cookie de session. Ouvrez une fenêtre privée, ou supprimez les cookies de ce site — un cookie laissé par une visite précédente en HTTPS sur la même adresse empêche le nouveau de s'installer.",
+    "totp_label": "Code à usage unique",
+    "totp_hint": "Les 6 chiffres affichés par votre application d'authentification.",
+    "totp_bad": "Code refusé. Vérifiez l'heure de l'appareil qui le génère, puis attendez le code suivant."
   },
   "fleet": {
     "title": "Parc",
@@ -822,11 +825,22 @@
     "current": "Mot de passe actuel",
     "identity": "Identité",
     "next": "Nouveau mot de passe",
-    "passkey_warning": "⚠️ Les clés d'accès exigeront une connexion HTTPS : sur un hub joint en clair, le navigateur les refusera quoi qu'il arrive.",
+    "passkey_warning": "⚠️ Les clés d'accès exigeront une connexion HTTPS : sur un hub joint en clair, le navigateur les refusera quoi qu'il arrive. L'interrupteur HTTPS est dans Réglages → Général.",
     "password": "Mot de passe",
     "password_hint": "L'ancien mot de passe est exigé : sans lui, une session volée suffirait à s'approprier le compte.",
     "role_hint": "Votre rôle est fixé par un administrateur. Il décide de ce que vous pouvez faire dans le hub.",
     "second_factor": "Second facteur",
-    "second_factor_todo": "TOTP et clés d'accès ne sont pas encore disponibles."
+    "second_factor_todo": "Les clés d'accès ne sont pas encore disponibles.",
+    "totp_lead": "Un code à six chiffres, en plus du mot de passe, généré par une application sur votre téléphone (Aegis, Google Authenticator, 1Password, Bitwarden…).",
+    "totp_enable": "Activer le second facteur",
+    "totp_scan": "Scannez ce QR code avec votre application d'authentification, puis entrez le code qu'elle affiche.",
+    "totp_manual": "Si vous ne pouvez pas scanner, entrez ce secret à la main :",
+    "totp_code": "Code affiché par l'application",
+    "totp_confirm_hint": "Tant que ce code n'est pas vérifié, le second facteur reste inactif — c'est ce qui évite de s'enfermer dehors avec un QR mal scanné.",
+    "totp_activate": "Vérifier et activer",
+    "totp_on": "Le second facteur est actif sur ce compte.",
+    "totp_pending": "Un secret a été généré mais jamais confirmé : le second facteur n'est pas actif. Recommencez pour en obtenir un neuf.",
+    "totp_disable": "Désactiver le second facteur",
+    "totp_lost_device": "⚠️ Téléphone perdu ? Depuis le conteneur du hub : « lanprobe-web disable-totp <compte> ». C'est la seule sortie de secours — il n'y a ni e-mail de récupération ni support."
   }
 }

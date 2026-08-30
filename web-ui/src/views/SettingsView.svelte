@@ -92,6 +92,7 @@
 
   onMount(() => {
     void load();
+    void loadTotp();
     void loadInflux();
     // Ces deux-là ont un rôle minimum (contrat § 11) : le test d'URL annoncée
     // demande `operator`, les jetons de lecture `admin`. Les appeler pour tout
@@ -323,6 +324,75 @@
   let pwBusy = $state(false);
   let pwError = $state('');
   let pwDone = $state(false);
+
+  // ── Second facteur (contrat § 19) ────────────────────────────────────────
+  let totpEnabled = $state(false);
+  let totpPending = $state(false);
+  let totpSecret = $state('');
+  let totpQr = $state('');
+  let totpCode = $state('');
+  let totpBusy = $state(false);
+  let totpError = $state('');
+  let totpOffPassword = $state('');
+  let totpOffOpen = $state(false);
+
+  async function loadTotp() {
+    try {
+      const st = await api.totpStatus();
+      totpEnabled = st.enabled;
+      totpPending = st.pending;
+    } catch {
+      /* le reste de l'écran n'a pas à tomber pour autant */
+    }
+  }
+
+  async function startTotp() {
+    totpBusy = true;
+    totpError = '';
+    try {
+      const started = await api.totpStart();
+      totpSecret = started.secret;
+      totpQr = started.qr_svg;
+      totpCode = '';
+    } catch (e) {
+      totpError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      totpBusy = false;
+    }
+  }
+
+  async function confirmTotp() {
+    totpBusy = true;
+    totpError = '';
+    try {
+      await api.totpConfirm(totpCode.trim());
+      // Le secret disparaît de l'écran dès qu'il a servi : il n'a plus aucune
+      // raison d'être lisible par-dessus l'épaule.
+      totpSecret = '';
+      totpQr = '';
+      totpCode = '';
+      await loadTotp();
+    } catch (e) {
+      totpError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      totpBusy = false;
+    }
+  }
+
+  async function disableTotp() {
+    totpBusy = true;
+    totpError = '';
+    try {
+      await api.totpDisable(totpOffPassword);
+      totpOffPassword = '';
+      totpOffOpen = false;
+      await loadTotp();
+    } catch (e) {
+      totpError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      totpBusy = false;
+    }
+  }
 
   const pwReady = $derived(
     pwCurrent !== '' && pwNext.length >= 8 && pwNext === pwConfirm && pwNext !== pwCurrent,
@@ -594,9 +664,92 @@
 
     <section class="lp-card block">
       <h2 class="lp-title">{$_('account.second_factor')}</h2>
-      <!-- Annoncé plutôt que caché : quelqu'un qui cherche la 2FA doit savoir
-           qu'elle n'existe pas encore, pas conclure qu'il l'a mal cherchée. -->
-      <p class="hint">{$_('account.second_factor_todo')}</p>
+
+      {#if totpEnabled}
+        <p class="ok" role="status">{$_('account.totp_on')}</p>
+        <p class="hint">{$_('account.totp_lost_device')}</p>
+        {#if totpOffOpen}
+          <!-- Le mot de passe est exigé par le hub, pas seulement demandé
+               ici : sans lui, une session volée suffirait à retirer le
+               second facteur, c'est-à-dire à annuler ce contre quoi il
+               protège. -->
+          <label class="lp-field">
+            {$_('account.current_password')}
+            <input
+              class="lp-input"
+              type="password"
+              bind:value={totpOffPassword}
+              autocomplete="current-password"
+            />
+          </label>
+          <div class="row-btns">
+            <button class="lp-btn" onclick={() => (totpOffOpen = false)}>
+              {$_('common.cancel')}
+            </button>
+            <button
+              class="lp-btn danger"
+              onclick={disableTotp}
+              disabled={totpBusy || totpOffPassword === ''}
+            >
+              {$_('account.totp_disable')}
+            </button>
+          </div>
+        {:else}
+          <div class="row-btns">
+            <button class="lp-btn danger" onclick={() => (totpOffOpen = true)}>
+              {$_('account.totp_disable')}
+            </button>
+          </div>
+        {/if}
+      {:else if totpSecret}
+        <p class="sub">{$_('account.totp_scan')}</p>
+        <!-- QR rendu par le hub, pas par une bibliothèque JavaScript : le
+             secret ne traverse aucune dépendance de plus, et la page reste
+             lisible sur un réseau fermé, sans CDN. -->
+        <div class="qr">{@html totpQr}</div>
+        <p class="hint">{$_('account.totp_manual')}</p>
+        <p class="secret lp-mono">{totpSecret}</p>
+
+        <label class="lp-field">
+          {$_('account.totp_code')}
+          <input
+            class="lp-input code"
+            type="text"
+            bind:value={totpCode}
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            maxlength="6"
+            placeholder="000000"
+          />
+          <span class="hint">{$_('account.totp_confirm_hint')}</span>
+        </label>
+
+        {#if totpError}<p class="err" role="alert">{totpError}</p>{/if}
+        <div class="row-btns">
+          <button
+            class="lp-btn primary"
+            onclick={confirmTotp}
+            disabled={totpBusy || totpCode.trim().length !== 6}
+          >
+            {$_('account.totp_activate')}
+          </button>
+        </div>
+      {:else}
+        <p class="sub">{$_('account.totp_lead')}</p>
+        {#if totpPending}
+          <!-- Un secret existe, personne n'a prouvé qu'il fonctionne : le dire
+               évite de croire la 2FA active alors que la connexion ne la
+               demande pas. -->
+          <p class="hint">{$_('account.totp_pending')}</p>
+        {/if}
+        {#if totpError}<p class="err" role="alert">{totpError}</p>{/if}
+        <div class="row-btns">
+          <button class="lp-btn primary" onclick={startTotp} disabled={totpBusy}>
+            {$_('account.totp_enable')}
+          </button>
+        </div>
+      {/if}
+
       <p class="hint">{$_('account.passkey_warning')}</p>
     </section>
   </div>
@@ -1299,6 +1452,33 @@
   }
   /* « Enregistré mais pas appliqué » n'est ni une erreur ni un succès : c'est
      une action qui reste à faire. La couleur d'accent le dit sans crier. */
+  .qr {
+    display: flex;
+    justify-content: center;
+    margin: 10px 0;
+  }
+  /* Le SVG arrive avec ses dimensions propres : on les borne, sinon un QR de
+     600 px pousse la carte hors de l'écran sur téléphone. */
+  .qr :global(svg) {
+    width: 100%;
+    max-width: 220px;
+    height: auto;
+    background: #fff;
+    padding: 8px;
+    border-radius: 6px;
+  }
+  .secret {
+    margin: 4px 0 10px;
+    font-size: 13px;
+    letter-spacing: 0.12em;
+    word-break: break-all;
+    user-select: all;
+  }
+  .code {
+    font-family: var(--ep-mono, ui-monospace, monospace);
+    letter-spacing: 0.35em;
+    text-align: center;
+  }
   .pending {
     color: var(--ep-accent, #b8860b);
     font-weight: 600;

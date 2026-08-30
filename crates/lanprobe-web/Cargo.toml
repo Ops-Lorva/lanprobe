@@ -64,6 +64,7 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
