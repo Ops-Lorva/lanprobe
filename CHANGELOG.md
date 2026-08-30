@@ -6,6 +6,50 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.1.2] - 2026-08-29
+
+### English
+
+- 🔴 **Fixed: the updater no longer sees any update.** The version parser
+  existed **twice** — the shared copy and the desktop's own — and only
+  the shared one had learned the new `app-v` tags. 2.1.0 and 2.1.1 both
+  carry the broken copy and will **never** offer this release: install it
+  by hand once, and updates resume on their own afterwards.
+- The probe **backs its profiles up to the hub** — network profiles and
+  port-scan profiles alike. They stay a probe-side tool: the hub keeps
+  them as an opaque blob, never displays them, includes them in its
+  backups, and hands them back **at enrolment**. Re-enrolling a
+  reinstalled machine restores them; a key that already exists locally is
+  never overwritten.
+- The hub can impose the **port list** of a scan. Profiles are resolved
+  on the hub side and sent as a plain list, so adding a profile needs no
+  probe update.
+- The probe reports the **min / average / max latency** of every watched
+  target, computed on successful pings only — counting timeouts as zero
+  would show an excellent latency for a host that answers half the time.
+
+### Français
+
+- 🔴 **Correction : l'updater ne voyait plus aucune mise à jour.** La
+  lecture de version existait **en double** — la copie partagée et celle
+  du bureau — et seule la partagée avait appris les tags `app-v`. Les
+  2.1.0 et 2.1.1 embarquent la copie cassée et ne proposeront **jamais**
+  cette version : l'installer une fois à la main, les mises à jour
+  reprennent seules ensuite.
+- La sonde **sauvegarde ses profils sur le hub** — profils réseau comme
+  profils de scan de ports. Ils restent un outil de la sonde : le hub les
+  garde en bloc opaque, ne les affiche pas, les inclut dans ses
+  sauvegardes, et les rend **à l'enrôlement**. Ré-enrôler une machine
+  réinstallée les restitue ; une clé déjà présente en local n'est jamais
+  écrasée.
+- Le hub peut imposer la **liste de ports** d'un scan. Les profils sont
+  résolus côté hub et envoyés en liste brute : en ajouter un ne demande
+  aucune mise à jour de la sonde.
+- La sonde remonte la **latence min / moyenne / max** de chaque cible
+  surveillée, calculée sur les seuls relevés qui ont abouti — compter les
+  absences de réponse comme des zéros afficherait une latence excellente
+  pour un hôte qui répond une fois sur deux.
+
 ## [2.1.1] - 2026-08-29
 
 ### English
