@@ -37,6 +37,20 @@ pub mod keys {
     /// ⚠️ Baisser cette valeur **supprime des archives**.
     pub const BACKUP_KEEP_LAST: &str = "backup_keep_last";
 
+    /// ⚠️ Baisser cette valeur **supprime des scans**. Même garde-fou que la
+    /// rétention Influx : rien ne s'efface sans accord explicite.
+    ///
+    /// L'inventaire s'accumule sinon sans limite : un scan d'un /24 pose une
+    /// ligne par machine et une par port ouvert, à chaque passage.
+    pub const INVENTORY_DAYS: &str = "inventory_days";
+
+    /// Le hub termine lui-même le TLS, avec son certificat auto-signé.
+    ///
+    /// ⚠️ Ne prend effet **qu'au redémarrage** : basculer à chaud couperait
+    /// la page depuis laquelle on vient de cliquer, et laisserait les sondes
+    /// sans hub sans que personne ait vu le message.
+    pub const TLS_ENABLED: &str = "tls_enabled";
+
     pub const ALL: &[&str] = &[
         INFLUX_URL,
         INFLUX_ORG,
@@ -49,6 +63,8 @@ pub mod keys {
         BACKUP_ENABLED,
         BACKUP_INTERVAL_HOURS,
         BACKUP_KEEP_LAST,
+        INVENTORY_DAYS,
+        TLS_ENABLED,
     ];
 }
 
@@ -56,6 +72,25 @@ pub const DEFAULT_INFLUX_URL: &str = "https://127.0.0.1:8086";
 pub const DEFAULT_INFLUX_ORG: &str = "lanprobe";
 pub const DEFAULT_INFLUX_BUCKET: &str = "lanprobe";
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: i64 = 60;
+/// ⚠️ **Illimitée par défaut, et ça n'est pas un oubli.**
+///
+/// Un défaut à 90 jours se serait appliqué aux hubs déjà installés : la
+/// première purge aurait effacé des scans que personne n'a accepté de perdre,
+/// à la faveur d'une mise à jour. Sur ce projet rien ne s'efface sans accord
+/// explicite — la rétention de l'inventaire s'active donc à la main, et
+/// l'interface explique pourquoi on voudrait le faire.
+pub const DEFAULT_INVENTORY_DAYS: i64 = 0;
+
+/// Une rétention passe-t-elle de `current` à `new` en effaçant quelque chose ?
+/// `0` vaut « illimitée » : y aller n'efface rien, en partir efface tout ce
+/// qui dépasse.
+fn shortens(current: i64, new: i64) -> bool {
+    match (current, new) {
+        (_, 0) => false,
+        (0, _) => true,
+        (c, n) => n < c,
+    }
+}
 
 #[derive(Clone)]
 pub struct Settings {
@@ -139,6 +174,24 @@ impl Settings {
         .unwrap_or(crate::backup::DEFAULT_KEEP_LAST)
     }
 
+    /// Rétention de l'inventaire réseau, en jours. `0` = illimitée.
+    pub fn inventory_days(&self) -> i64 {
+        self.get_or(keys::INVENTORY_DAYS, &DEFAULT_INVENTORY_DAYS.to_string())
+            .parse()
+            .unwrap_or(DEFAULT_INVENTORY_DAYS)
+    }
+
+    /// Le hub doit-il servir en HTTPS lui-même.
+    ///
+    /// ⚠️ Lu **au démarrage seulement**. `--tls` (ou `LANPROBE_WEB_TLS`)
+    /// force l'activation quoi qu'en dise la base : une option passée
+    /// explicitement à la ligne de commande ne doit pas pouvoir être
+    /// désactivée depuis l'interface — sinon un opérateur qui n'a pas de
+    /// proxy peut se retrouver à servir en clair sans l'avoir voulu.
+    pub fn tls_enabled(&self) -> bool {
+        self.get_or(keys::TLS_ENABLED, "false") == "true"
+    }
+
     pub fn heartbeat_interval_secs(&self) -> i64 {
         self.get_or(
             keys::HEARTBEAT_INTERVAL_SECS,
@@ -170,6 +223,8 @@ impl Settings {
             keys::BACKUP_ENABLED: self.backup_enabled(),
             keys::BACKUP_INTERVAL_HOURS: self.backup_interval_hours(),
             keys::BACKUP_KEEP_LAST: self.backup_keep_last(),
+            keys::INVENTORY_DAYS: self.inventory_days(),
+            keys::TLS_ENABLED: self.tls_enabled(),
         })
     }
 
@@ -189,7 +244,7 @@ impl Settings {
                     return Err(DbError::Conflict(format!("{key} ne peut pas être vide")));
                 }
             }
-            keys::BACKUP_ENABLED => {
+            keys::BACKUP_ENABLED | keys::TLS_ENABLED => {
                 if !matches!(value, "true" | "false") {
                     return Err(DbError::Conflict(format!(
                         "{key} attend true ou false"
@@ -234,6 +289,23 @@ impl Settings {
                     )));
                 }
             }
+            keys::INVENTORY_DAYS => {
+                let parsed: i64 = value
+                    .parse()
+                    .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
+                if parsed < 0 {
+                    return Err(DbError::Conflict(format!("{key} ne peut pas être négatif")));
+                }
+                // Même garde que la rétention Influx, pour la même raison :
+                // raccourcir efface, et rien ne s'efface ici sans accord.
+                if shortens(self.inventory_days(), parsed) && !confirm_data_loss {
+                    return Err(DbError::Conflict(format!(
+                        "raccourcir la rétention de l'inventaire supprime les scans plus \
+                         anciens que {parsed} jour(s) — renvoyer la requête avec \
+                         confirm_data_loss: true"
+                    )));
+                }
+            }
             other => return Err(DbError::Conflict(format!("réglage inconnu : {other}"))),
         }
         self.db.set_setting(key, value)
@@ -254,12 +326,7 @@ impl Settings {
     /// l'infini : quitter l'illimité est la réduction la plus destructrice,
     /// pas une augmentation.
     fn retention_shortens_to(&self, new_days: i64) -> bool {
-        let current = self.retention_days();
-        match (current, new_days) {
-            (_, 0) => false,
-            (0, _) => true,
-            (c, n) => n < c,
-        }
+        shortens(self.retention_days(), new_days)
     }
 
     /// Amorce les réglages absents depuis l'environnement. Appelé une fois au
@@ -438,6 +505,46 @@ mod tests {
 
         s.put(keys::RETENTION_DAYS, "30", true).unwrap();
         assert_eq!(s.retention_days(), 30);
+    }
+
+    #[test]
+    fn inventory_retention_defaults_to_unlimited_so_an_update_erases_nothing() {
+        // 🔴 Le point du test : un défaut à 90 jours se serait appliqué aux
+        // hubs déjà installés, et la première purge aurait effacé des scans
+        // que personne n'a accepté de perdre — à la faveur d'une mise à jour.
+        let s = settings();
+        assert_eq!(s.inventory_days(), 0);
+    }
+
+    #[test]
+    fn shortening_the_inventory_retention_is_refused_without_confirmation() {
+        let s = settings();
+        // Partir d'illimité EST une réduction : tout ce qui dépasse s'efface.
+        assert!(s.put(keys::INVENTORY_DAYS, "90", false).is_err());
+        s.put(keys::INVENTORY_DAYS, "90", true).unwrap();
+
+        let err = s.put(keys::INVENTORY_DAYS, "30", false).unwrap_err();
+        assert!(
+            err.to_string().contains("confirm"),
+            "le refus doit nommer la confirmation attendue : {err}"
+        );
+        assert_eq!(s.inventory_days(), 90, "rien ne doit avoir changé");
+
+        s.put(keys::INVENTORY_DAYS, "30", true).unwrap();
+        assert_eq!(s.inventory_days(), 30);
+
+        // Rallonger ne détruit rien : aucune confirmation exigée.
+        s.put(keys::INVENTORY_DAYS, "365", false).unwrap();
+        assert_eq!(s.inventory_days(), 365);
+    }
+
+    #[test]
+    fn the_tls_switch_only_accepts_a_boolean() {
+        let s = settings();
+        assert!(!s.tls_enabled(), "le hub sert en clair par défaut");
+        assert!(s.put(keys::TLS_ENABLED, "oui", false).is_err());
+        s.put(keys::TLS_ENABLED, "true", false).unwrap();
+        assert!(s.tls_enabled());
     }
 
     #[test]

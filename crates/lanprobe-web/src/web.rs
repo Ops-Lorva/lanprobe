@@ -3183,6 +3183,16 @@ async fn put_settings(
             return error_response(e);
         }
         influx_touched |= key.starts_with("influx_") || key == crate::settings::keys::RETENTION_DAYS;
+        // Le mode de service (clair ou TLS) est lu **au démarrage**. Le
+        // signaler ici est la seule façon pour l'interface de dire « c'est
+        // enregistré, mais ça ne s'appliquera qu'au redémarrage » — sans
+        // quoi l'utilisateur enregistre, recharge en `https://`, tombe sur
+        // rien, et croit avoir cassé son hub.
+        if key == crate::settings::keys::TLS_ENABLED {
+            state
+                .restart_required
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     if influx_touched {

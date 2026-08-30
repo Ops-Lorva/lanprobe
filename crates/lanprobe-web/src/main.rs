@@ -203,13 +203,45 @@ async fn main() -> Result<(), String> {
         std::time::Duration::from_secs(15 * 60),
     ));
 
+    // ── Rétention de l'inventaire ─────────────────────────────────────────
+    //
+    // Séparée de la rétention Influx : l'inventaire vit en SQLite, et le
+    // bucket ne sait rien de ces tables. Le pas est large parce que la
+    // question ne se pose qu'en jours — une purge de plus ou de moins dans
+    // la journée ne change rien à ce qu'on lit.
+    {
+        let db = db.clone();
+        let settings = settings.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            loop {
+                tick.tick().await;
+                let days = settings.inventory_days();
+                if days <= 0 {
+                    continue;
+                }
+                match db.prune_inventory(days) {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!("inventaire : {n} scan(s) au-delà de {days} jours retirés"),
+                    Err(e) => tracing::warn!("purge de l'inventaire : {e}"),
+                }
+            }
+        });
+    }
+
+    // ⚠️ `--tls` (ou `LANPROBE_WEB_TLS`) l'emporte sur la base : une option
+    // passée explicitement au démarrage ne doit pas pouvoir être annulée
+    // depuis l'interface. Sans cette règle, un opérateur qui n'a pas de proxy
+    // pourrait se retrouver à servir en clair d'un clic, sans rien remarquer.
+    let tls_on = args.tls || settings.tls_enabled();
+
     let state = web::AppState {
         db,
         auth,
         settings,
         influx,
         notifier,
-        tls: args.tls,
+        tls: tls_on,
         config_dir: args.config_dir.clone(),
         backup_dir: args.backup_dir.clone(),
         influx_cli: args.influx_cli.clone(),
@@ -220,7 +252,7 @@ async fn main() -> Result<(), String> {
     let addr: SocketAddr = format!("{}:{}", args.host, args.port)
         .parse()
         .map_err(|e| format!("adresse d'écoute invalide : {e}"))?;
-    if args.tls {
+    if tls_on {
         let tls_paths = tls::tls_paths(&args.config_dir);
         let tls_config = tls::server_config(&tls_paths)?;
         tracing::info!("hub à l'écoute sur https://{addr}");

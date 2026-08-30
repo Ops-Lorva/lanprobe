@@ -39,11 +39,17 @@
   let hubPublicUrl = $state('');
   // La version vient de /api/status, la seule route publique du hub.
   let hubVersion = $state('—');
+  // Le hub le dit lui-même : un réglage lu au démarrage a changé depuis.
+  // C'est la seule source honnête — l'interface, elle, ne sait pas avec quels
+  // arguments le processus a été lancé.
+  let restartPending = $state(false);
   let retention = $state('0');
   let heartbeat = $state('60');
   let backupEnabled = $state(true);
   let backupInterval = $state('24');
   let backupKeep = $state('7');
+  let inventoryDays = $state('0');
+  let tlsEnabled = $state(false);
 
   let fieldError = $state('');
   let busy = $state(false);
@@ -55,12 +61,20 @@
     org = s.influx_org;
     bucket = s.influx_bucket;
     hubPublicUrl = s.hub_public_url ?? '';
-    api.status().then((st) => (hubVersion = st.version || '—')).catch(() => {});
+    api
+      .status()
+      .then((st) => {
+        hubVersion = st.version || '—';
+        restartPending = st.restart_required === true;
+      })
+      .catch(() => {});
     retention = String(s.retention_days);
     heartbeat = String(s.heartbeat_interval_secs);
     backupEnabled = s.backup_enabled;
     backupInterval = String(s.backup_interval_hours);
     backupKeep = String(s.backup_keep_last);
+    inventoryDays = String(s.inventory_days);
+    tlsEnabled = s.tls_enabled;
   }
 
   async function load() {
@@ -191,6 +205,7 @@
   const heartbeatNum = $derived(Number.parseInt(heartbeat, 10));
   const intervalNum = $derived(Number.parseInt(backupInterval, 10));
   const keepNum = $derived(Number.parseInt(backupKeep, 10));
+  const inventoryNum = $derived(Number.parseInt(inventoryDays, 10));
 
   function retentionLabel(days: number) {
     return days === 0
@@ -222,12 +237,29 @@
         (saved.backup_keep_last > 0 && keepNum > 0 && keepNum < saved.backup_keep_last)),
   );
 
+  /**
+   * Troisième réduction possible de cet écran, et exactement la même règle :
+   * `0` vaut « illimité », donc en partir efface tout ce qui dépasse.
+   */
+  const inventoryShrink = $derived(
+    Number.isInteger(inventoryNum) &&
+      inventoryNum >= 0 &&
+      ((saved.inventory_days === 0 && inventoryNum > 0) ||
+        (saved.inventory_days > 0 && inventoryNum > 0 && inventoryNum < saved.inventory_days)),
+  );
+
+  function inventoryLabel(days: number) {
+    return days === 0
+      ? $_('settings.retention_unlimited_label')
+      : $_('settings.retention_days_label', { values: { n: days } });
+  }
+
   function keepLabel(n: number) {
     return n === 0 ? $_('backup.keep_all_label') : $_('backup.keep_n_label', { values: { n } });
   }
 
   /** Les deux réductions partent dans le même PUT, donc dans la même confirmation. */
-  const dataLoss = $derived(isShrink || keepShrink);
+  const dataLoss = $derived(isShrink || keepShrink || inventoryShrink);
   const bothLosses = $derived(isShrink && keepShrink);
 
   const cutoffDate = $derived(
@@ -250,6 +282,8 @@
     if (backupEnabled !== saved.backup_enabled) p.backup_enabled = backupEnabled;
     if (intervalNum !== saved.backup_interval_hours) p.backup_interval_hours = intervalNum;
     if (keepNum !== saved.backup_keep_last) p.backup_keep_last = keepNum;
+    if (inventoryNum !== saved.inventory_days) p.inventory_days = inventoryNum;
+    if (tlsEnabled !== saved.tls_enabled) p.tls_enabled = tlsEnabled;
     return p;
   });
 
@@ -622,6 +656,45 @@
       <LangTheme labelled />
     </section>
 
+    <!--
+      ⚠️ Le seul réglage de cet onglet qui puisse rendre le hub injoignable.
+      Il ne détruit rien — d'où sa place ici et non dans la zone rouge — mais
+      il change l'adresse par laquelle tout le monde arrive, sondes comprises.
+      Les conséquences sont énumérées AVANT le clic, pas après : découvrir
+      qu'on a coupé ses sondes en rechargeant une page qui ne répond plus est
+      exactement ce qu'il faut éviter.
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.tls_title')}</h2>
+      <p class="sub">{$_('settings.tls_lead')}</p>
+
+      <label class="switch">
+        <input type="checkbox" bind:checked={tlsEnabled} disabled={!$isAdmin} />
+        <span>{$_('settings.tls_label')}</span>
+      </label>
+
+      {#if tlsEnabled !== saved.tls_enabled}
+        <div class="warn" role="status">
+          <strong>{$_('settings.tls_warn_title')}</strong>
+          <ul class="tls-list">
+            <li>{$_('settings.tls_warn_url', { values: { scheme: tlsEnabled ? 'https://' : 'http://' } })}</li>
+            <li>{$_('settings.tls_warn_probes')}</li>
+            <li>{$_('settings.tls_warn_selfsigned')}</li>
+            <li>{$_('settings.tls_warn_restart')}</li>
+          </ul>
+        </div>
+      {:else if restartPending}
+        <!-- Enregistré ≠ appliqué. Sans cette ligne, l'écran affiche le
+             réglage voulu et le hub sert encore l'autre : on recharge en
+             `https://`, on tombe sur rien, et on croit avoir cassé le hub. -->
+        <p class="cur pending">{$_('settings.tls_restart_pending')}</p>
+      {:else if saved.tls_enabled}
+        <p class="cur">{$_('settings.tls_current_on')}</p>
+      {:else}
+        <p class="cur">{$_('settings.tls_current_off')}</p>
+      {/if}
+    </section>
+
     <!-- Un fait, pas un réglage : d'où sa place en fin d'onglet. -->
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.hub_version_title')}</h2>
@@ -866,6 +939,52 @@
                 },
               })}
               {$_('settings.shrink_cutoff', { values: { date: cutoffDate } })}
+            </p>
+          </div>
+        {/if}
+      </section>
+
+      <!--
+        L'inventaire vit en SQLite, pas dans le bucket : la rétention Influx ne
+        le voit pas, et il grossit de son côté — une ligne par machine et une
+        par port ouvert, à chaque scan. D'où un réglage distinct, sous la même
+        barre rouge, avec la même confirmation.
+      -->
+      <section class="card lp-card danger-frame" class:risky={inventoryShrink}>
+        <h2 class="lp-title">{$_('settings.inventory_title')}</h2>
+        <p class="sub">{$_('settings.inventory_lead')}</p>
+
+        <label class="lp-field">
+          {$_('settings.inventory_label')}
+          <span class="unit-row">
+            <input
+              class="lp-input num"
+              type="number"
+              min="0"
+              step="1"
+              bind:value={inventoryDays}
+              disabled={!$isAdmin}
+            />
+            <span class="unit">{$_('settings.retention_unit')}</span>
+          </span>
+          <span class="hint">{$_('settings.inventory_hint')}</span>
+          <span class="cur">
+            {$_('settings.retention_current', {
+              values: { label: inventoryLabel(saved.inventory_days) },
+            })}
+          </span>
+        </label>
+
+        {#if inventoryShrink}
+          <div class="warn" role="status">
+            <strong>{$_('settings.shrink_title')}</strong>
+            <p>
+              {$_('settings.inventory_shrink_from_to', {
+                values: {
+                  from: inventoryLabel(saved.inventory_days),
+                  to: inventoryLabel(inventoryNum),
+                },
+              })}
             </p>
           </div>
         {/if}
@@ -1177,6 +1296,27 @@
   .cur {
     font-size: 11px;
     color: var(--ep-text-secondary);
+  }
+  /* « Enregistré mais pas appliqué » n'est ni une erreur ni un succès : c'est
+     une action qui reste à faire. La couleur d'accent le dit sans crier. */
+  .pending {
+    color: var(--ep-accent, #b8860b);
+    font-weight: 600;
+  }
+  /* L'interrupteur TLS : même forme que les autres cases de cet écran. */
+  .switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .tls-list {
+    margin: 6px 0 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
   .pair {
     display: grid;

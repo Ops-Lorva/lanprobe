@@ -138,6 +138,18 @@ export interface HubSettings {
   backup_interval_hours: number;
   /** Archives conservées. `0` = toutes ; baisser la valeur en supprime. */
   backup_keep_last: number;
+  /**
+   * Rétention de l'inventaire réseau (scans, machines, ports), en jours.
+   * `0` = illimitée. ⚠️ Baisser la valeur SUPPRIME des scans — le hub exige
+   * `confirm_data_loss`, comme pour la rétention des mesures.
+   */
+  inventory_days: number;
+  /**
+   * Le hub termine lui-même le TLS, avec un certificat auto-signé.
+   * ⚠️ Lu au démarrage seulement : l'activer ne change rien tant que le
+   * conteneur n'a pas redémarré.
+   */
+  tls_enabled: boolean;
 }
 
 export const SETTINGS_DEFAULTS: HubSettings = {
@@ -152,6 +164,8 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   backup_enabled: true,
   backup_interval_hours: 24,
   backup_keep_last: 7,
+  inventory_days: 0,
+  tls_enabled: false,
 };
 
 // ── Sauvegarde ──────────────────────────────────────────────────────────────
@@ -485,6 +499,12 @@ export interface Subscriptions {
 export interface HubStatus {
   needs_setup: boolean;
   version: string;
+  /**
+   * Un réglage lu au démarrage a changé depuis. Le hub continue de tourner
+   * avec l'ancien : tant que personne ne redémarre le conteneur, ce qui est
+   * enregistré et ce qui s'applique diffèrent.
+   */
+  restart_required?: boolean;
 }
 
 /** Erreur applicative : porte le code HTTP pour distinguer 401 / 409 / reste. */
