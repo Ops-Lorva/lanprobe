@@ -6,6 +6,75 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.2.0] - 2026-08-30
+
+### English
+
+- **The hub's certificate is pinned instead of unchecked.** The
+  "accept a self-signed certificate" tick box accepted **any**
+  certificate: it did not say "I trust MY hub", it said "I no longer
+  check anything" — and the probe's token travels in those requests.
+  Now, when the certificate does not verify, the probe reads its
+  fingerprint and **shows it**: you compare it with the one your hub
+  displays and confirm. From then on, only that certificate is accepted.
+  ⚠️ The handshake signature is still verified, unlike before — without
+  it, anyone replaying the hub's (public) certificate would pass the pin
+  without holding the private key.
+  ⚠️ Only what needs pinning is pinned: a certificate that verifies on
+  its own is left alone, otherwise a renewal at a public authority would
+  cut the probe off every three months.
+  ⚠️ `allow_self_signed` is still honoured for probes already carrying
+  it — removing it would cut them off remotely and without a word. It is
+  simply no longer offered.
+- 🔴 **Fixed: measurements were not sent through the hub's client.**
+  The export built its own, so anything applied to the hub's client did
+  not reach it. Enrolment worked, the heartbeat worked, and every write
+  failed — the buffer grew in silence while the app said "attached".
+- 🔴 **Fixed: certificate failures were never recognised.** `reqwest`
+  reports "error sending request for url …" and hides the real cause in
+  its source chain. The "certificate cannot be verified" message was
+  therefore unreachable, and users were sent to check a network that was
+  perfectly fine.
+- Scripted enrolment with a username and password is refused when that
+  account requires a second factor: that path has no screen and cannot
+  present a code, so it would have made the password alone a valid key
+  for an account that just declared otherwise. Use an enrolment code.
+
+### Français
+
+- **Le certificat du hub s'épingle, au lieu de ne plus être vérifié.**
+  La case « accepter un certificat auto-signé » acceptait **n'importe
+  quel** certificat : elle ne disait pas « je fais confiance à MON hub »,
+  elle disait « je ne vérifie plus rien » — et c'est le jeton de la sonde
+  qui voyage dans ces requêtes. Désormais, si le certificat ne se vérifie
+  pas, la sonde relève son empreinte et **la montre** : vous la comparez
+  à celle qu'affiche votre hub, et vous confirmez. Ensuite, seul ce
+  certificat-là est accepté.
+  ⚠️ La signature du handshake reste vérifiée, contrairement à avant :
+  sans ce contrôle, un intermédiaire qui rejoue le certificat du hub — il
+  est public — passerait l'épinglage sans posséder la clé privée.
+  ⚠️ On n'épingle que ce qui en a besoin : un certificat qui se vérifie
+  tout seul est laissé tranquille, sinon un renouvellement chez une
+  autorité publique couperait la sonde tous les trois mois.
+  ⚠️ `allow_self_signed` reste honoré pour les sondes qui le portent déjà
+  — le retirer les couperait du hub à distance et sans un mot. Il n'est
+  simplement plus proposé.
+- 🔴 **Correction : les mesures ne partaient pas par le client du hub.**
+  L'export construisait le sien, donc ce qu'on appliquait au client du
+  hub ne l'atteignait pas. L'enrôlement passait, le battement passait, et
+  chaque écriture échouait — le tampon grossissait en silence pendant que
+  l'application annonçait « rattachée ».
+- 🔴 **Correction : un échec de certificat n'était jamais reconnu.**
+  `reqwest` affiche « error sending request for url … » et cache la vraie
+  cause dans sa chaîne de sources. Le message « certificat non
+  vérifiable » était donc inatteignable, et l'utilisateur était envoyé
+  vérifier un réseau qui allait parfaitement bien.
+- L'enrôlement scripté par identifiants est refusé quand le compte exige
+  un second facteur : ce chemin n'a pas d'écran et ne peut pas présenter
+  de code, il aurait fait du mot de passe seul une clé valide pour un
+  compte qui vient de déclarer le contraire. Utilisez un code
+  d'enrôlement.
+
 ## [2.1.2] - 2026-08-29
 
 ### English
