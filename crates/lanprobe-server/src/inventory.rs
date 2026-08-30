@@ -92,7 +92,7 @@ pub async fn publish(state: &AppState, key: &SecretKey, report: ScanReport) {
     };
 
     let url = format!("{}/api/probes/{}/scans", cfg.url, cfg.probe_id);
-    let result = hub::http_client_for(cfg.allow_self_signed, source)
+    let result = hub::http_client_pinned(&cfg, source)
         .post(&url)
         .bearer_auth(token)
         .json(&report)

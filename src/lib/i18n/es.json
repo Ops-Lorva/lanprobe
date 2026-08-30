@@ -393,7 +393,10 @@
       "name_ph": "Dejar vacío: el hub elegirá",
       "name_hint": "Opcional. Una reinscripción conserva el nombre definido en el hub.",
       "scheme_hint": "Haga clic para alternar entre https:// y http://",
-      "restored": "{n, plural, one {# ajuste restaurado} other {# ajustes restaurados}} desde el hub."
+      "restored": "{n, plural, one {# ajuste restaurado} other {# ajustes restaurados}} desde el hub.",
+      "pin_title": "El certificado de {host} no se verifica",
+      "pin_hint": "Compare esta huella con la que muestra su hub. Si coinciden, confirme: la sonda solo aceptará ese certificado. Si difieren, alguien se interpone — no siga.",
+      "pin_confirm": "La huella coincide, vincular"
     }
   },
   "scheduler": {

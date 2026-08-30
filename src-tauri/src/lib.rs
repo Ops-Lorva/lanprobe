@@ -646,6 +646,10 @@ struct HubEnrollArgs {
     site: Option<String>,
     #[serde(default)]
     allow_self_signed: bool,
+    /// Empreinte confirmée par l'opérateur. Vide au premier essai : c'est le
+    /// hub qui, en échouant, fait apparaître l'empreinte à confirmer.
+    #[serde(default)]
+    pin: Option<String>,
 }
 
 /// État du rattachement, sans aucun secret : l'interface a besoin de savoir
@@ -671,6 +675,46 @@ fn cmd_hub_status(state: tauri::State<'_, SharedState>) -> serde_json::Value {
     })
 }
 
+/// L'échec vient-il de la vérification du certificat ?
+///
+/// Sur le texte, faute de mieux : `reqwest` enveloppe l'erreur TLS sans type
+/// distinct exploitable. Se tromper ici ne coûte qu'une proposition
+/// d'épinglage inutile — aucune vérification n'est relâchée.
+fn looks_like_tls_failure(message: &str) -> bool {
+    let m = message.to_lowercase();
+    [
+        "certificate",
+        "certificat",
+        "tls",
+        "self-signed",
+        "unknownissuer",
+        "invalidcertificate",
+    ]
+    .iter()
+    .any(|needle| m.contains(needle))
+}
+
+/// `https://hub:8443/…` → `("hub", 8443)`. `None` hors HTTPS : il n'y a alors
+/// aucun certificat à épingler.
+fn split_https_authority(url: &str) -> Option<(String, u16)> {
+    let rest = url.trim().strip_prefix("https://")?;
+    let authority = rest.split(['/', '?']).next()?;
+    if let Some(close) = authority.rfind(']') {
+        let host = &authority[..=close];
+        let port = authority[close + 1..]
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(443);
+        return Some((host.trim_matches(|c| c == '[' || c == ']').to_string(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => {
+            Some((host.to_string(), port.parse().unwrap_or(443)))
+        }
+        _ => Some((authority.to_string(), 443)),
+    }
+}
+
 #[tauri::command]
 async fn cmd_hub_enroll(
     state: tauri::State<'_, SharedState>,
@@ -682,7 +726,7 @@ async fn cmd_hub_enroll(
         (Some(u), Some(p)) => Some((u.as_str(), p.as_str(), args.site.as_deref().unwrap_or(""))),
         _ => None,
     };
-    let cfg = lanprobe_server::hub::enroll(
+    let cfg = match lanprobe_server::hub::enroll(
         &state,
         &key,
         &args.url,
@@ -690,8 +734,34 @@ async fn cmd_hub_enroll(
         args.code.as_deref(),
         credentials,
         args.allow_self_signed,
+        args.pin.as_deref().unwrap_or(""),
     )
-    .await?;
+    .await
+    {
+        Ok(cfg) => cfg,
+        // 🔴 Le moment où l'opérateur doit décider, pas une panne à afficher
+        // sèchement. On relève l'empreinte et on la lui rend, pour qu'il la
+        // compare et confirme — plutôt que de le laisser chercher une case
+        // « accepter n'importe quoi » et tout désactiver pour de bon.
+        Err(e)
+            if args.pin.as_deref().unwrap_or("").is_empty()
+                && !args.allow_self_signed
+                && looks_like_tls_failure(&e) =>
+        {
+            let Some((host, port)) = split_https_authority(&args.url) else {
+                return Err(e);
+            };
+            let seen = lanprobe_server::tls_pin::capture_fingerprint(&host, port, None)
+                .await
+                .map_err(|inner| format!("{e} ({inner})"))?;
+            return Ok(serde_json::json!({
+                "needs_pin": true,
+                "host": host,
+                "fingerprint": seen,
+            }));
+        }
+        Err(e) => return Err(e),
+    };
     Ok(serde_json::json!({
         "probe_id": cfg.probe_id,
         "name": cfg.name,

@@ -393,7 +393,10 @@
       "name_ph": "Leave empty: the hub will choose",
       "name_hint": "Optional. A re-enrolment keeps the name set in the hub.",
       "scheme_hint": "Click to switch between https:// and http://",
-      "restored": "{n, plural, one {# setting restored} other {# settings restored}} from the hub."
+      "restored": "{n, plural, one {# setting restored} other {# settings restored}} from the hub.",
+      "pin_title": "The certificate of {host} does not verify",
+      "pin_hint": "Compare this fingerprint with the one your hub shows. If they match, confirm: the probe will accept that certificate and no other. If they differ, someone is in the middle — stop here.",
+      "pin_confirm": "The fingerprint matches, attach"
     }
   },
   "scheduler": {

@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 
-// @ts-expect-error process is a nodejs global
+// `process` est bien typé depuis que @types/node est là : la directive
+// d'exception ne couvrait plus rien, et une directive inutile est elle-même
+// signalée en erreur.
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/

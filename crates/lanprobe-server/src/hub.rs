@@ -102,6 +102,19 @@ pub struct HubConfig {
     /// avec un vrai certificat — ne l'active jamais.
     #[serde(default)]
     pub allow_self_signed: bool,
+    /// Empreinte SHA-256 du certificat du hub, épinglée à la première
+    /// connexion.
+    ///
+    /// C'est ce qui remplace `allow_self_signed` : celle-ci acceptait
+    /// **n'importe quel** certificat — donc celui de n'importe qui sur le
+    /// chemin, qui repartait avec le jeton de la sonde. Une empreinte dit
+    /// « ce hub-là », pas « je ne vérifie plus rien ».
+    ///
+    /// ⚠️ `allow_self_signed` reste lu, et l'emporte quand il est vrai : des
+    /// sondes déployées le portent, et le retirer les couperait du hub à la
+    /// mise à jour. Il n'est simplement plus proposé.
+    #[serde(default)]
+    pub hub_cert_sha256: String,
 }
 
 fn default_heartbeat() -> u64 {
@@ -446,6 +459,11 @@ pub async fn enroll(
     code: Option<&str>,
     credentials: Option<(&str, &str, &str)>,
     allow_self_signed: bool,
+    // Empreinte du certificat du hub, confirmée par l'opérateur. Vide quand
+    // le certificat se vérifie tout seul : on n'épingle que ce qui en a
+    // besoin, sinon un renouvellement chez une autorité publique couperait la
+    // sonde tous les trois mois.
+    pin: &str,
 ) -> Result<HubConfig, String> {
     // Le nom est facultatif : vide, le hub en choisit un, et un ré-enrôlement
     // garde de toute façon celui qui est défini là-bas.
@@ -474,7 +492,7 @@ pub async fn enroll(
     // pour mesurer par un autre donnerait une sonde qui joint son hub à
     // l'installation et plus jamais après.
     let source = crate::scheduler::resolve_src(state)?;
-    let response = http_client(allow_self_signed, source)
+    let response = http_client(allow_self_signed, pin, source)
         .post(format!("{hub_url}/api/probes/enroll"))
         .json(&body)
         .timeout(Duration::from_secs(20))
@@ -536,6 +554,7 @@ pub async fn enroll(
         },
         heartbeat_interval_secs: parsed.heartbeat_interval_secs,
         allow_self_signed,
+        hub_cert_sha256: pin.trim().to_string(),
     };
 
     save(state, &config)?;
@@ -562,7 +581,7 @@ pub async fn upload_config(
     }
     let token = secrets::open(key, &cfg.token)?;
     let source = crate::scheduler::resolve_src(state)?;
-    let response = http_client(cfg.allow_self_signed, source)
+    let response = http_client_pinned(&cfg, source)
         .post(format!("{}/api/probes/{}/config", cfg.url, cfg.probe_id))
         .bearer_auth(token)
         .json(&config)
@@ -844,7 +863,7 @@ async fn beat(
     // qu'on observe.
     let source = crate::scheduler::resolve_src(state).map_err(BeatError::Transient)?;
 
-    let response = http_client(config.allow_self_signed, source)
+    let response = http_client_pinned(config, source)
         .post(format!(
             "{}/api/probes/{}/heartbeat",
             config.url, config.probe_id
@@ -997,17 +1016,25 @@ fn looks_like_tls_failure(error: &reqwest::Error) -> bool {
 /// router, ce qui est le comportement attendu quand rien n'est imposé.
 /// Même client, exposé pour la publication d'inventaire : elle doit suivre
 /// exactement les mêmes règles de certificat et d'interface que le battement.
-pub fn http_client_for(
-    allow_self_signed: bool,
-    source: Option<std::net::Ipv4Addr>,
-) -> reqwest::Client {
-    http_client(allow_self_signed, source)
+/// Client HTTP pour un hub donné, épingle comprise.
+pub fn http_client_pinned(cfg: &HubConfig, source: Option<std::net::Ipv4Addr>) -> reqwest::Client {
+    http_client(cfg.allow_self_signed, &cfg.hub_cert_sha256, source)
 }
 
-fn http_client(allow_self_signed: bool, source: Option<std::net::Ipv4Addr>) -> reqwest::Client {
+fn http_client(
+    allow_self_signed: bool,
+    pin: &str,
+    source: Option<std::net::Ipv4Addr>,
+) -> reqwest::Client {
     let builder = reqwest::Client::builder();
+    // Ordre volontaire : l'ancien réglage l'emporte. Une sonde déjà déployée
+    // qui le porte doit continuer de fonctionner à la lettre après la mise à
+    // jour — la remplacer par une épingle qu'elle n'a pas la couperait du hub
+    // sans le moindre message, à distance.
     let builder = if allow_self_signed {
         builder.danger_accept_invalid_certs(true)
+    } else if !pin.trim().is_empty() {
+        builder.use_preconfigured_tls(crate::tls_pin::pinned_tls_config(pin.trim()))
     } else {
         builder
     };

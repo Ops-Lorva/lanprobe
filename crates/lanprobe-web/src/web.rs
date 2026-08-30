@@ -2260,6 +2260,21 @@ fn resolve_enrollment_target(
         ));
     };
     state.db.verify_credentials(username, password)?;
+    // 🔴 Ce chemin n'a aucun moyen de présenter un second facteur : il n'y a
+    // pas d'écran, et une sonde scriptée ne peut pas lire un code à usage
+    // unique. Le laisser passer ferait du mot de passe seul une clé valide
+    // pour un compte qui a précisément déclaré que le mot de passe seul ne
+    // suffit plus — c'est-à-dire une porte dérobée autour du second facteur.
+    //
+    // Le code d'enrôlement est le chemin prévu pour les machines : il est à
+    // usage unique, daté, et lié à un site.
+    if state.db.totp_enabled(username).unwrap_or(false) {
+        return Err(DbError::Forbidden(
+            "ce compte exige un second facteur, que l'enrôlement par identifiants ne peut pas \
+             présenter — utilisez un code d'enrôlement"
+                .into(),
+        ));
+    }
     // Le chemin scripté passe par les identifiants du compte et non par une
     // session : sans ce contrôle, il contournerait tous les rôles.
     match state.db.role_of(username)? {
@@ -7883,6 +7898,34 @@ mod tests {
         assert!(
             !h.state.secrets.is_set("totp:admin"),
             "le secret part avec : un ancien code ne doit pas revivre sur un QR qu'on croit neuf"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_factor_closes_the_scripted_enrolment_path() {
+        // 🔴 Ce chemin n'a pas d'écran : il ne peut pas présenter de code.
+        // Le laisser passer ferait du mot de passe seul une clé valide pour un
+        // compte qui vient de déclarer le contraire.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        enable_totp(&h, &session).await;
+
+        let (status, body, _) = h
+            .call(json_request(
+                "POST",
+                "/api/probes/enroll",
+                serde_json::json!({
+                    "username": "admin",
+                    "password": PASSWORD,
+                    "site": "Durand",
+                    "name": "Sonde scriptée",
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("code d'enrôlement"),
+            "le refus doit nommer le chemin qui marche : {body}"
         );
     }
 

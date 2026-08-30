@@ -18,7 +18,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use lanprobe_server::{config, default_config_dir, hub, influxdb, scheduler, secrets, state};
+use lanprobe_server::{
+    config, default_config_dir, hub, influxdb, scheduler, secrets, state, tls_pin,
+};
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
@@ -57,11 +59,21 @@ enum Command {
         /// Site d'accueil, obligatoire avec `--username`.
         #[arg(long)]
         site: Option<String>,
-        /// Accepte un certificat auto-signé. ⚠️ N'utilisez ceci que sur un
-        /// réseau que vous maîtrisez : la sonde ne pourra plus distinguer le
-        /// hub d'une machine qui se fait passer pour lui.
+        /// Accepte un certificat auto-signé. ⚠️ **Déconseillé** : la sonde
+        /// ne peut alors plus distinguer le hub d'une machine qui se fait
+        /// passer pour lui, et c'est son jeton qui part dans la requête.
+        /// Préférez `--pin`, ou laissez la commande relever l'empreinte et
+        /// vous la montrer.
         #[arg(long)]
         allow_self_signed: bool,
+        /// Empreinte SHA-256 attendue du certificat du hub. Seul ce
+        /// certificat-là sera accepté, maintenant et ensuite.
+        ///
+        /// Sans cette option et sans `--allow-self-signed`, un hub dont le
+        /// certificat ne se vérifie pas fait échouer la commande **en
+        /// affichant l'empreinte à confirmer** : c'est le chemin normal.
+        #[arg(long)]
+        pin: Option<String>,
     },
 
     /// Affiche l'état du rattachement.
@@ -70,6 +82,40 @@ enum Command {
     /// Détache cette sonde. Le hub garde ses mesures ; il faudra un nouveau
     /// code pour la rattacher.
     Forget,
+}
+
+/// L'échec vient-il de la vérification du certificat ?
+///
+/// Sur le texte de l'erreur, faute de mieux : `reqwest` enveloppe l'erreur TLS
+/// sans type distinct exploitable. Se tromper ici ne coûte qu'un message trop
+/// serviable — on ne relâche aucune vérification, on propose seulement de
+/// relever l'empreinte.
+fn looks_like_tls_failure(message: &str) -> bool {
+    let m = message.to_lowercase();
+    ["certificate", "certificat", "tls", "self-signed", "unknownissuer", "invalidcertificate"]
+        .iter()
+        .any(|needle| m.contains(needle))
+}
+
+/// `https://hub.exemple.fr:8443/…` → `("hub.exemple.fr", 8443)`. `None` si
+/// l'URL n'est pas en HTTPS : il n'y a alors aucun certificat à épingler.
+fn split_https_authority(url: &str) -> Option<(String, u16)> {
+    let rest = url.trim().strip_prefix("https://")?;
+    let authority = rest.split(['/', '?']).next()?;
+    if let Some(close) = authority.rfind(']') {
+        let host = &authority[..=close];
+        let port = authority[close + 1..]
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(443);
+        return Some((host.trim_matches(|c| c == '[' || c == ']').to_string(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => {
+            Some((host.to_string(), port.parse().unwrap_or(443)))
+        }
+        _ => Some((authority.to_string(), 443)),
+    }
 }
 
 /// État minimal, sans ordonnanceur : suffisant pour lire et écrire la config.
@@ -93,7 +139,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => run(config_dir).await?,
-        Command::Enroll { hub: hub_url, code, name, username, password, site, allow_self_signed } => {
+        Command::Enroll {
+            hub: hub_url,
+            code,
+            name,
+            username,
+            password,
+            site,
+            allow_self_signed,
+            pin,
+        } => {
             let state = bare_state(&config_dir)?;
             let key = secrets::load_or_create_key(&config_dir)?;
             let credentials = match (&username, &password, &site) {
@@ -103,7 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if code.is_none() && credentials.is_none() {
                 return Err("il faut --code, ou --username/--password/--site".into());
             }
-            let cfg = hub::enroll(
+            let pin = pin.unwrap_or_default();
+            let cfg = match hub::enroll(
                 &state,
                 &key,
                 &hub_url,
@@ -111,8 +167,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 code.as_deref(),
                 credentials,
                 allow_self_signed,
+                &pin,
             )
-            .await?;
+            .await
+            {
+                Ok(cfg) => cfg,
+                // 🔴 Un échec de certificat n'est pas une panne à signaler
+                // sèchement : c'est le moment exact où l'opérateur doit
+                // décider. On relève l'empreinte et on la lui montre, plutôt
+                // que de le laisser chercher `--allow-self-signed` et tout
+                // désactiver pour de bon.
+                Err(e) if pin.is_empty() && !allow_self_signed && looks_like_tls_failure(&e) => {
+                    let (host, port) = split_https_authority(&hub_url)
+                        .ok_or_else(|| format!("{e}"))?;
+                    let seen = tls_pin::capture_fingerprint(&host, port, None)
+                        .await
+                        .map_err(|inner| format!("{e}\n(empreinte non relevable : {inner})"))?;
+                    eprintln!("Le certificat de {host} ne se vérifie pas.");
+                    eprintln!();
+                    eprintln!("  empreinte SHA-256 : {seen}");
+                    eprintln!();
+                    eprintln!("Comparez-la à celle affichée par le hub, puis relancez avec :");
+                    eprintln!("  --pin {seen}");
+                    return Err("certificat à confirmer".into());
+                }
+                Err(e) => return Err(e.into()),
+            };
             println!("Rattachée au hub {}", cfg.url);
             println!("  sonde  : {} ({})", cfg.name, cfg.probe_id);
             println!("  site   : {}", cfg.site);

@@ -19,6 +19,7 @@ pub mod export_buffer;
 pub mod influxdb;
 pub mod inventory;
 pub mod monitor;
+pub mod tls_pin;
 pub mod hub;
 pub mod scheduler;
 pub mod secrets;

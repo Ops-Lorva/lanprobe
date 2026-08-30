@@ -56,9 +56,29 @@
     const clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
     return clean.length > 4 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean;
   }
-  let hubSelfSigned = $state(false);
+  /**
+   * ⚠️ Toujours faux, et plus proposé nulle part.
+   *
+   * Le champ reste envoyé parce que le hub et les sondes déjà déployées le
+   * connaissent : une sonde qui le porte dans sa configuration doit continuer
+   * de fonctionner à la lettre après la mise à jour. Ce qui disparaît, c'est
+   * la possibilité de l'activer — remplacée par l'épinglage, qui dit « ce
+   * hub-là » au lieu de « je ne vérifie plus rien ».
+   */
+  const hubSelfSigned = false;
   let hubBusy = $state(false);
   let hubError = $state('');
+
+  /**
+   * Épinglage du certificat, à la première connexion.
+   *
+   * ⚠️ Remplace la case « accepter un certificat auto-signé », qui acceptait
+   * **n'importe quel** certificat : n'importe qui sur le chemin pouvait se
+   * faire passer pour le hub et repartir avec le jeton de la sonde. Cocher
+   * cette case ne disait pas « je fais confiance à MON hub », elle disait
+   * « je ne vérifie plus rien ».
+   */
+  let pendingPin = $state<{ host: string; fingerprint: string } | null>(null);
 
   async function refreshHub() {
     try {
@@ -69,11 +89,11 @@
     }
   }
 
-  async function connectHub() {
+  async function connectHub(pin: string = '') {
     hubError = '';
     hubBusy = true;
     try {
-      await invoke('cmd_hub_enroll', {
+      const result = (await invoke('cmd_hub_enroll', {
         args: {
           url: hubUrl.trim(),
           // Facultatif : vide, c'est le hub qui nomme. Et un ré-enrôlement
@@ -81,8 +101,17 @@
           name: hubName.trim() || null,
           code: hubCode.trim() || null,
           allow_self_signed: hubSelfSigned,
+          pin: pin || null,
         },
-      });
+      })) as { needs_pin?: boolean; host?: string; fingerprint?: string };
+
+      // Ce n'est pas un échec : c'est le moment où l'utilisateur doit
+      // décider. Le rattachement reprendra avec l'empreinte confirmée.
+      if (result?.needs_pin) {
+        pendingPin = { host: result.host ?? '', fingerprint: result.fingerprint ?? '' };
+        return;
+      }
+      pendingPin = null;
       hubCode = '';
       await refreshHub();
 
@@ -323,14 +352,34 @@
           />
         </label>
         <p class="hub-hint">{$_('settings.hub.code_hint')}</p>
-        <label class="hub-check">
-          <input type="checkbox" bind:checked={hubSelfSigned} disabled={readOnly} />
-          {$_('settings.hub.self_signed')}
-        </label>
-        <p class="hub-hint">{$_('settings.hub.self_signed_hint')}</p>
-        <button class="hub-btn" onclick={connectHub} disabled={readOnly || hubBusy || !hubUrl || !hubCode}>
-          {hubBusy ? $_('settings.hub.connecting') : $_('settings.hub.connect')}
-        </button>
+        {#if pendingPin}
+          <!--
+            L'empreinte se compare à l'œil, donc elle s'affiche en entier et en
+            chasse fixe. La tronquer ferait comparer les premiers caractères,
+            ce qui ne prouve rien.
+          -->
+          <div class="pin-box">
+            <p class="pin-title">{$_('settings.hub.pin_title', { values: { host: pendingPin.host } })}</p>
+            <p class="pin-fp">{pendingPin.fingerprint}</p>
+            <p class="hub-hint">{$_('settings.hub.pin_hint')}</p>
+            <div class="pin-acts">
+              <button class="hub-btn ghost" onclick={() => (pendingPin = null)} disabled={hubBusy}>
+                {$_('common.cancel')}
+              </button>
+              <button
+                class="hub-btn"
+                onclick={() => connectHub(pendingPin?.fingerprint ?? '')}
+                disabled={hubBusy}
+              >
+                {$_('settings.hub.pin_confirm')}
+              </button>
+            </div>
+          </div>
+        {:else}
+          <button class="hub-btn" onclick={() => connectHub()} disabled={readOnly || hubBusy || !hubUrl || !hubCode}>
+            {hubBusy ? $_('settings.hub.connecting') : $_('settings.hub.connect')}
+          </button>
+        {/if}
         {#if hubError}
           <p class="hub-error" role="alert">{$_('settings.hub.error')} — {hubError}</p>
         {/if}
@@ -584,6 +633,38 @@
   .hub-hint { font-size: 12px; opacity: .65; margin: 2px 0 10px; }
   .hub-restored { color: var(--ep-success, #22c55e); opacity: 1; }
   .hub-state { font-size: 13px; margin-bottom: 10px; }
+  /* L'empreinte se compare à l'œil : chasse fixe, entière, et coupable de
+     prendre de la place. La tronquer ferait comparer les premiers caractères,
+     ce qui ne prouve rien. */
+  .pin-box {
+    margin: 8px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--lp-warn, #b8860b);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--lp-warn, #b8860b) 8%, transparent);
+  }
+  .pin-title {
+    margin: 0 0 6px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .pin-fp {
+    margin: 0 0 6px;
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+    line-height: 1.6;
+    word-break: break-all;
+    user-select: all;
+  }
+  .pin-acts {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .hub-btn.ghost {
+    background: none;
+    border: 1px solid var(--lp-border, #4444);
+  }
   .hub-error { font-size: 12px; color: var(--danger, #f87171); margin-top: 8px; }
   .hub-btn { padding: 7px 14px; border-radius: 6px; border: 1px solid transparent;
     background: var(--accent, #6366f1); color: #fff; font-size: 13px; cursor: pointer; }
