@@ -110,10 +110,6 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/me", get(me))
             .route("/api/me/password", post(change_own_password))
             .route("/api/probes", get(list_probes))
-            .route("/api/probes/{id}/metrics", get(probe_metrics))
-            .route("/api/probes/{id}/inventory", get(probe_inventory))
-            .route("/api/probes/{id}/sla.csv", get(probe_sla_csv))
-            .route("/api/probes/{id}/sla", get(probe_sla_samples))
             .route("/api/settings", get(get_settings))
             .route("/api/settings/influx-advertise", get(get_advertise))
             .route("/api/influx", get(influx_overview))
@@ -134,6 +130,31 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/sites/{id}", patch(rename_site).delete(delete_site))
             .route("/api/enroll-codes", post(create_enroll_code))
             .route("/api/enroll-codes/pending", get(list_pending_codes))
+            .route("/api/settings/influx-advertise/test", post(test_advertise))
+            .route(
+                "/api/notifications/subscriptions",
+                put(put_subscription),
+            ),
+    );
+
+    // Les routes qui désignent UNE sonde vivent à part, derrière le garde de
+    // portée. Elles gardent leur rôle minimum d'origine — la portée s'ajoute
+    // au rôle, elle ne le remplace pas : un lecteur restreint à un site reste
+    // un lecteur sur ce site.
+    let probe_read = guarded_probe_scope(
+        &state,
+        Role::Viewer,
+        Router::new()
+            .route("/api/probes/{id}/metrics", get(probe_metrics))
+            .route("/api/probes/{id}/inventory", get(probe_inventory))
+            .route("/api/probes/{id}/sla.csv", get(probe_sla_csv))
+            .route("/api/probes/{id}/sla", get(probe_sla_samples)),
+    );
+
+    let probe_write = guarded_probe_scope(
+        &state,
+        Role::Operator,
+        Router::new()
             .route("/api/probes/{id}", patch(update_probe).delete(revoke_probe))
             .route("/api/probes/{id}/rotate", post(rotate_token))
             .route("/api/probes/{id}/revoke-token", post(revoke_token_now))
@@ -141,11 +162,6 @@ pub fn build_router(state: AppState) -> Router {
             .route(
                 "/api/probes/{id}/commands",
                 get(list_commands).post(create_command),
-            )
-            .route("/api/settings/influx-advertise/test", post(test_advertise))
-            .route(
-                "/api/notifications/subscriptions",
-                put(put_subscription),
             ),
     );
 
@@ -194,7 +210,9 @@ pub fn build_router(state: AppState) -> Router {
         .merge(public)
         .merge(sites_read)
         .merge(read_only)
+        .merge(probe_read)
         .merge(parc)
+        .merge(probe_write)
         .merge(administration)
         .with_state(state)
         // L'interface web est servie en dernier : toute requête qui n'a
@@ -214,6 +232,66 @@ fn guarded(state: &AppState, minimum: Role, router: Router<AppState>) -> Router<
     router
         .layer(middleware::from_fn_with_state((state.clone(), minimum), role_guard))
         .layer(middleware::from_fn_with_state(state.clone(), session_guard))
+}
+
+/// Comme [`guarded`], plus la portée par site (contrat § 17).
+///
+/// ⚠️ **À réserver aux routes dont le paramètre `{id}` est un `probe_id`.**
+/// C'est la raison d'être de ce routeur séparé : `/api/sites/{id}` porte le
+/// même nom de paramètre et désigne autre chose. Un garde posé sur tout le
+/// routeur aurait cherché une sonde là où passe un site.
+///
+/// Le contrôle est un intergiciel et non un appel dans chaque handler parce
+/// qu'un handler ajouté demain hériterait alors du garde sans que personne y
+/// pense — et une route oubliée, ici, rend le parc d'un autre client.
+fn guarded_probe_scope(
+    state: &AppState,
+    minimum: Role,
+    router: Router<AppState>,
+) -> Router<AppState> {
+    router
+        .layer(middleware::from_fn_with_state(state.clone(), probe_scope_guard))
+        .layer(middleware::from_fn_with_state((state.clone(), minimum), role_guard))
+        .layer(middleware::from_fn_with_state(state.clone(), session_guard))
+}
+
+/// Rend 404 quand la sonde visée sort de la portée de l'appelant.
+///
+/// ⚠️ **404 et non 403.** « Ça existe mais pas pour vous » révèle déjà
+/// l'existence du site d'un autre client — précisément ce que la portée
+/// protège. Une sonde hors portée doit être indistinguable d'une sonde qui
+/// n'existe pas.
+async fn probe_scope_guard(
+    State(state): State<AppState>,
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    use axum::extract::RawPathParams;
+    use axum::RequestExt;
+
+    // L'identité est posée par `session_guard`, qui tourne avant celui-ci.
+    // Son absence n'est pas un cas à traiter ici : sans elle la requête ne
+    // serait jamais arrivée jusqu'à cette couche.
+    let Some(actor) = req.extensions().get::<Identity>().cloned() else {
+        return next.run(req).await;
+    };
+    if matches!(actor.scope, crate::db::Scope::All) {
+        return next.run(req).await;
+    }
+
+    let probe_id = match req.extract_parts::<RawPathParams>().await {
+        Ok(params) => params
+            .iter()
+            .find(|(name, _)| *name == "id")
+            .map(|(_, value)| value.to_string()),
+        Err(_) => None,
+    };
+    if let Some(id) = probe_id {
+        if let Err(refusal) = probe_in_scope(&state, &actor, &id) {
+            return refusal;
+        }
+    }
+    next.run(req).await
 }
 
 // ── Erreurs ────────────────────────────────────────────────────────────────
@@ -481,6 +559,13 @@ fn session_of(headers: &HeaderMap) -> Option<String> {
 pub struct Identity {
     pub username: String,
     pub role: Role,
+    /// Les sites que ce compte a le droit de voir (contrat § 17).
+    ///
+    /// ⚠️ Calculée à CHAQUE requête, comme le rôle : une portée posée dans le
+    /// cookie de session survivrait à sa révocation, et un compte qu'on vient
+    /// de restreindre continuerait de tout voir tant qu'il garde son onglet
+    /// ouvert.
+    pub scope: crate::db::Scope,
 }
 
 /// Rend l'identité d'un compte actif. `None` si le compte a été désactivé
@@ -490,10 +575,34 @@ fn identity_of(state: &AppState, username: &str) -> Option<Identity> {
     if user.disabled_at.is_some() {
         return None;
     }
+    let scope = state
+        .db
+        .user_scope(&user.username, user.role)
+        .unwrap_or(crate::db::Scope::All);
     Some(Identity {
         username: user.username,
         role: user.role,
+        scope,
     })
+}
+
+/// Refuse une sonde hors portée, en **404**.
+///
+/// ⚠️ Pas 403 : « ça existe mais pas pour vous » révèle déjà l'existence du
+/// site d'un autre client, ce qui est exactement ce que la portée protège.
+/// Une sonde hors portée doit être indistinguable d'une sonde inexistante.
+fn site_in_scope(actor: &Identity, site_id: &str) -> Result<(), Response> {
+    if actor.scope.allows(site_id) {
+        return Ok(());
+    }
+    Err(fail(StatusCode::NOT_FOUND, "site inconnu"))
+}
+
+fn probe_in_scope(state: &AppState, actor: &Identity, probe_id: &str) -> Result<(), Response> {
+    match state.db.get_probe(probe_id) {
+        Ok(p) if actor.scope.allows(&p.site_id) => Ok(()),
+        _ => Err(fail(StatusCode::NOT_FOUND, "sonde inconnue")),
+    }
 }
 
 async fn session_guard(
@@ -639,10 +748,26 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
 // journal d'audit — c'est précisément ce qu'on veut garder.
 
 async fn list_users(State(state): State<AppState>) -> Response {
-    match state.db.list_users() {
-        Ok(users) => ok_json(serde_json::to_value(users).unwrap_or(serde_json::Value::Null)),
-        Err(e) => error_response(e),
-    }
+    let users = match state.db.list_users() {
+        Ok(users) => users,
+        Err(e) => return error_response(e),
+    };
+    // La portée est jointe à chaque compte : sans elle, l'écran des comptes
+    // devrait interroger une route par ligne pour savoir ce que chacun voit,
+    // et afficherait « tous les sites » en attendant — c'est-à-dire l'inverse
+    // de la vérité pour un compte restreint.
+    let rows: Vec<serde_json::Value> = users
+        .into_iter()
+        .map(|u| {
+            let sites = state.db.list_user_sites(&u.username).unwrap_or_default();
+            let mut value = serde_json::to_value(&u).unwrap_or(serde_json::Value::Null);
+            if let Some(map) = value.as_object_mut() {
+                map.insert("sites".into(), serde_json::json!(sites));
+            }
+            value
+        })
+        .collect();
+    ok_json(serde_json::Value::Array(rows))
 }
 
 #[derive(Deserialize)]
@@ -697,6 +822,11 @@ struct UserPatch {
     /// `true` désactive, `false` réactive. Jamais de suppression.
     #[serde(default)]
     disabled: Option<bool>,
+    /// Portée par site (contrat § 17). Liste **vide** = accès à tous les
+    /// sites ; absente = on ne touche pas à la portée existante. La
+    /// distinction compte : `[]` est un ordre, `null` est un silence.
+    #[serde(default)]
+    sites: Option<Vec<String>>,
 }
 
 async fn update_user(
@@ -736,8 +866,60 @@ async fn update_user(
             return error_response(e);
         }
     }
+    if let Some(sites) = body.sites.as_deref() {
+        // ⚠️ Restreindre un `admin` ne veut rien dire : il gère les comptes,
+        // donc il lèverait sa propre restriction en trois clics. Le refus est
+        // ici, en plus du champ masqué dans l'interface — une limite qu'on
+        // peut retirer soi-même n'est pas une limite, et la promettre serait
+        // pire que ne rien promettre.
+        let target_role = match state.db.get_user(&username) {
+            Ok(u) => u.role,
+            Err(e) => return error_response(e),
+        };
+        if target_role == Role::Admin && !sites.is_empty() {
+            return fail(
+                StatusCode::CONFLICT,
+                "un administrateur voit tous les sites : il pourrait lever sa propre \
+                 restriction. Changez son rôle d'abord.",
+            );
+        }
+        let detail = if sites.is_empty() {
+            "tous les sites".to_string()
+        } else {
+            format!("{} site(s)", sites.len())
+        };
+        let written = state.db.set_user_sites(&username, sites);
+        match &written {
+            Ok(()) => audit(
+                &state,
+                Some(&actor.username),
+                "user.scope",
+                Some(&username),
+                Outcome::Success,
+                Some(&detail),
+            ),
+            Err(e) => audit(
+                &state,
+                Some(&actor.username),
+                "user.scope",
+                Some(&username),
+                Outcome::Failure,
+                Some(&e.to_string()),
+            ),
+        }
+        if let Err(e) = written {
+            return error_response(e);
+        }
+    }
     match state.db.get_user(&username) {
-        Ok(user) => ok_json(serde_json::to_value(user).unwrap_or(serde_json::Value::Null)),
+        Ok(user) => {
+            let sites = state.db.list_user_sites(&username).unwrap_or_default();
+            let mut value = serde_json::to_value(&user).unwrap_or(serde_json::Value::Null);
+            if let Some(map) = value.as_object_mut() {
+                map.insert("sites".into(), serde_json::json!(sites));
+            }
+            ok_json(value)
+        }
         Err(e) => error_response(e),
     }
 }
@@ -1029,12 +1211,15 @@ async fn test_notification(
 
 /// Les abonnements, **héritage déjà résolu**. Le refaire dans l'interface est
 /// exactement l'endroit où les deux se mettraient à diverger.
-async fn list_subscriptions(State(state): State<AppState>) -> Response {
-    let sites = match state.db.list_sites() {
+async fn list_subscriptions(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
+    let sites = match state.db.list_sites_scoped(&actor.scope) {
         Ok(sites) => sites,
         Err(e) => return error_response(e),
     };
-    let probes = match state.db.list_probes(None) {
+    let probes = match state.db.list_probes_scoped(None, &actor.scope) {
         Ok(probes) => probes,
         Err(e) => return error_response(e),
     };
@@ -1102,6 +1287,18 @@ async fn put_subscription(
         None => "hérite",
     };
     let target = format!("{}:{}", body.scope, body.scope_id);
+    // ⚠️ Écrire un abonnement hors portée reviendrait à révéler — et à
+    // modifier — le réglage d'alerte du site d'un autre client. Le refus
+    // prend la forme d'un 404 comme partout ailleurs : « inconnu », pas
+    // « interdit ».
+    let in_scope = match body.scope.as_str() {
+        "site" => actor.scope.allows(&body.scope_id),
+        "probe" => probe_in_scope(&state, &actor, &body.scope_id).is_ok(),
+        _ => true,
+    };
+    if !in_scope {
+        return fail(StatusCode::NOT_FOUND, "cible inconnue");
+    }
     let written = state
         .db
         .set_notify_subscription(&body.scope, &body.scope_id, body.enabled);
@@ -1147,8 +1344,11 @@ fn validate_url(value: &str) -> Result<(), String> {
 
 // ── Sites ──────────────────────────────────────────────────────────────────
 
-async fn list_sites(State(state): State<AppState>) -> Response {
-    match state.db.list_sites() {
+async fn list_sites(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
+    match state.db.list_sites_scoped(&actor.scope) {
         Ok(sites) => ok_json(serde_json::to_value(sites).unwrap_or(serde_json::Value::Null)),
         Err(e) => error_response(e),
     }
@@ -1186,6 +1386,9 @@ async fn rename_site(
     Path(id): Path<String>,
     Json(body): Json<SiteBody>,
 ) -> Response {
+    if let Err(refusal) = site_in_scope(&actor, &id) {
+        return refusal;
+    }
     match audited(
         &state,
         Some(&actor.username),
@@ -1203,6 +1406,9 @@ async fn delete_site(
     Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(refusal) = site_in_scope(&actor, &id) {
+        return refusal;
+    }
     match audited(
         &state,
         Some(&actor.username),
@@ -1227,6 +1433,12 @@ async fn create_enroll_code(
     Extension(actor): Extension<Identity>,
     Json(body): Json<EnrollCodeBody>,
 ) -> Response {
+    // ⚠️ Un opérateur restreint ne doit pas pouvoir poser une sonde chez un
+    // autre client. Le refus est un 404 : nommer un site qu'on n'a pas le
+    // droit de voir ne doit pas apprendre qu'il existe.
+    if let Err(refusal) = site_in_scope(&actor, &body.site_id) {
+        return refusal;
+    }
     let site = match state.db.get_site(&body.site_id) {
         Ok(site) => site,
         Err(e) => return error_response(e),
@@ -1733,10 +1945,17 @@ struct ProbeFilter {
     site: Option<String>,
 }
 
-async fn list_probes(State(state): State<AppState>, Query(filter): Query<ProbeFilter>) -> Response {
+async fn list_probes(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Query(filter): Query<ProbeFilter>,
+) -> Response {
     let interval = state.settings.heartbeat_interval_secs();
     let now = crate::db::now();
-    match state.db.list_probes(filter.site.as_deref()) {
+    match state
+        .db
+        .list_probes_scoped(filter.site.as_deref(), &actor.scope)
+    {
         Ok(probes) => ok_json(serde_json::Value::Array(
             probes
                 .into_iter()
@@ -1794,6 +2013,15 @@ async fn update_probe(
     Path(id): Path<String>,
     Json(body): Json<ProbePatch>,
 ) -> Response {
+    // La sonde d'origine est déjà validée par l'intergiciel de portée. Ce qui
+    // ne l'est pas, c'est la DESTINATION : sans ce contrôle, un opérateur
+    // restreint pourrait déplacer une sonde chez un autre client — et la
+    // perdre de vue au passage, puisqu'elle sortirait de sa propre portée.
+    if let Some(target) = body.site_id.as_deref() {
+        if let Err(refusal) = site_in_scope(&actor, target) {
+            return refusal;
+        }
+    }
     match audited(
         &state,
         Some(&actor.username),
@@ -3341,9 +3569,21 @@ async fn list_read_tokens(State(state): State<AppState>) -> Response {
 /// Les enrôlements encore ouverts, pour que l'interface les affiche comme des
 /// lignes en attente dans la liste des sondes du site, avec leur compte à
 /// rebours. Le code lui-même n'y figure pas : il est haché en base.
-async fn list_pending_codes(State(state): State<AppState>) -> Response {
+async fn list_pending_codes(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
     match state.db.pending_enroll_codes(crate::db::now()) {
-        Ok(rows) => ok_json(serde_json::to_value(rows).unwrap_or(serde_json::Value::Null)),
+        // ⚠️ Ces lignes portent le code d'enrôlement EN CLAIR. Un code de la
+        // baie d'un autre client suffirait à y poser une sonde : le filtre de
+        // portée n'est pas cosmétique ici, il est le contrôle.
+        Ok(rows) => {
+            let visible: Vec<_> = rows
+                .into_iter()
+                .filter(|r| actor.scope.allows(&r.site_id))
+                .collect();
+            ok_json(serde_json::to_value(visible).unwrap_or(serde_json::Value::Null))
+        }
         Err(e) => error_response(e),
     }
 }
@@ -6816,6 +7056,272 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK);
         assert!(h.state.db.notify_enabled_for_probe(&probe_id).unwrap());
+    }
+
+    // ── Portée par site (contrat § 17) ────────────────────────────────────
+
+    /// Deux clients, deux sites, et un compte qui n'a le droit d'en voir
+    /// qu'un. C'est le décor de tous les tests de portée qui suivent.
+    async fn two_clients_and_a_restricted_viewer(
+    ) -> (Harness, String, String, String, String, String) {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let (probe_a, _) = h.enroll(&admin, "Durand", "Paris").await;
+        let (probe_b, _) = h.enroll(&admin, "Martin", "Lyon").await;
+        let site_a = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+        let site_b = h.state.db.find_site_by_name("Martin").unwrap().unwrap().site_id;
+
+        h.user("claire", Role::Viewer).await;
+        h.state
+            .db
+            .set_user_sites("claire", &[site_a.clone()])
+            .unwrap();
+        let viewer = h.login_as("claire").await;
+        (h, viewer, site_a, site_b, probe_a, probe_b)
+    }
+
+    #[tokio::test]
+    async fn no_row_means_every_site_so_an_update_locks_nobody_out() {
+        // 🔴 Le point : le codage inverse — une ligne par site autorisé,
+        // obligatoire — aurait enfermé tous les comptes existants hors de
+        // leur parc à la migration. L'absence de ligne DOIT valoir « tout ».
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.enroll(&admin, "Durand", "Paris").await;
+        h.user("claire", Role::Viewer).await;
+        let viewer = h.login_as("claire").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &viewer))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 1, "aucune portée = tout voir");
+    }
+
+    #[tokio::test]
+    async fn a_restricted_account_only_lists_its_own_sites_and_probes() {
+        let (h, viewer, site_a, _site_b, _pa, _pb) = two_clients_and_a_restricted_viewer().await;
+
+        let (_, sites, _) = h
+            .call(with_cookie(empty_request("GET", "/api/sites"), &viewer))
+            .await;
+        let sites = sites.as_array().unwrap();
+        assert_eq!(sites.len(), 1, "un seul site visible");
+        assert_eq!(sites[0]["site_id"].as_str().unwrap(), site_a);
+
+        let (_, probes, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &viewer))
+            .await;
+        let probes = probes.as_array().unwrap();
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0]["site"].as_str().unwrap(), "Durand");
+    }
+
+    #[tokio::test]
+    async fn asking_for_a_site_outside_the_scope_returns_nothing_not_everything() {
+        // Le paramètre d'URL ne doit pas devenir une clé : demander le site
+        // d'un autre ne rend ni son parc, ni le sien par repli.
+        let (h, viewer, _a, site_b, _pa, _pb) = two_clients_and_a_restricted_viewer().await;
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes?site={site_b}")),
+                &viewer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_per_probe_route_answers_404_outside_the_scope() {
+        // 🔴 404 et non 403 : « ça existe mais pas pour vous » révèle déjà
+        // l'existence du site d'un autre client. Ce test balaie TOUTES les
+        // routes qui désignent une sonde — c'est le filet qui rattrape une
+        // route ajoutée plus tard sans son garde.
+        let (h, viewer, _a, _b, probe_a, probe_b) = two_clients_and_a_restricted_viewer().await;
+
+        for path in [
+            format!("/api/probes/{probe_b}/metrics"),
+            format!("/api/probes/{probe_b}/inventory"),
+            format!("/api/probes/{probe_b}/sla.csv"),
+            format!("/api/probes/{probe_b}/sla"),
+        ] {
+            let (status, _, _) = h
+                .call(with_cookie(empty_request("GET", &path), &viewer))
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path} doit répondre 404");
+        }
+
+        // Et la sonde de son propre site répond, elle : la portée restreint,
+        // elle ne casse pas.
+        let (status, _, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_a}/inventory?kind=ports")),
+                &viewer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_restricted_operator_cannot_touch_another_clients_site() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let (_, _) = h.enroll(&admin, "Durand", "Paris").await;
+        let (probe_b, _) = h.enroll(&admin, "Martin", "Lyon").await;
+        let site_a = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+        let site_b = h.state.db.find_site_by_name("Martin").unwrap().unwrap().site_id;
+        h.user("olivier", Role::Operator).await;
+        h.state.db.set_user_sites("olivier", &[site_a.clone()]).unwrap();
+        let op = h.login_as("olivier").await;
+
+        // Renommer le site d'un autre.
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request("PATCH", &format!("/api/sites/{site_b}"), serde_json::json!({ "name": "Volé" })),
+                &op,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            h.state.db.get_site(&site_b).unwrap().name,
+            "Martin",
+            "le site ne doit pas avoir bougé"
+        );
+
+        // Poser une sonde chez un autre.
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/enroll-codes", serde_json::json!({ "site_id": site_b })),
+                &op,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Piloter la sonde d'un autre.
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PATCH",
+                    &format!("/api/probes/{probe_b}"),
+                    serde_json::json!({ "name": "Volée" }),
+                ),
+                &op,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_probe_cannot_be_moved_out_of_the_operators_scope() {
+        // L'intergiciel valide la sonde d'ORIGINE ; sans ce contrôle-ci, la
+        // destination passait — et la sonde partait chez un autre client.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let (probe_a, _) = h.enroll(&admin, "Durand", "Paris").await;
+        h.enroll(&admin, "Martin", "Lyon").await;
+        let site_a = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+        let site_b = h.state.db.find_site_by_name("Martin").unwrap().unwrap().site_id;
+        h.user("olivier", Role::Operator).await;
+        h.state.db.set_user_sites("olivier", &[site_a.clone()]).unwrap();
+        let op = h.login_as("olivier").await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PATCH",
+                    &format!("/api/probes/{probe_a}"),
+                    serde_json::json!({ "site_id": site_b }),
+                ),
+                &op,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(h.state.db.get_probe(&probe_a).unwrap().site_id, site_a);
+    }
+
+    #[tokio::test]
+    async fn pending_enrollment_codes_of_another_client_are_never_listed() {
+        // Ces lignes portent le code EN CLAIR : le filtre n'est pas cosmétique,
+        // il est le contrôle. Un code suffit à poser une sonde chez l'autre.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.enroll(&admin, "Durand", "Paris").await;
+        let site_a = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+        let (_, site_b_json, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/sites", serde_json::json!({ "name": "Martin" })),
+                &admin,
+            ))
+            .await;
+        let site_b = site_b_json["site_id"].as_str().unwrap().to_string();
+        h.call(with_cookie(
+            json_request("POST", "/api/enroll-codes", serde_json::json!({ "site_id": site_b })),
+            &admin,
+        ))
+        .await;
+
+        h.user("olivier", Role::Operator).await;
+        h.state.db.set_user_sites("olivier", &[site_a]).unwrap();
+        let op = h.login_as("olivier").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", "/api/enroll-codes/pending"),
+                &op,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.as_array().unwrap().is_empty(),
+            "aucun code d'un autre site ne doit sortir : {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admin_can_never_be_restricted() {
+        // 🔴 Il gère les comptes : il lèverait sa propre restriction en trois
+        // clics. Une limite qu'on peut retirer soi-même n'est pas une limite,
+        // et la promettre serait pire que ne rien promettre.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.enroll(&admin, "Durand", "Paris").await;
+        let site_a = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+        h.user("alice", Role::Admin).await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PATCH",
+                    "/api/users/alice",
+                    serde_json::json!({ "sites": [site_a] }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(h.state.db.list_user_sites("alice").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_scope_set_then_cleared_gives_everything_back() {
+        let (h, viewer, site_a, _b, _pa, _pb) = two_clients_and_a_restricted_viewer().await;
+        let admin = h.login().await;
+        let _ = site_a;
+
+        // `[]` est un ordre — « plus de restriction » — et non un silence.
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request("PATCH", "/api/users/claire", serde_json::json!({ "sites": [] })),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, probes, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &viewer))
+            .await;
+        assert_eq!(probes.as_array().unwrap().len(), 2, "la portée est levée");
     }
 
     #[tokio::test]

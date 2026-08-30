@@ -573,7 +573,18 @@
     "disable_body": "La cuenta ya no puede iniciar sesión, y sus sesiones abiertas caen de inmediato.",
     "disable_keeps": "No se borra: el registro de auditoría nombra esta cuenta, y sus acciones pasadas siguen siendo legibles ahí. Puede reactivarla cuando quiera.",
     "disable_confirm": "Desactivar",
-    "disabling": "Desactivando…"
+    "disabling": "Desactivando…",
+    "col_scope": "Alcance",
+    "change_scope": "Alcance",
+    "scope_admin": "Todos los sitios (administrador)",
+    "scope_all": "Todos los sitios",
+    "scope_n": "{n} sitio(s)",
+    "scope_title": "Alcance de {name}",
+    "scope_lead": "Marque los sitios que esta cuenta puede ver. El filtrado ocurre en el hub: un sitio sin marcar no existe para ella, ni sus sondas.",
+    "scope_no_site": "Todavía no hay ningún sitio en el parque.",
+    "scope_none_means_all": "Ninguna casilla marcada: esta cuenta ve TODOS los sitios, incluidos los creados más adelante.",
+    "scope_selected": "{n} sitio(s) seleccionado(s). Esta cuenta no verá nada más.",
+    "scope_probe_count": "{n, plural, =0 {ninguna sonda} one {# sonda} other {# sondas}}"
   },
   "audit": {
     "title": "Registro de auditoría",

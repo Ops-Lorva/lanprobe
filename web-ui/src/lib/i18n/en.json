@@ -573,7 +573,18 @@
     "disable_body": "The account can no longer sign in, and its open sessions drop immediately.",
     "disable_keeps": "It is not deleted: the audit log names this account, and its past actions stay readable there. Re-enable it at any time.",
     "disable_confirm": "Disable",
-    "disabling": "Disabling…"
+    "disabling": "Disabling…",
+    "col_scope": "Scope",
+    "change_scope": "Scope",
+    "scope_admin": "All sites (administrator)",
+    "scope_all": "All sites",
+    "scope_n": "{n} site(s)",
+    "scope_title": "Scope of {name}",
+    "scope_lead": "Tick the sites this account may see. Filtering happens in the hub: an unticked site does not exist for them, nor do its probes.",
+    "scope_no_site": "No site in the fleet yet.",
+    "scope_none_means_all": "Nothing ticked: this account sees ALL sites, including those created later.",
+    "scope_selected": "{n} site(s) selected. This account will see nothing else.",
+    "scope_probe_count": "{n, plural, =0 {no probe} one {# probe} other {# probes}}"
   },
   "audit": {
     "title": "Audit log",

@@ -573,7 +573,18 @@
     "disable_body": "Le compte ne pourra plus se connecter, et ses sessions ouvertes tombent immédiatement.",
     "disable_keeps": "Il n'est pas supprimé : le journal d'audit nomme ce compte, et ses actions passées y restent lisibles. Réactivable à tout moment.",
     "disable_confirm": "Désactiver",
-    "disabling": "Désactivation…"
+    "disabling": "Désactivation…",
+    "col_scope": "Portée",
+    "change_scope": "Portée",
+    "scope_admin": "Tous les sites (administrateur)",
+    "scope_all": "Tous les sites",
+    "scope_n": "{n} site(s)",
+    "scope_title": "Portée de {name}",
+    "scope_lead": "Cochez les sites que ce compte a le droit de voir. Le filtrage se fait dans le hub : un site non coché n'existe pas pour lui, ses sondes non plus.",
+    "scope_no_site": "Aucun site dans le parc pour l'instant.",
+    "scope_none_means_all": "Aucune case cochée : ce compte voit TOUS les sites, y compris ceux créés plus tard.",
+    "scope_selected": "{n} site(s) sélectionné(s). Ce compte ne verra rien d'autre.",
+    "scope_probe_count": "{n, plural, =0 {aucune sonde} one {# sonde} other {# sondes}}"
   },
   "audit": {
     "title": "Journal d'audit",

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { _, locale } from 'svelte-i18n';
-  import { api, ApiError, type Account, type Role } from '$lib/api';
+  import { api, ApiError, type Account, type Role, type Site } from '$lib/api';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import RoleChoice from '$lib/components/RoleChoice.svelte';
@@ -16,6 +16,8 @@
   let accounts = $state<Account[]>([]);
   /** Refus du hub sur une action lancée hors dialogue (réactivation). */
   let rowError = $state('');
+  /** Les sites du parc, pour composer une portée (contrat § 17). */
+  let sites = $state<Site[]>([]);
 
   /**
    * Toute réponse du hub passe par ici. Un 401 renvoie à la connexion ; un 403
@@ -37,6 +39,10 @@
     rowError = '';
     try {
       accounts = (await api.users()) ?? [];
+      // Chargés avec les comptes : le sélecteur de portée doit pouvoir
+      // s'ouvrir sans attendre, et un échec ici ne doit pas priver l'écran
+      // de ce qu'il sait déjà afficher.
+      sites = await api.sites().catch(() => []);
     } catch (e) {
       const msg = handle(e);
       if (e instanceof ApiError && e.isForbidden) denied = msg;
@@ -59,6 +65,51 @@
     ),
   );
   const activeCount = $derived(accounts.filter((a) => a.disabled_at == null).length);
+
+  // ── Portée par site (contrat § 17) ───────────────────────────────────────
+  //
+  // ⚠️ Aucune case cochée = accès à TOUS les sites, jamais « aucun ». Le
+  // dialogue le dit en toutes lettres : un sélecteur vide qui voudrait dire
+  // « ne voit rien » serait le contresens le plus coûteux de cet écran.
+  let scopeTarget = $state<Account | null>(null);
+  let scopePicked = $state<string[]>([]);
+  let scopeError = $state('');
+  let scopeBusy = $state(false);
+
+  function openScope(a: Account) {
+    scopeTarget = a;
+    scopePicked = [...(a.sites ?? [])];
+    scopeError = '';
+  }
+
+  function toggleScope(siteId: string) {
+    scopePicked = scopePicked.includes(siteId)
+      ? scopePicked.filter((s) => s !== siteId)
+      : [...scopePicked, siteId];
+  }
+
+  async function submitScope() {
+    if (!scopeTarget) return;
+    scopeBusy = true;
+    scopeError = '';
+    try {
+      await api.patchUser(scopeTarget.username, { sites: scopePicked });
+      scopeTarget = null;
+      await load();
+    } catch (e) {
+      scopeError = handle(e);
+    } finally {
+      scopeBusy = false;
+    }
+  }
+
+  /** Ce que voit un compte, en une phrase, pour la colonne du tableau. */
+  function scopeLabel(a: Account): string {
+    const n = a.sites?.length ?? 0;
+    if (a.role === 'admin') return $_('accounts.scope_admin');
+    if (n === 0) return $_('accounts.scope_all');
+    return $_('accounts.scope_n', { values: { n } });
+  }
 
   // ── Création ─────────────────────────────────────────────────────────────
   let createOpen = $state(false);
@@ -222,6 +273,7 @@
     <div class="row header" aria-hidden="true">
       <span>{$_('accounts.col_account')}</span>
       <span>{$_('accounts.col_role')}</span>
+      <span>{$_('accounts.col_scope')}</span>
       <span>{$_('accounts.col_created')}</span>
       <span class="right">{$_('accounts.col_actions')}</span>
     </div>
@@ -241,6 +293,8 @@
           <span class="pill role-{a.role}">{$_(`accounts.role_${a.role}`)}</span>
         </span>
 
+        <span class="scope">{scopeLabel(a)}</span>
+
         <span class="created lp-mono">{dateOnly(a.created_at, lang)}</span>
 
         <!--
@@ -251,6 +305,14 @@
         -->
         <span class="acts">
           <button class="lp-btn sm" onclick={() => openRole(a)}>{$_('accounts.change_role')}</button>
+          <!-- Masqué pour un `admin` : le hub refuse de le restreindre, parce
+               qu'il lèverait sa propre limite en trois clics. Un bouton qui
+               n'aurait jamais qu'un refus à offrir n'apprend rien. -->
+          {#if a.role !== 'admin'}
+            <button class="lp-btn sm" onclick={() => openScope(a)}>
+              {$_('accounts.change_scope')}
+            </button>
+          {/if}
           <button class="lp-btn sm" onclick={() => openPassword(a)}>
             {$_('accounts.change_password')}
           </button>
@@ -268,6 +330,50 @@
     {/each}
   </div>
 {/if}
+
+<Modal
+  open={scopeTarget !== null}
+  title={$_('accounts.scope_title', { values: { name: scopeTarget?.username ?? '' } })}
+  onclose={() => (scopeTarget = null)}
+>
+  <p class="dlg-lead">{$_('accounts.scope_lead')}</p>
+
+  {#if sites.length === 0}
+    <p class="dlg-lead">{$_('accounts.scope_no_site')}</p>
+  {:else}
+    <div class="scope-list">
+      {#each sites as s (s.site_id)}
+        <label class="scope-row">
+          <input
+            type="checkbox"
+            checked={scopePicked.includes(s.site_id)}
+            onchange={() => toggleScope(s.site_id)}
+          />
+          <span class="scope-name">{s.name}</span>
+          <span class="scope-count">
+            {$_('accounts.scope_probe_count', { values: { n: s.probe_count } })}
+          </span>
+        </label>
+      {/each}
+    </div>
+  {/if}
+
+  <!-- ⚠️ La phrase qui compte : aucune case cochée ne veut pas dire « ne voit
+       rien ». Sans elle, on décocherait tout en croyant fermer un accès. -->
+  <p class="dlg-note" class:accent={scopePicked.length === 0}>
+    {scopePicked.length === 0
+      ? $_('accounts.scope_none_means_all')
+      : $_('accounts.scope_selected', { values: { n: scopePicked.length } })}
+  </p>
+
+  {#if scopeError}<p class="dlg-err" role="alert">{scopeError}</p>{/if}
+  {#snippet footer()}
+    <button class="lp-btn" onclick={() => (scopeTarget = null)}>{$_('common.cancel')}</button>
+    <button class="lp-btn primary" onclick={submitScope} disabled={scopeBusy}>
+      {scopeBusy ? $_('common.saving') : $_('common.save')}
+    </button>
+  {/snippet}
+</Modal>
 
 <Modal open={createOpen} title={$_('accounts.new_title')} onclose={() => (createOpen = false)}>
   <label class="lp-field">
@@ -391,12 +497,68 @@
      au lieu d'au-dessus. */
   .row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 120px 108px 300px;
+    grid-template-columns: minmax(0, 1fr) 120px 140px 108px 300px;
     align-items: center;
     gap: 10px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--ep-border);
     font-size: 12.5px;
+  }
+  .scope {
+    font-size: 11.5px;
+    color: var(--ep-text-secondary);
+  }
+  .scope-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 260px;
+    overflow-y: auto;
+    margin: 8px 0;
+  }
+  .scope-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--ep-border);
+    cursor: pointer;
+    font-size: 12.5px;
+  }
+  .scope-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .scope-count {
+    font-size: 11px;
+    color: var(--ep-text-secondary);
+  }
+  /* Les dialogues de cet écran n'avaient encore ni texte d'introduction ni
+     ligne d'erreur : les deux classes viennent d'ailleurs, elles se posent
+     ici avec la même forme que dans le parc. */
+  .dlg-lead {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--ep-text-secondary);
+    line-height: 1.5;
+  }
+  .dlg-err {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--ep-danger, #c0392b);
+  }
+  .dlg-note {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    color: var(--ep-text-secondary);
+  }
+  /* « Aucune case = tous les sites » est le contresens à éviter : quand c'est
+     l'état courant, la phrase se voit. */
+  .dlg-note.accent {
+    color: var(--ep-accent, #b8860b);
+    font-weight: 600;
   }
   .row:last-child {
     border-bottom: none;
@@ -504,11 +666,26 @@
      une décision. Sous 560 px, la ligne se replie en deux étages plutôt que de
      comprimer les boutons jusqu'à l'illisible — à 390 px, « Désactiver » doit
      rester lisible en entier. */
+  /* ⚠️ Les `nth-child` de l'en-tête doivent suivre EXACTEMENT l'ordre des
+     colonnes d'une ligne. La portée s'est insérée en 3e position : masquer le
+     mauvais rang décalerait tous les intitulés d'un cran, et la colonne
+     « Créé le » porterait le titre « Portée ». */
+  @media (max-width: 900px) {
+    .row {
+      grid-template-columns: minmax(0, 1fr) 120px 140px 300px;
+    }
+    .created,
+    .row.header span:nth-child(4) {
+      display: none;
+    }
+  }
   @media (max-width: 760px) {
     .row {
       grid-template-columns: minmax(0, 1fr) 300px;
     }
-    .created,
+    .scope,
+    .role,
+    .row.header span:nth-child(2),
     .row.header span:nth-child(3) {
       display: none;
     }

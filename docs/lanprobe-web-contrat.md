@@ -849,7 +849,7 @@ Ils vivent dans un stockage scellé à part, chiffré par le mécanisme existant
 affiche « configuré » ou « non configuré », avec un bouton de test — jamais la
 valeur.
 
-## 14. Fiche d'une sonde : cinq onglets (non implémenté)
+## 14. Fiche d'une sonde : cinq onglets ✅ implémenté (six, avec les commandes)
 
 Demandé par le propriétaire : la fiche reprend ce que fait LanProbe, et permet
 de le **déclencher à distance**.
@@ -1058,7 +1058,7 @@ retour du lien ; `broken` signifie que le hub a **refusé le jeton** — la sond
 révoquée et réessayer ne servira jamais à rien. Les mélanger laisserait attendre
 indéfiniment une reconnexion impossible.
 
-## 16. Configuration des sondes remontée au hub (non implémenté)
+## 16. Configuration des sondes remontée au hub ✅ implémenté
 
 Demandé le 28/08 : le hub connaît l'identité d'une sonde, pas sa configuration.
 Si la machine meurt, on ré-enrôle et **on reconfigure tout de mémoire**.
@@ -1077,7 +1077,7 @@ retour. Remonter les secrets ferait du hub un dépôt de mots de passe de tous l
 sites, et de sa sauvegarde une cible autrement plus intéressante — pour un
 bénéfice nul, puisqu'une sonde ré-enrôlée peut les redemander à son opérateur.
 
-## 17. Portée par site d'un compte (non implémenté)
+## 17. Portée par site d'un compte ✅ implémenté
 
 Demandé le 29/08 : un compte doit pouvoir ne voir **que certains sites**, ou
 tous. C'est ce qui permet de montrer son parc à un client sans lui montrer ceux

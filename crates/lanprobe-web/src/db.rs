@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -312,7 +312,70 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE probes ADD COLUMN config    TEXT;
     ALTER TABLE probes ADD COLUMN config_at INTEGER;
     "#,
+    // v13 → v14 : portée par site d'un compte (contrat § 17).
+    //
+    // ⚠️ **Aucune ligne = accès à tous les sites.** C'est le cas courant — une
+    // équipe qui gère tout — et il ne doit rien coûter à configurer. Le codage
+    // inverse (une ligne par site autorisé, obligatoire) aurait enfermé tous
+    // les comptes existants hors de leur parc à la première migration.
+    //
+    // La suppression en cascade est volontaire des deux côtés : un site
+    // supprimé ne doit pas laisser une portée qui le nomme encore, et un
+    // compte supprimé ne doit rien laisser derrière lui.
+    r#"
+    CREATE TABLE user_sites (
+      username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+      site_id  TEXT NOT NULL REFERENCES sites(site_id)  ON DELETE CASCADE,
+      PRIMARY KEY (username, site_id)
+    );
+    "#,
 ];
+
+/// Portée d'un compte : les sites qu'il a le droit de voir.
+///
+/// ⚠️ **`All` n'est pas « aucun site », c'est « tous ».** L'absence de ligne
+/// dans `user_sites` vaut accès complet (contrat § 17) : c'est le cas courant,
+/// et le codage inverse aurait enfermé tous les comptes existants hors de leur
+/// parc à la première migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    All,
+    Sites(Vec<String>),
+}
+
+impl Scope {
+    pub fn allows(&self, site_id: &str) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Sites(ids) => ids.iter().any(|s| s == site_id),
+        }
+    }
+
+    /// Fragment SQL à coller derrière un `WHERE` déjà ouvert, et ses
+    /// paramètres. Le filtrage se fait ici, en SQL, jamais en écartant des
+    /// lignes après coup : une liste tronquée côté interface laisse la donnée
+    /// passer sur le réseau, et suffit à révéler le parc d'un autre client.
+    fn sql_and_params<'a>(&'a self, column: &str) -> (String, Vec<&'a str>) {
+        match self {
+            Scope::All => (String::new(), Vec::new()),
+            // Une portée vide ne peut pas exister — `user_scope` rend `All`
+            // quand la table est vide — mais si elle arrivait ici, `IN ()`
+            // est une erreur de syntaxe SQLite. `1 = 0` ne montre rien, ce
+            // qui est le comportement sûr.
+            Scope::Sites(ids) if ids.is_empty() => (" 1 = 0".into(), Vec::new()),
+            Scope::Sites(ids) => {
+                let holes = (0..ids.len())
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (
+                    format!(" {column} IN ({holes})"),
+                    ids.iter().map(String::as_str).collect(),
+                )
+            }
+        }
+    }
+}
 
 /// Rapport de scan publié par une sonde (contrat § 12).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1623,6 +1686,113 @@ impl Db {
         )
         .optional()?
         .ok_or_else(|| DbError::NotFound("sonde inconnue".into()))
+    }
+
+    /// Les sites qu'un compte a le droit de voir.
+    ///
+    /// ⚠️ **Un `admin` n'est jamais restreint.** Il gère les comptes : il
+    /// pourrait lever sa propre restriction en trois clics, et une limite
+    /// qu'on retire soi-même n'est pas une limite. La règle est ici, en base,
+    /// pas seulement dans l'interface qui masque le champ.
+    pub fn user_scope(&self, username: &str, role: Role) -> DbResult<Scope> {
+        if role == Role::Admin {
+            return Ok(Scope::All);
+        }
+        let sites = self.list_user_sites(username)?;
+        Ok(if sites.is_empty() {
+            Scope::All
+        } else {
+            Scope::Sites(sites)
+        })
+    }
+
+    pub fn list_user_sites(&self, username: &str) -> DbResult<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT site_id FROM user_sites WHERE username = ?1 ORDER BY site_id",
+        )?;
+        let rows = stmt.query_map([username], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Remplace la portée d'un compte. Une liste vide rend l'accès à tout.
+    ///
+    /// ⚠️ Les sites sont vérifiés un par un : sans ça, une faute de frappe
+    /// dans un identifiant produirait une portée qui ne désigne rien — donc
+    /// un compte qui ne voit plus rien, sans message pour l'expliquer.
+    pub fn set_user_sites(&self, username: &str, site_ids: &[String]) -> DbResult<()> {
+        self.get_user(username)?;
+        for id in site_ids {
+            self.get_site(id)?;
+        }
+        let conn = self.lock()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM user_sites WHERE username = ?1", [username])?;
+        for id in site_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO user_sites (username, site_id) VALUES (?1, ?2)",
+                rusqlite::params![username, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Les sites visibles dans cette portée.
+    pub fn list_sites_scoped(&self, scope: &Scope) -> DbResult<Vec<Site>> {
+        let (clause, params) = scope.sql_and_params("s.site_id");
+        let conn = self.lock()?;
+        let sql = if clause.is_empty() {
+            format!("SELECT {SITE_COLUMNS} FROM sites s ORDER BY s.name COLLATE NOCASE")
+        } else {
+            format!(
+                "SELECT {SITE_COLUMNS} FROM sites s WHERE{clause} ORDER BY s.name COLLATE NOCASE"
+            )
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), site_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Les sondes visibles dans cette portée, éventuellement d'un seul site.
+    pub fn list_probes_scoped(
+        &self,
+        site_id: Option<&str>,
+        scope: &Scope,
+    ) -> DbResult<Vec<ProbeRecord>> {
+        // Demander un site hors portée ne rend pas « tout le parc » : il ne
+        // rend rien. Le contraire ferait d'un paramètre d'URL une clé.
+        if let Some(id) = site_id {
+            if !scope.allows(id) {
+                return Ok(Vec::new());
+            }
+        }
+        let (clause, scope_params) = scope.sql_and_params("p.site_id");
+        let conn = self.lock()?;
+        let base = format!(
+            "SELECT {PROBE_COLUMNS} FROM probes p JOIN sites s ON s.site_id = p.site_id"
+        );
+        let mut params: Vec<&str> = Vec::new();
+        let mut wheres: Vec<String> = Vec::new();
+        if let Some(id) = site_id {
+            wheres.push(" p.site_id = ?".into());
+            params.push(id);
+        }
+        if !clause.is_empty() {
+            wheres.push(clause);
+            params.extend(scope_params);
+        }
+        let sql = if wheres.is_empty() {
+            format!("{base} ORDER BY s.name COLLATE NOCASE, p.name COLLATE NOCASE")
+        } else {
+            format!(
+                "{base} WHERE{} ORDER BY s.name COLLATE NOCASE, p.name COLLATE NOCASE",
+                wheres.join(" AND")
+            )
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), probe_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn list_probes(&self, site_id: Option<&str>) -> DbResult<Vec<ProbeRecord>> {

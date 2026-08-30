@@ -271,6 +271,14 @@ export interface Account {
   created_at: number;
   /** Epoch en secondes quand le compte est désactivé, `null` s'il est actif. */
   disabled_at: number | null;
+  /**
+   * Sites que ce compte a le droit de voir (contrat § 17).
+   *
+   * ⚠️ **Liste vide = accès à TOUS les sites**, pas à aucun. C'est le cas
+   * courant et il ne coûte rien à configurer ; l'interpréter à l'envers
+   * afficherait « ne voit rien » pour la quasi-totalité des comptes.
+   */
+  sites: string[];
 }
 
 // ── Journal d'audit (contrat § 11) ──────────────────────────────────────────
@@ -808,8 +816,17 @@ export const api = {
       body: JSON.stringify({ username, password, role }),
     }),
 
-  /** Rôle, activation, ou les deux. Le hub refuse (409) ce qui couperait le dernier accès. */
-  patchUser: (username: string, patch: { role?: Role; disabled?: boolean }) =>
+  /**
+   * Rôle, activation, portée, ou tout à la fois. Le hub refuse (409) ce qui
+   * couperait le dernier accès, et refuse de restreindre un `admin`.
+   *
+   * ⚠️ `sites: []` est un ORDRE — « plus aucune restriction » — alors que
+   * l'absence du champ ne touche pas à la portée existante.
+   */
+  patchUser: (
+    username: string,
+    patch: { role?: Role; disabled?: boolean; sites?: string[] },
+  ) =>
     request<Account>(`/api/users/${encodeURIComponent(username)}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
