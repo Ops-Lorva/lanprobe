@@ -1122,7 +1122,7 @@ Une interface qui cache sans que le serveur refuse ne protège rien du tout.
 `GET /api/me` donne le rôle avant le premier clic — c'est ce qui rend le
 masquage possible sans sonder une route interdite et salir le journal d'audit.
 
-## 19. Mon compte : mot de passe ✅, TOTP ✅, passkeys (à faire)
+## 19. Mon compte : mot de passe ✅, TOTP ✅, clés d'accès ✅
 
 Un onglet « Mon compte » dans les réglages, accessible à **tous les rôles** :
 changer son mot de passe, activer une double authentification, gérer ses clés

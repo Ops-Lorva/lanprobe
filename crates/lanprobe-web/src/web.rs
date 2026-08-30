@@ -36,6 +36,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::Auth;
+use webauthn_rs::prelude::*;
 use crate::db::{AuditFilter, Db, DbError, DbResult, Outcome, ProbeIdentity, Role};
 use crate::influx::Influx;
 use crate::probe::ProbeStatus;
@@ -59,6 +60,12 @@ pub struct AppState {
     /// Magasin scellé (`enc:v1:`). Porte les secrets des canaux de
     /// notification et, depuis le second facteur, celui de chaque compte.
     pub secrets: crate::secrets::Secrets,
+    /// Défis WebAuthn entamés, en mémoire et à durée de vie courte.
+    ///
+    /// En mémoire et non en base : un défi ne survit pas à un redémarrage de
+    /// toute façon — le navigateur, lui, aura perdu le sien — et le poser en
+    /// base ne ferait qu'y laisser des lignes mortes.
+    pub ceremonies: Arc<crate::passkeys::Ceremonies>,
     /// Vrai quand le hub termine lui-même le TLS. Faux quand il sert en clair
     /// derrière un reverse proxy — le cas courant en auto-hébergement.
     pub tls: bool,
@@ -87,6 +94,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/setup", post(setup))
         .route("/api/login", post(login))
+        .route("/api/login/passkey/start", post(passkey_login_start))
+        .route("/api/login/passkey/finish", post(passkey_login_finish))
         .route("/api/logout", post(logout))
         .route("/api/probes/enroll", post(enroll))
         .route("/api/probes/{id}/write", post(write_metrics))
@@ -115,6 +124,10 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/me/totp", get(totp_status).delete(disable_own_totp))
             .route("/api/me/totp/start", post(start_own_totp))
             .route("/api/me/totp/confirm", post(confirm_own_totp))
+            .route("/api/me/passkeys", get(list_own_passkeys))
+            .route("/api/me/passkeys/start", post(start_passkey_registration))
+            .route("/api/me/passkeys/finish", post(finish_passkey_registration))
+            .route("/api/me/passkeys/{id}", axum::routing::delete(delete_own_passkey))
             .route("/api/probes", get(list_probes))
             .route("/api/settings", get(get_settings))
             .route("/api/settings/influx-advertise", get(get_advertise))
@@ -637,6 +650,361 @@ async fn disable_own_totp(
         None,
     );
     ok_json(json!({ "enabled": false }))
+}
+
+// ── Clés d'accès (contrat § 19) ────────────────────────────────────────────
+
+/// Décrit une clé sans rien révéler de sensible — une clé publique ne l'est
+/// pas, mais l'identifiant complet n'a aucune raison de s'afficher.
+fn passkey_json(p: &crate::db::PasskeyRecord) -> serde_json::Value {
+    json!({
+        "id": p.credential_id,
+        "label": p.label,
+        "created_at": p.created_at,
+        "last_used_at": p.last_used_at,
+    })
+}
+
+async fn list_own_passkeys(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+) -> Response {
+    let host = host_header(&headers).unwrap_or_default();
+    let https = is_https(&state, &headers);
+    match state.db.list_passkeys(&identity.username) {
+        Ok(rows) => ok_json(json!({
+            "passkeys": rows.iter().map(passkey_json).collect::<Vec<_>>(),
+            // ⚠️ Renvoyé pour que l'écran DISE pourquoi le bouton ne peut pas
+            // marcher, au lieu de proposer une action que le navigateur
+            // refusera sans message.
+            "secure_context": crate::passkeys::secure_context(&host, https),
+            "rp_id": crate::passkeys::rp_id_of(&host),
+        })),
+        Err(e) => error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct PasskeyLabel {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+async fn start_passkey_registration(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+) -> Response {
+    let host = host_header(&headers).unwrap_or_default();
+    let https = is_https(&state, &headers);
+    if !crate::passkeys::secure_context(&host, https) {
+        // Le navigateur refuserait de toute façon, mais sans rien dire
+        // d'exploitable. Le hub, lui, peut nommer la cause et la solution.
+        return fail(
+            StatusCode::CONFLICT,
+            "les clés d'accès exigent une connexion HTTPS (ou localhost). \
+             Activez le TLS dans Réglages → Général, ou placez le hub derrière \
+             un reverse proxy.",
+        );
+    }
+    let webauthn = match crate::passkeys::context(&host, https) {
+        Ok(w) => w,
+        Err(e) => return fail(StatusCode::CONFLICT, &e),
+    };
+
+    // Les clés déjà posées sont exclues : sans cela, le navigateur propose
+    // gaiement d'en réenregistrer une, et l'insertion échoue à la fin sur une
+    // contrainte d'unicité — après que l'utilisateur a touché son capteur.
+    let existing: Vec<CredentialID> = state
+        .db
+        .list_passkeys(&identity.username)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| serde_json::from_str::<Passkey>(&p.credential).ok())
+        .map(|k| k.cred_id().clone())
+        .collect();
+
+    // ⚠️ Un identifiant STABLE et propre au compte. Le tirer au hasard à
+    // chaque cérémonie ferait apparaître un nouveau compte dans le
+    // gestionnaire de clés à chaque enregistrement.
+    let user_unique_id = stable_user_uuid(&identity.username);
+
+    match webauthn.start_passkey_registration(
+        user_unique_id,
+        &identity.username,
+        &identity.username,
+        Some(existing),
+    ) {
+        Ok((challenge, registration)) => {
+            state
+                .ceremonies
+                .put_registration(&identity.username, registration);
+            ok_json(serde_json::to_value(challenge).unwrap_or(serde_json::Value::Null))
+        }
+        Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// Un UUID déterministe, dérivé du nom de compte.
+///
+/// WebAuthn veut un identifiant opaque et stable. Le nom seul ne convient pas
+/// (il doit faire 64 octets au plus et rester binaire), et un tirage aléatoire
+/// non plus : il changerait à chaque cérémonie, et le gestionnaire de clés du
+/// système afficherait un compte de plus à chaque enregistrement.
+fn stable_user_uuid(username: &str) -> Uuid {
+    let digest = ring::digest::digest(&ring::digest::SHA256, username.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest.as_ref()[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+#[derive(Deserialize)]
+struct FinishRegistration {
+    credential: RegisterPublicKeyCredential,
+    #[serde(flatten)]
+    naming: PasskeyLabel,
+}
+
+async fn finish_passkey_registration(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Json(body): Json<FinishRegistration>,
+) -> Response {
+    let host = host_header(&headers).unwrap_or_default();
+    let https = is_https(&state, &headers);
+    let webauthn = match crate::passkeys::context(&host, https) {
+        Ok(w) => w,
+        Err(e) => return fail(StatusCode::CONFLICT, &e),
+    };
+    let Some(pending) = state.ceremonies.take_registration(&identity.username) else {
+        return fail(
+            StatusCode::CONFLICT,
+            "aucune inscription en cours, ou elle a expiré — recommencez",
+        );
+    };
+
+    let passkey = match webauthn.finish_passkey_registration(&body.credential, &pending) {
+        Ok(k) => k,
+        Err(e) => {
+            audit(
+                &state,
+                Some(&identity.username),
+                "auth.passkey.add",
+                None,
+                Outcome::Failure,
+                Some(&e.to_string()),
+            );
+            return fail(StatusCode::BAD_REQUEST, &e.to_string());
+        }
+    };
+
+    let id = base64_url(passkey.cred_id().as_ref());
+    let label = body
+        .naming
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .unwrap_or("Clé d'accès")
+        .to_string();
+    let serialized = match serde_json::to_string(&passkey) {
+        Ok(s) => s,
+        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    match state
+        .db
+        .add_passkey(&identity.username, &id, &label, &serialized)
+    {
+        Ok(()) => {
+            audit(
+                &state,
+                Some(&identity.username),
+                "auth.passkey.add",
+                Some(&label),
+                Outcome::Success,
+                None,
+            );
+            ok_json(json!({ "ok": true }))
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+async fn delete_own_passkey(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.db.remove_passkey(&identity.username, &id) {
+        Ok(()) => {
+            audit(
+                &state,
+                Some(&identity.username),
+                "auth.passkey.remove",
+                Some(&id),
+                Outcome::Success,
+                None,
+            );
+            ok_json(json!({ "ok": true }))
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct PasskeyLoginStart {
+    username: String,
+}
+
+/// Ouvre une cérémonie d'authentification pour un compte.
+///
+/// ⚠️ Répond la même chose pour un compte sans clé et pour un compte
+/// inexistant : un défi qui n'aboutira jamais plutôt qu'un refus. Distinguer
+/// les deux transformerait cette route en oracle qui dit quels comptes
+/// existent, sans qu'aucun mot de passe soit demandé.
+async fn passkey_login_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PasskeyLoginStart>,
+) -> Response {
+    let host = host_header(&headers).unwrap_or_default();
+    let https = is_https(&state, &headers);
+    let webauthn = match crate::passkeys::context(&host, https) {
+        Ok(w) => w,
+        Err(e) => return fail(StatusCode::CONFLICT, &e),
+    };
+    let username = body.username.trim().to_string();
+    let keys: Vec<Passkey> = state
+        .db
+        .list_passkeys(&username)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| serde_json::from_str(&p.credential).ok())
+        .collect();
+
+    if keys.is_empty() {
+        return fail(
+            StatusCode::NOT_FOUND,
+            "aucune clé d'accès pour ce compte sur ce hub",
+        );
+    }
+
+    match webauthn.start_passkey_authentication(&keys) {
+        Ok((challenge, pending)) => {
+            state.ceremonies.put_authentication(&username, pending);
+            ok_json(serde_json::to_value(challenge).unwrap_or(serde_json::Value::Null))
+        }
+        Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct PasskeyLoginFinish {
+    username: String,
+    credential: PublicKeyCredential,
+}
+
+async fn passkey_login_finish(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PasskeyLoginFinish>,
+) -> Response {
+    let host = host_header(&headers).unwrap_or_default();
+    let https = is_https(&state, &headers);
+    let secure = is_https(&state, &headers);
+    let webauthn = match crate::passkeys::context(&host, https) {
+        Ok(w) => w,
+        Err(e) => return fail(StatusCode::CONFLICT, &e),
+    };
+    let username = body.username.trim().to_string();
+    let Some(pending) = state.ceremonies.take_authentication(&username) else {
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "aucune authentification en cours, ou elle a expiré",
+        );
+    };
+
+    let result = match webauthn.finish_passkey_authentication(&body.credential, &pending) {
+        Ok(r) => r,
+        Err(e) => {
+            audit(
+                &state,
+                Some(&username),
+                "auth.login",
+                None,
+                Outcome::Failure,
+                Some(&format!("clé d'accès refusée : {e}")),
+            );
+            return fail(StatusCode::UNAUTHORIZED, "clé d'accès refusée");
+        }
+    };
+
+    // Un compte désactivé ne rentre pas, quelle que soit la clé : la
+    // désactivation doit valoir pour tous les chemins d'entrée, sinon elle ne
+    // vaut rien.
+    match state.db.get_user(&username) {
+        Ok(user) if user.disabled_at.is_none() => {}
+        _ => {
+            audit(
+                &state,
+                Some(&username),
+                "auth.login",
+                None,
+                Outcome::Failure,
+                Some("compte désactivé"),
+            );
+            return fail(StatusCode::FORBIDDEN, "compte désactivé");
+        }
+    }
+
+    // 🔴 Le compteur anti-clonage a pu bouger : le réécrire est la seule
+    // chose qui rende ce compteur utile. Sans cette mise à jour, une clé
+    // dupliquée ne serait jamais détectée.
+    if result.needs_update() {
+        let id = base64_url(result.cred_id().as_ref());
+        if let Some(record) = state
+            .db
+            .list_passkeys(&username)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| p.credential_id == id)
+        {
+            if let Ok(mut key) = serde_json::from_str::<Passkey>(&record.credential) {
+                key.update_credential(&result);
+                if let Ok(updated) = serde_json::to_string(&key) {
+                    let _ = state.db.touch_passkey(&username, &id, &updated);
+                }
+            }
+        }
+    }
+
+    match state.auth.start_session(username.clone()) {
+        Ok(token) => {
+            audit(
+                &state,
+                Some(&username),
+                "auth.login",
+                None,
+                Outcome::Success,
+                Some("clé d'accès"),
+            );
+            (
+                [(header::SET_COOKIE, session_cookie(&token, false, secure))],
+                Json(json!({ "ok": true })),
+            )
+                .into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Base64 URL sans remplissage — la forme qu'emploie WebAuthn partout.
+fn base64_url(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Qui est connecté, et avec quel rôle.
@@ -4005,6 +4373,7 @@ mod tests {
                 influx,
                 notifier,
                 secrets,
+                ceremonies: std::sync::Arc::new(crate::passkeys::Ceremonies::new()),
                 // Les tests jouent le cas courant : hub en clair derrière un
                 // proxy. Le cookie `Secure` est vérifié via `X-Forwarded-Proto`.
                 tls: false,

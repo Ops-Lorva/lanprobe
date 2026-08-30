@@ -249,7 +249,12 @@
     "cookie_blocked": "Sesión iniciada, pero su navegador rechazó la cookie de sesión. Abra una ventana privada o borre las cookies de este sitio: una cookie dejada por una visita HTTPS anterior a la misma dirección bloquea la nueva.",
     "totp_label": "Código de un solo uso",
     "totp_hint": "Los 6 dígitos que muestra su aplicación de autenticación.",
-    "totp_bad": "Código rechazado. Compruebe la hora del dispositivo que lo genera y espere al siguiente código."
+    "totp_bad": "Código rechazado. Compruebe la hora del dispositivo que lo genera y espere al siguiente código.",
+    "or": "o",
+    "passkey_submit": "Iniciar sesión con una llave de acceso",
+    "passkey_waiting": "Siga las indicaciones de su dispositivo…",
+    "passkey_need_username": "Escriba primero su identificador.",
+    "passkey_none": "Ninguna llave de acceso para esta cuenta en este hub."
   },
   "fleet": {
     "title": "Parque",
@@ -841,6 +846,21 @@
     "totp_on": "El segundo factor está activo en esta cuenta.",
     "totp_pending": "Se generó un secreto pero nunca se confirmó: el segundo factor no está activo. Empiece de nuevo para obtener uno nuevo.",
     "totp_disable": "Desactivar el segundo factor",
-    "totp_lost_device": "⚠️ ¿Teléfono perdido? Desde el contenedor del hub: «lanprobe-web disable-totp <cuenta>». Es la única salida — no hay correo de recuperación ni soporte."
+    "totp_lost_device": "⚠️ ¿Teléfono perdido? Desde el contenedor del hub: «lanprobe-web disable-totp <cuenta>». Es la única salida — no hay correo de recuperación ni soporte.",
+    "passkeys": "Llaves de acceso",
+    "pk_lead": "Inicie sesión con la huella, la cara o el PIN del dispositivo, sin escribir contraseña. La llave nunca sale del dispositivo y solo funciona en este hub — eso es lo que la hace inmune al phishing.",
+    "pk_add": "Añadir una llave de acceso",
+    "pk_waiting": "Siga las indicaciones de su dispositivo…",
+    "pk_label": "Nombre de la llave",
+    "pk_label_placeholder": "Portátil de la oficina",
+    "pk_label_hint": "Sin nombre, no sabrá cuál revocar el día que se pierda un dispositivo.",
+    "pk_remove": "Revocar",
+    "pk_last_used": "usada el {date}",
+    "pk_never_used": "nunca usada",
+    "pk_cancelled": "Solicitud cancelada o caducada en el dispositivo.",
+    "pk_already": "Esta llave ya está registrada en esta cuenta.",
+    "pk_insecure": "El navegador se niega: la página no se sirve desde un origen seguro.",
+    "pk_rp": "Dirección actual: {host}.",
+    "pk_rp_bound": "⚠️ Una llave creada aquí solo valdrá para «{host}». Acceder al hub por otra dirección — su IP en vez de su nombre — mostrará «ninguna llave para este sitio»: es la protección contra el phishing haciendo su trabajo, no un fallo."
   }
 }

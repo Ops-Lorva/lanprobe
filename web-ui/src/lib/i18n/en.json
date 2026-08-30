@@ -249,7 +249,12 @@
     "cookie_blocked": "Signed in, but your browser refused the session cookie. Open a private window, or delete this site's cookies — a cookie left by an earlier HTTPS visit to the same address blocks the new one.",
     "totp_label": "One-time code",
     "totp_hint": "The 6 digits shown by your authenticator app.",
-    "totp_bad": "Code rejected. Check the clock of the device generating it, then wait for the next code."
+    "totp_bad": "Code rejected. Check the clock of the device generating it, then wait for the next code.",
+    "or": "or",
+    "passkey_submit": "Sign in with a passkey",
+    "passkey_waiting": "Follow your device…",
+    "passkey_need_username": "Enter your username first.",
+    "passkey_none": "No passkey for this account on this hub."
   },
   "fleet": {
     "title": "Fleet",
@@ -841,6 +846,21 @@
     "totp_on": "The second factor is active on this account.",
     "totp_pending": "A secret was generated but never confirmed: the second factor is not active. Start again to get a fresh one.",
     "totp_disable": "Turn off the second factor",
-    "totp_lost_device": "⚠️ Lost your phone? From the hub container: “lanprobe-web disable-totp <account>”. That is the only way back — there is no recovery email and no support."
+    "totp_lost_device": "⚠️ Lost your phone? From the hub container: “lanprobe-web disable-totp <account>”. That is the only way back — there is no recovery email and no support.",
+    "passkeys": "Passkeys",
+    "pk_lead": "Sign in with the device's fingerprint, face or PIN, without typing a password. The key never leaves the device and only works on this hub — that is what makes it phishing-proof.",
+    "pk_add": "Add a passkey",
+    "pk_waiting": "Follow your device…",
+    "pk_label": "Key name",
+    "pk_label_placeholder": "Office laptop",
+    "pk_label_hint": "Without a name, you will not know which one to revoke the day a device is lost.",
+    "pk_remove": "Revoke",
+    "pk_last_used": "used on {date}",
+    "pk_never_used": "never used",
+    "pk_cancelled": "Request cancelled or timed out on the device.",
+    "pk_already": "This key is already registered on this account.",
+    "pk_insecure": "The browser refuses: the page is not served from a secure origin.",
+    "pk_rp": "Current address: {host}.",
+    "pk_rp_bound": "⚠️ A key created here will only work for “{host}”. Reaching the hub by another address — its IP instead of its name — will show “no key for this site”: that is the anti-phishing protection doing its job, not a failure."
   }
 }

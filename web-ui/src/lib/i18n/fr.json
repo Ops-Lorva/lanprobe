@@ -249,7 +249,12 @@
     "cookie_blocked": "Connexion acceptée, mais votre navigateur a refusé le cookie de session. Ouvrez une fenêtre privée, ou supprimez les cookies de ce site — un cookie laissé par une visite précédente en HTTPS sur la même adresse empêche le nouveau de s'installer.",
     "totp_label": "Code à usage unique",
     "totp_hint": "Les 6 chiffres affichés par votre application d'authentification.",
-    "totp_bad": "Code refusé. Vérifiez l'heure de l'appareil qui le génère, puis attendez le code suivant."
+    "totp_bad": "Code refusé. Vérifiez l'heure de l'appareil qui le génère, puis attendez le code suivant.",
+    "or": "ou",
+    "passkey_submit": "Se connecter avec une clé d'accès",
+    "passkey_waiting": "Suivez votre appareil…",
+    "passkey_need_username": "Entrez d'abord votre identifiant.",
+    "passkey_none": "Aucune clé d'accès pour ce compte sur ce hub."
   },
   "fleet": {
     "title": "Parc",
@@ -841,6 +846,21 @@
     "totp_on": "Le second facteur est actif sur ce compte.",
     "totp_pending": "Un secret a été généré mais jamais confirmé : le second facteur n'est pas actif. Recommencez pour en obtenir un neuf.",
     "totp_disable": "Désactiver le second facteur",
-    "totp_lost_device": "⚠️ Téléphone perdu ? Depuis le conteneur du hub : « lanprobe-web disable-totp <compte> ». C'est la seule sortie de secours — il n'y a ni e-mail de récupération ni support."
+    "totp_lost_device": "⚠️ Téléphone perdu ? Depuis le conteneur du hub : « lanprobe-web disable-totp <compte> ». C'est la seule sortie de secours — il n'y a ni e-mail de récupération ni support.",
+    "passkeys": "Clés d'accès",
+    "pk_lead": "Se connecter avec l'empreinte, le visage ou le code de l'appareil, sans taper de mot de passe. La clé ne quitte jamais l'appareil et ne fonctionne que sur ce hub — c'est ce qui la rend insensible à l'hameçonnage.",
+    "pk_add": "Ajouter une clé d'accès",
+    "pk_waiting": "Suivez votre appareil…",
+    "pk_label": "Nom de la clé",
+    "pk_label_placeholder": "Portable du bureau",
+    "pk_label_hint": "Sans nom, on ne saura pas laquelle révoquer le jour où l'un des appareils est perdu.",
+    "pk_remove": "Révoquer",
+    "pk_last_used": "utilisée le {date}",
+    "pk_never_used": "jamais utilisée",
+    "pk_cancelled": "Demande annulée ou expirée sur l'appareil.",
+    "pk_already": "Cette clé est déjà enregistrée sur ce compte.",
+    "pk_insecure": "Le navigateur refuse : la page n'est pas servie sur une origine sûre.",
+    "pk_rp": "Adresse actuelle : {host}.",
+    "pk_rp_bound": "⚠️ Une clé créée ici ne vaudra que pour « {host} ». Joindre le hub par une autre adresse — son IP au lieu de son nom — affichera « aucune clé pour ce site » : c'est la protection contre l'hameçonnage qui fait son travail, pas une panne."
   }
 }

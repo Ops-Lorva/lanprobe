@@ -105,6 +105,20 @@ fn code_at(secret: &[u8], step: u64) -> u32 {
     binary % 10u32.pow(DIGITS)
 }
 
+/// Compare deux codes sans que la durée dépende de l'endroit où ils diffèrent.
+///
+/// Six chiffres, c'est un million de possibilités : un attaquant capable de
+/// distinguer « faux dès le premier chiffre » de « faux au dernier » réduit
+/// cet espace de recherche. Le OU exclusif suivi d'un test unique ne s'arrête
+/// jamais en chemin, contrairement à `==` sur des tableaux.
+fn equal_in_constant_time(a: u32, b: u32) -> bool {
+    let mut diff = 0u8;
+    for (x, y) in a.to_be_bytes().iter().zip(b.to_be_bytes().iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Le pas de temps courant pour un instant donné.
 pub fn step_of(unix_secs: i64) -> u64 {
     (unix_secs.max(0) as u64) / STEP_SECS
@@ -132,15 +146,7 @@ pub fn verify(secret_b32: &str, code: &str, now: i64, last_used_step: Option<u64
                 continue;
             }
         }
-        // Comparaison en temps constant : le code fait six chiffres, un
-        // attaquant qui mesure la différence entre « faux au premier chiffre »
-        // et « faux au dernier » réduit l'espace de recherche.
-        if ring::constant_time::verify_slices_are_equal(
-            &code_at(&secret, step).to_be_bytes(),
-            &typed.to_be_bytes(),
-        )
-        .is_ok()
-        {
+        if equal_in_constant_time(code_at(&secret, step), typed) {
             return Some(step);
         }
     }
@@ -208,6 +214,15 @@ mod tests {
         assert_eq!(code_at(&secret, step_of(59)), 287_082);
         assert_eq!(code_at(&secret, step_of(1_111_111_109)), 81_804);
         assert_eq!(code_at(&secret, step_of(1_234_567_890)), 5_924);
+    }
+
+    #[test]
+    fn the_constant_time_compare_still_compares() {
+        // Une comparaison en temps constant qui rendrait toujours la même
+        // chose serait « sûre » et parfaitement inutile.
+        assert!(equal_in_constant_time(123_456, 123_456));
+        assert!(!equal_in_constant_time(123_456, 123_457));
+        assert!(!equal_in_constant_time(0, 1_000_000));
     }
 
     #[test]

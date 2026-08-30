@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -344,6 +344,31 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE users ADD COLUMN totp_enabled   INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE users ADD COLUMN totp_last_step INTEGER;
+    "#,
+    // v15 → v16 : clés d'accès (contrat § 19).
+    //
+    // La clé publique et son compteur sont rangés en JSON opaque : leur forme
+    // appartient à la bibliothèque WebAuthn, et la recopier en colonnes
+    // obligerait à une migration à chaque évolution de la spécification pour
+    // un contenu que le hub ne lit jamais lui-même.
+    //
+    // Rien de secret ici — une clé PUBLIQUE ne l'est pas — donc pas de
+    // scellement : contrairement au TOTP, un vol de base ne donne aucun moyen
+    // de s'authentifier.
+    //
+    // `label` existe parce qu'on finit par en avoir plusieurs — le portable,
+    // le téléphone, une clé physique — et qu'« en révoquer une » n'a aucun
+    // sens si on ne peut pas les distinguer.
+    r#"
+    CREATE TABLE user_passkeys (
+      username      TEXT    NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+      credential_id TEXT    NOT NULL,
+      label         TEXT    NOT NULL,
+      credential    TEXT    NOT NULL,
+      created_at    INTEGER NOT NULL,
+      last_used_at  INTEGER,
+      PRIMARY KEY (username, credential_id)
+    );
     "#,
 ];
 
@@ -707,6 +732,17 @@ pub struct UserRecord {
     pub created_at: i64,
     /// Renseigné quand le compte est désactivé. On ne supprime pas un compte.
     pub disabled_at: Option<i64>,
+}
+
+/// Une clé d'accès enregistrée, telle qu'elle sort de la base.
+#[derive(Debug, Clone)]
+pub struct PasskeyRecord {
+    pub credential_id: String,
+    pub label: String,
+    /// Sérialisation opaque de la bibliothèque WebAuthn.
+    pub credential: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
 }
 
 /// Longueur minimale d'un mot de passe de compte, vérifiée en base et pas
@@ -1280,6 +1316,87 @@ impl Db {
             "UPDATE users SET totp_last_step = ?2 WHERE username = ?1",
             rusqlite::params![username, step as i64],
         )?;
+        Ok(())
+    }
+
+    /// Les clés d'accès d'un compte, telles que la bibliothèque WebAuthn les
+    /// a sérialisées.
+    pub fn list_passkeys(&self, username: &str) -> DbResult<Vec<PasskeyRecord>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT credential_id, label, credential, created_at, last_used_at
+             FROM user_passkeys WHERE username = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([username], |r| {
+            Ok(PasskeyRecord {
+                credential_id: r.get(0)?,
+                label: r.get(1)?,
+                credential: r.get(2)?,
+                created_at: r.get(3)?,
+                last_used_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn add_passkey(
+        &self,
+        username: &str,
+        credential_id: &str,
+        label: &str,
+        credential: &str,
+    ) -> DbResult<()> {
+        self.get_user(username)?;
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO user_passkeys (username, credential_id, label, credential, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![username, credential_id, label.trim(), credential, now()],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _)
+                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                DbError::Conflict("cette clé est déjà enregistrée sur ce compte".into())
+            }
+            other => DbError::from(other),
+        })?;
+        Ok(())
+    }
+
+    /// Met à jour la clé après une authentification réussie.
+    ///
+    /// ⚠️ Le compteur anti-clonage vit DANS `credential` : ne pas réécrire la
+    /// valeur rendue par la bibliothèque reviendrait à ne jamais détecter une
+    /// clé dupliquée, c'est-à-dire à perdre la seule protection que ce
+    /// compteur apporte.
+    pub fn touch_passkey(
+        &self,
+        username: &str,
+        credential_id: &str,
+        credential: &str,
+    ) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE user_passkeys SET credential = ?3, last_used_at = ?4
+             WHERE username = ?1 AND credential_id = ?2",
+            rusqlite::params![username, credential_id, credential, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Retire une clé. C'est la seule suppression assumée de ce schéma : une
+    /// clé perdue ou volée doit pouvoir disparaître, et la « désactiver »
+    /// laisserait un doute sur ce qu'elle peut encore.
+    pub fn remove_passkey(&self, username: &str, credential_id: &str) -> DbResult<()> {
+        let conn = self.lock()?;
+        let removed = conn.execute(
+            "DELETE FROM user_passkeys WHERE username = ?1 AND credential_id = ?2",
+            rusqlite::params![username, credential_id],
+        )?;
+        if removed == 0 {
+            return Err(DbError::NotFound("clé inconnue".into()));
+        }
         Ok(())
     }
 

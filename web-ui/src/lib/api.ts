@@ -504,6 +504,14 @@ export interface Subscriptions {
   probes: ProbeSubscription[];
 }
 
+/** Une clé d'accès enregistrée. Rien de secret : une clé publique ne l'est pas. */
+export interface Passkey {
+  id: string;
+  label: string;
+  created_at: number;
+  last_used_at: number | null;
+}
+
 export interface HubStatus {
   needs_setup: boolean;
   version: string;
@@ -673,6 +681,35 @@ export const api = {
     request<{ enabled: boolean }>('/api/me/totp', {
       method: 'DELETE',
       body: JSON.stringify({ password }),
+    }),
+
+  // ── Clés d'accès (contrat § 19) ─────────────────────────────────────────
+
+  passkeys: () =>
+    request<{ passkeys: Passkey[]; secure_context: boolean; rp_id: string }>('/api/me/passkeys'),
+
+  passkeyStart: () => request<unknown>('/api/me/passkeys/start', { method: 'POST' }),
+
+  passkeyFinish: (credential: unknown, label: string) =>
+    request<{ ok: boolean }>('/api/me/passkeys/finish', {
+      method: 'POST',
+      body: JSON.stringify({ credential, label }),
+    }),
+
+  passkeyDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/me/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** Ouvre une cérémonie de connexion par clé. `404` = ce compte n'en a pas. */
+  passkeyLoginStart: (username: string) =>
+    request<unknown>('/api/login/passkey/start', {
+      method: 'POST',
+      body: JSON.stringify({ username }),
+    }),
+
+  passkeyLoginFinish: (username: string, credential: unknown) =>
+    request<unknown>('/api/login/passkey/finish', {
+      method: 'POST',
+      body: JSON.stringify({ username, credential }),
     }),
 
   /** Qui est connecté, et avec quel rôle. `401` si la session ne tient plus. */

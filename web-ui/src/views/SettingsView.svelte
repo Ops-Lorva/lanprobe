@@ -10,6 +10,7 @@
     type BackupList,
     type HubSettings,
     type InfluxInfo,
+    type Passkey,
     type ReadToken,
   } from '$lib/api';
   import StateBlock from '$lib/components/StateBlock.svelte';
@@ -23,6 +24,7 @@
   import { go, route, type SettingsTab } from '$lib/router';
   import { canOperate, identity, isAdmin } from '$lib/session';
   import { dateOnly, humanBytes } from '$lib/time';
+  import { passkeysSupported, createCredential, ceremonyError } from '$lib/webauthn';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
   const lang = $derived($locale ?? 'en');
@@ -93,6 +95,7 @@
   onMount(() => {
     void load();
     void loadTotp();
+    void loadPasskeys();
     void loadInflux();
     // Ces deux-là ont un rôle minimum (contrat § 11) : le test d'URL annoncée
     // demande `operator`, les jetons de lecture `admin`. Les appeler pour tout
@@ -391,6 +394,61 @@
       totpError = e instanceof ApiError ? e.message : String(e);
     } finally {
       totpBusy = false;
+    }
+  }
+
+  // ── Clés d'accès (contrat § 19) ──────────────────────────────────────────
+  let passkeys = $state<Passkey[]>([]);
+  let pkSecure = $state(false);
+  let pkRpId = $state('');
+  let pkLabel = $state('');
+  let pkBusy = $state(false);
+  let pkError = $state('');
+
+  /**
+   * Deux conditions, et pas une : le hub doit servir sur une origine sûre, ET
+   * le navigateur doit exposer l'API. Un navigateur ancien sur un hub en HTTPS
+   * échouerait sinon au clic, sans rien expliquer.
+   */
+  const pkUsable = $derived(pkSecure && passkeysSupported());
+
+  async function loadPasskeys() {
+    try {
+      const r = await api.passkeys();
+      passkeys = r.passkeys;
+      pkSecure = r.secure_context;
+      pkRpId = r.rp_id;
+    } catch {
+      /* le reste de l'écran n'a pas à tomber pour autant */
+    }
+  }
+
+  async function addPasskey() {
+    pkBusy = true;
+    pkError = '';
+    try {
+      const challenge = await api.passkeyStart();
+      const credential = await createCredential(challenge as never);
+      await api.passkeyFinish(credential, pkLabel.trim());
+      pkLabel = '';
+      await loadPasskeys();
+    } catch (e) {
+      pkError = e instanceof ApiError ? e.message : ceremonyError(e, (k) => $_(k));
+    } finally {
+      pkBusy = false;
+    }
+  }
+
+  async function removePasskey(id: string) {
+    pkBusy = true;
+    pkError = '';
+    try {
+      await api.passkeyDelete(id);
+      await loadPasskeys();
+    } catch (e) {
+      pkError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      pkBusy = false;
     }
   }
 
@@ -750,7 +808,64 @@
         </div>
       {/if}
 
-      <p class="hint">{$_('account.passkey_warning')}</p>
+    </section>
+
+    <section class="lp-card block">
+      <h2 class="lp-title">{$_('account.passkeys')}</h2>
+      <p class="sub">{$_('account.pk_lead')}</p>
+
+      {#if passkeys.length > 0}
+        <div class="pk-list">
+          {#each passkeys as k (k.id)}
+            <div class="pk-row">
+              <span class="pk-name">{k.label}</span>
+              <span class="pk-when">
+                {k.last_used_at
+                  ? $_('account.pk_last_used', {
+                      values: { date: dateOnly(k.last_used_at, lang) },
+                    })
+                  : $_('account.pk_never_used')}
+              </span>
+              <button class="lp-btn danger sm" disabled={pkBusy} onclick={() => removePasskey(k.id)}>
+                {$_('account.pk_remove')}
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      {#if pkUsable}
+        <label class="lp-field">
+          {$_('account.pk_label')}
+          <input
+            class="lp-input"
+            bind:value={pkLabel}
+            placeholder={$_('account.pk_label_placeholder')}
+            maxlength="40"
+          />
+          <!-- Sans nom, « en révoquer une » n'a aucun sens dès qu'on en a
+               deux : on ne saurait pas laquelle est le téléphone perdu. -->
+          <span class="hint">{$_('account.pk_label_hint')}</span>
+        </label>
+        {#if pkError}<p class="err" role="alert">{pkError}</p>{/if}
+        <div class="row-btns">
+          <button class="lp-btn primary" onclick={addPasskey} disabled={pkBusy}>
+            {pkBusy ? $_('account.pk_waiting') : $_('account.pk_add')}
+          </button>
+        </div>
+      {:else}
+        <!-- ⚠️ Le bouton n'est pas grisé, il est ABSENT, et la raison est
+             écrite. Le navigateur refuserait l'API sans message exploitable,
+             et un bouton qui ne fait rien laisse chercher la panne ailleurs. -->
+        <p class="warn-inline">{$_('account.passkey_warning')}</p>
+        {#if pkRpId}
+          <p class="hint">{$_('account.pk_rp', { values: { host: pkRpId } })}</p>
+        {/if}
+      {/if}
+
+      {#if pkUsable && pkRpId}
+        <p class="hint">{$_('account.pk_rp_bound', { values: { host: pkRpId } })}</p>
+      {/if}
     </section>
   </div>
   {/if}
@@ -1452,6 +1567,37 @@
   }
   /* « Enregistré mais pas appliqué » n'est ni une erreur ni un succès : c'est
      une action qui reste à faire. La couleur d'accent le dit sans crier. */
+  .pk-list {
+    display: flex;
+    flex-direction: column;
+    margin: 4px 0 10px;
+  }
+  .pk-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 0;
+    border-top: 1px solid var(--ep-border);
+    font-size: 12.5px;
+  }
+  .pk-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pk-when {
+    font-size: 11px;
+    color: var(--ep-text-secondary);
+  }
+  /* L'avertissement remplace le bouton : il doit se lire comme une raison,
+     pas comme une note de bas de page. */
+  .warn-inline {
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ep-accent, #b8860b);
+  }
   .qr {
     display: flex;
     justify-content: center;

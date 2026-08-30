@@ -1,6 +1,7 @@
 <script lang="ts">
   import { _ } from 'svelte-i18n';
   import { api, ApiError, whoami, type Identity } from '$lib/api';
+  import { passkeysSupported, getAssertion, ceremonyError } from '$lib/webauthn';
   import AuthFrame from './AuthFrame.svelte';
 
   const { onDone, notice = '' } = $props<{
@@ -22,6 +23,47 @@
    */
   let totpNeeded = $state(false);
   let code = $state('');
+
+  /**
+   * La connexion par clé d'accès.
+   *
+   * ⚠️ Le bouton n'apparaît que si le navigateur peut réellement l'utiliser :
+   * proposer une clé sur un hub en HTTP donnerait un clic qui échoue sans
+   * message, et enverrait chercher la panne du mauvais côté.
+   */
+  const canPasskey = passkeysSupported();
+  let pkBusy = $state(false);
+
+  async function signInWithPasskey() {
+    const who = username.trim();
+    if (!who) {
+      error = $_('auth.passkey_need_username');
+      return;
+    }
+    pkBusy = true;
+    error = '';
+    try {
+      const challenge = await api.passkeyLoginStart(who);
+      const assertion = await getAssertion(challenge as never);
+      await api.passkeyLoginFinish(who, assertion);
+      const identity = await whoami();
+      if (!identity) {
+        error = $_('auth.cookie_blocked');
+        return;
+      }
+      onDone(identity);
+    } catch (err) {
+      if (err instanceof ApiError && err.isNetwork) error = $_('auth.unreachable');
+      // 404 : ce compte n'a aucune clé sur ce hub. C'est une information que
+      // l'utilisateur a demandée en cliquant, pas une fuite : il faut un nom
+      // de compte pour l'obtenir, exactement comme pour un mot de passe.
+      else if (err instanceof ApiError && err.status === 404) error = $_('auth.passkey_none');
+      else if (err instanceof ApiError) error = err.message;
+      else error = ceremonyError(err, (k) => $_(k));
+    } finally {
+      pkBusy = false;
+    }
+  }
 
   async function submit(e: Event) {
     e.preventDefault();
@@ -117,6 +159,17 @@
     <button class="lp-btn primary" type="submit" disabled={busy}>
       {busy ? $_('auth.submitting') : $_('auth.submit')}
     </button>
+
+    {#if canPasskey && !totpNeeded}
+      <!-- Sous le mot de passe et non au-dessus : c'est le chemin que
+           connaissent ceux qui en ont une, pas celui qu'on découvre. Une clé
+           d'accès remplace le mot de passe ET le second facteur — elle est
+           déjà liée à l'appareil et déverrouillée par lui. -->
+      <div class="or" aria-hidden="true"><span>{$_('auth.or')}</span></div>
+      <button class="lp-btn" type="button" onclick={signInWithPasskey} disabled={pkBusy}>
+        {pkBusy ? $_('auth.passkey_waiting') : $_('auth.passkey_submit')}
+      </button>
+    {/if}
   </form>
 </AuthFrame>
 
@@ -144,6 +197,24 @@
   .hint {
     font-size: 11px;
     color: var(--ep-text-secondary);
+  }
+  /* Séparateur « ou » : un simple filet coupé par le mot, pour que les deux
+     chemins se lisent comme des alternatives et non comme une suite d'étapes. */
+  .or {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--ep-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .or::before,
+  .or::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--ep-border);
   }
   .err {
     font-size: 12px;

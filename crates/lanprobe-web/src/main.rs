@@ -253,6 +253,7 @@ async fn main() -> Result<(), String> {
         influx,
         notifier,
         secrets,
+        ceremonies: Arc::new(lanprobe_web::passkeys::Ceremonies::new()),
         tls: tls_on,
         config_dir: args.config_dir.clone(),
         backup_dir: args.backup_dir.clone(),
