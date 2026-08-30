@@ -45,9 +45,14 @@ FROM rust:1.98.0-slim-bookworm@sha256:1469a27c125cb5a3aebfa4f4e4665d935b02fb72cc
 # crates/lanprobe-server/Cargo.toml) en ont besoin. À ajuster si le Cargo.toml
 # réel de lanprobe-web introduit d'autres dépendances système (ex.
 # libsqlite3-dev si le stockage SQLite du contrat n'est pas "bundled").
+# libssl-dev : `webauthn-rs` (clés d'accès) passe par `openssl-sys`, qui se
+# lie à la libssl du système. Le paquet `openssl` de l'étape finale apporte la
+# bibliothèque d'exécution correspondante ; les deux images étant épinglées à
+# la même Debian 12 par empreinte, l'ABI ne peut pas diverger entre elles.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         pkg-config \
+        libssl-dev \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
