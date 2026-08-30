@@ -503,12 +503,17 @@ pub async fn enroll(
             // certificat » n'a pas la même correction que « personne ne
             // répond », et le message générique enverrait l'utilisateur
             // vérifier son réseau alors que son hub est parfaitement joignable.
-            let hint = if !allow_self_signed && looks_like_tls_failure(&e) {
-                " — certificat non vérifiable. Si votre hub utilise un certificat auto-signé, cochez l'option correspondante ; sinon placez-le derrière un reverse proxy muni d'un vrai certificat."
+            let hint = if !allow_self_signed && pin.trim().is_empty() && looks_like_tls_failure(&e)
+            {
+                " — certificat non vérifiable. Confirmez son empreinte pour l'épingler, \
+                 ou placez le hub derrière un reverse proxy muni d'un vrai certificat."
+            } else if !pin.trim().is_empty() && looks_like_tls_failure(&e) {
+                " — le certificat présenté ne correspond pas à l'empreinte épinglée. \
+                 Soit le hub en a changé, soit ce n'est pas lui."
             } else {
                 ""
             };
-            format!("hub injoignable : {e}{hint}")
+            format!("hub injoignable : {}{hint}", cause_chain(&e))
         })?;
 
     let status = response.status();
@@ -993,8 +998,34 @@ fn platform() -> &'static str {
 
 /// Vrai quand l'erreur de `reqwest` ressemble à un refus de certificat.
 fn looks_like_tls_failure(error: &reqwest::Error) -> bool {
-    let text = error.to_string().to_lowercase();
-    text.contains("certificate") || text.contains("tls") || text.contains("self-signed")
+    let text = cause_chain(error).to_lowercase();
+    ["certificate", "certificat", "tls", "self-signed", "unknownissuer", "invalidcertificate"]
+        .iter()
+        .any(|needle| text.contains(needle))
+}
+
+/// Le message d'une erreur `reqwest`, **avec sa chaîne de causes**.
+///
+/// 🔴 `reqwest::Error` s'affiche seul en « error sending request for url … »,
+/// qui ne dit rien : la vraie raison — certificat refusé, connexion refusée,
+/// nom introuvable — vit dans `source()`. Sans la dérouler, le message montré
+/// à l'utilisateur est inutile, et toute détection faite dessus échoue en
+/// silence. C'est exactement ce qui rendait la mention « certificat non
+/// vérifiable » inatteignable.
+fn cause_chain(error: &reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source: Option<&(dyn std::error::Error + 'static)> =
+        std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        // Une cause qui répète la précédente n'apprend rien et allonge le
+        // message que l'utilisateur doit lire.
+        if !parts.iter().any(|p| p == &text) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(" : ")
 }
 
 /// Client HTTP vers le hub.

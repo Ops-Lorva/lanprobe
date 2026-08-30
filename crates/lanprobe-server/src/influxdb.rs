@@ -40,32 +40,21 @@ impl InfluxClient {
         probe_id: &str,
         token: &str,
         host_tag: String,
-        allow_self_signed: bool,
+        hub_cfg: &crate::hub::HubConfig,
         source: Option<std::net::Ipv4Addr>,
     ) -> Self {
         Self {
-            // Le hub peut porter un certificat auto-signé quand l'utilisateur
-            // l'a explicitement déclaré : le relais des mesures doit suivre le
-            // même réglage que le battement de cœur, sinon la sonde se
-            // rattache mais n'écrit jamais rien.
-            http: {
-                let builder = reqwest::Client::builder();
-                let builder = if allow_self_signed {
-                    builder.danger_accept_invalid_certs(true)
-                } else {
-                    builder
-                };
-                // Même contrainte que le battement de cœur : les mesures
-                // partent par l'interface sélectionnée, jamais par une autre.
-                // Sans ça, une sonde pouvait mesurer un lien mort et livrer
-                // ses relevés par un lien sain — le hub voyait des données
-                // arriver d'une interface qui ne portait rien.
-                let builder = match source {
-                    Some(ip) => builder.local_address(std::net::IpAddr::V4(ip)),
-                    None => builder,
-                };
-                builder.build().unwrap_or_default()
-            },
+            // 🔴 **Le même client que le battement de cœur**, épingle
+            // comprise. Un client construit ici à part est exactement ce qui
+            // s'était produit : la sonde se rattachait, battait, et n'écrivait
+            // jamais rien — le tampon grossissait en silence pendant que
+            // l'interface annonçait « rattachée ». Passer la configuration
+            // entière plutôt que des bouts rend cette divergence impossible.
+            //
+            // La contrainte d'interface vaut ici aussi : sans elle, une sonde
+            // pouvait mesurer un lien mort et livrer ses relevés par un lien
+            // sain.
+            http: crate::hub::http_client_pinned(hub_cfg, source),
             base_url: format!(
                 "{}/api/probes/{}/write",
                 hub_url.trim_end_matches('/'),
@@ -306,15 +295,7 @@ async fn hub_client(state: &AppState, key: &crate::secrets::SecretKey) -> Option
     };
     tracing::info!("mesures envoyées au hub {} (sonde « {} »)", cfg.url, host_tag);
     Some(
-        InfluxClient::for_hub(
-            &cfg.url,
-            &cfg.probe_id,
-            &token,
-            host_tag,
-            cfg.allow_self_signed,
-            source,
-        )
-        .await,
+        InfluxClient::for_hub(&cfg.url, &cfg.probe_id, &token, host_tag, &cfg, source).await,
     )
 }
 
@@ -520,7 +501,7 @@ mod tests {
             "13f1af69-6f84-41c5-a1c4-cf742b02b71d",
             "jeton",
             "Windows".into(),
-            false,
+            &crate::hub::HubConfig::default(),
             None,
         )
         .await;
