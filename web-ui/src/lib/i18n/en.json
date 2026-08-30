@@ -701,7 +701,13 @@
     "test_failed": "Failed",
     "test_skipped": "Not configured, not tested.",
     "channel_webhook": "Webhook",
-    "channel_smtp": "SMTP"
+    "channel_smtp": "SMTP",
+    "site_alerts": "Site alerts",
+    "site_alerts_for": "Alerts for {name}",
+    "site_panel_lead": "A probe follows its site unless you give it an exception. The hub announces state changes only, and it announces the recovery too.",
+    "subs_moved": "Alerts are set on each site, from the fleet. Here is what applies today.",
+    "subs_count": "{n} / {total} probe(s)",
+    "subs_goto_fleet": "Go to the fleet"
   },
   "commands": {
     "col_by": "By",

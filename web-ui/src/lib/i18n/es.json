@@ -701,7 +701,13 @@
     "test_failed": "Con error",
     "test_skipped": "Sin configurar, no probado.",
     "channel_webhook": "Webhook",
-    "channel_smtp": "SMTP"
+    "channel_smtp": "SMTP",
+    "site_alerts": "Alertas del sitio",
+    "site_alerts_for": "Alertas de {name}",
+    "site_panel_lead": "Una sonda sigue a su sitio, salvo que se le ponga una excepción. El hub solo anuncia los cambios de estado, y anuncia también la vuelta.",
+    "subs_moved": "Las alertas se configuran en cada sitio, desde el parque. Esto es lo que se aplica hoy.",
+    "subs_count": "{n} / {total} sonda(s)",
+    "subs_goto_fleet": "Ir al parque"
   },
   "commands": {
     "col_by": "Por",

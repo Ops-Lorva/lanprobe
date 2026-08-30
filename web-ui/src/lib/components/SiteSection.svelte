@@ -18,6 +18,8 @@
     expanded: boolean;
     ontoggle: () => void;
     onrename: () => void;
+    /** Ouvre les alertes DU SITE : c'est ici qu'on décide qui réveille qui. */
+    onalerts: () => void;
     onfocusSite: () => void;
     /** Ouvre le rapport SLA du site — la sélection des sondes se fait là. */
     onexportSla: () => void;
@@ -43,6 +45,7 @@
     expanded,
     ontoggle,
     onrename,
+    onalerts,
     onfocusSite,
     onadd,
     addBusy = false,
@@ -123,6 +126,21 @@
         </svg>
       </button>
       {#if $canOperate}
+      <!-- Les alertes se règlent là où l'on pense au site, pas dans un écran
+           de réglages qu'on ouvre une fois par trimestre. La question « ce
+           site doit-il réveiller quelqu'un ? » se pose en regardant ses
+           sondes, donc ici. -->
+      <button
+        class="lp-btn ghost sm"
+        onclick={onalerts}
+        title={$_('notify.site_alerts')}
+        aria-label={$_('notify.site_alerts_for', { values: { name: siteName } })}
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2a3.5 3.5 0 0 0-3.5 3.5c0 3-1.2 4-1.2 4h9.4s-1.2-1-1.2-4A3.5 3.5 0 0 0 8 2z" />
+          <path d="M6.8 11.6a1.4 1.4 0 0 0 2.4 0" />
+        </svg>
+      </button>
       <button
         class="lp-btn ghost sm"
         onclick={onrename}

@@ -14,6 +14,7 @@
   import StateBlock from '$lib/components/StateBlock.svelte';
   import StatusMark from '$lib/components/StatusMark.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import SiteAlerts from '$lib/components/SiteAlerts.svelte';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
 
@@ -282,6 +283,19 @@
   // remet à un client. On choisit les sondes à y faire figurer : toutes ne le
   // concernent pas forcément, et un rapport qui expose une sonde d'un autre
   // client serait pire qu'inutile.
+  // ── Alertes du site ───────────────────────────────────────────────────────
+  //
+  // Le panneau se monte à l'ouverture et relit ses abonnements à chaque
+  // écriture : c'est le hub qui résout l'héritage site → sonde, et le
+  // recalculer ici en serait une deuxième implémentation.
+  let alertsSiteId = $state('');
+  let alertsSiteName = $state('');
+
+  function openAlerts(siteId: string, siteName: string) {
+    alertsSiteId = siteId;
+    alertsSiteName = siteName;
+  }
+
   let slaSiteId = $state('');
   let slaSiteName = $state('');
   let slaPicked = $state(new SvelteSet<string>());
@@ -542,6 +556,7 @@
             [g.site.site_id]: !isExpanded(g.site.site_id, g.probes, groups.length),
           })}
         onrename={() => openRename(g.site.site_id, g.site.name)}
+        onalerts={() => openAlerts(g.site.site_id, g.site.name)}
         onexportSla={() => openSlaExport(g.site.site_id, g.site.name)}
         onfocusSite={() => fleet.selectSite(g.site.site_id, onExpired)}
         onadd={() => void addProbe(g.site.site_id, g.site.name)}
@@ -621,6 +636,22 @@
     >
       {slaBusy ? $_('sla.exporting') : $_('sla.export')}
     </button>
+  {/snippet}
+</Modal>
+
+<Modal
+  open={alertsSiteId !== ''}
+  title={$_('notify.site_alerts_for', { values: { name: alertsSiteName } })}
+  onclose={() => (alertsSiteId = '')}
+>
+  <!-- ⚠️ `{#key}` : sans lui, rouvrir le panneau sur un AUTRE site réutilise
+       le composant déjà monté, qui garde les abonnements du premier — on
+       réglerait les alertes d'un site en croyant régler celles d'un autre. -->
+  {#key alertsSiteId}
+    <SiteAlerts siteId={alertsSiteId} {onExpired} />
+  {/key}
+  {#snippet footer()}
+    <button class="lp-btn" onclick={() => (alertsSiteId = '')}>{$_('common.close')}</button>
   {/snippet}
 </Modal>
 

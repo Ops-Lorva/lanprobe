@@ -13,7 +13,7 @@
     type Subscriptions,
     type WebhookTemplate,
   } from '$lib/api';
-  import { canOperate, isAdmin } from '$lib/session';
+  import { isAdmin } from '$lib/session';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
 
@@ -49,7 +49,6 @@
   let subs = $state<Subscriptions | null>(null);
   let subsLoading = $state(true);
   let subsError = $state('');
-  let subsBusy = $state('');
 
   async function loadSubs() {
     subsLoading = true;
@@ -62,38 +61,6 @@
     } finally {
       subsLoading = false;
     }
-  }
-
-  /**
-   * Après chaque écriture on relit tout.
-   *
-   * ⚠️ L'héritage est résolu par le hub : `enabled` est ce qui s'applique,
-   * `exception` ce qui est réglé sur la sonde. Le recalculer en JS après un clic
-   * serait la deuxième implémentation de la règle, donc l'endroit exact où les
-   * deux se mettraient à diverger — activer un site montrerait ses sondes
-   * activées ici et pas là-bas.
-   */
-  async function setSub(
-    scope: 'site' | 'probe',
-    id: string,
-    enabled: boolean | null,
-    key: string,
-  ) {
-    subsBusy = key;
-    subsError = '';
-    let refused = '';
-    try {
-      await api.setSubscription(scope, id, enabled);
-    } catch (e) {
-      refused = handle(e);
-    }
-    // On relit même après un refus. Le navigateur a déjà déplacé la liste
-    // déroulante, lui : sans relecture, elle resterait sur un choix que le hub
-    // n'a pas retenu — et à côté d'une colonne « effectif » qui, elle, dit la
-    // vérité. Un contrôle qui ment est pire qu'un refus.
-    await loadSubs();
-    if (refused) subsError = refused;
-    subsBusy = '';
   }
 
   type Group = { site_id: string; name: string; enabled: boolean; probes: ProbeSubscription[] };
@@ -111,15 +78,30 @@
 
   const totalProbes = $derived(subs?.probes.length ?? 0);
 
-  /** `null` → « suit son site », `true` → toujours, `false` → jamais. */
-  function excToValue(e: boolean | null): string {
-    return e == null ? 'inherit' : e ? 'on' : 'off';
-  }
-  function valueToExc(v: string): boolean | null {
-    return v === 'inherit' ? null : v === 'on';
-  }
-
   // ══ Canaux ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Accordéons des deux canaux.
+   *
+   * Un canal se règle une fois et ne se rouvre plus. Déplié en permanence, il
+   * pousse tout le reste de l'écran vers le bas pour un formulaire qu'on ne
+   * touchera pas de l'année. Replié, il laisse voir d'un coup d'œil ce qui est
+   * configuré et ce qui ne l'est pas.
+   *
+   * ⚠️ Un canal NON configuré s'ouvre tout seul : c'est celui-là qu'on vient
+   * remplir, et le replier reviendrait à cacher la seule chose à faire.
+   */
+  let openCh = $state<Record<string, boolean>>({});
+  function chOpen(
+    name: 'webhook' | 'smtp',
+    configured: boolean | undefined,
+    unreadable: boolean | undefined,
+  ): boolean {
+    return openCh[name] ?? (!configured || !!unreadable);
+  }
+  function toggleCh(name: 'webhook' | 'smtp', currently: boolean) {
+    openCh = { ...openCh, [name]: !currently };
+  }
 
   /** Une écriture en cours, quelle que soit la carte : un seul verrou suffit. */
   let busy = $state(false);
@@ -382,8 +364,15 @@
       </div>
 
       <!-- Webhook -->
+      {@const hookOpen = chOpen('webhook', status.webhook.configured, status.webhook.unreadable)}
       <section class="card lp-card">
-        <div class="ch-head">
+        <button
+          class="ch-head"
+          type="button"
+          aria-expanded={hookOpen}
+          onclick={() => toggleCh('webhook', hookOpen)}
+        >
+          <span class="caret" class:on={hookOpen} aria-hidden="true">›</span>
           <h2 class="lp-title">{$_('notify.webhook_title')}</h2>
           {#if status.webhook.unreadable}
             <span class="pill unreadable">{$_('notify.state_unreadable')}</span>
@@ -392,7 +381,9 @@
           {:else}
             <span class="pill unset">{$_('notify.state_unset')}</span>
           {/if}
-        </div>
+        </button>
+
+        {#if hookOpen}
 
         {#if status.webhook.unreadable}
           <!--
@@ -441,11 +432,19 @@
             {busy ? $_('common.saving') : $_('common.save')}
           </button>
         </div>
+        {/if}
       </section>
 
       <!-- SMTP -->
+      {@const smtpOpen = chOpen('smtp', status.smtp.configured, status.smtp.unreadable)}
       <section class="card lp-card">
-        <div class="ch-head">
+        <button
+          class="ch-head"
+          type="button"
+          aria-expanded={smtpOpen}
+          onclick={() => toggleCh('smtp', smtpOpen)}
+        >
+          <span class="caret" class:on={smtpOpen} aria-hidden="true">›</span>
           <h2 class="lp-title">{$_('notify.smtp_title')}</h2>
           {#if status.smtp.unreadable}
             <span class="pill unreadable">{$_('notify.state_unreadable')}</span>
@@ -454,7 +453,9 @@
           {:else}
             <span class="pill unset">{$_('notify.state_unset')}</span>
           {/if}
-        </div>
+        </button>
+
+        {#if smtpOpen}
 
         {#if status.smtp.unreadable}
           <p class="warn">{$_('notify.unreadable_body')}</p>
@@ -543,6 +544,7 @@
             {busy ? $_('common.saving') : $_('common.save')}
           </button>
         </div>
+        {/if}
       </section>
 
       <!-- Test -->
@@ -580,9 +582,12 @@
     {/if}
   {/if}
 
-  <!-- L'intitulé ne sert qu'à séparer deux groupes. Pour qui ne voit pas les
-       canaux, les abonnements sont tout le contenu de l'onglet : un titre qui
-       ne sépare rien n'annonce rien. -->
+  <!-- Les abonnements ne se RÈGLENT plus ici : ils se règlent sur le site,
+       dans le parc, là où l'on regarde ses sondes en se demandant si elles
+       doivent réveiller quelqu'un. Ce qui reste ici est la seule chose que
+       la page du parc ne peut pas donner : la vue d'ensemble, tous sites
+       confondus, pour repérer d'un coup d'œil celui qu'on a oublié
+       d'activer. C'est un état, pas un formulaire. -->
   {#if $isAdmin}
     <div class="group">
       <span class="group-title">{$_('notify.tab_subs')}</span>
@@ -601,81 +606,29 @@
       <a class="lp-btn primary" href="#/">{$_('notify.no_site_cta')}</a>
     </StateBlock>
   {:else}
-    {#if subsError}<p class="err" role="alert">{subsError}</p>{/if}
+    <section class="card lp-card">
+      <p class="lead">{$_('notify.subs_moved')}</p>
 
-    <p class="lead">{$_('notify.subs_lead', { values: { n: totalProbes } })}</p>
-
-    {#each groups as g (g.site_id)}
-      <section class="card lp-card">
-        <div class="site-head">
-          <h2 class="lp-title">{g.name}</h2>
-          <label class="switch">
-            <input
-              type="checkbox"
-              checked={g.enabled}
-              disabled={!$canOperate || subsBusy === `site:${g.site_id}`}
-              onchange={(ev) =>
-                setSub(
-                  'site',
-                  g.site_id,
-                  (ev.currentTarget as HTMLInputElement).checked,
-                  `site:${g.site_id}`,
-                )}
-            />
-            <span>{$_('notify.site_alert')}</span>
-          </label>
-        </div>
-
-        {#if g.probes.length === 0}
-          <p class="muted">{$_('notify.site_no_probe')}</p>
-        {:else}
-          <div class="probes">
-            {#each g.probes as p (p.probe_id)}
-              <div class="prow">
-                <span class="pname">{p.name}</span>
-
-                <!--
-                  Liste déroulante et non trois boutons : la phrase entière
-                  tient dans une liste à n'importe quelle largeur, et sur un
-                  site de quarante sondes quarante segments côte à côte
-                  feraient un mur. « Comme le site » est l'option par défaut
-                  et la première : c'est l'état qu'on veut voir dominer.
-                -->
-                <select
-                  class="lp-input sel"
-                  value={excToValue(p.exception)}
-                  disabled={!$canOperate || subsBusy === `probe:${p.probe_id}`}
-                  aria-label={$_('notify.probe_rule_for', { values: { name: p.name } })}
-                  onchange={(ev) =>
-                    setSub(
-                      'probe',
-                      p.probe_id,
-                      valueToExc((ev.currentTarget as HTMLSelectElement).value),
-                      `probe:${p.probe_id}`,
-                    )}
-                >
-                  <option value="inherit">{$_('notify.rule_inherit')}</option>
-                  <option value="on">{$_('notify.rule_always')}</option>
-                  <option value="off">{$_('notify.rule_never')}</option>
-                </select>
-
-                <!--
-                  Ce qui s'applique VRAIMENT, tel que le hub l'a calculé. Sans
-                  cette colonne, « comme le site » n'apprend rien : il faut
-                  remonter au réglage du site pour savoir si la sonde alerte.
-                -->
-                <span class="eff" class:on={p.enabled}>
-                  {p.enabled ? $_('notify.eff_on') : $_('notify.eff_off')}
-                  {#if p.exception == null}
-                    <span class="from">{$_('notify.eff_from_site')}</span>
-                  {/if}
-                </span>
-              </div>
-            {/each}
+      <div class="overview">
+        {#each groups as g (g.site_id)}
+          {@const on = g.probes.filter((p) => p.enabled).length}
+          <div class="orow">
+            <span class="oname">{g.name}</span>
+            <span class="ostate" class:on={g.enabled}>
+              {g.enabled ? $_('notify.eff_on') : $_('notify.eff_off')}
+            </span>
+            <!-- Le compte des sondes qui alertent VRAIMENT, exceptions
+                 comprises : un site éteint dont deux sondes alertent quand
+                 même ne se lit sur aucune case à cocher. -->
+            <span class="ocount">{$_('notify.subs_count', { values: { n: on, total: g.probes.length } })}</span>
           </div>
-        {/if}
-      </section>
-    {/each}
+        {/each}
+      </div>
+
+      <div class="row-btns">
+        <a class="lp-btn" href="#/">{$_('notify.subs_goto_fleet')}</a>
+      </div>
+    </section>
   {/if}
 </div>
 
@@ -830,12 +783,70 @@
     font-weight: 400;
   }
 
+  /* L'en-tête est devenu le bouton de l'accordéon : il garde exactement
+     l'apparence qu'il avait (aucun fond, aucune bordure de bouton), parce
+     qu'un canal replié doit se lire comme un titre, pas comme une action de
+     plus. Seul le chevron annonce qu'il s'ouvre. */
   .ch-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 10px;
     flex-wrap: wrap;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .ch-head .lp-title {
+    flex: 1;
+  }
+  .caret {
+    display: inline-block;
+    transition: transform 0.15s ease;
+    color: var(--lp-muted);
+    font-size: 1rem;
+    line-height: 1;
+  }
+  .caret.on {
+    transform: rotate(90deg);
+  }
+  /* Vue d'ensemble des abonnements : un état, pas un formulaire. */
+  .overview {
+    display: flex;
+    flex-direction: column;
+    margin: 0.2rem 0 0.9rem;
+  }
+  .orow {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 0.8rem;
+    padding: 0.42rem 0;
+    border-top: 1px solid var(--lp-border);
+  }
+  .oname {
+    font-size: 0.87rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ostate {
+    font-size: 0.74rem;
+    color: var(--lp-muted);
+  }
+  .ostate.on {
+    color: var(--lp-ok, #2f9e5f);
+  }
+  .ocount {
+    font-size: 0.74rem;
+    color: var(--lp-muted);
+    min-width: 5.5rem;
+    text-align: right;
   }
   .pill {
     font-size: 10px;
