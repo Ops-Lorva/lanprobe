@@ -514,6 +514,19 @@ async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
 /// interface : un scan pris par le mauvais lien ne dit rien du réseau qu'on
 /// croit observer.
 pub async fn portscan_once(state: &AppState, ip: &str) -> Result<usize, String> {
+    portscan_with(state, ip, None).await
+}
+
+/// Idem, avec une liste de ports imposée (profil choisi depuis le hub).
+///
+/// ⚠️ La liste est **résolue par l'appelant**, pas nommée ici : les profils
+/// vivent dans l'interface, et faire connaître « common » ou « web » à la
+/// sonde obligerait à la mettre à jour pour ajouter un profil.
+pub async fn portscan_with(
+    state: &AppState,
+    ip: &str,
+    ports: Option<Vec<u16>>,
+) -> Result<usize, String> {
     if ip.parse::<std::net::Ipv4Addr>().is_err() {
         return Err(format!("« {ip} » n'est pas une adresse IPv4"));
     }
@@ -525,7 +538,7 @@ pub async fn portscan_once(state: &AppState, ip: &str) -> Result<usize, String> 
         payload: json!({ "ip": ip, "in_progress": true, "profile_id": null }),
     });
 
-    let results = scan_ports(ip, src, None).await;
+    let results = scan_ports(ip, src, ports).await;
     let entry = state.portscan.set_tcp(ip, results, now_secs(), None);
     let _ = state.events.send(crate::state::BroadcastEvent {
         event: "portscan:update".into(),

@@ -410,7 +410,14 @@
     "col_state": "Estado",
     "col_uptime": "Disponibilidad",
     "iperf_placeholder": "Servidor iperf3 (p. ej. 10.4.8.1)",
-    "discovery_placeholder": "Red, vacío = automático (p. ej. 10.0.8.0/24)"
+    "discovery_placeholder": "Red, vacío = automático (p. ej. 10.0.8.0/24)",
+    "ports_count": "{n, plural, one {# puerto abierto} other {# puertos abiertos}}",
+    "profile_common": "Comunes",
+    "profile_web": "Web",
+    "profile_infra": "Infra",
+    "profile_db": "Bases de datos",
+    "discovery_ping": "Vigilar",
+    "discovery_scan": "Escanear puertos"
   },
   "charts": {
     "latency_title": "Latencia de los hosts vigilados",

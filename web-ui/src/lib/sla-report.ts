@@ -179,7 +179,7 @@ export function windowLabel(range: string, t: Translate, locale = 'en'): string 
  * Les coupures sont peintes en fond, pas seulement absentes de la courbe :
  * une ligne qui s'interrompt se confond avec une ligne qui sort du cadre.
  */
-function chartPng(samples: Sample[], t: Translate): string | null {
+function chartPng(samples: Sample[], t: Translate, locale: string): string | null {
   if (samples.length < 2) return null;
   const W = 900;
   const H = 260;
@@ -247,10 +247,63 @@ function chartPng(samples: Sample[], t: Translate): string | null {
   }
   ctx.stroke();
 
+  // ⚠️ L'axe des temps, sans quoi une courbe ne dit que « ça a bougé » : on ne
+  // sait ni quand la coupure a eu lieu, ni combien de temps couvre le
+  // graphique. Dans un rapport remis à un client, c'est précisément la
+  // question qu'il posera.
+  const fmt = (ts: number) =>
+    new Intl.DateTimeFormat(locale, {
+      // Au-delà de 36 h, l'heure seule devient ambiguë : deux points à 14:00
+      // peuvent être à deux jours d'écart.
+      ...(span > 36 * 3600
+        ? { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }
+        : { hour: '2-digit', minute: '2-digit' }),
+    }).format(new Date(ts * 1000));
+
+  ctx.fillStyle = '#6b7280';
+  ctx.textAlign = 'center';
+  const ticks = 5;
+  for (let i = 0; i < ticks; i++) {
+    const ts = t0 + (span * i) / (ticks - 1);
+    const px = Math.min(W - PAD.right - 30, Math.max(PAD.left + 30, x(ts)));
+    ctx.fillText(fmt(ts), px, H - 8);
+  }
+  ctx.textAlign = 'left';
+
   ctx.fillStyle = '#374151';
   ctx.fillText(t('sla.col_latency'), PAD.left, 11);
 
   return canvas.toDataURL('image/png').split(',')[1];
+}
+
+/**
+ * Ajuste chaque colonne au plus long contenu qu'elle porte.
+ *
+ * ⚠️ Sans ça, une adresse longue ou un nom de serveur Ookla s'affichent en
+ * `####` ou tronqués, et le lecteur doit élargir à la main — dans un document
+ * qu'on lui a remis. Des largeurs fixes ne peuvent pas prévoir ce qu'un client
+ * a comme noms d'hôtes.
+ *
+ * Plafonné : une URL de résultat ferait une colonne de 300 caractères qui
+ * pousse tout le reste hors de l'écran.
+ */
+function autoFit(ws: import('exceljs').Worksheet, max = 46): void {
+  ws.columns?.forEach((col) => {
+    let widest = 10;
+    col.eachCell?.({ includeEmpty: false }, (cell) => {
+      const v = cell.value;
+      const text =
+        v == null
+          ? ''
+          : typeof v === 'object' && 'richText' in v
+            ? String((v as { richText: { text: string }[] }).richText.map((r) => r.text).join(''))
+            : String(v);
+      // +2 : la bordure de cellule mange un peu de place, et un texte qui
+      // touche exactement le bord se lit comme s'il était coupé.
+      widest = Math.max(widest, Math.min(max, text.length + 2));
+    });
+    col.width = widest;
+  });
 }
 
 function dt(seconds: number, locale: string): string {
@@ -351,7 +404,7 @@ export async function downloadSlaWorkbook(
       outages(r.samples).length,
     ]);
   }
-  sum.columns = [18, 22, 12, 12, 10, 10, 10, 12, 12].map((width) => ({ width }));
+  autoFit(sum);
 
   // ── Une feuille par cible : incidents puis série ─────────────────────────
   const used = new Set<string>();
@@ -404,11 +457,11 @@ export async function downloadSlaWorkbook(
         sample.latency_ms ?? '',
       ]);
     }
-    ws.columns = [24, 14, 14, 12].map((width) => ({ width }));
+    autoFit(ws);
 
     // Le graphique se pose à droite des données, jamais dessus : il ne doit
     // pas masquer les chiffres qu'il illustre.
-    const png = chartPng(r.samples, t);
+    const png = chartPng(r.samples, t, locale);
     if (png) {
       const imgId = wb.addImage({ base64: png, extension: 'png' });
       ws.addImage(imgId, {
@@ -447,7 +500,7 @@ export async function downloadSlaWorkbook(
         r.jitter_ms != null ? +r.jitter_ms.toFixed(1) : '—',
       ]);
     }
-    ws.columns = [18, 24, 12, 30, 12, 12, 12, 12].map((width) => ({ width }));
+    autoFit(ws);
   }
 
   // ── Inventaire : machines vues, et ports ouverts ────────────────────────
@@ -479,7 +532,7 @@ export async function downloadSlaWorkbook(
         h.latency_ms ?? '—',
       ]);
     }
-    ws.columns = [18, 22, 16, 24, 20, 22, 12].map((width) => ({ width }));
+    autoFit(ws);
   }
 
   const openPorts = payloads.flatMap((p) =>
@@ -499,7 +552,7 @@ export async function downloadSlaWorkbook(
     for (const o of openPorts) {
       ws.addRow([o.probe, dt(o.at, locale), o.ip, o.port, o.proto, o.service ?? '—']);
     }
-    ws.columns = [18, 22, 16, 10, 10, 22].map((width) => ({ width }));
+    autoFit(ws);
   }
 
   const buffer = await wb.xlsx.writeBuffer();

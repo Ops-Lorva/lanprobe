@@ -68,7 +68,18 @@ pub async fn execute(state: &AppState, command: &Command) -> Ack {
             Ok(())
         }
         "port_scan" => match arg(command, "ip") {
-            Some(ip) => scheduler::portscan_once(state, ip).await.map(|_| ()),
+            Some(ip) => {
+                // Le hub peut imposer la liste de ports. Vide ou absente, la
+                // sonde reprend sa liste courante — les profils vivent dans
+                // l'interface, pas dans la sonde.
+                let ports: Option<Vec<u16>> = command
+                    .args
+                    .get("ports")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|p| p.as_u64()).map(|p| p as u16).collect())
+                    .filter(|v: &Vec<u16>| !v.is_empty());
+                scheduler::portscan_with(state, ip, ports).await.map(|_| ())
+            }
             None => Err("adresse manquante".into()),
         },
         "discovery" => {

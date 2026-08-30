@@ -410,7 +410,14 @@
     "col_state": "State",
     "col_uptime": "Uptime",
     "iperf_placeholder": "iperf3 server (e.g. 10.4.8.1)",
-    "discovery_placeholder": "Network, blank = auto (e.g. 10.0.8.0/24)"
+    "discovery_placeholder": "Network, blank = auto (e.g. 10.0.8.0/24)",
+    "ports_count": "{n, plural, one {# open port} other {# open ports}}",
+    "profile_common": "Common",
+    "profile_web": "Web",
+    "profile_infra": "Infra",
+    "profile_db": "Databases",
+    "discovery_ping": "Watch",
+    "discovery_scan": "Scan ports"
   },
   "charts": {
     "latency_title": "Latency of monitored hosts",

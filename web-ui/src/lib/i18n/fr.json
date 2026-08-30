@@ -410,7 +410,14 @@
     "col_state": "État",
     "col_uptime": "Disponibilité",
     "iperf_placeholder": "Serveur iperf3 (ex. 10.4.8.1)",
-    "discovery_placeholder": "Réseau, vide = auto (ex. 10.0.8.0/24)"
+    "discovery_placeholder": "Réseau, vide = auto (ex. 10.0.8.0/24)",
+    "ports_count": "{n, plural, one {# port ouvert} other {# ports ouverts}}",
+    "profile_common": "Courants",
+    "profile_web": "Web",
+    "profile_infra": "Infra",
+    "profile_db": "Bases de données",
+    "discovery_ping": "Surveiller",
+    "discovery_scan": "Scanner les ports"
   },
   "charts": {
     "latency_title": "Latence des hôtes suivis",

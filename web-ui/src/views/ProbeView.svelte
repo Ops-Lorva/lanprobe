@@ -476,6 +476,39 @@
     }
   }
 
+  /**
+   * Profils de scan, résolus ICI et envoyés en liste de ports.
+   *
+   * ⚠️ La sonde ne connaît pas les noms de profils : lui faire connaître
+   * « common » ou « web » obligerait à la mettre à jour pour en ajouter un.
+   * Elle reçoit des ports, l'interface décide lesquels.
+   */
+  const PORT_PROFILES: Record<string, number[] | null> = {
+    // `null` = la liste par défaut de la sonde.
+    common: null,
+    web: [80, 443, 8080, 8443, 8000, 8888, 3000, 5000],
+    infra: [22, 23, 53, 123, 161, 389, 636, 3389, 5900, 161],
+    db: [1433, 1521, 3306, 5432, 6379, 9200, 27017, 5984],
+  };
+  let portProfile = $state<keyof typeof PORT_PROFILES>('common');
+
+  /** Cibles déjà surveillées : inutile de proposer de les ajouter deux fois. */
+  const monitoredNow = $derived(new Set((probe?.monitors ?? []).map((m) => m.ip)));
+
+  /** IP dont les ports sont dépliés. Une seule à la fois : la liste est longue. */
+  let openHost = $state('');
+
+  /** Ports groupés par machine — l'inventaire arrive à plat. */
+  const portsByHost = $derived.by(() => {
+    const map = new Map<string, { port: number; proto: string; service?: string | null }[]>();
+    for (const p of portsScan?.ports ?? []) {
+      const list = map.get(p.ip) ?? [];
+      list.push(p);
+      map.set(p.ip, list);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  });
+
   let iperfServer = $state('');
   let discoveryCidr = $state('');
   let speedEngine = $state<'ookla' | 'iperf3'>('ookla');
@@ -1150,25 +1183,33 @@
               <p class="bsub">{$_('probe.ports_sub')}</p>
             </div>
             {#if $canOperate}
-            <form class="inline" onsubmit={(e) => e.preventDefault()}>
-              <input
-                class="lp-input"
-                bind:value={newTarget}
-                placeholder={$_('probe.ports_placeholder')}
-                spellcheck="false"
-                autocomplete="off"
-              />
-              {#if newTarget.trim()}
-                <CommandButton
-                  probeId={id}
-                  kind="port_scan"
-                  args={{ ip: newTarget.trim() }}
-                  label={$_('probe.ports_run')}
-                allowed={$canOperate}
-                  onsent={afterCommand}
+              <div class="runbox">
+                <input
+                  class="lp-input"
+                  bind:value={newTarget}
+                  placeholder={$_('probe.ports_placeholder')}
+                  spellcheck="false"
+                  autocomplete="off"
                 />
-              {/if}
-            </form>
+                <select class="lp-input narrow" bind:value={portProfile}>
+                  {#each Object.keys(PORT_PROFILES) as p (p)}
+                    <option value={p}>{$_(`probe.profile_${p}`)}</option>
+                  {/each}
+                </select>
+                {#if newTarget.trim()}
+                  <CommandButton
+                    probeId={id}
+                    kind="port_scan"
+                    args={{
+                      ip: newTarget.trim(),
+                      ...(PORT_PROFILES[portProfile] ? { ports: PORT_PROFILES[portProfile] } : {}),
+                    }}
+                    label={$_('probe.ports_run')}
+                    allowed={$canOperate}
+                    onsent={afterCommand}
+                  />
+                {/if}
+              </div>
             {/if}
           </header>
 
@@ -1180,31 +1221,49 @@
             <p class="empty">{$_('probe.ports_never')}</p>
           {:else}
             <p class="scanmeta">{$_('probe.scan_at', { values: { when: logTime(portsScan.started_at, lang) } })}</p>
-            {#if portsScan.ports.length === 0}
+            {#if portsByHost.length === 0}
               <p class="empty">{$_('probe.ports_empty')}</p>
             {:else}
-              <div class="tablewrap">
-                <table class="grid">
-                  <thead>
-                    <tr>
-                      <th>{$_('probe.col_ip')}</th>
-                      <th class="num">{$_('probe.col_port')}</th>
-                      <th>{$_('probe.col_proto')}</th>
-                      <th>{$_('probe.col_service')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each portsScan.ports as p (`${p.ip}:${p.port}/${p.proto}`)}
-                      <tr>
-                        <td class="lp-mono">{p.ip}</td>
-                        <td class="num lp-mono">{p.port}</td>
-                        <td class="lp-mono">{p.proto}</td>
-                        <td>{p.service ?? '—'}</td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
+              <!-- Une machine par ligne, ses ports dépliés au clic : à plat,
+                   un scan d'un /24 donne des centaines de lignes où l'on perd
+                   quelle machine expose quoi. -->
+              <ul class="hosts">
+                {#each portsByHost as [ip, list] (ip)}
+                  <li>
+                    <button
+                      class="hostrow"
+                      aria-expanded={openHost === ip}
+                      onclick={() => (openHost = openHost === ip ? '' : ip)}
+                    >
+                      <span class="caret" class:on={openHost === ip} aria-hidden="true">›</span>
+                      <span class="lp-mono">{ip}</span>
+                      <span class="hostn">{$_('probe.ports_count', { values: { n: list.length } })}</span>
+                    </button>
+                    {#if openHost === ip}
+                      <div class="tablewrap">
+                        <table class="grid">
+                          <thead>
+                            <tr>
+                              <th class="num">{$_('probe.col_port')}</th>
+                              <th>{$_('probe.col_proto')}</th>
+                              <th>{$_('probe.col_service')}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {#each list as p (`${p.port}/${p.proto}`)}
+                              <tr>
+                                <td class="num lp-mono">{p.port}</td>
+                                <td class="lp-mono">{p.proto}</td>
+                                <td>{p.service ?? '—'}</td>
+                              </tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      </div>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
             {/if}
           {/if}
         </section>
@@ -1259,6 +1318,7 @@
                       <th>{$_('probe.col_mac')}</th>
                       <th>{$_('probe.col_vendor')}</th>
                       <th class="num">{$_('charts.latency')}</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1269,6 +1329,32 @@
                         <td class="lp-mono">{h.mac ?? '—'}</td>
                         <td>{h.vendor ?? '—'}</td>
                         <td class="num lp-mono">{h.latency_ms ?? '—'}</td>
+                        <td class="right">
+                          <!-- Agir depuis la machine qu'on regarde : recopier
+                               son adresse dans un autre onglet pour la
+                               surveiller ou la scanner, c'est trois gestes et
+                               une faute de frappe possible. -->
+                          <span class="rowacts">
+                            {#if !monitoredNow.has(h.ip)}
+                              <CommandButton
+                                probeId={id}
+                                kind="add_monitor"
+                                args={{ ip: h.ip }}
+                                label={$_('probe.discovery_ping')}
+                                allowed={$canOperate}
+                                onsent={afterCommand}
+                              />
+                            {/if}
+                            <CommandButton
+                              probeId={id}
+                              kind="port_scan"
+                              args={{ ip: h.ip }}
+                              label={$_('probe.discovery_scan')}
+                              allowed={$canOperate}
+                              onsent={afterCommand}
+                            />
+                          </span>
+                        </td>
                       </tr>
                     {/each}
                   </tbody>
@@ -1798,8 +1884,7 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  .addrow .lp-input,
-  .inline .lp-input {
+  .addrow .lp-input {
     max-width: 240px;
   }
 
@@ -1857,6 +1942,63 @@
   }
   .runbox .lp-input {
     max-width: 190px;
+  }
+  .runbox .narrow {
+    max-width: 150px;
+  }
+
+  /* ── Ports par machine ─────────────────────────────────────────────── */
+  .hosts {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .hostrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 8px;
+    border: none;
+    border-radius: 5px;
+    background: var(--ep-bg-tertiary);
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .hostrow:hover {
+    background: var(--ep-bg-secondary);
+  }
+  .hostrow:focus-visible {
+    outline: 2px solid var(--ep-accent);
+    outline-offset: -2px;
+  }
+  .caret {
+    display: inline-block;
+    transition: transform 0.12s;
+    color: var(--ep-text-dim);
+  }
+  .caret.on {
+    transform: rotate(90deg);
+  }
+  .rowacts {
+    display: inline-flex;
+    gap: 6px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .hostn {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--ep-text-dim);
+  }
+  .hosts .tablewrap {
+    padding: 4px 8px 10px 24px;
   }
   .engines {
     display: flex;
