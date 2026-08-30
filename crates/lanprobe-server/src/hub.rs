@@ -279,6 +279,11 @@ struct EnrollResponse {
     influx: InfluxResponse,
     #[serde(default = "default_heartbeat")]
     heartbeat_interval_secs: u64,
+    /// Configuration que le hub gardait pour cette sonde (§ 16). Présente
+    /// seulement sur un ré-enrôlement d'une machine déjà connue — c'est le
+    /// seul moment où une machine réinstallée peut retrouver ses profils.
+    #[serde(default)]
+    config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +321,7 @@ pub struct HeartbeatResponse {
     #[serde(default)]
     pub commands: Vec<crate::commands::Command>,
 }
+
 
 /// Ce que la sonde raconte d'elle-même à chaque battement.
 #[derive(Debug, Serialize)]
@@ -472,6 +478,17 @@ pub async fn enroll(
     let parsed: EnrollResponse =
         serde_json::from_str(&text).map_err(|e| format!("réponse illisible du hub : {e}"))?;
 
+    // ⚠️ Déposée AVANT d'écrire la config du hub : si l'écriture échoue, on
+    // préfère une sonde non rattachée qui a gardé ses profils à une sonde
+    // rattachée qui les a perdus.
+    if let Some(restored) = parsed.config.clone() {
+        let mut root = state.config.get();
+        if let Some(map) = root.as_object_mut() {
+            map.insert(RESTORED_KEY.to_string(), restored);
+        }
+        let _ = state.config.put(root);
+    }
+
     let config = HubConfig {
         url: hub_url.to_string(),
         probe_id: parsed.probe_id,
@@ -496,6 +513,55 @@ pub async fn enroll(
 }
 
 /// Relit la section `hub` de la configuration.
+/// Dépose la configuration de la sonde au hub, pour sauvegarde (§ 16).
+///
+/// ⚠️ Le hub ne la lit pas : c'est un concentrateur, pas un gestionnaire de
+/// profils. Elle part dans ses sauvegardes, et une sonde ré-enrôlée la
+/// retrouve — voilà tout le service rendu.
+///
+/// Un échec ne fait rien échouer d'autre : les profils restent sur la machine,
+/// et une sauvegarde manquée ne doit pas empêcher de mesurer.
+pub async fn upload_config(
+    state: &AppState,
+    key: &SecretKey,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    let cfg = load(state);
+    if !cfg.is_enrolled() {
+        return Err("sonde non rattachée".into());
+    }
+    let token = secrets::open(key, &cfg.token)?;
+    let source = crate::scheduler::resolve_src(state)?;
+    let response = http_client(cfg.allow_self_signed, source)
+        .post(format!("{}/api/probes/{}/config", cfg.url, cfg.probe_id))
+        .bearer_auth(token)
+        .json(&config)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("le hub a répondu {}", response.status()))
+    }
+}
+
+/// Configuration rendue par le hub au dernier enrôlement, s'il en gardait une.
+///
+/// ⚠️ Consommée une seule fois : une fois restituée à l'application, elle est
+/// effacée. La relire à chaque démarrage écraserait ce que quelqu'un vient de
+/// régler devant l'écran.
+pub fn take_restored_config(state: &AppState) -> Option<serde_json::Value> {
+    let mut root = state.config.get();
+    let restored = root.as_object_mut()?.remove(RESTORED_KEY)?;
+    let _ = state.config.put(root);
+    Some(restored)
+}
+
+/// Clé sous laquelle la configuration rendue par le hub attend l'application.
+const RESTORED_KEY: &str = "hub_restored_config";
+
 pub fn load(state: &AppState) -> HubConfig {
     state
         .config

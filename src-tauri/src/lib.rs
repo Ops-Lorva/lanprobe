@@ -592,6 +592,42 @@ fn cmd_open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Sauvegarde des profils au hub (contrat § 16) ───────────────────────────
+
+/// Dépose au hub la configuration locale — profils réseau, profils de scan.
+///
+/// ⚠️ Le hub ne s'en sert pas et ne l'affiche pas : les profils servent en
+/// local, devant la machine. Il les garde, ils partent dans ses sauvegardes,
+/// et une machine réinstallée les retrouve à son ré-enrôlement.
+///
+/// Rend `Ok(false)` quand la sonde n'est rattachée à aucun hub : ce n'est pas
+/// une erreur, c'est le cas d'une sonde qui fonctionne seule.
+#[tauri::command]
+async fn cmd_hub_push_config(
+    config: serde_json::Value,
+    state: tauri::State<'_, SharedState>,
+) -> Result<bool, String> {
+    let config_dir = lanprobe_server::default_config_dir();
+    let key = lanprobe_server::secrets::load_or_create_key(&config_dir)?;
+    let shared = (**state.inner()).clone();
+    if !lanprobe_server::hub::load(&shared).is_enrolled() {
+        return Ok(false);
+    }
+    lanprobe_server::hub::upload_config(&shared, &key, config).await?;
+    Ok(true)
+}
+
+/// Configuration rendue par le hub au dernier enrôlement, s'il en gardait une.
+///
+/// ⚠️ Consommée une seule fois. La relire à chaque démarrage écraserait ce que
+/// quelqu'un vient de régler devant l'écran.
+#[tauri::command]
+fn cmd_hub_take_restored_config(
+    state: tauri::State<'_, SharedState>,
+) -> Option<serde_json::Value> {
+    lanprobe_server::hub::take_restored_config(state.inner())
+}
+
 // ── Rattachement à un hub ──────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -749,6 +785,8 @@ pub fn run() {
             cmd_clear_discovery,
             cmd_get_monitoring_snapshot,
             cmd_hub_status,
+            cmd_hub_push_config,
+            cmd_hub_take_restored_config,
             cmd_hub_enroll,
             cmd_hub_forget,
             cmd_config_get,

@@ -392,7 +392,8 @@
       "error": "Fallo al vincular",
       "name_ph": "Dejar vacío: el hub elegirá",
       "name_hint": "Opcional. Una reinscripción conserva el nombre definido en el hub.",
-      "scheme_hint": "Haga clic para alternar entre https:// y http://"
+      "scheme_hint": "Haga clic para alternar entre https:// y http://",
+      "restored": "{n, plural, one {# ajuste restaurado} other {# ajustes restaurados}} desde el hub."
     }
   },
   "scheduler": {

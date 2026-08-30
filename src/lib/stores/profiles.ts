@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { scheduleBackup } from '../hubConfigBackup';
 import { getConfigStore } from './configStore';
 
 export interface Profile {
@@ -27,6 +28,9 @@ function createProfilesStore() {
     const store = await getConfigStore();
     await store.set(STORE_KEY, profiles);
     await store.save();
+    // Le hub garde une copie : une machine réinstallée retrouve ses profils
+    // à son ré-enrôlement. Différé et silencieux — voir `hubConfigBackup`.
+    scheduleBackup();
   }
 
   return {

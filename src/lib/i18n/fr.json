@@ -392,7 +392,8 @@
       "error": "Échec du rattachement",
       "name_ph": "Laisser vide : le hub choisira",
       "name_hint": "Facultatif. Un ré-enrôlement garde le nom défini dans le hub.",
-      "scheme_hint": "Cliquer pour basculer entre https:// et http://"
+      "scheme_hint": "Cliquer pour basculer entre https:// et http://",
+      "restored": "{n, plural, one {# réglage restauré} other {# réglages restaurés}} depuis le hub."
     }
   },
   "scheduler": {

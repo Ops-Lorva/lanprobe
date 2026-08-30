@@ -88,7 +88,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/probes/enroll", post(enroll))
         .route("/api/probes/{id}/write", post(write_metrics))
         .route("/api/probes/{id}/heartbeat", post(heartbeat))
-        .route("/api/probes/{id}/scans", post(publish_scan));
+        .route("/api/probes/{id}/scans", post(publish_scan))
+        .route("/api/probes/{id}/config", post(store_probe_config));
 
     // `GET /api/sites` accepte aussi les identifiants du compte : la sonde
     // l'appelle avant l'enrôlement, quand elle n'a pas encore de session.
@@ -1398,6 +1399,14 @@ async fn enroll(
             "token": probe_token,
             "influx": influx,
             "heartbeat_interval_secs": state.settings.heartbeat_interval_secs(),
+            // ⚠️ Rendue à l'enrôlement, pas au battement : c'est le seul
+            // moment où une machine réinstallée peut retrouver ses profils.
+            // Au battement, elle en a déjà, et les réécrire écraserait ce que
+            // quelqu'un vient de régler devant l'écran.
+            "config": probe
+                .config
+                .as_deref()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok()),
         })),
     )
         .into_response()
@@ -1834,6 +1843,36 @@ async fn revoke_probe(
 
 /// Rotation d'hygiène : le nouveau jeton attend d'être remis au prochain
 /// battement, l'ancien reste actif jusqu'à l'accusé.
+/// La sonde dépose sa configuration pour sauvegarde (contrat § 16).
+///
+/// ⚠️ Le hub ne la lit pas et ne l'affiche pas. Les profils réseau servent en
+/// local, devant la machine ; les montrer ici n'apprendrait rien. Le hub est
+/// un concentrateur : il les garde, ils partent dans ses sauvegardes, et une
+/// sonde ré-enrôlée les retrouve — c'est tout ce qu'on lui demande.
+async fn store_probe_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(token) = bearer_token(&headers) else {
+        return fail(StatusCode::UNAUTHORIZED, "jeton de sonde requis");
+    };
+    if let Err(e) = state.db.authenticate_probe(&id, &token) {
+        return error_response(e);
+    }
+    // Plafond : le blob est opaque, donc rien ne borne sa taille côté hub.
+    // Un mégaoctet couvre très large pour des profils réseau.
+    let serialised = body.to_string();
+    if serialised.len() > 1024 * 1024 {
+        return fail(StatusCode::PAYLOAD_TOO_LARGE, "configuration trop volumineuse");
+    }
+    match state.db.store_probe_config(&id, &serialised) {
+        Ok(()) => ok_json(json!({ "ok": true })),
+        Err(e) => error_response(e),
+    }
+}
+
 /// La sonde publie le résultat complet d'un scan (contrat § 12).
 ///
 /// ⚠️ Le hub ne dérive **pas** le compteur Influx de ce message : la sonde

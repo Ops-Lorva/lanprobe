@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { scheduleBackup } from '../hubConfigBackup';
 import { getConfigStore } from './configStore';
 
 export interface PortScanProfile {
@@ -77,6 +78,7 @@ function createPortScanProfilesStore() {
     const custom = profiles.filter(p => !p.builtin && !p.id.startsWith('builtin:'));
     await store.set(STORE_KEY, custom);
     await store.save();
+    scheduleBackup();
   }
 
   async function persistActive(id: string) {

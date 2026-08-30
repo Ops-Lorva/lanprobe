@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -298,6 +298,19 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE probes ADD COLUMN monitors    TEXT;
     ALTER TABLE probes ADD COLUMN monitors_at INTEGER;
+    "#,
+    // v12 → v13 : configuration de la sonde, déposée pour sauvegarde.
+    //
+    // ⚠️ Le hub ne s'en sert PAS. Les profils réseau servent en local, devant
+    // la machine, pour changer de réseau en trois clics — les afficher ici
+    // n'apprendrait rien. Le hub est un concentrateur : il les garde, ils
+    // partent dans ses sauvegardes, et une sonde ré-enrôlée les retrouve.
+    //
+    // Blob opaque : le hub n'a pas à comprendre ce qu'il conserve, et la forme
+    // peut changer côté application sans migration ici.
+    r#"
+    ALTER TABLE probes ADD COLUMN config    TEXT;
+    ALTER TABLE probes ADD COLUMN config_at INTEGER;
     "#,
 ];
 
@@ -691,6 +704,10 @@ pub struct ProbeRecord {
     /// dernier battement. JSON brut : le hub le relaie sans l'interpréter.
     pub monitors: Option<String>,
     pub monitors_at: Option<i64>,
+    /// Configuration déposée par la sonde (profils réseau, profils de scan…).
+    /// Opaque pour le hub : il la garde et la rend, il ne la lit pas.
+    pub config: Option<String>,
+    pub config_at: Option<i64>,
 }
 
 const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash, p.platform, \
@@ -698,7 +715,8 @@ const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash
                              p.influx_auth_id, p.influx_token_version, p.pending_influx_auth_id, \
                              p.pending_influx_token, p.pending_influx_token_version, \
                              p.public_ip, p.public_ip_at, p.interface, p.local_ips, p.gateway, \
-                             p.internet_state, p.internet_state_at, p.monitors, p.monitors_at";
+                             p.internet_state, p.internet_state_at, p.monitors, p.monitors_at, \
+                             p.config, p.config_at";
 
 /// Ce qu'une sonde raconte de sa position réseau dans son battement.
 ///
@@ -811,6 +829,8 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
         internet_state_at: r.get(22)?,
         monitors: r.get(23)?,
         monitors_at: r.get(24)?,
+        config: r.get(25)?,
+        config_at: r.get(26)?,
     })
 }
 
@@ -2194,6 +2214,20 @@ impl Db {
         // Les tables filles partent par ON DELETE CASCADE.
         conn.execute("PRAGMA foreign_keys = ON", [])?;
         Ok(conn.execute("DELETE FROM scans WHERE started_at < ?1", rusqlite::params![cutoff])?)
+    }
+
+    /// Dépose la configuration d'une sonde. Écrase la précédente : c'est une
+    /// photo de son état courant, pas un historique.
+    pub fn store_probe_config(&self, probe_id: &str, config: &str) -> DbResult<()> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let changed = conn.execute(
+            "UPDATE probes SET config = ?2, config_at = ?3 WHERE probe_id = ?1",
+            rusqlite::params![probe_id, config, now()],
+        )?;
+        if changed == 0 {
+            return Err(DbError::NotFound("sonde inconnue".into()));
+        }
+        Ok(())
     }
 
     /// Historique récent, du plus neuf au plus ancien.

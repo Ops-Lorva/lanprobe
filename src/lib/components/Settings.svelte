@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { pushNow, restoreFromHub } from '../hubConfigBackup';
   import { invoke } from '@tauri-apps/api/core';
   import { _ } from 'svelte-i18n';
   import { settings, type Theme, type Layout, type Lang, type SpeedtestEngine, type Palette } from '../stores/settings';
@@ -14,6 +15,8 @@
     enrolled: false, url: '', name: '', site: '',
   });
   let hubUrl = $state('');
+  /** Nombre de réglages rendus par le hub au dernier enrôlement. */
+  let hubRestored = $state(0);
 
   // ── Adresse du hub : schéma séparé de l'hôte ─────────────────────────────
   //
@@ -82,6 +85,21 @@
       });
       hubCode = '';
       await refreshHub();
+
+      // Le hub gardait peut-être les profils de cette machine : c'est le seul
+      // moment où une machine réinstallée peut les retrouver. Ne remplace que
+      // ce qui manque en local — voir `hubConfigBackup`.
+      const restored = await restoreFromHub();
+      if (restored > 0) {
+        hubRestored = restored;
+        await profiles.init();
+        await portscanProfiles.init();
+      } else {
+        // Rien à restaurer : on dépose ce que cette machine a, pour la
+        // prochaine fois. C'est l'enrôlement initial d'une sonde qui a déjà
+        // servi en local.
+        void pushNow();
+      }
     } catch (e) {
       hubError = String(e);
     } finally {
@@ -250,6 +268,14 @@
         <button class="hub-btn ghost" onclick={forgetHub} disabled={readOnly}>
           {$_('settings.hub.forget')}
         </button>
+        {#if hubRestored > 0}
+          <!-- Le dire : quelqu'un qui vient de réinstaller une machine ne
+               s'attend pas à retrouver ses profils, et les découvrirait par
+               hasard. -->
+          <p class="hub-hint hub-restored">
+            {$_('settings.hub.restored', { values: { n: hubRestored } })}
+          </p>
+        {/if}
         <p class="hub-hint">{$_('settings.hub.forget_hint')}</p>
       {:else}
         <p class="hub-hint">{$_('settings.hub.lead')}</p>
@@ -556,6 +582,7 @@
   .scheme:disabled { opacity: .5; cursor: default; }
   .hub-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 4px 0; }
   .hub-hint { font-size: 12px; opacity: .65; margin: 2px 0 10px; }
+  .hub-restored { color: var(--ep-success, #22c55e); opacity: 1; }
   .hub-state { font-size: 13px; margin-bottom: 10px; }
   .hub-error { font-size: 12px; color: var(--danger, #f87171); margin-top: 8px; }
   .hub-btn { padding: 7px 14px; border-radius: 6px; border: 1px solid transparent;

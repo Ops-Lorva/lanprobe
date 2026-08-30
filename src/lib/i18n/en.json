@@ -392,7 +392,8 @@
       "error": "Attachment failed",
       "name_ph": "Leave empty: the hub will choose",
       "name_hint": "Optional. A re-enrolment keeps the name set in the hub.",
-      "scheme_hint": "Click to switch between https:// and http://"
+      "scheme_hint": "Click to switch between https:// and http://",
+      "restored": "{n, plural, one {# setting restored} other {# settings restored}} from the hub."
     }
   },
   "scheduler": {
