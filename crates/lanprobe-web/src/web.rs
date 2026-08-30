@@ -1516,7 +1516,7 @@ struct HeartbeatBody {
     /// surveille plus rien » — ce n'est pas la même chose qu'un champ absent,
     /// qui vient d'une sonde antérieure à ce champ.
     #[serde(default)]
-    monitors: Vec<serde_json::Value>,
+    monitors: Option<Vec<serde_json::Value>>,
     /// Identité réseau du site (contrat, section 15). Chaque champ est
     /// facultatif : une sonde sans accès internet bat **sans** IP publique
     /// plutôt que d'échouer, et un champ absent n'efface jamais ce que le hub
@@ -1605,10 +1605,13 @@ async fn heartbeat(
             .internet_state
             .map(|v| v.trim().to_lowercase())
             .filter(|v| matches!(v.as_str(), "online" | "limited" | "offline")),
-        // Réécrit à chaque battement, y compris vide : une sonde qui a cessé
-        // de surveiller doit pouvoir le dire. Sérialisé ici plutôt qu'en base
-        // pour que le hub n'ait pas à comprendre ce qu'il relaie.
-        monitors: serde_json::to_string(&body.monitors).ok(),
+        // ⚠️ `Option`, pas `Vec`. Absent et vide ne veulent pas dire la même
+        // chose : une sonde antérieure à ce champ n'envoie rien, et
+        // l'enregistrer comme « je ne surveille rien » ferait passer TOUTES
+        // ses cibles réelles pour des surveillances mortes à l'écran.
+        // Un tableau explicitement vide, lui, efface : une sonde qui a cessé
+        // de surveiller doit pouvoir le dire.
+        monitors: body.monitors.as_ref().and_then(|m| serde_json::to_string(m).ok()),
     };
     let change = match state.db.record_heartbeat(
         &id,

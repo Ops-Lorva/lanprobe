@@ -1022,9 +1022,13 @@
             </div>
           {/if}
 
-          {#if staleTargets.length}
-            <p class="stale-note">
-              {$_('probe.monitoring_stale', { values: { list: staleTargets.join(', ') } })}
+          <!-- ⚠️ Seulement quand la sonde annonce ET qu'il reste des cibles
+               orphelines : sur une sonde qui n'annonce rien, la liste vaudrait
+               « tout est mort », ce qui est faux et bruyant. Discret, en une
+               ligne — c'est une note de bas de page, pas une alerte. -->
+          {#if activeMonitors !== null && activeMonitors.length > 0 && staleTargets.length}
+            <p class="stale-note" title={staleTargets.join(', ')}>
+              {$_('probe.monitoring_stale', { values: { n: staleTargets.length } })}
             </p>
           {/if}
 

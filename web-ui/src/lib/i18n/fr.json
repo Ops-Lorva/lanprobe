@@ -404,7 +404,7 @@
     "col_vendor": "Constructeur",
     "tab_commands": "Commandes",
     "monitoring_unknown": "Cette sonde n'annonce pas encore ses surveillances — elle est plus ancienne que cette fonction.",
-    "monitoring_stale": "Vues dans la fenêtre affichée mais plus surveillées : {list}",
+    "monitoring_stale": "{n, plural, one {# cible} other {# cibles}} de la fenêtre ne sont plus surveillées",
     "monitor_alive": "Répond",
     "monitor_down": "Ne répond pas",
     "col_state": "État",

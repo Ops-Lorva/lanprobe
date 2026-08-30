@@ -39,7 +39,7 @@ struct GithubAsset {
 /// versions déjà installées embarquent cette fonction : si elle ne reconnaît
 /// que l'ancienne forme, elles cessent de voir les mises à jour **sans rien
 /// dire**. On accepte donc les deux, définitivement.
-fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
+pub fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
     let s = tag
         .strip_prefix("app-v")
         .or_else(|| tag.strip_prefix('v'))?;
@@ -195,5 +195,51 @@ mod updater_tag_tests {
         let from_old = expected_asset_name("v2.1.0", true);
         assert_eq!(from_new, from_old);
         assert_eq!(from_new.as_deref(), Some("lanprobe-server_v2.1.0_amd64.deb"));
+    }
+}
+
+#[cfg(test)]
+mod real_release_list_tests {
+    use super::*;
+
+    /// Les tags réellement publiés au 30/08/2026, dans l'ordre rendu par
+    /// l'API. Le tri doit trouver 2.1.1 et ignorer le hub.
+    const PUBLISHED: &[&str] = &[
+        "hub-1.0.0",
+        "app-v2.1.1",
+        "app-v2.1.0",
+        "v2.0.0",
+        "v1.1.5",
+        "v1.1.4",
+    ];
+
+    #[test]
+    fn a_2_1_0_install_finds_2_1_1_in_the_real_list() {
+        let latest = PUBLISHED
+            .iter()
+            .filter_map(|t| parse_version(t).map(|v| (v, *t)))
+            .max_by_key(|(v, _)| *v);
+        assert_eq!(latest, Some(((2, 1, 1), "app-v2.1.1")));
+
+        let current = parse_version("v2.1.0").unwrap();
+        assert!(latest.unwrap().0 > current, "2.1.1 doit être vue comme plus récente");
+    }
+
+    #[test]
+    fn the_hub_release_is_never_taken_for_an_application_version() {
+        // `hub-1.0.0` est en tête de liste. Le prendre pour une version de
+        // l'application proposerait une mise à jour vers le mauvais produit —
+        // et, pire, ferait redescendre de 2.1.x à 1.0.0.
+        assert_eq!(parse_version("hub-1.0.0"), None);
+    }
+
+    #[test]
+    fn the_asset_looked_for_is_the_one_actually_published() {
+        // Le fichier publié s'appelle `lanprobe-server_v2.1.1_amd64.deb`,
+        // pas `lanprobe-server_app-v2.1.1_amd64.deb`.
+        assert_eq!(
+            expected_asset_name("app-v2.1.1", true).as_deref(),
+            Some("lanprobe-server_v2.1.1_amd64.deb")
+        );
     }
 }

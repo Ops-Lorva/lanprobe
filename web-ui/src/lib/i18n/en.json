@@ -404,7 +404,7 @@
     "col_vendor": "Vendor",
     "tab_commands": "Commands",
     "monitoring_unknown": "This probe does not report its watches yet — it predates this feature.",
-    "monitoring_stale": "Seen in the displayed window but no longer watched: {list}",
+    "monitoring_stale": "{n, plural, one {# target} other {# targets}} from the window are no longer watched",
     "monitor_alive": "Answering",
     "monitor_down": "Not answering",
     "col_state": "State",

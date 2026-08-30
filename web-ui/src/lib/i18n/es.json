@@ -404,7 +404,7 @@
     "col_vendor": "Fabricante",
     "tab_commands": "Comandos",
     "monitoring_unknown": "Esta sonda aún no anuncia sus vigilancias: es anterior a esta función.",
-    "monitoring_stale": "Vistos en la ventana mostrada pero ya no vigilados: {list}",
+    "monitoring_stale": "{n, plural, one {# destino} other {# destinos}} de la ventana ya no se vigilan",
     "monitor_alive": "Responde",
     "monitor_down": "No responde",
     "col_state": "Estado",

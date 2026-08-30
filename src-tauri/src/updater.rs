@@ -73,53 +73,25 @@ struct GithubAsset {
 }
 
 /// Détermine le flavour Linux courant : AppImage (env var APPIMAGE posée
-/// par le runtime) ou .deb (binaire dans /usr). Retourne None sur une
-/// install inconnue pour éviter de proposer une mise à jour cassée.
-#[cfg(target_os = "linux")]
-fn linux_flavour() -> Option<&'static str> {
-    if std::env::var("APPIMAGE").is_ok() {
-        return Some("appimage");
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let s = exe.to_string_lossy();
-        if s.contains("/.mount_") || s.to_lowercase().contains("appimage") {
-            return Some("appimage");
-        }
-        if s.starts_with("/usr/") {
-            return Some("deb");
-        }
-    }
-    None
-}
 
 /// Parse un tag semver `vX.Y.Z` en tuple comparable. Ignore les suffixes
 /// comme `-linux` / `-windows` / `latest` — on ne veut que les tags full.
+/// 🔴 **Ne pas réécrire ici.** Cette fonction existait en double — une copie
+/// ici, une dans `lanprobe-core` — et les deux ont divergé au passage aux tags
+/// `app-v*` : le correctif n'a été appliqué qu'à celle de `core`, que
+/// l'application n'appelle pas. Résultat, une 2.1.0 installée ne voyait pas
+/// 2.1.1, sans le moindre message. Une seule implémentation, désormais.
 fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
-    let s = tag.strip_prefix('v')?;
-    if s.contains('-') { return None; }
-    let mut parts = s.split('.');
-    let a = parts.next()?.parse().ok()?;
-    let b = parts.next()?.parse().ok()?;
-    let c = parts.next()?.parse().ok()?;
-    if parts.next().is_some() { return None; }
-    Some((a, b, c))
+    lanprobe_core::updater::parse_version(tag)
 }
 
 /// Retourne le nom d'asset attendu pour la plateforme courante (sans URL
 /// — l'URL réelle vient de la réponse GitHub qui connaît l'ID public).
+/// 🔴 Même règle : la source de vérité est dans `lanprobe-core`. Une copie
+/// locale reproduirait la panne ci-dessus, en pire — l'application chercherait
+/// un fichier qui n'existe pas et conclurait « plateforme non supportée ».
 fn expected_asset_name(tag: &str) -> Option<String> {
-    #[cfg(target_os = "windows")]
-    { return Some(format!("lanprobe_{}_x64-setup.exe", tag)); }
-    #[cfg(target_os = "linux")]
-    {
-        match linux_flavour()? {
-            "appimage" => Some(format!("lanprobe_{}_amd64.AppImage", tag)),
-            "deb"      => Some(format!("lanprobe_{}_amd64.deb", tag)),
-            _ => None,
-        }
-    }
-    #[cfg(target_os = "macos")]
-    { Some(format!("lanprobe_{}_universal.pkg", tag)) }
+    lanprobe_core::updater::expected_asset_name(tag, false)
 }
 
 /// Cherche l'asset correspondant à la plateforme dans les assets GitHub.
