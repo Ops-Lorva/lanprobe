@@ -309,7 +309,16 @@ export interface ProbeCommand {
 export interface MonitorState {
   ip: string;
   alive: boolean;
+  /** Dernier relevé. */
   latency_ms?: number | null;
+  /**
+   * ⚠️ Min / moyenne / max sur ce que la sonde garde en mémoire. La dernière
+   * valeur seule ne dit rien de la stabilité : un lien qui oscille entre 5 et
+   * 300 ms et un lien stable à 150 affichent la même chose une fois sur deux.
+   */
+  min_ms?: number | null;
+  avg_ms?: number | null;
+  max_ms?: number | null;
   uptime_pct: number;
   samples: number;
 }

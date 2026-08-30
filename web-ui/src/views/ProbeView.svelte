@@ -1023,7 +1023,11 @@
                     <th>{$_('probe.col_ip')}</th>
                     <th>{$_('probe.col_state')}</th>
                     <th class="num">{$_('charts.latency')}</th>
+                    <th class="num">{$_('charts.stat_min')}</th>
+                    <th class="num">{$_('charts.stat_avg')}</th>
+                    <th class="num">{$_('charts.stat_max')}</th>
                     <th class="num">{$_('probe.col_uptime')}</th>
+                    <th class="num">{$_('sla.col_samples')}</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -1037,7 +1041,11 @@
                         </span>
                       </td>
                       <td class="num lp-mono">{m.latency_ms != null ? m.latency_ms.toFixed(1) : '—'}</td>
+                      <td class="num lp-mono">{m.min_ms != null ? m.min_ms.toFixed(1) : '—'}</td>
+                      <td class="num lp-mono">{m.avg_ms != null ? m.avg_ms.toFixed(1) : '—'}</td>
+                      <td class="num lp-mono">{m.max_ms != null ? m.max_ms.toFixed(1) : '—'}</td>
                       <td class="num lp-mono">{m.uptime_pct.toFixed(1)} %</td>
+                      <td class="num lp-mono">{m.samples}</td>
                       <td class="right">
                         <CommandButton
                           probeId={id}

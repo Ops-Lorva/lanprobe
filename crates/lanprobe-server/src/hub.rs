@@ -372,8 +372,19 @@ struct HeartbeatRequest<'a> {
 struct MonitorState {
     ip: String,
     alive: bool,
+    /// Dernier relevé.
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_ms: Option<f64>,
+    /// ⚠️ Min / moyenne / max sur ce que la sonde garde en mémoire. La
+    /// dernière valeur seule ne dit rien de la stabilité : un lien qui oscille
+    /// entre 5 et 300 ms et un lien stable à 150 affichent la même chose une
+    /// fois sur deux.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avg_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_ms: Option<f64>,
     /// Part des relevés en vie sur ce que la sonde garde en mémoire.
     uptime_pct: f64,
     samples: usize,
@@ -391,7 +402,26 @@ fn monitor_states(state: &AppState) -> Vec<MonitorState> {
         .map(|(ip, samples)| {
             let alive_count = samples.iter().filter(|s| s.alive).count();
             let last = samples.last();
+            // Seuls les relevés qui ont abouti : une absence de réponse n'est
+            // pas une latence de zéro, et la compter écraserait la moyenne.
+            let lat: Vec<f64> = samples
+                .iter()
+                .filter_map(|s| s.latency_ms)
+                .map(|v| v as f64)
+                .collect();
+            let (min_ms, avg_ms, max_ms) = if lat.is_empty() {
+                (None, None, None)
+            } else {
+                (
+                    lat.iter().copied().reduce(f64::min),
+                    Some(lat.iter().sum::<f64>() / lat.len() as f64),
+                    lat.iter().copied().reduce(f64::max),
+                )
+            };
             MonitorState {
+                min_ms,
+                avg_ms,
+                max_ms,
                 alive: last.map(|s| s.alive).unwrap_or(false),
                 latency_ms: last.and_then(|s| s.latency_ms).map(|v| v as f64),
                 uptime_pct: (alive_count as f64 / samples.len() as f64) * 100.0,
