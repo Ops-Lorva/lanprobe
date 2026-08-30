@@ -22,7 +22,7 @@ LANPROBE_GID=10001
 # privilégié. Sans ce chown, un volume nommé neuf reste à root:root et la
 # sauvegarde quotidienne échoue — silencieusement du point de vue de
 # l'utilisateur, qui découvrirait le vide le jour de la restauration.
-DATA_DIRS=(/data/lanprobe /data/influxdb "${LANPROBE_WEB_BACKUP_DIR:-/backup}")
+DATA_DIRS=(/data/influxdb "${LANPROBE_WEB_BACKUP_DIR:-/backup}")
 
 for dir in "${DATA_DIRS[@]}"; do
     mkdir -p "$dir"
@@ -34,6 +34,20 @@ for dir in "${DATA_DIRS[@]}"; do
         chown -R "${LANPROBE_UID}:${LANPROBE_GID}" "$dir"
     fi
 done
+
+# 🔴 Le volume du hub, lui, est repris À CHAQUE DÉMARRAGE, sans regarder le
+# propriétaire du répertoire.
+#
+# Il ne pèse que quelques mégaoctets — base SQLite, certificat, clés — donc
+# l'argument de coût ci-dessus ne s'y applique pas. Et surtout, le test sur le
+# seul répertoire ne voit pas le cas qui casse : `lanprobe-web restore`
+# s'exécute en `docker exec`, donc en **root**, et repose une base et des
+# secrets appartenant à root DANS un répertoire qui, lui, appartient toujours
+# à `lanprobe`. Le chown conditionnel était alors sauté, et le hub redémarrait
+# sur « unable to open database file » — c'est-à-dire précisément le jour de
+# la restauration, le seul jour où l'on compte dessus.
+mkdir -p /data/lanprobe
+chown -R "${LANPROBE_UID}:${LANPROBE_GID}" /data/lanprobe
 
 # À partir d'ici, plus jamais root : gosu fait un execve() direct vers
 # l'utilisateur applicatif (ce n'est pas un sudo, il ne reste aucun processus

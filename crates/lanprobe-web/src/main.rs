@@ -419,12 +419,52 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
                 lanprobe_web::db::Outcome::Success,
                 Some("ligne de commande"),
             );
+            warn_if_restored_files_changed_owner(args);
             println!(
                 "redémarrez le hub : un processus déjà lancé sert encore l'ancienne base"
             );
             Ok(())
         }
     }
+}
+
+/// Prévient quand la restauration a reposé la base sous un autre propriétaire
+/// que celui du volume.
+///
+/// 🔴 C'est le cas normal du chemin documenté : `docker exec` s'exécute en
+/// root, alors que le hub tourne sans privilège. La restauration réussit, dit
+/// qu'elle a réussi, et le hub refuse ensuite d'ouvrir sa propre base avec
+/// « unable to open database file » — au redémarrage, donc loin du message
+/// qui aurait pu l'expliquer.
+///
+/// L'image répare cela toute seule à chaque démarrage (voir `entrypoint.sh`),
+/// mais une restauration faite à la main sur l'hôte n'a pas ce filet : on le
+/// dit ici, avec la commande qui corrige.
+fn warn_if_restored_files_changed_owner(args: &Args) {
+    use std::os::unix::fs::MetadataExt;
+
+    let db_path = args.config_dir.join("hub.sqlite");
+    let (Ok(dir), Ok(db)) = (
+        std::fs::metadata(&args.config_dir),
+        std::fs::metadata(&db_path),
+    ) else {
+        return;
+    };
+    if dir.uid() == db.uid() {
+        return;
+    }
+    eprintln!(
+        "⚠️  {} appartient maintenant à l'uid {} alors que {} appartient à l'uid {} — \n\
+         \x20   le hub, qui tourne sans privilège, ne pourra pas l'ouvrir. Corrigez avec :\n\
+         \x20     chown -R {}:{} {}",
+        db_path.display(),
+        db.uid(),
+        args.config_dir.display(),
+        dir.uid(),
+        dir.uid(),
+        dir.gid(),
+        args.config_dir.display()
+    );
 }
 
 /// Ouvre la base du volume. À n'appeler que lorsque l'existence du fichier
