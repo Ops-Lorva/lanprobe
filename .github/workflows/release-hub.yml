@@ -41,6 +41,27 @@ jobs:
           sed -i.bak "0,/^version = \".*\"/s//version = \"${VERSION}\"/" \
             crates/lanprobe-web/Cargo.toml && rm crates/lanprobe-web/Cargo.toml.bak
           grep -m1 '^version' crates/lanprobe-web/Cargo.toml
+          # 🔴 Le verrou doit suivre. L'image construit avec `--locked` — pour
+          # que la version publiée soit exactement celle qu'on a testée — et
+          # cargo refuse alors de réécrire un Cargo.lock devenu faux. Le piège
+          # ne s'est pas vu à la 1.0.0 : le numéro injecté valait celui déjà
+          # écrit, donc rien ne changeait. Il ne se déclenche qu'à la
+          # DEUXIÈME publication du hub.
+          python3 - "$VERSION" <<'PY'
+          import re, sys
+          version = sys.argv[1]
+          lock = open('Cargo.lock').read()
+          patched, count = re.subn(
+              r'(\[\[package\]\]\nname = "lanprobe-web"\nversion = ")[^"]*(")',
+              rf'\g<1>{version}\g<2>',
+              lock,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("entrée lanprobe-web introuvable dans Cargo.lock")
+          open('Cargo.lock', 'w').write(patched)
+          print(f"Cargo.lock : lanprobe-web -> {version}")
+          PY
 
       - name: Repository name in lower case
         id: repo
