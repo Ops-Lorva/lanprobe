@@ -786,6 +786,18 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
+  /**
+   * Change SON PROPRE mot de passe.
+   *
+   * ⚠️ L'ancien est exigé par le hub : une session volée suffirait sinon à
+   * s'approprier le compte définitivement.
+   */
+  changeOwnPassword: (current: string, next: string) =>
+    request<{ ok: boolean }>('/api/me/password', {
+      method: 'POST',
+      body: JSON.stringify({ current, next }),
+    }),
+
   setUserPassword: (username: string, password: string) =>
     request<{ ok: boolean }>(`/api/users/${encodeURIComponent(username)}/password`, {
       method: 'POST',

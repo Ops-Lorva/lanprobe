@@ -21,7 +21,7 @@
   import AccountsView from './AccountsView.svelte';
   import NotificationsView from './NotificationsView.svelte';
   import { go, route, type SettingsTab } from '$lib/router';
-  import { canOperate, isAdmin } from '$lib/session';
+  import { canOperate, identity, isAdmin } from '$lib/session';
   import { dateOnly, humanBytes } from '$lib/time';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
@@ -282,7 +282,42 @@
   // La pastille sur un onglet dit où sont les modifications en attente — sans
   // elle, on enregistrerait une valeur saisie sur un onglet qu'on ne voit plus.
   type Tab = SettingsTab;
+  // ── Mon compte ───────────────────────────────────────────────────────────
+  let pwCurrent = $state('');
+  let pwNext = $state('');
+  let pwConfirm = $state('');
+  let pwBusy = $state(false);
+  let pwError = $state('');
+  let pwDone = $state(false);
+
+  const pwReady = $derived(
+    pwCurrent !== '' && pwNext.length >= 8 && pwNext === pwConfirm && pwNext !== pwCurrent,
+  );
+
+  async function changePassword() {
+    pwBusy = true;
+    pwError = '';
+    pwDone = false;
+    try {
+      await api.changeOwnPassword(pwCurrent, pwNext);
+      // Vidés tout de suite : trois champs qui gardent un mot de passe en
+      // clair après coup, c'est un post-it sur l'écran.
+      pwCurrent = '';
+      pwNext = '';
+      pwConfirm = '';
+      pwDone = true;
+    } catch (e) {
+      pwError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      pwBusy = false;
+    }
+  }
+
   const ALL_TABS: { id: Tab; key: string; admin?: true }[] = [
+    // En tête : c'est le seul onglet que TOUS les rôles peuvent utiliser, et
+    // celui qu'un lecteur vient chercher. Le reléguer en fin de rangée le
+    // ferait chercher parmi des onglets qui ne le concernent pas.
+    { id: 'account', key: 'settings.tab_account' },
     { id: 'general', key: 'settings.tab_general' },
     { id: 'alerts', key: 'settings.tab_alerts' },
     { id: 'storage', key: 'settings.tab_storage' },
@@ -306,6 +341,11 @@
   }
 
   const dirtyTabs = $derived<Record<Tab, boolean>>({
+    // « Mon compte » n'a rien de différé : un mot de passe s'enregistre par son
+    // propre bouton, ou pas du tout. Le laisser marquer « non enregistré »
+    // ferait chercher un bouton « Enregistrer les réglages » qui ne le
+    // concerne pas.
+    account: false,
     // Langue et thème s'appliquent au clic et ne partent jamais au hub : rien à
     // y enregistrer de leur fait.
     general: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
@@ -475,6 +515,57 @@
        pas, plutôt que de laisser saisir puis refuser. -->
   {#if !$isAdmin && (tab === 'general' || tab === 'storage')}
     <p class="readonly">{$_('settings.readonly_note')}</p>
+  {/if}
+
+  {#if tab === 'account'}
+  <div class="cards" role="tabpanel" id="panel-account" aria-labelledby="tab-account" tabindex="-1">
+    <section class="lp-card block">
+      <h2 class="lp-title">{$_('account.identity')}</h2>
+      <dl class="idlist">
+        <div><dt>{$_('accounts.username')}</dt><dd class="lp-mono">{$identity?.username ?? '—'}</dd></div>
+        <div>
+          <dt>{$_('accounts.role')}</dt>
+          <dd>{$identity ? $_(`accounts.role_${$identity.role}`) : '—'}</dd>
+        </div>
+      </dl>
+      <p class="hint">{$_('account.role_hint')}</p>
+    </section>
+
+    <section class="lp-card block">
+      <h2 class="lp-title">{$_('account.password')}</h2>
+      <!-- ⚠️ L'ancien mot de passe est exigé par le hub, pas seulement demandé
+           ici : une session volée suffirait sinon à s'approprier le compte
+           définitivement, sans aucun chemin de retour pour son titulaire. -->
+      <p class="hint">{$_('account.password_hint')}</p>
+      <label class="lp-field">
+        {$_('account.current')}
+        <input class="lp-input" type="password" bind:value={pwCurrent} autocomplete="current-password" />
+      </label>
+      <label class="lp-field">
+        {$_('account.next')}
+        <input class="lp-input" type="password" bind:value={pwNext} autocomplete="new-password" />
+      </label>
+      <label class="lp-field">
+        {$_('account.confirm')}
+        <input class="lp-input" type="password" bind:value={pwConfirm} autocomplete="new-password" />
+      </label>
+      <div class="pwrow">
+        <button class="lp-btn primary" onclick={changePassword} disabled={pwBusy || !pwReady}>
+          {pwBusy ? $_('common.saving') : $_('account.change')}
+        </button>
+        {#if pwError}<span class="pwerr">{pwError}</span>{/if}
+        {#if pwDone}<span class="pwok">{$_('account.changed')}</span>{/if}
+      </div>
+    </section>
+
+    <section class="lp-card block">
+      <h2 class="lp-title">{$_('account.second_factor')}</h2>
+      <!-- Annoncé plutôt que caché : quelqu'un qui cherche la 2FA doit savoir
+           qu'elle n'existe pas encore, pas conclure qu'il l'a mal cherchée. -->
+      <p class="hint">{$_('account.second_factor_todo')}</p>
+      <p class="hint">{$_('account.passkey_warning')}</p>
+    </section>
+  </div>
   {/if}
 
   {#if tab === 'general'}
@@ -904,6 +995,42 @@
 {/if}
 
 <style>
+  /* ── Mon compte ─────────────────────────────────────────────────────── */
+  .block {
+    padding: 16px 18px;
+  }
+  .idlist {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 28px;
+    margin: 10px 0 0;
+  }
+  .idlist dt {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--ep-text-dim);
+  }
+  .idlist dd {
+    margin: 2px 0 0;
+    font-size: 14px;
+  }
+  .pwrow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .pwerr {
+    font-size: 12px;
+    color: var(--ep-danger);
+  }
+  .pwok {
+    font-size: 12px;
+    color: var(--ep-success);
+  }
+
   .head {
     margin-bottom: 14px;
     max-width: 74ch;

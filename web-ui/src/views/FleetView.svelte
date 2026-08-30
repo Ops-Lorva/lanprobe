@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { canOperate } from '$lib/session';
   import { SvelteSet } from 'svelte/reactivity';
   import { RANGES, type Range } from '$lib/metrics';
   import { _, locale } from 'svelte-i18n';
@@ -395,7 +396,9 @@
     </p>
   </div>
   <div class="head-acts">
-    <button class="lp-btn sm" onclick={() => (createOpen = true)}>{$_('fleet.new_site')}</button>
+    {#if $canOperate}
+      <button class="lp-btn sm" onclick={() => (createOpen = true)}>{$_('fleet.new_site')}</button>
+    {/if}
     <button
       class="lp-btn sm"
       onclick={() => void fleet.load(onExpired, { quiet: true })}
@@ -502,9 +505,11 @@
   <!-- Premier vide : rien du tout. Il n'y a pas encore de site où réserver une
        place, donc la seule action possible est d'en créer un. -->
   <StateBlock title={$_('fleet.empty_sites_title')} body={$_('fleet.empty_sites_body')}>
-    <button class="lp-btn primary" onclick={() => (createOpen = true)}>
-      {$_('fleet.empty_sites_cta')}
-    </button>
+    {#if $canOperate}
+      <button class="lp-btn primary" onclick={() => (createOpen = true)}>
+        {$_('fleet.empty_sites_cta')}
+      </button>
+    {/if}
   </StateBlock>
 {:else if filtered.length === 0 && hasFilter && $pendingRows.length === 0}
   <StateBlock

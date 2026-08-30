@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from 'svelte';
+  import { canOperate } from '$lib/session';
   import { SvelteSet } from 'svelte/reactivity';
   import { _, locale } from 'svelte-i18n';
   import { fleet } from '$lib/fleet';
@@ -683,7 +684,9 @@
       {:else}
         <div class="title-row">
           <h1>{probe.name}</h1>
-          <button class="lp-btn ghost sm" onclick={startEdit}>{$_('probe.rename')}</button>
+          {#if $canOperate}
+            <button class="lp-btn ghost sm" onclick={startEdit}>{$_('probe.rename')}</button>
+          {/if}
         </div>
       {/if}
 
@@ -709,6 +712,10 @@
       porte la sienne, en toutes lettres, avant le clic.
     -->
     <div class="acts">
+      <!-- ⚠️ Masquage ET vérification serveur (§ 18). Le masquage évite le
+           clic qui échoue ; c'est le serveur qui évite l'accès, parce qu'il
+           suffit d'appeler la route à la main. -->
+      {#if $canOperate}
       <ActionMenu label={$_('probe.actions')}>
         {#snippet children(close)}
           <p class="mgroup">{$_('probe.menu_probe')}</p>
@@ -782,6 +789,7 @@
           </div>
         {/snippet}
       </ActionMenu>
+      {/if}
     </div>
   </header>
 
@@ -1003,6 +1011,7 @@
                           kind="remove_monitor"
                           args={{ ip: m.ip }}
                           label={$_('probe.monitoring_remove')}
+                          allowed={$canOperate}
                           onsent={afterCommand}
                         />
                       </td>
@@ -1019,6 +1028,7 @@
             </p>
           {/if}
 
+          {#if $canOperate}
           <form class="addrow" onsubmit={(e) => e.preventDefault()}>
             <input
               class="lp-input"
@@ -1033,10 +1043,12 @@
                 kind="add_monitor"
                 args={{ ip: newTarget.trim() }}
                 label={$_('probe.monitoring_add')}
+                allowed={$canOperate}
                 onsent={() => { newTarget = ''; afterCommand(); }}
               />
             {/if}
           </form>
+          {/if}
         </section>
       {:else if tab === 'speedtest'}
         <section class="lp-card block">
@@ -1077,6 +1089,7 @@
                   args={speedEngine === 'iperf3'
                     ? { engine: 'iperf3', server: iperfServer.trim() }
                     : { engine: 'ookla' }}
+                  allowed={$canOperate}
                   label={$_('probe.speedtest_run')}
                   onsent={afterCommand}
                 />
@@ -1132,6 +1145,7 @@
               <h2 class="lp-title">{$_('probe.tab_ports')}</h2>
               <p class="bsub">{$_('probe.ports_sub')}</p>
             </div>
+            {#if $canOperate}
             <form class="inline" onsubmit={(e) => e.preventDefault()}>
               <input
                 class="lp-input"
@@ -1146,10 +1160,12 @@
                   kind="port_scan"
                   args={{ ip: newTarget.trim() }}
                   label={$_('probe.ports_run')}
+                allowed={$canOperate}
                   onsent={afterCommand}
                 />
               {/if}
             </form>
+            {/if}
           </header>
 
           {#if portsScan === undefined}
@@ -1212,6 +1228,7 @@
                 kind="discovery"
                 args={discoveryCidr.trim() ? { cidr: discoveryCidr.trim() } : {}}
                 label={$_('probe.discovery_run')}
+                allowed={$canOperate}
                 onsent={afterCommand}
               />
             </div>

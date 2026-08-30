@@ -125,7 +125,8 @@
     "hub_version": "Hub {version}",
     "loss_title": "Ces changements suppriment des données",
     "loss_ack": "J'ai compris que ces suppressions sont définitives.",
-    "loss_confirm": "Enregistrer et supprimer"
+    "loss_confirm": "Enregistrer et supprimer",
+    "tab_account": "Mon compte"
   },
   "backup": {
     "auto_title": "Sauvegarde automatique",
@@ -773,5 +774,19 @@
     "from": "Du",
     "to": "au",
     "custom": "Période précise…"
+  },
+  "account": {
+    "change": "Changer le mot de passe",
+    "changed": "Mot de passe changé.",
+    "confirm": "Confirmer",
+    "current": "Mot de passe actuel",
+    "identity": "Identité",
+    "next": "Nouveau mot de passe",
+    "passkey_warning": "⚠️ Les clés d'accès exigeront une connexion HTTPS : sur un hub joint en clair, le navigateur les refusera quoi qu'il arrive.",
+    "password": "Mot de passe",
+    "password_hint": "L'ancien mot de passe est exigé : sans lui, une session volée suffirait à s'approprier le compte.",
+    "role_hint": "Votre rôle est fixé par un administrateur. Il décide de ce que vous pouvez faire dans le hub.",
+    "second_factor": "Second facteur",
+    "second_factor_todo": "TOTP et clés d'accès ne sont pas encore disponibles."
   }
 }

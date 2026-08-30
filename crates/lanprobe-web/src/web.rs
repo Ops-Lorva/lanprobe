@@ -107,6 +107,7 @@ pub fn build_router(state: AppState) -> Router {
         Role::Viewer,
         Router::new()
             .route("/api/me", get(me))
+            .route("/api/me/password", post(change_own_password))
             .route("/api/probes", get(list_probes))
             .route("/api/probes/{id}/metrics", get(probe_metrics))
             .route("/api/probes/{id}/inventory", get(probe_inventory))
@@ -335,6 +336,59 @@ async fn login(
 /// ce même journal, la série de refus qui compte.
 async fn me(Extension(identity): Extension<Identity>) -> Response {
     ok_json(json!({ "username": identity.username, "role": identity.role.as_str() }))
+}
+
+#[derive(Deserialize)]
+struct OwnPasswordBody {
+    current: String,
+    next: String,
+}
+
+/// Changement de son PROPRE mot de passe (contrat § 19).
+///
+/// ⚠️ Distinct de `POST /api/users/{…}/password`, réservé aux
+/// administrateurs. Sans cette route, un lecteur ou un opérateur ne pourrait
+/// jamais changer son mot de passe sans demander à un administrateur — et un
+/// administrateur qui change le mot de passe de quelqu'un le connaît.
+///
+/// ⚠️ L'ancien mot de passe est **exigé**. Une session volée suffirait sinon à
+/// s'approprier le compte définitivement : le voleur changerait le mot de
+/// passe et le propriétaire n'aurait plus aucun chemin de retour.
+async fn change_own_password(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(body): Json<OwnPasswordBody>,
+) -> Response {
+    if state
+        .db
+        .verify_credentials(&identity.username, &body.current)
+        .is_err()
+    {
+        audit(
+            &state,
+            Some(&identity.username),
+            "user.password",
+            Some(&identity.username),
+            Outcome::Failure,
+            Some("mot de passe actuel incorrect"),
+        );
+        return fail(StatusCode::FORBIDDEN, "mot de passe actuel incorrect");
+    }
+    if body.next == body.current {
+        return fail(StatusCode::BAD_REQUEST, "le nouveau mot de passe est identique à l'ancien");
+    }
+    if let Err(e) = state.db.reset_user_password(&identity.username, &body.next) {
+        return error_response(e);
+    }
+    audit(
+        &state,
+        Some(&identity.username),
+        "user.password",
+        Some(&identity.username),
+        Outcome::Success,
+        Some("changement par le titulaire du compte"),
+    );
+    ok_json(json!({ "ok": true }))
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {

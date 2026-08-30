@@ -1,5 +1,6 @@
 <script lang="ts">
   import { _ } from 'svelte-i18n';
+  import { canOperate } from '$lib/session';
   import StatusMark from './StatusMark.svelte';
   import type { ProbeStatus } from '$lib/api';
 
@@ -83,7 +84,9 @@
     <span class="tally">
       {#if total > 0}<span class="sep" aria-hidden="true">·</span>{/if}
       <span class="muted">{$_('site.probe_count', { values: { n: total } })}</span>
-      {#if onadd}
+      <!-- Enrôler une sonde est une action sur le parc : un lecteur n'en a
+           pas le droit, et le bouton n'a rien à faire sous ses yeux. -->
+      {#if onadd && $canOperate}
         <button
           class="add"
           class:busy={addBusy}

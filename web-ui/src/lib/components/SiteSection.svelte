@@ -1,5 +1,6 @@
 <script lang="ts">
   import { _ } from 'svelte-i18n';
+  import { canOperate } from '$lib/session';
   import ProbeRow from './ProbeRow.svelte';
   import SiteHealth from './SiteHealth.svelte';
   import StateBlock from './StateBlock.svelte';
@@ -100,6 +101,13 @@
           <path d="M2 3h12l-4.6 5.4v4.2L6.6 14V8.4z" />
         </svg>
       </button>
+      <!-- ⚠️ Masquage ET vérification serveur, pas l'un OU l'autre. Le
+           masquage évite la tentation et le clic qui échoue ; c'est la
+           vérification qui évite l'accès, parce qu'il suffit d'appeler la
+           route à la main. Voir § 18 du contrat.
+
+           Le rapport SLA, lui, reste visible pour un lecteur : le produire
+           ne change rien au parc. -->
       <!-- Le rapport se demande depuis le SITE : c'est l'unité qu'on remet à
            un client, pas la sonde. Une sonde seule reste exportable depuis sa
            fiche. -->
@@ -114,6 +122,7 @@
           <path d="M2.5 11v2.5h11V11" />
         </svg>
       </button>
+      {#if $canOperate}
       <button
         class="lp-btn ghost sm"
         onclick={onrename}
@@ -124,6 +133,7 @@
           <path d="M11.2 2.3l2.5 2.5L5.5 13H3v-2.5z" />
         </svg>
       </button>
+      {/if}
     </div>
   </div>
 

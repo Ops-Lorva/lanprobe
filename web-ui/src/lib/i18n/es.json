@@ -125,7 +125,8 @@
     "hub_version": "Hub {version}",
     "loss_title": "Estos cambios borran datos",
     "loss_ack": "Entiendo que estos borrados son definitivos.",
-    "loss_confirm": "Guardar y borrar"
+    "loss_confirm": "Guardar y borrar",
+    "tab_account": "Mi cuenta"
   },
   "backup": {
     "auto_title": "Copia de seguridad automática",
@@ -773,5 +774,19 @@
     "from": "Del",
     "to": "al",
     "custom": "Periodo exacto…"
+  },
+  "account": {
+    "change": "Cambiar la contraseña",
+    "changed": "Contraseña cambiada.",
+    "confirm": "Confirmar",
+    "current": "Contraseña actual",
+    "identity": "Identidad",
+    "next": "Nueva contraseña",
+    "passkey_warning": "⚠️ Las claves de acceso exigirán una conexión HTTPS: en un hub accedido en claro, el navegador las rechazará igualmente.",
+    "password": "Contraseña",
+    "password_hint": "Se exige la contraseña anterior: sin ella, una sesión robada bastaría para apoderarse de la cuenta.",
+    "role_hint": "Su rol lo fija un administrador. Decide lo que puede hacer en el hub.",
+    "second_factor": "Segundo factor",
+    "second_factor_todo": "TOTP y claves de acceso aún no están disponibles."
   }
 }

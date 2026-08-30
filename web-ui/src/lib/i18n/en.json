@@ -125,7 +125,8 @@
     "hub_version": "Hub {version}",
     "loss_title": "These changes delete data",
     "loss_ack": "I understand that these deletions are permanent.",
-    "loss_confirm": "Save and delete"
+    "loss_confirm": "Save and delete",
+    "tab_account": "My account"
   },
   "backup": {
     "auto_title": "Automatic backup",
@@ -773,5 +774,19 @@
     "from": "From",
     "to": "to",
     "custom": "Exact period…"
+  },
+  "account": {
+    "change": "Change password",
+    "changed": "Password changed.",
+    "confirm": "Confirm",
+    "current": "Current password",
+    "identity": "Identity",
+    "next": "New password",
+    "passkey_warning": "⚠️ Passkeys will require an HTTPS connection: on a hub reached in plain HTTP, the browser will refuse them whatever we do.",
+    "password": "Password",
+    "password_hint": "The old password is required: without it, a stolen session would be enough to seize the account.",
+    "role_hint": "Your role is set by an administrator. It decides what you can do in the hub.",
+    "second_factor": "Second factor",
+    "second_factor_todo": "TOTP and passkeys are not available yet."
   }
 }
