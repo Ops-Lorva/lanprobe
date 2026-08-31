@@ -1085,7 +1085,7 @@ la mauvaise adresse a l'air normal et personne ne le remet en cause — c'est le
 panne que ce projet refuse partout ailleurs.
 
 Les libellés de réseau (« Maison », « Bureau ») vivent dans une table séparée, clé
-`(public_ip, gateway)` : ils survivent à la purge des intervalles et se réappliquent quand
+`(site_id, public_ip, gateway)` : ils survivent à la purge des intervalles et se réappliquent quand
 le réseau revient. La passerelle fait partie de la clé parce que deux réseaux derrière un
 même opérateur partagent l'adresse publique.
 
