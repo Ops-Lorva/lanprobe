@@ -955,6 +955,21 @@ pub struct ProbeIdentity {
     pub monitors: Option<String>,
 }
 
+/// Plafond du nombre d'intervalles d'adresse conservés **par sonde**.
+///
+/// ⚠️ Chaque adresse différente ouvre un intervalle, et la purge par rétention
+/// (`purge_public_ip_history`) ne supprime rien quand la rétention Influx est
+/// illimitée — qui est le réglage par DÉFAUT. Sans plafond, une seule sonde
+/// authentifiée qui bat avec une adresse différente à chaque fois fait enfler
+/// `probe_public_ip_history` jusqu'à saturer le disque du hub, et donc pour
+/// tous les sites qu'il porte.
+///
+/// Ce qu'on perd au-delà du plafond, c'est l'historique le PLUS ANCIEN : celui
+/// dont les mesures ont de toute façon le plus de chances d'avoir déjà été
+/// purgées côté Influx, et qu'aucun découpage de SLA ne peut donc plus servir.
+/// 500 intervalles, c'est déjà un poste itinérant sur plusieurs mois.
+pub const MAX_PUBLIC_IP_INTERVALS: usize = 500;
+
 /// Bascule d'IP publique observée à un battement — changement d'opérateur,
 /// passage sur un lien de secours. C'est ce qui mérite une ligne d'audit ;
 /// une adresse inchangée n'en mérite aucune.
@@ -2574,6 +2589,25 @@ impl Db {
                         subnet,
                         ts
                     ],
+                )?;
+                // ⚠️ Plafond PAR SONDE, appliqué à l'ouverture d'un intervalle
+                // — c'est le seul moment où leur nombre augmente. Voir
+                // `MAX_PUBLIC_IP_INTERVALS` : sans lui, une sonde qui bat avec
+                // une adresse différente à chaque fois fait grossir cette table
+                // sans borne, la purge par rétention ne rattrapant rien quand
+                // la rétention Influx est illimitée.
+                //
+                // Ce qui saute, c'est le plus ANCIEN : ses mesures ont de toute
+                // façon le plus de chances d'être déjà parties côté Influx, et
+                // un intervalle sans mesures à découper ne sert plus à rien.
+                conn.execute(
+                    "DELETE FROM probe_public_ip_history
+                      WHERE probe_id = ?1
+                        AND id NOT IN (SELECT id FROM probe_public_ip_history
+                                        WHERE probe_id = ?1
+                                     ORDER BY confirmed_from DESC, id DESC
+                                        LIMIT ?2)",
+                    rusqlite::params![probe_id, MAX_PUBLIC_IP_INTERVALS as i64],
                 )?;
             }
         }
@@ -4729,6 +4763,51 @@ mod tests {
         beat_with_ip(&db, &probe, "88.120.0.1");
         let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
         assert_eq!(rows[0].label.as_deref(), Some("Maison"));
+    }
+
+    #[test]
+    fn the_intervals_of_one_probe_are_capped_and_the_oldest_go_first() {
+        // ⚠️ Une adresse différente à chaque battement ouvre un intervalle à
+        // chaque battement, et la purge par rétention ne rattrape rien quand
+        // la rétention est illimitée : sans plafond, une seule sonde
+        // authentifiée sature le disque du hub pour TOUS les sites.
+        let (db, probe) = db_with_probe();
+        for n in 0..MAX_PUBLIC_IP_INTERVALS + 20 {
+            beat_with_ip(&db, &probe, &format!("88.120.{}.{}", n / 256, n % 256));
+        }
+
+        let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), MAX_PUBLIC_IP_INTERVALS);
+        // Ce qu'on perd, c'est l'historique le plus ancien — celui dont les
+        // mesures ont de toute façon le plus de chances d'être déjà purgées
+        // côté Influx.
+        assert_eq!(rows[0].public_ip, "88.120.0.20", "les plus anciens partent");
+        assert_eq!(
+            rows[rows.len() - 1].public_ip,
+            format!(
+                "88.120.{}.{}",
+                (MAX_PUBLIC_IP_INTERVALS + 19) / 256,
+                (MAX_PUBLIC_IP_INTERVALS + 19) % 256
+            ),
+            "le plus récent reste"
+        );
+    }
+
+    #[test]
+    fn the_cap_never_touches_another_probe() {
+        // Le plafond est PAR SONDE : une sonde bavarde ne doit pas effacer
+        // l'historique de sa voisine.
+        let (db, noisy) = db_with_probe();
+        let site = db.list_sites().unwrap()[0].site_id.clone();
+        let (quiet, _) = db.enroll_probe(&site, "Lyon").unwrap();
+
+        beat_with_ip(&db, &quiet.probe_id, "88.120.9.9");
+        for n in 0..MAX_PUBLIC_IP_INTERVALS + 5 {
+            beat_with_ip(&db, &noisy, &format!("172.58.{}.{}", n / 256, n % 256));
+        }
+
+        let rows = db.public_ip_history(&quiet.probe_id, 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 1, "la voisine garde son intervalle : {rows:?}");
     }
 
     #[test]
