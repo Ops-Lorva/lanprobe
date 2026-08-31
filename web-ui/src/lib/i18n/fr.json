@@ -53,7 +53,7 @@
     "shrink_keep": "Garder {from}",
     "invalid_url": "Indiquez une URL complète, par exemple https://127.0.0.1:8086.",
     "invalid_retention": "La rétention se saisit en jours entiers, 0 ou plus.",
-    "invalid_heartbeat": "La cadence doit être d'au moins 10 secondes.",
+    "invalid_heartbeat": "La cadence doit être d'au moins 5 secondes.",
     "required": "Ce champ ne peut pas être vide.",
     "influx_title": "URL InfluxDB annoncée aux sondes",
     "field_label": "URL annoncée",

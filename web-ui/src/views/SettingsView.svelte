@@ -571,7 +571,10 @@
     }
     if (!Number.isInteger(retentionNum) || retentionNum < 0)
       return { msg: $_('settings.invalid_retention'), tab: 'storage' };
-    if (!Number.isInteger(heartbeatNum) || heartbeatNum < 10)
+    // ⚠️ 5 s, pas 10 : c'est le plancher que la sonde applique réellement
+    // (`hub.rs:876`). Un formulaire plus permissif ou plus strict que la sonde
+    // affiche un réglage qu'elle n'applique pas.
+    if (!Number.isInteger(heartbeatNum) || heartbeatNum < 5)
       return { msg: $_('settings.invalid_heartbeat'), tab: 'general' };
     // Le hub refuse une cadence nulle ou négative. On le dit ici plutôt que de
     // laisser partir la requête : le message serait le même, avec un aller-
@@ -935,7 +938,7 @@
           <input
             class="lp-input num"
             type="number"
-            min="10"
+            min="5"
             step="1"
             bind:value={heartbeat}
             disabled={!$isAdmin}
