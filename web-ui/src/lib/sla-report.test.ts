@@ -1,11 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
+  buildSlaWorkbook,
   byPublicIp,
   outages,
   stats,
   windowLabel,
   type PublicIpInterval,
   type Sample,
+  type SlaPayload,
 } from './sla-report';
 
 const t = (k: string, v?: Record<string, string | number>) =>
@@ -162,5 +164,58 @@ describe('byPublicIp', () => {
   it('ne renvoie pas de ligne indéterminée quand il n’y a rien dedans', () => {
     const rows = byPublicIp([sample(10, 'online')], [interval('88.120.0.1', 0, 100)]);
     expect(rows.some((r) => r.public_ip === null)).toBe(false);
+  });
+});
+
+function payloadWithTwoAddresses(): SlaPayload {
+  return {
+    probe: 'sonde-1',
+    site: 'Site A',
+    range: '-24h',
+    generated_at: 1_788_000_000,
+    targets: [],
+    // La coupure de 20 tombe dans le trou entre les deux intervalles : elle
+    // n'appartient à aucune des deux adresses.
+    internet: [sample(10, 'online'), sample(20, 'offline'), sample(30, 'online')],
+    speedtests: [],
+    discovery: null,
+    ports: null,
+    public_ip_history: [interval('88.120.0.1', 10, 10), interval('172.58.0.9', 30, 30)],
+  };
+}
+
+describe('buildSlaWorkbook', () => {
+  // exceljs est importé à la demande et sa première résolution dépasse le
+  // délai par défaut d'un test. On la sort des tests eux-mêmes : sinon le
+  // premier d'entre eux échoue sur le temps de chargement, pas sur ce qu'il
+  // vérifie — et l'ordre des tests déciderait lequel.
+  beforeAll(async () => {
+    await import('exceljs');
+  }, 60_000);
+
+  it('ajoute un onglet par adresse au classeur', async () => {
+    const wb = await buildSlaWorkbook([payloadWithTwoAddresses()], t, 'fr');
+    const sheet = wb.getWorksheet(t('report.ipSheet'));
+    expect(sheet).toBeDefined();
+    // en-tête + 2 adresses + la ligne indéterminée
+    expect(sheet!.rowCount).toBeGreaterThanOrEqual(4);
+  });
+
+  it('écrit la ligne indéterminée en toutes lettres, pas en case vide', async () => {
+    // ⚠️ Une case vide se lit comme une donnée manquante. C'est une part de la
+    // période qu'on refuse d'imputer : elle doit se dire.
+    const wb = await buildSlaWorkbook([payloadWithTwoAddresses()], t, 'fr');
+    const sheet = wb.getWorksheet(t('report.ipSheet'))!;
+    const addresses = sheet.getColumn(3).values.map((v) => String(v ?? ''));
+    expect(addresses).toContain(t('report.ipUndetermined'));
+  });
+
+  it('ne fabrique aucun onglet quand la sonde n’a aucun relevé internet', async () => {
+    const wb = await buildSlaWorkbook(
+      [{ ...payloadWithTwoAddresses(), internet: [], public_ip_history: [] }],
+      t,
+      'fr',
+    );
+    expect(wb.getWorksheet(t('report.ipSheet'))).toBeUndefined();
   });
 });

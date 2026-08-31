@@ -857,6 +857,17 @@
     "to": "to",
     "custom": "Exact period…"
   },
+  "report": {
+    "ipSheet": "SLA by public IP",
+    "ipLabel": "Label",
+    "ipAddress": "Public IP",
+    "ipGateway": "Gateway",
+    "ipFrom": "From",
+    "ipTo": "To",
+    "ipSamples": "Samples",
+    "ipUptime": "Uptime",
+    "ipUndetermined": "Undetermined"
+  },
   "account": {
     "change": "Change password",
     "changed": "Password changed.",

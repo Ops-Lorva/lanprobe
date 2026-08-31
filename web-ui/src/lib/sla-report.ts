@@ -187,6 +187,9 @@ export function windowLabel(range: string, t: Translate, locale = 'en'): string 
  */
 function chartPng(samples: Sample[], t: Translate, locale: string): string | null {
   if (samples.length < 2) return null;
+  // Hors navigateur (tests du classeur), il n'y a pas de canvas. Le rapport se
+  // lit très bien sans l'image : elle illustre des chiffres qui sont déjà là.
+  if (typeof document === 'undefined') return null;
   const W = 900;
   const H = 260;
   const PAD = { top: 16, right: 16, bottom: 26, left: 52 };
@@ -355,11 +358,49 @@ export async function downloadSlaWorkbook(
 ): Promise<void> {
   if (payloads.length === 0) return;
   const first = payloads[0];
+  const wb = await buildSlaWorkbook(payloads, t, locale);
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const slug = title.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+  a.href = url;
+  // Le nom de fichier porte la période : trois rapports du même site dans un
+  // dossier de téléchargements doivent se distinguer sans les ouvrir.
+  const period = first.range.includes('..')
+    ? first.range.split('..').map((s) => new Date(Number(s) * 1000).toISOString().slice(0, 10)).join('_')
+    : first.range.replace('-', '');
+  a.download = `lanprobe-sla-${slug || 'rapport'}-${period}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Construit le classeur, sans le télécharger.
+ *
+ * ⚠️ Séparée du téléchargement pour une raison précise : `Blob`, `<a download>`
+ * et `URL.createObjectURL` n'existent que dans un navigateur, donc un classeur
+ * construit et téléchargé d'un seul tenant ne peut pas être vérifié. Le contenu
+ * d'un document remis à un client est précisément ce qu'on veut pouvoir
+ * vérifier. `downloadSlaWorkbook` reste le point d'entrée.
+ */
+export async function buildSlaWorkbook(
+  payloads: SlaPayload[],
+  t: Translate,
+  locale: string,
+): Promise<import('exceljs').Workbook> {
   // Import à la demande : exceljs pèse lourd, et la plupart des visites du hub
   // ne produisent aucun rapport.
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   wb.creator = 'LanProbe';
+  if (payloads.length === 0) return wb;
+  const first = payloads[0];
   wb.created = new Date(first.generated_at * 1000);
 
   const window = windowLabel(first.range, t, locale);
@@ -561,24 +602,48 @@ export async function downloadSlaWorkbook(
     autoFit(ws);
   }
 
-  const buffer = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buffer], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const slug = title.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
-  a.href = url;
-  // Le nom de fichier porte la période : trois rapports du même site dans un
-  // dossier de téléchargements doivent se distinguer sans les ouvrir.
-  const period = first.range.includes('..')
-    ? first.range.split('..').map((s) => new Date(Number(s) * 1000).toISOString().slice(0, 10)).join('_')
-    : first.range.replace('-', '');
-  a.download = `lanprobe-sla-${slug || 'rapport'}-${period}.xlsx`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // ── SLA par IP publique ─────────────────────────────────────────────────
+  //
+  // Un client qui conteste un SLA veut savoir sur quel lien il a été mesuré.
+  //
+  // ⚠️ Le découpage se fait sonde par sonde : les intervalles d'une sonde ne
+  // décrivent que son propre lien, et croiser les relevés de l'une avec les
+  // intervalles de l'autre imputerait une coupure à une adresse qui n'y était
+  // pour rien.
+  const ipRows = payloads.flatMap((p) =>
+    byPublicIp(p.internet, p.public_ip_history ?? []).map((r) => ({ probe: p.probe, ...r })),
+  );
+  if (ipRows.length) {
+    const ws = wb.addWorksheet(t('report.ipSheet'));
+    ws.addRow([
+      t('sla.probe'),
+      t('report.ipLabel'),
+      t('report.ipAddress'),
+      t('report.ipGateway'),
+      t('report.ipFrom'),
+      t('report.ipTo'),
+      t('report.ipSamples'),
+      t('report.ipUptime'),
+    ]);
+    for (const r of ipRows) {
+      ws.addRow([
+        r.probe,
+        r.label ?? '',
+        // ⚠️ La ligne indéterminée n'est pas une adresse manquante : c'est une
+        // part de la période qu'on refuse d'imputer. Elle doit se lire comme
+        // telle, pas comme une case vide.
+        r.public_ip ?? t('report.ipUndetermined'),
+        r.gateway ?? '',
+        r.from ? dt(r.from, locale) : '',
+        r.to ? dt(r.to, locale) : '',
+        r.samples,
+        `${r.uptime_pct.toFixed(2)} %`,
+      ]);
+    }
+    autoFit(ws);
+  }
+
+  return wb;
 }
 
 export interface PublicIpInterval {

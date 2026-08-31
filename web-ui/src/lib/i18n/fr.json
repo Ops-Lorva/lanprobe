@@ -857,6 +857,17 @@
     "to": "au",
     "custom": "Période précise…"
   },
+  "report": {
+    "ipSheet": "SLA par IP publique",
+    "ipLabel": "Libellé",
+    "ipAddress": "IP publique",
+    "ipGateway": "Passerelle",
+    "ipFrom": "Début",
+    "ipTo": "Fin",
+    "ipSamples": "Relevés",
+    "ipUptime": "Disponibilité",
+    "ipUndetermined": "Indéterminé"
+  },
   "account": {
     "change": "Changer le mot de passe",
     "changed": "Mot de passe changé.",
