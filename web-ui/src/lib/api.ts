@@ -95,11 +95,15 @@ export interface PendingEnroll {
 /**
  * Corps de `PUT /api/networks/label` (contrat § 15).
  *
- * ⚠️ La clé est le COUPLE `(public_ip, gateway)`, pas l'adresse seule : deux
- * réseaux derrière le même opérateur partagent la même IP publique, et
- * « Maison » se retrouverait collé au bureau d'un autre client.
+ * ⚠️ La clé est le TRIPLET `(site_id, public_ip, gateway)`. Ni l'adresse seule
+ * ni le couple `(adresse, passerelle)` ne suffisent : deux réseaux derrière le
+ * même opérateur partagent l'IP publique, et sous CGNAT deux CLIENTS la
+ * partagent aussi — avec, une fois sur deux, la même `192.168.1.1` de box.
+ * Sans le site, « Maison de Durand » s'affichait dans le rapport de Martin.
  */
 export interface NetworkLabel {
+  /** Le site du réseau nommé. Le hub refuse en 404 s'il est hors portée. */
+  site_id: string;
   public_ip: string;
   /** Chaîne vide quand la sonde n'a pas remonté de passerelle. */
   gateway: string;

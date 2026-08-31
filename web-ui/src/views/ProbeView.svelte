@@ -401,11 +401,16 @@
   const labelDraft = (r: IpSlaRow) => labelDrafts[labelKey(r)] ?? r.label ?? '';
 
   async function saveLabel(r: IpSlaRow) {
-    if (r.public_ip == null) return;
+    // `probe` porte le site, qui fait partie de la clé du libellé : sans lui
+    // il n'y a rien à enregistrer, et la ligne « indéterminé » ne se nomme pas.
+    if (r.public_ip == null || !probe) return;
     labelBusy = labelKey(r);
     labelError = '';
     try {
       await api.setNetworkLabel({
+        // ⚠️ Le site fait partie de la clé : sans lui le hub refuse, et deux
+        // clients derrière la même sortie CGNAT partageraient le libellé.
+        site_id: probe.site_id,
         public_ip: r.public_ip,
         // Le hub garde le couple : une passerelle inconnue est une clé, pas
         // une absence de clé.
