@@ -15,9 +15,24 @@ pub struct IpNet {
     bits: u8,
 }
 
+/// Ramène `::ffff:a.b.c.d` à `a.b.c.d`.
+///
+/// ⚠️ Un hub qui écoute sur `[::]` — le montage dual-stack courant — reçoit les
+/// sondes IPv4 sous cette forme. Sans cette normalisation, un `trusted_proxies`
+/// écrit en IPv4 ne reconnaissait jamais le proxy : `X-Forwarded-For` restait
+/// ignoré et la détection par adresse source était **muette en production alors
+/// qu'elle passait en test**. On ne relâche rien d'autre — une IPv6 réelle ne
+/// devient pas comparable à un préfixe IPv4.
+fn unmap(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(addr, IpAddr::V4),
+        v4 => v4,
+    }
+}
+
 impl IpNet {
     fn contains(&self, addr: IpAddr) -> bool {
-        match (self.base, addr) {
+        match (unmap(self.base), unmap(addr)) {
             (IpAddr::V4(b), IpAddr::V4(a)) => {
                 if self.bits == 0 {
                     return true;
@@ -134,6 +149,47 @@ mod tests {
             ip("10.0.0.5")
         );
         assert_eq!(resolve(ip("10.0.0.5"), Some(""), &trusted), ip("10.0.0.5"));
+    }
+
+    #[test]
+    fn an_ipv4_mapped_peer_is_recognised_by_an_ipv4_cidr() {
+        // ⚠️ Un hub qui écoute sur `[::]` — le montage dual-stack courant —
+        // voit une sonde IPv4 arriver en `::ffff:10.0.0.9`. Sans cette
+        // équivalence, un `trusted_proxies` en IPv4 ne matchait jamais : la
+        // détection par adresse source passait en test et restait MUETTE en
+        // production, sans rien signaler.
+        let trusted = parse_cidrs("10.0.0.0/8");
+        let got = resolve(ip("::ffff:10.0.0.9"), Some("88.120.0.1"), &trusted);
+        assert_eq!(got, ip("88.120.0.1"));
+    }
+
+    #[test]
+    fn an_ipv4_mapped_hop_in_the_header_is_treated_as_its_ipv4_form() {
+        let trusted = parse_cidrs("10.0.0.0/8");
+        let got = resolve(
+            ip("10.0.0.5"),
+            Some("203.0.113.7, ::ffff:10.0.0.9"),
+            &trusted,
+        );
+        assert_eq!(got, ip("203.0.113.7"));
+    }
+
+    #[test]
+    fn a_real_ipv6_address_still_does_not_match_an_ipv4_cidr() {
+        // On ne relâche rien d'autre : seule la forme mappée est ramenée à
+        // l'IPv4 qu'elle représente réellement.
+        let trusted = parse_cidrs("10.0.0.0/8");
+        let got = resolve(ip("2001:db8::9"), Some("88.120.0.1"), &trusted);
+        assert_eq!(got, ip("2001:db8::9"), "une v6 réelle n'est pas de confiance");
+    }
+
+    #[test]
+    fn an_ipv4_mapped_cidr_entry_matches_a_bare_ipv4_peer() {
+        // La symétrie compte : un opérateur qui écrit la forme mappée dans son
+        // réglage doit couvrir la même machine qu'en IPv4 nue.
+        let trusted = parse_cidrs("::ffff:10.0.0.9");
+        let got = resolve(ip("10.0.0.9"), Some("88.120.0.1"), &trusted);
+        assert_eq!(got, ip("88.120.0.1"));
     }
 
     #[test]
