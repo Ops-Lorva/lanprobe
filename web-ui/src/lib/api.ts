@@ -176,6 +176,15 @@ export interface HubSettings {
    * conteneur n'a pas redémarré.
    */
   tls_enabled: boolean;
+  /**
+   * Reverse proxies dont on accepte le `X-Forwarded-For`, en CIDR séparés par
+   * des virgules.
+   *
+   * ⚠️ **Vide par défaut, et c'est le comportement sûr** : l'en-tête est alors
+   * ignoré, on lit l'adresse de la socket. Le lire « s'il est là » laisserait
+   * n'importe qui forger son adresse source.
+   */
+  trusted_proxies: string;
 }
 
 export const SETTINGS_DEFAULTS: HubSettings = {
@@ -193,6 +202,7 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   backup_keep_last: 7,
   inventory_days: 0,
   tls_enabled: false,
+  trusted_proxies: '',
 };
 
 // ── Sauvegarde ──────────────────────────────────────────────────────────────

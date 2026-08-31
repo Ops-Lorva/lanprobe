@@ -43,6 +43,9 @@ describe('catalogues de traduction', () => {
     'probe.ipTable.undetermined',
     'probe.ipTable.save',
     'probe.ipTable.error',
+    'settings.proxies_title',
+    'settings.proxies_label',
+    'settings.proxies_hint',
   ];
 
   for (const [lang, catalog] of Object.entries(CATALOGS)) {
