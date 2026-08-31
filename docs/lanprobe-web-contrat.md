@@ -1023,8 +1023,74 @@ de la sonde, comme dans l'app.
 ⚠️ **L'IP publique ne se redemande pas à chaque battement.** La connaître exige
 un appel sortant vers un service tiers ; le faire toutes les minutes pour chaque
 sonde du parc, c'est marteler un service gratuit et publier son trafic. La sonde
-la met en cache et ne la rafraîchit **qu'au changement d'interface ou toutes les
-6 heures** — elle change rarement, et un changement compte plus que sa fraîcheur.
+la met en cache et la relève :
+
+- quand la **passerelle ou une IP locale** change — ⚠️ changer de réseau Wi-Fi garde
+  souvent le **même nom d'interface** (`en0` reste `en0`), l'interface seule ne suffit
+  donc pas : c'était le défaut d'origine, l'adresse pouvait rester fausse six heures ;
+- à chaque **transition d'état internet** (`offline` → `online`) — on vient de
+  raccrocher, souvent sur un autre lien ;
+- quand le **hub le demande** (`recheck_public_ip`, ci-dessous) ;
+- sinon toutes les **6 heures**, en dernier recours.
+
+⚠️ **Plancher : au plus un relevé forcé toutes les 5 minutes par sonde.** Une sortie
+multi-WAN en répartition de charge alterne l'adresse source à chaque battement ; sans
+plancher on martèlerait le service tiers, ce que le TTL long cherchait justement à
+éviter. Le plancher est un compteur en mémoire, pas un réglage.
+
+### `recheck_public_ip` — le hub détecte, la sonde mesure
+
+Le hub compare l'adresse source du battement à celle du battement précédent. Si elle a
+changé, il ajoute `"recheck_public_ip": true` à sa réponse.
+
+⚠️ **L'adresse vue par le hub n'est JAMAIS enregistrée.** Le battement peut sortir par
+la route par défaut alors que les mesures sont liées à une autre interface : on
+retomberait sur une adresse plausible et fausse au milieu de mesures honnêtes, c'est-à-dire
+sur le défaut que le relevé par interface source corrige déjà. Le hub déclenche, la
+sonde mesure.
+
+⚠️ **Ce déclencheur est muet quand le hub est dans le LAN des sondes** — l'adresse source
+est alors privée et ne dit rien de l'adresse publique. C'est le cas courant en
+auto-hébergement ; les déclencheurs locaux ci-dessus le couvrent.
+
+Une sonde antérieure à ce champ l'ignore et garde son comportement : dégradation, pas
+panne.
+
+### `trusted_proxies` — réglage, table `settings`
+
+Liste de CIDR séparés par des virgules. Vide (défaut) : on lit l'adresse de la socket et
+on **ignore** `X-Forwarded-For`. Renseignée : on remonte l'en-tête de droite à gauche et
+on s'arrête au premier saut hors liste.
+
+⚠️ Sans ce réglage, deux échecs symétriques : derrière un reverse proxy toutes les sondes
+portent l'adresse du proxy ; en acceptant l'en-tête naïvement, n'importe qui forge la
+sienne — l'en-tête est écrit par le client.
+
+### Historique des adresses
+
+Le hub tient un intervalle par adresse : `public_ip`, `interface`, `gateway`,
+`local_subnet`, `confirmed_from`, `confirmed_until`. L'identité réseau y est un
+**instantané figé** : après un changement, elle décrit le réseau tel qu'il était.
+
+⚠️ **`confirmed_until` est le dernier battement ayant CONFIRMÉ l'adresse, pas l'instant
+où le changement a été détecté.** Un battement sans adresse — une sonde sans accès
+internet — ne prolonge rien. Conséquence, et c'est tout l'intérêt : **le trou entre le
+`confirmed_until` d'un intervalle et le `confirmed_from` du suivant EST la zone
+indéterminée**. Une coupure suivie d'un retour sur la **même** adresse lui est imputée ;
+une coupure suivie d'une adresse **différente** n'est imputée à personne.
+
+Le SLA par adresse en découle sans cas particulier, et ses pourcentages ne totalisent
+volontairement pas 100 % : le reste est la part assumée d'inconnu. Un « 99,2 % » collé à
+la mauvaise adresse a l'air normal et personne ne le remet en cause — c'est le mode de
+panne que ce projet refuse partout ailleurs.
+
+Les libellés de réseau (« Maison », « Bureau ») vivent dans une table séparée, clé
+`(public_ip, gateway)` : ils survivent à la purge des intervalles et se réappliquent quand
+le réseau revient. La passerelle fait partie de la clé parce que deux réseaux derrière un
+même opérateur partagent l'adresse publique.
+
+⚠️ **Rien de tout cela ne va dans InfluxDB** (§12) : une étiquette par adresse ferait une
+série par adresse, et un poste itinérant en voit des dizaines.
 
 Le hub garde la **dernière valeur connue** avec sa date : une sonde hors ligne
 doit continuer d'afficher l'adresse qu'elle avait, pas un tiret. C'est justement
