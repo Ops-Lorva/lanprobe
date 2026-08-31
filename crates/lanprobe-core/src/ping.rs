@@ -18,29 +18,54 @@ pub struct PingResult {
 
 const PROBE_PORTS: &[u16] = &[80, 443, 22, 445, 8080, 21, 23, 8443, 139, 9100, 631, 3389];
 
+/// Délai d'attente d'un ping, commun aux quatre chemins de mesure.
+pub const PING_TIMEOUT_MS: u64 = 1000;
+
+/// Transforme une latence mesurée en résultat, en écartant l'impossible.
+///
+/// ⚠️ **Une latence supérieure au délai d'attente ne peut pas venir du réseau** :
+/// le ping aurait abandonné avant. Elle vient d'un processus suspendu — un
+/// portable qui se met en veille reprend son chronomètre au réveil et compte
+/// tout le sommeil comme temps de réponse.
+///
+/// Constaté en production : `max 1045504 ms`, soit **17 minutes** pour un ping.
+/// Le point avait tout du vrai — bonne unité, bon horodatage, bonne cible — mais
+/// aucun paquet n'avait mis 17 minutes. Il écrasait l'échelle du graphe et
+/// rendait toutes les mesures honnêtes illisibles, sans que rien ne le signale.
+///
+/// Décision de Benjamin : **au-delà du délai, l'hôte est considéré mort.** C'est
+/// d'ailleurs ce qu'il est du point de vue de la sonde, qui n'a rien reçu à
+/// temps. Mieux vaut un trou franc qu'une valeur plausible et fausse.
+fn measured(ip: &str, latency_ms: u64, timestamp: u64) -> PingResult {
+    if latency_ms > PING_TIMEOUT_MS {
+        return PingResult { ip: ip.to_string(), alive: false, latency_ms: None, timestamp };
+    }
+    PingResult { ip: ip.to_string(), alive: true, latency_ms: Some(latency_ms), timestamp }
+}
+
 pub async fn ping_once(ip: &str, src: Option<Ipv4Addr>) -> PingResult {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    if let Some(lat) = icmp_ping(ip, src, 1000).await {
-        return PingResult { ip: ip.to_string(), alive: true, latency_ms: Some(lat), timestamp };
+    if let Some(lat) = icmp_ping(ip, src, PING_TIMEOUT_MS).await {
+        return measured(ip, lat, timestamp);
     }
 
     #[cfg(target_os = "windows")]
-    if let Some(lat) = windows_ping_exe(ip, src, 1000).await {
-        return PingResult { ip: ip.to_string(), alive: true, latency_ms: Some(lat), timestamp };
+    if let Some(lat) = windows_ping_exe(ip, src, PING_TIMEOUT_MS).await {
+        return measured(ip, lat, timestamp);
     }
 
     #[cfg(target_os = "macos")]
-    if let Some(lat) = macos_ping_exe(ip, src, 1000).await {
-        return PingResult { ip: ip.to_string(), alive: true, latency_ms: Some(lat), timestamp };
+    if let Some(lat) = macos_ping_exe(ip, src, PING_TIMEOUT_MS).await {
+        return measured(ip, lat, timestamp);
     }
 
     let start = Instant::now();
-    if tcp_probe(ip, src, 1000).await {
-        PingResult { ip: ip.to_string(), alive: true, latency_ms: Some(start.elapsed().as_millis() as u64), timestamp }
+    if tcp_probe(ip, src, PING_TIMEOUT_MS).await {
+        measured(ip, start.elapsed().as_millis() as u64, timestamp)
     } else {
         PingResult { ip: ip.to_string(), alive: false, latency_ms: None, timestamp }
     }
@@ -244,4 +269,43 @@ async fn macos_ping_exe(ip: &str, src: Option<Ipv4Addr>, timeout_ms: u64) -> Opt
         }
     }
     None
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_latency_within_the_timeout_is_kept() {
+        let r = measured("10.0.0.1", 42, 1000);
+        assert!(r.alive);
+        assert_eq!(r.latency_ms, Some(42));
+    }
+
+    #[test]
+    fn a_latency_at_the_timeout_is_still_a_measurement() {
+        // La borne est inclusive : une réponse arrivée pile à temps EST arrivée.
+        let r = measured("10.0.0.1", PING_TIMEOUT_MS, 1000);
+        assert!(r.alive);
+        assert_eq!(r.latency_ms, Some(PING_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn a_latency_beyond_the_timeout_is_a_dead_host_not_a_slow_one() {
+        // ⚠️ Le cas réel : 1 045 504 ms — 17 minutes — relevés sur un portable
+        // qui s'était endormi pendant la mesure. Aucun paquet n'a mis 17
+        // minutes ; le chronomètre a compté le sommeil. Un tel point écrasait
+        // l'échelle du graphe et rendait toutes les vraies mesures illisibles.
+        let r = measured("10.0.0.1", 1_045_504, 1000);
+        assert!(!r.alive, "au-delà du délai, l'hôte est considéré mort");
+        assert_eq!(r.latency_ms, None, "aucune latence ne doit être publiée");
+    }
+
+    #[test]
+    fn just_past_the_timeout_is_already_dead() {
+        let r = measured("10.0.0.1", PING_TIMEOUT_MS + 1, 1000);
+        assert!(!r.alive);
+        assert_eq!(r.latency_ms, None);
+    }
 }

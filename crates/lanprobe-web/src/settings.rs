@@ -88,6 +88,10 @@ pub const DEFAULT_INFLUX_URL: &str = "https://127.0.0.1:8086";
 pub const DEFAULT_INFLUX_ORG: &str = "lanprobe";
 pub const DEFAULT_INFLUX_BUCKET: &str = "lanprobe";
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: i64 = 60;
+/// Plancher du battement, aligné sur celui que la sonde applique de son côté
+/// (`crates/lanprobe-server/src/hub.rs:876`, `max(5)`). Trois planchers
+/// différents — formulaire, API, sonde — se seraient contredits en silence.
+pub const MIN_HEARTBEAT_INTERVAL_SECS: i64 = 5;
 /// ⚠️ **Illimitée par défaut, et ça n'est pas un oubli.**
 ///
 /// Un défaut à 90 jours se serait appliqué aux hubs déjà installés : la
@@ -361,14 +365,28 @@ impl Settings {
                     )));
                 }
             }
-            keys::HEARTBEAT_INTERVAL_SECS
-            | keys::NOTIFY_DELAY_SECS
-            | keys::BACKUP_INTERVAL_HOURS => {
+            keys::NOTIFY_DELAY_SECS | keys::BACKUP_INTERVAL_HOURS => {
                 let parsed: i64 = value
                     .parse()
                     .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
                 if parsed <= 0 {
                     return Err(DbError::Conflict(format!("{key} doit être supérieur à 0")));
+                }
+            }
+            keys::HEARTBEAT_INTERVAL_SECS => {
+                let parsed: i64 = value
+                    .parse()
+                    .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
+                // ⚠️ Le plancher n'est pas décoratif : la sonde applique
+                // `max(5)` (`lanprobe-server/src/hub.rs:876`). Accepter 1 ici
+                // afficherait « 1 s » dans les réglages pendant que la sonde
+                // bat à 5 — une valeur plausible et fausse, que personne ne
+                // remet en cause parce qu'elle vient du formulaire lui-même.
+                if parsed < MIN_HEARTBEAT_INTERVAL_SECS {
+                    return Err(DbError::Conflict(format!(
+                        "{key} ne peut pas descendre sous {MIN_HEARTBEAT_INTERVAL_SECS} s : \
+                         c'est le plancher appliqué par la sonde."
+                    )));
                 }
             }
             keys::RETENTION_DAYS => {
@@ -645,6 +663,11 @@ mod tests {
         let s = settings();
         assert!(s.put(keys::HEARTBEAT_INTERVAL_SECS, "soixante", false).is_err());
         assert!(s.put(keys::HEARTBEAT_INTERVAL_SECS, "0", false).is_err());
+        // ⚠️ La sonde plafonne à 5 s : accepter moins afficherait un réglage
+        // que la sonde n'applique pas.
+        assert!(s.put(keys::HEARTBEAT_INTERVAL_SECS, "1", false).is_err());
+        assert!(s.put(keys::HEARTBEAT_INTERVAL_SECS, "4", false).is_err());
+        s.put(keys::HEARTBEAT_INTERVAL_SECS, "5", false).unwrap();
         assert!(s.put(keys::HEARTBEAT_INTERVAL_SECS, "-1", false).is_err());
         assert!(s.put(keys::HEARTBEAT_INTERVAL_SECS, "30", false).is_ok());
         assert_eq!(s.heartbeat_interval_secs(), 30);
