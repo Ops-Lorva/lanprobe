@@ -895,6 +895,7 @@
     "pk_already": "Esta llave ya está registrada en esta cuenta.",
     "pk_insecure": "El navegador se niega: la página no se sirve desde un origen seguro.",
     "pk_rp": "Dirección actual: {host}.",
-    "pk_rp_bound": "⚠️ Una llave creada aquí solo valdrá para «{host}». Acceder al hub por otra dirección — su IP en vez de su nombre — mostrará «ninguna llave para este sitio»: es la protección contra el phishing haciendo su trabajo, no un fallo."
+    "pk_rp_bound": "⚠️ Una llave creada aquí solo valdrá para «{host}». Acceder al hub por otra dirección — su IP en vez de su nombre — mostrará «ninguna llave para este sitio»: es la protección contra el phishing haciendo su trabajo, no un fallo.",
+    "current_password": "Contraseña actual"
   }
 }

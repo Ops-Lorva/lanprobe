@@ -895,6 +895,7 @@
     "pk_already": "This key is already registered on this account.",
     "pk_insecure": "The browser refuses: the page is not served from a secure origin.",
     "pk_rp": "Current address: {host}.",
-    "pk_rp_bound": "⚠️ A key created here will only work for “{host}”. Reaching the hub by another address — its IP instead of its name — will show “no key for this site”: that is the anti-phishing protection doing its job, not a failure."
+    "pk_rp_bound": "⚠️ A key created here will only work for “{host}”. Reaching the hub by another address — its IP instead of its name — will show “no key for this site”: that is the anti-phishing protection doing its job, not a failure.",
+    "current_password": "Current password"
   }
 }

@@ -895,6 +895,7 @@
     "pk_already": "Cette clé est déjà enregistrée sur ce compte.",
     "pk_insecure": "Le navigateur refuse : la page n'est pas servie sur une origine sûre.",
     "pk_rp": "Adresse actuelle : {host}.",
-    "pk_rp_bound": "⚠️ Une clé créée ici ne vaudra que pour « {host} ». Joindre le hub par une autre adresse — son IP au lieu de son nom — affichera « aucune clé pour ce site » : c'est la protection contre l'hameçonnage qui fait son travail, pas une panne."
+    "pk_rp_bound": "⚠️ Une clé créée ici ne vaudra que pour « {host} ». Joindre le hub par une autre adresse — son IP au lieu de son nom — affichera « aucune clé pour ce site » : c'est la protection contre l'hameçonnage qui fait son travail, pas une panne.",
+    "current_password": "Mot de passe actuel"
   }
 }
