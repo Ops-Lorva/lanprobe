@@ -273,7 +273,10 @@ async fn main() -> Result<(), String> {
             addr,
             axum_server::tls_rustls::RustlsConfig::from_config(tls_config),
         )
-        .serve(router.into_make_service())
+        // ⚠️ `with_connect_info` et non `into_make_service` : sans lui,
+        // l'adresse de la socket n'atteint jamais les gestionnaires et le
+        // battement ne peut plus détecter qu'une sonde a changé de réseau.
+        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .map_err(|e| e.to_string());
     }
@@ -287,9 +290,12 @@ async fn main() -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| e.to_string())?;
-    axum::serve(listener, router.into_make_service())
-        .await
-        .map_err(|e| e.to_string())
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// La cible InfluxDB pour `influx backup`, ou `None` s'il n'y a pas de jeton

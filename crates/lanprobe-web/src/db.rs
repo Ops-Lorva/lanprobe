@@ -2658,6 +2658,33 @@ impl Db {
         Ok(rows)
     }
 
+    /// Mémorise l'adresse source du battement et dit si elle a changé.
+    ///
+    /// ⚠️ Cette adresse ne sert QU'À déclencher un relevé côté sonde : elle
+    /// n'est jamais reprise comme adresse publique. Le battement peut sortir
+    /// par la route par défaut alors que les mesures sont liées à une autre
+    /// interface — on écrirait une adresse plausible et fausse au milieu de
+    /// mesures honnêtes.
+    ///
+    /// Le premier battement ne demande rien : sans point de comparaison, un
+    /// « changement » serait une invention.
+    pub fn note_observed_source(&self, probe_id: &str, observed: &str) -> DbResult<bool> {
+        let conn = self.lock()?;
+        let previous: Option<String> = conn
+            .query_row(
+                "SELECT observed_source_ip FROM probes WHERE probe_id = ?1",
+                [probe_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        conn.execute(
+            "UPDATE probes SET observed_source_ip = ?2 WHERE probe_id = ?1",
+            rusqlite::params![probe_id, observed],
+        )?;
+        Ok(matches!(previous, Some(p) if p != observed))
+    }
+
     /// Pose ou remplace le libellé d'un réseau. Une chaîne vide l'efface :
     /// l'utilisateur qui vide le champ veut retirer le libellé, pas en poser
     /// un vide.
@@ -4702,6 +4729,18 @@ mod tests {
         beat_with_ip(&db, &probe, "88.120.0.1");
         let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
         assert_eq!(rows[0].label.as_deref(), Some("Maison"));
+    }
+
+    #[test]
+    fn a_first_heartbeat_asks_for_nothing_but_a_moved_probe_does() {
+        // ⚠️ Sans point de comparaison, un « changement » serait une
+        // invention : le premier battement ne demande donc rien.
+        let (db, probe) = db_with_probe();
+
+        assert!(!db.note_observed_source(&probe, "203.0.113.10").unwrap());
+        assert!(!db.note_observed_source(&probe, "203.0.113.10").unwrap());
+        assert!(db.note_observed_source(&probe, "198.51.100.4").unwrap());
+        assert!(!db.note_observed_source(&probe, "198.51.100.4").unwrap());
     }
 
     #[test]
