@@ -57,6 +57,14 @@ pub mod keys {
     /// sans hub sans que personne ait vu le message.
     pub const TLS_ENABLED: &str = "tls_enabled";
 
+    /// Reverse proxies dont on accepte le `X-Forwarded-For`, en CIDR séparés
+    /// par des virgules.
+    ///
+    /// ⚠️ **Vide par défaut, et c'est le comportement sûr.** L'en-tête est
+    /// alors ignoré : on lit l'adresse de la socket. Le lire « s'il est
+    /// présent » laisserait n'importe quelle sonde forger son adresse source.
+    pub const TRUSTED_PROXIES: &str = "trusted_proxies";
+
     pub const ALL: &[&str] = &[
         INFLUX_URL,
         INFLUX_ORG,
@@ -72,6 +80,7 @@ pub mod keys {
         BACKUP_KEEP_LAST,
         INVENTORY_DAYS,
         TLS_ENABLED,
+        TRUSTED_PROXIES,
     ];
 }
 
@@ -211,6 +220,13 @@ impl Settings {
     /// proxy peut se retrouver à servir en clair sans l'avoir voulu.
     pub fn tls_enabled(&self) -> bool {
         self.get_or(keys::TLS_ENABLED, "false") == "true"
+    }
+
+    /// Proxies de confiance, en CIDR séparés par des virgules. Vide par
+    /// défaut : `X-Forwarded-For` est alors ignoré, ce qui est le comportement
+    /// sûr pour un hub exposé directement.
+    pub fn trusted_proxies(&self) -> Vec<crate::client_ip::IpNet> {
+        crate::client_ip::parse_cidrs(&self.get_or(keys::TRUSTED_PROXIES, ""))
     }
 
     pub fn heartbeat_interval_secs(&self) -> i64 {
