@@ -680,6 +680,37 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+/**
+ * Fenêtre demandée : `range` pour une fenêtre glissante, `start`/`stop`
+ * (epoch, **secondes**) pour une période précise.
+ *
+ * ⚠️ Un rapport remis à un client porte sur une période convenue : « les 7
+ * derniers jours » donnerait un chiffre différent à chaque ouverture du
+ * document.
+ */
+export interface MetricsWindow {
+  range?: string;
+  start?: number;
+  stop?: number;
+}
+
+/**
+ * Un seul endroit construit la fenêtre. Le rapport et l'historique des
+ * adresses doivent couvrir EXACTEMENT la même période : deux constructions
+ * séparées finiraient par en couvrir deux légèrement différentes, et le
+ * tableau par adresse contredirait la courbe qu'il légende.
+ */
+function windowQuery(window: MetricsWindow): URLSearchParams {
+  const q = new URLSearchParams();
+  if (window.start != null && window.stop != null) {
+    q.set('start', String(window.start));
+    q.set('stop', String(window.stop));
+  } else {
+    q.set('range', window.range ?? '-24h');
+  }
+  return q;
+}
+
 export const api = {
   /** Route publique, seule accessible quand `needs_setup` est vrai. */
   status: () => request<HubStatus>('/api/status'),
@@ -924,24 +955,23 @@ export const api = {
     ),
 
   /** Relevés bruts d'une fenêtre, pour le rapport SLA. */
+  sla: (id: string, window: MetricsWindow) =>
+    request<import('./sla-report').SlaPayload>(
+      `/api/probes/${encodeURIComponent(id)}/sla?${windowQuery(window)}`,
+    ),
+
   /**
-   * `range` pour une fenêtre glissante, `start`/`stop` (epoch, secondes) pour
-   * une période précise. ⚠️ Un rapport remis à un client porte sur une période
-   * convenue : « les 7 derniers jours » donnerait un chiffre différent à
-   * chaque ouverture du document.
+   * Intervalles d'adresse publique de la fenêtre — et rien d'autre.
+   *
+   * ⚠️ Route séparée, et non le rapport complet : `/sla` embarque le scan de
+   * découverte, les ports ouverts et l'historique des débits. Le rappeler
+   * toutes les 30 secondes pour deux colonnes ferait transiter un gros objet
+   * en boucle. Même fenêtre que `/sla`, donc mêmes bornes exactement.
    */
-  sla: (id: string, window: { range?: string; start?: number; stop?: number }) => {
-    const q = new URLSearchParams();
-    if (window.start != null && window.stop != null) {
-      q.set('start', String(window.start));
-      q.set('stop', String(window.stop));
-    } else {
-      q.set('range', window.range ?? '-24h');
-    }
-    return request<import('./sla-report').SlaPayload>(
-      `/api/probes/${encodeURIComponent(id)}/sla?${q}`,
-    );
-  },
+  publicIps: (id: string, window: MetricsWindow) =>
+    request<{ intervals: import('./sla-report').PublicIpInterval[] }>(
+      `/api/probes/${encodeURIComponent(id)}/public-ips?${windowQuery(window)}`,
+    ),
 
   /**
    * Nomme un réseau. Le libellé vit dans sa propre table côté hub : il survit

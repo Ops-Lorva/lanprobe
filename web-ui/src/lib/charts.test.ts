@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gapLimit, normalizeState, segments, seriesColor } from './charts';
+import { gapLimit, internetSamples, normalizeState, segments, seriesColor } from './charts';
 
 describe('normalizeState', () => {
   it('ramène les états écrits par la sonde à un vocabulaire fermé', () => {
@@ -70,5 +70,31 @@ describe('segments', () => {
 
   it('rend une liste vide sur une série vide', () => {
     expect(segments([])).toEqual([]);
+  });
+});
+
+describe('internetSamples', () => {
+  it('ramène les relevés du graphe en SECONDES', () => {
+    // ⚠️ Le piège de tout ce chantier : les points du graphe sont en
+    // millisecondes, les intervalles d'adresse publique en secondes. Sans
+    // cette conversion aucun relevé ne tombe dans aucun intervalle et TOUT
+    // ressort en « indéterminé » — sans la moindre erreur à l'écran.
+    expect(internetSamples([{ t: 1_788_000_000_000, v: 'online' }])).toEqual([
+      { timestamp: 1_788_000_000, alive: true, state: 'online' },
+    ]);
+  });
+
+  it('ne compte « disponible » que « online », comme le hub', () => {
+    // Le hub écrit `alive: state == "online"` dans le rapport SLA. Compter
+    // « limited » comme disponible donnerait deux disponibilités pour la même
+    // fenêtre : celle de l'écran et celle du classeur remis au client.
+    const rows = internetSamples([
+      { t: 0, v: 'online' },
+      { t: 1_000, v: 'limited' },
+      { t: 2_000, v: 'offline' },
+      { t: 3_000, v: 'perdu' },
+    ]);
+    expect(rows.map((s) => s.alive)).toEqual([true, false, false, false]);
+    expect(rows.map((s) => s.state)).toEqual(['online', 'limited', 'offline', 'unknown']);
   });
 });
