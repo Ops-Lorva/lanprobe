@@ -126,6 +126,21 @@ export interface Stats {
 }
 
 /**
+ * Délai d'attente d'un ping, côté sonde (`lanprobe-core/src/ping.rs`).
+ *
+ * ⚠️ Une latence au-delà est impossible : le ping aurait abandonné avant. Elle
+ * vient d'une sonde suspendue — un portable endormi pendant la mesure compte
+ * son sommeil comme temps de réponse. Relevé en production : 1 045 504 ms.
+ * Dans un rapport remis à un client, un « pic à 17 minutes » est pire que dans
+ * un graphe : il se discute en réunion.
+ *
+ * ⚠️ Seules la moyenne, le minimum, le maximum et le p95 l'ignorent. La
+ * DISPONIBILITÉ n'est pas touchée : elle se calcule sur `alive`, et réécrire
+ * après coup un `alive` enregistré changerait un pourcentage de SLA déjà remis.
+ */
+export const PING_TIMEOUT_MS = 1000;
+
+/**
  * ⚠️ La disponibilité se calcule sur `alive`, jamais sur la présence d'une
  * latence : un hôte muet n'en écrit pas, et compter les latences donnerait
  * 100 % sur un hôte mort.
@@ -138,6 +153,10 @@ export function stats(samples: Sample[]): Stats {
   const lat = samples
     .map((s) => s.latency_ms)
     .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+    // ⚠️ Une latence au-delà du délai d'attente vient d'une sonde suspendue,
+    // pas du réseau. Un seul de ces points suffit à faire d'une moyenne un
+    // chiffre que le client contestera à juste titre.
+    .filter((v) => v <= PING_TIMEOUT_MS)
     .sort((a, b) => a - b);
   const p95 = lat.length ? lat[Math.min(lat.length - 1, Math.floor(lat.length * 0.95))] : null;
   return {

@@ -266,6 +266,35 @@ function sortSeries(map: SeriesMap): SeriesMap {
 }
 
 /** Ne garde que les points numériques d'une série (les champs texte sortent). */
+/**
+ * Délai d'attente d'un ping, côté sonde (`lanprobe-core/src/ping.rs`).
+ */
+export const PING_TIMEOUT_MS = 1000;
+
+/**
+ * Écarte les latences que le réseau ne peut pas avoir produites.
+ *
+ * ⚠️ Une latence supérieure au délai d'attente est impossible : le ping aurait
+ * abandonné avant. Elle vient d'un processus suspendu — un portable endormi
+ * pendant la mesure reprend son chronomètre au réveil et compte tout le
+ * sommeil comme temps de réponse. Relevé en production : 1 045 504 ms, soit
+ * 17 minutes, qui poussaient l'axe du graphe à 1 500 000 et aplatissaient
+ * toutes les mesures honnêtes.
+ *
+ * La sonde ne les écrit plus, mais celles déjà dans InfluxDB restent tant
+ * qu'elles sont dans la fenêtre : sans ce filtre, les graphes resteraient
+ * écrasés pendant toute la rétention.
+ *
+ * ⚠️ On retire la LATENCE, jamais la disponibilité. Réécrire après coup un
+ * `alive` déjà enregistré changerait un pourcentage de SLA remis à un client —
+ * ce n'est pas la même décision, et elle n'a pas été prise.
+ */
+export function plausibleLatency(
+  points: { t: number; v: number }[],
+): { t: number; v: number }[] {
+  return points.filter((p) => p.v <= PING_TIMEOUT_MS);
+}
+
 export function numeric(points: Point[] | undefined): { t: number; v: number }[] {
   if (!points) return [];
   const out: { t: number; v: number }[] = [];

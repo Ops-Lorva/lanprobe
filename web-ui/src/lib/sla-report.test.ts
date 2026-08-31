@@ -219,3 +219,26 @@ describe('buildSlaWorkbook', () => {
     expect(wb.getWorksheet(t('report.ipSheet'))).toBeUndefined();
   });
 });
+
+
+describe('stats — latences impossibles', () => {
+  it('écarte une latence au-delà du délai sans toucher à la disponibilité', () => {
+    // ⚠️ Le cas réel : un portable endormi pendant la mesure a publié
+    // 1 045 504 ms — 17 minutes. Il écrasait la moyenne du rapport remis au
+    // client. Mais l'hôte était bien vu vivant à ce moment-là : réécrire
+    // `alive` changerait un SLA déjà communiqué, ce n'est pas la même décision.
+    const s = stats([
+      { timestamp: 10, alive: true, latency_ms: 10 },
+      { timestamp: 20, alive: true, latency_ms: 30 },
+      { timestamp: 30, alive: true, latency_ms: 1_045_504 },
+    ]);
+    expect(s.max).toBe(30);
+    expect(s.avg).toBe(20);
+    expect(s.uptime_pct).toBe(100);
+  });
+
+  it('garde une latence pile au délai', () => {
+    const s = stats([{ timestamp: 10, alive: true, latency_ms: 1000 }]);
+    expect(s.max).toBe(1000);
+  });
+});

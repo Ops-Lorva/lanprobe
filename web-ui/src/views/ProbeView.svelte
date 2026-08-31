@@ -22,6 +22,7 @@
     normalizeCurves,
     rangeMillis,
     numeric,
+    plausibleLatency,
     type Range,
     type Curve,
   } from '$lib/metrics';
@@ -520,7 +521,11 @@
       // Une seule cible : pas la peine d'afficher son adresse en légende.
       label: latency.length > 1 ? (c.tags.ip ?? c.label) : $_('charts.latency'),
       color: seriesColor(i),
-      points: numeric(c.points),
+      // ⚠️ Les latences au-delà du délai d'attente sont écartées : elles
+      // viennent d'une sonde suspendue, pas du réseau. La sonde ne les écrit
+      // plus, mais celles déjà en base écraseraient l'échelle jusqu'à la fin
+      // de la rétention.
+      points: plausibleLatency(numeric(c.points)),
     }));
   });
   const pingPoints = $derived(pingCurves.flatMap((c) => c.points));
