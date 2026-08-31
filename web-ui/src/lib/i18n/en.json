@@ -121,6 +121,9 @@
     "hub_url_title": "Hub address",
     "hub_url_label": "Public address of this hub",
     "hub_url_hint": "The address your probes use to reach this hub. It is the only address setting: everything else follows from it.",
+    "proxies_title": "Trusted proxies",
+    "proxies_label": "Reverse proxies whose header is accepted",
+    "proxies_hint": "Comma-separated CIDRs, e.g. 10.0.0.0/8, 172.16.0.0/12. Leave it empty if the hub is reached directly. Fill it in only if the hub sits behind a reverse proxy you control: without this list, X-Forwarded-For is ignored — that is intended, the header is written by the client.",
     "hub_version_title": "Version",
     "hub_version": "Hub {version}",
     "loss_title": "These changes delete data",
@@ -454,7 +457,22 @@
     "profile_infra": "Infra",
     "profile_db": "Databases",
     "discovery_ping": "Watch",
-    "discovery_scan": "Scan ports"
+    "discovery_scan": "Scan ports",
+    "ipHistoryEmpty": "Address history available since the hub was updated.",
+    "ipTable": {
+      "title": "Uptime by public IP",
+      "label": "Label",
+      "address": "Public IP",
+      "gateway": "Gateway",
+      "period": "Period",
+      "duration": "Duration",
+      "uptime": "Uptime",
+      "undetermined": "Undetermined",
+      "undeterminedHint": "Samples no known address covered — an acknowledged unknown, never charged to an address.",
+      "placeholder": "Home, Office…",
+      "save": "Save",
+      "error": "The label could not be saved: {message}"
+    }
   },
   "charts": {
     "latency_title": "Latency of monitored hosts",

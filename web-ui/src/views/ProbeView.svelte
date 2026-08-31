@@ -25,6 +25,10 @@
     type Range,
     type Curve,
   } from '$lib/metrics';
+  // ⚠️ Import statique assumé : `sla-report` ne charge exceljs qu'à la
+  // demande, à l'intérieur de `downloadSlaReport`. Le tableau par adresse ne
+  // tire donc pas le classeur dans le paquet principal.
+  import { byPublicIp, type IpSlaRow, type SlaPayload } from '$lib/sla-report';
   import { seriesColor, normalizeState } from '$lib/charts';
   import { platformLabel } from '$lib/format';
   import StatusMark from '$lib/components/StatusMark.svelte';
@@ -338,6 +342,97 @@
     speed = s;
     loadedAt = Date.now();
     refreshing = false;
+    // Même fenêtre que les courbes, lue dans la foulée : le graphe et le
+    // tableau par adresse doivent parler de la même période, sinon un repère
+    // se pose là où le tableau ne compte rien.
+    await loadSla();
+  }
+
+  // ── Adresses publiques traversées (contrat § 15) ─────────────────────────
+  //
+  // L'historique voyage avec le rapport SLA plutôt que par sa propre route :
+  // le tableau ici et l'onglet Excel découpent alors les MÊMES relevés avec
+  // les MÊMES intervalles. Deux lectures séparées finiraient par diverger
+  // d'une minute et donneraient deux disponibilités pour la même période.
+  let sla = $state<SlaPayload | null>(null);
+  let slaLoadError = $state('');
+
+  async function loadSla() {
+    try {
+      sla = await api.sla(id, { range });
+      slaLoadError = '';
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      // ⚠️ On garde l'erreur au lieu de retomber sur un historique vide : un
+      // tableau absent se lirait comme « aucun changement d'adresse », ce qui
+      // est une affirmation qu'on n'a pas les moyens de faire.
+      sla = null;
+      slaLoadError = e instanceof ApiError ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Repères à poser sur le graphe.
+   *
+   * ⚠️ **Secondes → millisecondes ici, et nulle part ailleurs.** Le hub
+   * compte en secondes ; `StatusBand` trace en millisecondes. Oubliée, la
+   * conversion ne lève aucune erreur : les repères se posent en 1970,
+   * c'est-à-dire hors fenêtre, et le graphe paraît simplement vide de
+   * changements.
+   */
+  const ipChanges = $derived(
+    (sla?.public_ip_history ?? []).map((i) => ({
+      at: i.confirmed_from * 1000,
+      ip: i.public_ip,
+      label: i.label,
+    })),
+  );
+
+  // Le découpage vit dans `sla-report.ts` : une seconde implémentation ici
+  // donnerait deux pourcentages pour la même période, celui de l'écran et
+  // celui du classeur remis au client.
+  const ipRows = $derived(byPublicIp(sla?.internet ?? [], sla?.public_ip_history ?? []));
+
+  /** Libellés en cours de saisie, par couple (adresse, passerelle). */
+  let labelDrafts = $state<Record<string, string>>({});
+  let labelBusy = $state('');
+  let labelError = $state('');
+
+  const labelKey = (r: IpSlaRow) => `${r.public_ip}|${r.gateway ?? ''}`;
+  const labelDraft = (r: IpSlaRow) => labelDrafts[labelKey(r)] ?? r.label ?? '';
+
+  async function saveLabel(r: IpSlaRow) {
+    if (r.public_ip == null) return;
+    labelBusy = labelKey(r);
+    labelError = '';
+    try {
+      await api.setNetworkLabel({
+        public_ip: r.public_ip,
+        // Le hub garde le couple : une passerelle inconnue est une clé, pas
+        // une absence de clé.
+        gateway: r.gateway ?? '',
+        label: labelDraft(r).trim(),
+      });
+      // La valeur enregistrée revient par le SLA : garder le brouillon
+      // laisserait l'écran affirmer un libellé que le hub n'a peut-être pas
+      // retenu tel quel.
+      delete labelDrafts[labelKey(r)];
+      await loadSla();
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      labelError = $_('probe.ipTable.error', {
+        values: { message: e instanceof ApiError ? e.message : String(e) },
+      });
+    } finally {
+      labelBusy = '';
+    }
+  }
+
+  /** Même découpage que le rapport, avec les mêmes clés de traduction. */
+  function humanDuration(seconds: number): string {
+    if (seconds < 60) return $_('sla.dur_s', { values: { n: Math.round(seconds) } });
+    if (seconds < 3600) return $_('sla.dur_m', { values: { n: Math.round(seconds / 60) } });
+    return $_('sla.dur_h', { values: { n: (seconds / 3600).toFixed(1) } });
   }
 
   // Recharge à chaque changement de fenêtre ou de sonde — la barre de filtres
@@ -934,7 +1029,89 @@
       errorText={inet.error}
       {refreshing}
     >
-      <StatusBand points={inetPoints} {domain} />
+      <StatusBand points={inetPoints} {domain} changes={ipChanges} />
+
+      <!--
+        ⚠️ Historique vide ≠ tableau vide. L'historique des adresses commence
+        à la mise à jour du hub : le lendemain, toute fenêtre antérieure n'a
+        aucun intervalle. Un tableau sans lignes se lirait comme une panne, la
+        phrase dit ce qui se passe réellement.
+      -->
+      {#if slaLoadError}
+        <p class="ipnote err">{slaLoadError}</p>
+      {:else if (sla?.public_ip_history ?? []).length === 0}
+        <p class="ipnote">{$_('probe.ipHistoryEmpty')}</p>
+      {:else}
+        <p class="ipcap">{$_('probe.ipTable.title')}</p>
+        {#if labelError}<p class="ipnote err">{labelError}</p>{/if}
+        <div class="tablewrap">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th>{$_('probe.ipTable.label')}</th>
+                <th>{$_('probe.ipTable.address')}</th>
+                <th>{$_('probe.ipTable.gateway')}</th>
+                <th>{$_('probe.ipTable.period')}</th>
+                <th class="num">{$_('probe.ipTable.duration')}</th>
+                <th class="num">{$_('probe.ipTable.uptime')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each ipRows as r (r.public_ip ?? '')}
+                <tr class:undet={r.public_ip === null}>
+                  <td>
+                    {#if r.public_ip === null}
+                      <!-- La part d'inconnu porte un nom et une explication :
+                           une cellule vide se lirait comme une donnée
+                           manquante, alors que c'est une réponse. -->
+                      <span class="undet-tag" title={$_('probe.ipTable.undeterminedHint')}>
+                        {$_('probe.ipTable.undetermined')}
+                      </span>
+                    {:else if $canOperate}
+                      <span class="labcell">
+                        <input
+                          class="lp-input labinput"
+                          value={labelDraft(r)}
+                          oninput={(e) => (labelDrafts[labelKey(r)] = e.currentTarget.value)}
+                          placeholder={$_('probe.ipTable.placeholder')}
+                          spellcheck="false"
+                          autocomplete="off"
+                        />
+                        {#if labelDraft(r) !== (r.label ?? '')}
+                          <button
+                            class="lp-btn ghost sm"
+                            onclick={() => saveLabel(r)}
+                            disabled={labelBusy === labelKey(r)}
+                          >
+                            {$_('probe.ipTable.save')}
+                          </button>
+                        {/if}
+                      </span>
+                    {:else}
+                      {r.label ?? '—'}
+                    {/if}
+                  </td>
+                  <td class="lp-mono">
+                    {#if r.public_ip === null}
+                      <span class="undet-tag" title={$_('probe.ipTable.undeterminedHint')}>—</span>
+                    {:else}
+                      {r.public_ip}
+                    {/if}
+                  </td>
+                  <td class="lp-mono">{r.gateway ?? '—'}</td>
+                  <td class="lp-mono">
+                    {logTime(r.from, lang)} → {logTime(r.to, lang)}
+                  </td>
+                  <td class="num lp-mono">
+                    {r.from != null && r.to != null ? humanDuration(r.to - r.from) : '—'}
+                  </td>
+                  <td class="num lp-mono">{r.uptime_pct.toFixed(1)} %</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
       {#snippet table()}
         <ValueTable
           columns={[$_('charts.table_time'), $_('charts.table_state')]}
@@ -1940,6 +2117,44 @@
   .slaerr {
     font-size: 11px;
     color: var(--ep-danger);
+  }
+
+  /* ── Disponibilité par IP publique ─────────────────────────────────── */
+  .ipcap {
+    margin: 14px 0 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--ep-text-dim);
+  }
+  .ipnote {
+    margin: 10px 0 0;
+    font-size: 11.5px;
+    color: var(--ep-text-secondary);
+  }
+  .ipnote.err {
+    color: var(--ep-danger);
+  }
+  .labcell {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .labinput {
+    min-height: 28px;
+    padding: 4px 8px;
+    font-size: 12px;
+    max-width: 150px;
+  }
+  /* L'indéterminé se lit comme une réponse assumée, pas comme une case
+     ratée : même graisse que les autres lignes, teinte plus discrète, et un
+     titre qui dit pourquoi il est là. */
+  tr.undet td {
+    color: var(--ep-text-dim);
+  }
+  .undet-tag {
+    font-style: italic;
+    cursor: help;
   }
 
   .runbox {
