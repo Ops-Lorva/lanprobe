@@ -92,6 +92,24 @@ export interface PendingEnroll {
   code?: string | null;
 }
 
+/**
+ * Corps de `PUT /api/networks/label` (contrat § 15).
+ *
+ * ⚠️ La clé est le TRIPLET `(site_id, public_ip, gateway)`. Ni l'adresse seule
+ * ni le couple `(adresse, passerelle)` ne suffisent : deux réseaux derrière le
+ * même opérateur partagent l'IP publique, et sous CGNAT deux CLIENTS la
+ * partagent aussi — avec, une fois sur deux, la même `192.168.1.1` de box.
+ * Sans le site, « Maison de Durand » s'affichait dans le rapport de Martin.
+ */
+export interface NetworkLabel {
+  /** Le site du réseau nommé. Le hub refuse en 404 s'il est hors portée. */
+  site_id: string;
+  public_ip: string;
+  /** Chaîne vide quand la sonde n'a pas remonté de passerelle. */
+  gateway: string;
+  label: string;
+}
+
 /** Vue lecture seule d'InfluxDB (contrat § 8). */
 export interface InfluxInfo {
   url: string;
@@ -162,6 +180,15 @@ export interface HubSettings {
    * conteneur n'a pas redémarré.
    */
   tls_enabled: boolean;
+  /**
+   * Reverse proxies dont on accepte le `X-Forwarded-For`, en CIDR séparés par
+   * des virgules.
+   *
+   * ⚠️ **Vide par défaut, et c'est le comportement sûr** : l'en-tête est alors
+   * ignoré, on lit l'adresse de la socket. Le lire « s'il est là » laisserait
+   * n'importe qui forger son adresse source.
+   */
+  trusted_proxies: string;
 }
 
 export const SETTINGS_DEFAULTS: HubSettings = {
@@ -179,6 +206,7 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   backup_keep_last: 7,
   inventory_days: 0,
   tls_enabled: false,
+  trusted_proxies: '',
 };
 
 // ── Sauvegarde ──────────────────────────────────────────────────────────────
@@ -656,6 +684,37 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+/**
+ * Fenêtre demandée : `range` pour une fenêtre glissante, `start`/`stop`
+ * (epoch, **secondes**) pour une période précise.
+ *
+ * ⚠️ Un rapport remis à un client porte sur une période convenue : « les 7
+ * derniers jours » donnerait un chiffre différent à chaque ouverture du
+ * document.
+ */
+export interface MetricsWindow {
+  range?: string;
+  start?: number;
+  stop?: number;
+}
+
+/**
+ * Un seul endroit construit la fenêtre. Le rapport et l'historique des
+ * adresses doivent couvrir EXACTEMENT la même période : deux constructions
+ * séparées finiraient par en couvrir deux légèrement différentes, et le
+ * tableau par adresse contredirait la courbe qu'il légende.
+ */
+function windowQuery(window: MetricsWindow): URLSearchParams {
+  const q = new URLSearchParams();
+  if (window.start != null && window.stop != null) {
+    q.set('start', String(window.start));
+    q.set('stop', String(window.stop));
+  } else {
+    q.set('range', window.range ?? '-24h');
+  }
+  return q;
+}
+
 export const api = {
   /** Route publique, seule accessible quand `needs_setup` est vrai. */
   status: () => request<HubStatus>('/api/status'),
@@ -900,24 +959,34 @@ export const api = {
     ),
 
   /** Relevés bruts d'une fenêtre, pour le rapport SLA. */
+  sla: (id: string, window: MetricsWindow) =>
+    request<import('./sla-report').SlaPayload>(
+      `/api/probes/${encodeURIComponent(id)}/sla?${windowQuery(window)}`,
+    ),
+
   /**
-   * `range` pour une fenêtre glissante, `start`/`stop` (epoch, secondes) pour
-   * une période précise. ⚠️ Un rapport remis à un client porte sur une période
-   * convenue : « les 7 derniers jours » donnerait un chiffre différent à
-   * chaque ouverture du document.
+   * Intervalles d'adresse publique de la fenêtre — et rien d'autre.
+   *
+   * ⚠️ Route séparée, et non le rapport complet : `/sla` embarque le scan de
+   * découverte, les ports ouverts et l'historique des débits. Le rappeler
+   * toutes les 30 secondes pour deux colonnes ferait transiter un gros objet
+   * en boucle. Même fenêtre que `/sla`, donc mêmes bornes exactement.
    */
-  sla: (id: string, window: { range?: string; start?: number; stop?: number }) => {
-    const q = new URLSearchParams();
-    if (window.start != null && window.stop != null) {
-      q.set('start', String(window.start));
-      q.set('stop', String(window.stop));
-    } else {
-      q.set('range', window.range ?? '-24h');
-    }
-    return request<import('./sla-report').SlaPayload>(
-      `/api/probes/${encodeURIComponent(id)}/sla?${q}`,
-    );
-  },
+  publicIps: (id: string, window: MetricsWindow) =>
+    request<{ intervals: import('./sla-report').PublicIpInterval[] }>(
+      `/api/probes/${encodeURIComponent(id)}/public-ips?${windowQuery(window)}`,
+    ),
+
+  /**
+   * Nomme un réseau. Le libellé vit dans sa propre table côté hub : il survit
+   * à la purge des intervalles et se réapplique tout seul le jour où la sonde
+   * revient sur ce réseau.
+   */
+  setNetworkLabel: (body: NetworkLabel) =>
+    request<{ ok: boolean }>('/api/networks/label', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   commands: (id: string) =>
     request<{ commands: ProbeCommand[] }>(

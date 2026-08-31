@@ -8,6 +8,7 @@
 pub mod assets;
 pub mod auth;
 pub mod backup;
+pub mod client_ip;
 pub mod db;
 pub mod influx;
 pub mod notify;

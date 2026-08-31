@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { outages, stats, windowLabel, type Sample } from './sla-report';
+import { beforeAll, describe, expect, it } from 'vitest';
+import {
+  buildSlaWorkbook,
+  byPublicIp,
+  outages,
+  stats,
+  windowLabel,
+  type PublicIpInterval,
+  type Sample,
+  type SlaPayload,
+} from './sla-report';
 
 const t = (k: string, v?: Record<string, string | number>) =>
   v ? `${k}:${Object.values(v).join(',')}` : k;
@@ -86,5 +95,127 @@ describe('windowLabel avec bornes explicites', () => {
     expect(out).toContain('sla.from');
     expect(out).toContain('sla.to');
     expect(out).not.toContain('window_days');
+  });
+});
+
+const interval = (ip: string, from: number, to: number): PublicIpInterval => ({
+  public_ip: ip,
+  interface: 'en0',
+  gateway: '10.6.8.1',
+  local_subnet: '10.6.8.42',
+  confirmed_from: from,
+  confirmed_until: to,
+  label: null,
+});
+
+const sample = (timestamp: number, state: string): Sample => ({
+  timestamp,
+  alive: state === 'online',
+  state,
+});
+
+describe('byPublicIp', () => {
+  it('impute une coupure suivie du retour sur la MÊME adresse à cette adresse', () => {
+    // L'intervalle couvre la coupure : elle appartient bien à cette adresse.
+    const rows = byPublicIp(
+      [sample(10, 'online'), sample(20, 'offline'), sample(30, 'online')],
+      [interval('88.120.0.1', 10, 30)],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].public_ip).toBe('88.120.0.1');
+    expect(rows[0].samples).toBe(3);
+    expect(rows[0].uptime_pct).toBeCloseTo(66.67, 1);
+  });
+
+  it("n'impute à personne une coupure suivie d'une adresse DIFFÉRENTE", () => {
+    // Le trou entre deux intervalles est la zone indéterminée : c'est tout
+    // l'intérêt de fermer sur `confirmed_until`.
+    const rows = byPublicIp(
+      [sample(10, 'online'), sample(20, 'offline'), sample(30, 'online')],
+      [interval('88.120.0.1', 10, 10), interval('172.58.0.9', 30, 30)],
+    );
+    const indetermine = rows.find((r) => r.public_ip === null);
+    expect(indetermine?.samples).toBe(1);
+    expect(rows.find((r) => r.public_ip === '88.120.0.1')?.uptime_pct).toBe(100);
+    expect(rows.find((r) => r.public_ip === '172.58.0.9')?.uptime_pct).toBe(100);
+  });
+
+  it('range tout en indéterminé quand aucun intervalle ne couvre la fenêtre', () => {
+    // Cas du lendemain de la migration : l'historique n'existe pas encore.
+    const rows = byPublicIp([sample(10, 'online'), sample(20, 'online')], []);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].public_ip).toBeNull();
+    expect(rows[0].samples).toBe(2);
+  });
+
+  it('regroupe deux passages sur la même adresse en une seule ligne', () => {
+    const rows = byPublicIp(
+      [sample(10, 'online'), sample(50, 'online')],
+      [
+        interval('88.120.0.1', 10, 10),
+        interval('172.58.0.9', 20, 30),
+        interval('88.120.0.1', 50, 50),
+      ],
+    );
+    expect(rows.filter((r) => r.public_ip === '88.120.0.1')).toHaveLength(1);
+    expect(rows.find((r) => r.public_ip === '88.120.0.1')?.samples).toBe(2);
+  });
+
+  it('ne renvoie pas de ligne indéterminée quand il n’y a rien dedans', () => {
+    const rows = byPublicIp([sample(10, 'online')], [interval('88.120.0.1', 0, 100)]);
+    expect(rows.some((r) => r.public_ip === null)).toBe(false);
+  });
+});
+
+function payloadWithTwoAddresses(): SlaPayload {
+  return {
+    probe: 'sonde-1',
+    site: 'Site A',
+    range: '-24h',
+    generated_at: 1_788_000_000,
+    targets: [],
+    // La coupure de 20 tombe dans le trou entre les deux intervalles : elle
+    // n'appartient à aucune des deux adresses.
+    internet: [sample(10, 'online'), sample(20, 'offline'), sample(30, 'online')],
+    speedtests: [],
+    discovery: null,
+    ports: null,
+    public_ip_history: [interval('88.120.0.1', 10, 10), interval('172.58.0.9', 30, 30)],
+  };
+}
+
+describe('buildSlaWorkbook', () => {
+  // exceljs est importé à la demande et sa première résolution dépasse le
+  // délai par défaut d'un test. On la sort des tests eux-mêmes : sinon le
+  // premier d'entre eux échoue sur le temps de chargement, pas sur ce qu'il
+  // vérifie — et l'ordre des tests déciderait lequel.
+  beforeAll(async () => {
+    await import('exceljs');
+  }, 60_000);
+
+  it('ajoute un onglet par adresse au classeur', async () => {
+    const wb = await buildSlaWorkbook([payloadWithTwoAddresses()], t, 'fr');
+    const sheet = wb.getWorksheet(t('report.ipSheet'));
+    expect(sheet).toBeDefined();
+    // en-tête + 2 adresses + la ligne indéterminée
+    expect(sheet!.rowCount).toBeGreaterThanOrEqual(4);
+  });
+
+  it('écrit la ligne indéterminée en toutes lettres, pas en case vide', async () => {
+    // ⚠️ Une case vide se lit comme une donnée manquante. C'est une part de la
+    // période qu'on refuse d'imputer : elle doit se dire.
+    const wb = await buildSlaWorkbook([payloadWithTwoAddresses()], t, 'fr');
+    const sheet = wb.getWorksheet(t('report.ipSheet'))!;
+    const addresses = sheet.getColumn(3).values.map((v) => String(v ?? ''));
+    expect(addresses).toContain(t('report.ipUndetermined'));
+  });
+
+  it('ne fabrique aucun onglet quand la sonde n’a aucun relevé internet', async () => {
+    const wb = await buildSlaWorkbook(
+      [{ ...payloadWithTwoAddresses(), internet: [], public_ip_history: [] }],
+      t,
+      'fr',
+    );
+    expect(wb.getWorksheet(t('report.ipSheet'))).toBeUndefined();
   });
 });

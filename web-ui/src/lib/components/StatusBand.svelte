@@ -13,8 +13,18 @@
      * quoi on croit lire trois périodes différentes.
      */
     domain?: { from: number; to: number };
+    /**
+     * Changements d'IP publique à marquer, **en millisecondes** comme les
+     * points : le hub, lui, compte en secondes, la conversion se fait chez
+     * l'appelant. Un repère daté de 1970 ne lève aucune erreur, il se pose
+     * simplement à gauche du graphe.
+     *
+     * ⚠️ Facultatif : sans cette prop le composant se comporte exactement
+     * comme avant, ce qui garde ses autres usages intacts.
+     */
+    changes?: { at: number; ip: string; label: string | null }[];
   }
-  let { points, height = 74, domain }: Props = $props();
+  let { points, height = 74, domain, changes = [] }: Props = $props();
 
   const lang = $derived($locale ?? 'en');
 
@@ -114,6 +124,17 @@
 
   const legend: InternetState[] = ['online', 'limited', 'offline'];
 
+  /**
+   * Un repère hors de la fenêtre affichée se dessinerait à cheval sur les
+   * axes : on ne garde que ceux qui tombent dedans.
+   */
+  const visibleChanges = $derived(
+    changes.filter((c) => c.at >= bounds.tMin && c.at <= bounds.tMax),
+  );
+
+  const changeLabel = (c: { at: number; ip: string; label: string | null }) =>
+    `${c.label ? `${c.label} — ${c.ip}` : c.ip} · ${tooltipTime(c.at, lang)}`;
+
   function segLabel(s: Segment) {
     const name = s.state === 'gap' ? $_('charts.internet_unknown') : $_(`charts.internet_${s.state}`);
     return `${name} — ${tooltipTime(s.from, lang)} → ${tooltipTime(s.to, lang)}`;
@@ -142,6 +163,34 @@
       >
         <title>{segLabel(s)}</title>
       </rect>
+    {/each}
+
+    <!--
+      Les repères passent APRÈS les segments : dessinés avant, ils seraient
+      recouverts par la bande et invisibles là où elle est la plus haute,
+      c'est-à-dire pendant les coupures — exactement les moments où l'on
+      cherche à savoir sur quelle adresse on était.
+    -->
+    {#each visibleChanges as c (c.at)}
+      <g class="ip-change">
+        <!-- Trait large et transparent : le survol d'une ligne d'un pixel se
+             rate une fois sur deux, et l'adresse ne s'atteindrait plus. -->
+        <line
+          x1={x(c.at)}
+          x2={x(c.at)}
+          y1={PAD.top}
+          y2={height - PAD.bottom}
+          class="hit"
+        />
+        <line
+          x1={x(c.at)}
+          x2={x(c.at)}
+          y1={PAD.top}
+          y2={height - PAD.bottom}
+          class="mark"
+        />
+        <title>{changeLabel(c)}</title>
+      </g>
     {/each}
 
     {#each xTicks as t, i (i)}
@@ -199,6 +248,19 @@
   .seg.unknown,
   .seg.gap {
     fill: var(--ep-text-dim);
+  }
+  .ip-change .mark {
+    stroke: var(--ep-accent);
+    stroke-width: 1;
+    stroke-dasharray: 3 2;
+    opacity: 0.75;
+  }
+  .ip-change .hit {
+    stroke: transparent;
+    stroke-width: 9;
+  }
+  .ip-change:hover .mark {
+    opacity: 1;
   }
   .xtick {
     font-family: var(--ep-font-mono);

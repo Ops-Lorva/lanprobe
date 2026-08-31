@@ -52,6 +52,7 @@
   let backupKeep = $state('7');
   let inventoryDays = $state('0');
   let tlsEnabled = $state(false);
+  let trustedProxies = $state('');
 
   let fieldError = $state('');
   let busy = $state(false);
@@ -77,6 +78,10 @@
     backupKeep = String(s.backup_keep_last);
     inventoryDays = String(s.inventory_days);
     tlsEnabled = s.tls_enabled;
+    // ⚠️ `?? ''` et non `s.trusted_proxies` : un hub plus ancien que ce
+    // réglage ne le renvoie pas, et `undefined` dans un `<input>` laisserait
+    // un champ non contrôlé qui se croit modifié dès l'ouverture.
+    trustedProxies = s.trusted_proxies ?? '';
   }
 
   async function load() {
@@ -288,6 +293,8 @@
     if (keepNum !== saved.backup_keep_last) p.backup_keep_last = keepNum;
     if (inventoryNum !== saved.inventory_days) p.inventory_days = inventoryNum;
     if (tlsEnabled !== saved.tls_enabled) p.tls_enabled = tlsEnabled;
+    if (trustedProxies.trim() !== (saved.trusted_proxies ?? ''))
+      p.trusted_proxies = trustedProxies.trim();
     return p;
   });
 
@@ -510,7 +517,10 @@
     account: false,
     // Langue et thème s'appliquent au clic et ne partent jamais au hub : rien à
     // y enregistrer de leur fait.
-    general: 'hub_public_url' in patch || 'heartbeat_interval_secs' in patch,
+    general:
+      'hub_public_url' in patch ||
+      'heartbeat_interval_secs' in patch ||
+      'trusted_proxies' in patch,
     storage:
       'influx_url' in patch ||
       'influx_org' in patch ||
@@ -891,6 +901,29 @@
           disabled={!$isAdmin}
         />
         <span class="hint">{$_('settings.hub_url_hint')}</span>
+      </label>
+    </section>
+
+    <!--
+      Juste sous l'adresse du hub : c'est la même question — « par où arrive-t-on
+      ici ? ». ⚠️ Champ vide = `X-Forwarded-For` ignoré, et c'est le réglage
+      sûr, pas un oubli : l'en-tête est écrit par le client, l'accepter sans
+      liste laisserait n'importe qui se donner l'adresse qu'il veut. L'aide le
+      dit en toutes lettres, sinon on remplit le champ « au cas où ».
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.proxies_title')}</h2>
+      <label class="lp-field">
+        {$_('settings.proxies_label')}
+        <input
+          class="lp-input"
+          bind:value={trustedProxies}
+          placeholder="10.0.0.0/8, 172.16.0.0/12"
+          spellcheck="false"
+          autocomplete="off"
+          disabled={!$isAdmin}
+        />
+        <span class="hint">{$_('settings.proxies_hint')}</span>
       </label>
     </section>
 

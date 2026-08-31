@@ -57,6 +57,14 @@ pub mod keys {
     /// sans hub sans que personne ait vu le message.
     pub const TLS_ENABLED: &str = "tls_enabled";
 
+    /// Reverse proxies dont on accepte le `X-Forwarded-For`, en CIDR séparés
+    /// par des virgules.
+    ///
+    /// ⚠️ **Vide par défaut, et c'est le comportement sûr.** L'en-tête est
+    /// alors ignoré : on lit l'adresse de la socket. Le lire « s'il est
+    /// présent » laisserait n'importe quelle sonde forger son adresse source.
+    pub const TRUSTED_PROXIES: &str = "trusted_proxies";
+
     pub const ALL: &[&str] = &[
         INFLUX_URL,
         INFLUX_ORG,
@@ -72,6 +80,7 @@ pub mod keys {
         BACKUP_KEEP_LAST,
         INVENTORY_DAYS,
         TLS_ENABLED,
+        TRUSTED_PROXIES,
     ];
 }
 
@@ -213,6 +222,20 @@ impl Settings {
         self.get_or(keys::TLS_ENABLED, "false") == "true"
     }
 
+    /// Proxies de confiance, en CIDR séparés par des virgules. Vide par
+    /// défaut : `X-Forwarded-For` est alors ignoré, ce qui est le comportement
+    /// sûr pour un hub exposé directement.
+    pub fn trusted_proxies(&self) -> Vec<crate::client_ip::IpNet> {
+        crate::client_ip::parse_cidrs(&self.stored_trusted_proxies())
+    }
+
+    /// La liste telle qu'elle est saisie. C'est elle que le formulaire
+    /// réaffiche : rendre les CIDR re-sérialisés ferait bouger le champ sous
+    /// les doigts de l'opérateur à chaque enregistrement.
+    pub fn stored_trusted_proxies(&self) -> String {
+        self.get_or(keys::TRUSTED_PROXIES, "")
+    }
+
     pub fn heartbeat_interval_secs(&self) -> i64 {
         self.get_or(
             keys::HEARTBEAT_INTERVAL_SECS,
@@ -247,6 +270,7 @@ impl Settings {
             keys::BACKUP_KEEP_LAST: self.backup_keep_last(),
             keys::INVENTORY_DAYS: self.inventory_days(),
             keys::TLS_ENABLED: self.tls_enabled(),
+            keys::TRUSTED_PROXIES: self.stored_trusted_proxies(),
         })
     }
 
@@ -273,6 +297,46 @@ impl Settings {
                 for kind in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     if crate::notify::AlertKind::parse(kind).is_none() {
                         return Err(DbError::Conflict(format!("type d'alerte inconnu : {kind}")));
+                    }
+                }
+            }
+            keys::TRUSTED_PROXIES => {
+                // Vide reste valide : c'est le défaut sûr, `X-Forwarded-For`
+                // est alors ignoré.
+                //
+                // ⚠️ Mais une liste dont AUCUNE entrée n'est lisible est
+                // refusée. `parse_cidrs` écarte les entrées fautives pour
+                // qu'un réglage à moitié juste continue de protéger le reste ;
+                // une faute de frappe sur la seule entrée donnerait donc une
+                // liste vide, c'est-à-dire un réglage silencieusement inerte —
+                // le hub attribuerait l'adresse du proxy à toutes les sondes
+                // en croyant le réglage appliqué. On préfère l'échec visible.
+                for entry in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if crate::client_ip::parse_cidrs(entry).is_empty() {
+                        return Err(DbError::Conflict(format!(
+                            "CIDR illisible : {entry} — attendu par exemple 10.0.0.0/8"
+                        )));
+                    }
+                    // ⚠️ `/0` est refusé. C'est la saisie naturelle de qui se
+                    // dit « je suis derrière un proxy, je ne connais pas sa
+                    // plage, j'autorise tout » — et elle rend TOUS les sauts de
+                    // confiance : le hub retient alors le premier de la chaîne
+                    // `X-Forwarded-For`, celui que le client écrit lui-même.
+                    // N'importe quelle sonde se fait passer pour n'importe
+                    // quelle adresse, et le réglage a l'air posé tout en ne
+                    // protégeant plus rien.
+                    //
+                    // Aucun montage n'en a besoin : un proxy en local s'écrit
+                    // `127.0.0.1/32`, et sur socket unix il n'y a pas d'adresse
+                    // de pair du tout.
+                    if crate::client_ip::is_catch_all(entry) {
+                        return Err(DbError::Conflict(format!(
+                            "{entry} accorderait la confiance à tout le monde : \
+                             n'importe quel client pourrait alors forger son adresse. \
+                             Indiquez la plage réelle de votre proxy — par exemple \
+                             172.16.0.0/12 pour un réseau Docker, ou 127.0.0.1/32 \
+                             pour un proxy sur la même machine."
+                        )));
                     }
                 }
             }
@@ -432,6 +496,69 @@ mod tests {
         assert_eq!(s.retention_days(), 0, "0 = rétention illimitée");
         assert_eq!(s.heartbeat_interval_secs(), 60);
         assert!(s.stored_advertise_url().is_none());
+    }
+
+    #[test]
+    fn the_trusted_proxies_setting_can_actually_be_written() {
+        // ⚠️ Sans son bras dans `put`, la clé tombe dans `réglage inconnu` :
+        // toute écriture est rejetée, le réglage reste éternellement vide et
+        // le déclencheur `recheck_public_ip` est muet derrière un reverse
+        // proxy — sans que rien ne le dise.
+        let s = settings();
+        s.put(keys::TRUSTED_PROXIES, "10.0.0.0/8, 192.168.1.1", false).unwrap();
+        assert_eq!(s.trusted_proxies().len(), 2);
+
+        // Vider est un réglage valide : c'est le défaut sûr, l'en-tête
+        // redevient ignoré.
+        s.put(keys::TRUSTED_PROXIES, "", false).unwrap();
+        assert!(s.trusted_proxies().is_empty());
+
+        // Le formulaire de réglages doit voir la clé, sinon personne ne peut
+        // la renseigner depuis l'interface.
+        assert_eq!(s.all()[keys::TRUSTED_PROXIES], serde_json::json!(""));
+        s.put(keys::TRUSTED_PROXIES, "10.0.0.0/8", false).unwrap();
+        assert_eq!(s.all()[keys::TRUSTED_PROXIES], serde_json::json!("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn a_catch_all_prefix_is_refused_with_a_usable_message() {
+        // ⚠️ `/0` rend tous les sauts de confiance : le hub retiendrait alors
+        // l'adresse que le client écrit lui-même. Le réglage aurait l'air posé
+        // et ne protégerait plus rien — le mode de panne que ce dépôt refuse.
+        let s = settings();
+        for catch_all in ["0.0.0.0/0", "::/0", "10.0.0.0/8, 0.0.0.0/0"] {
+            let err = s
+                .put(keys::TRUSTED_PROXIES, catch_all, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("forger son adresse"),
+                "message inexploitable pour {catch_all} : {err}"
+            );
+        }
+        assert!(
+            s.trusted_proxies().is_empty(),
+            "un refus qui laisse une trace en base n'est pas un refus"
+        );
+        // Une plage réelle, même large, reste acceptée : on refuse `/0`, pas
+        // les réglages permissifs que l'utilisateur assume.
+        s.put(keys::TRUSTED_PROXIES, "10.0.0.0/8, 172.16.0.0/12", false)
+            .unwrap();
+        assert_eq!(s.trusted_proxies().len(), 2);
+    }
+
+    #[test]
+    fn a_trusted_proxies_list_with_nothing_readable_in_it_is_refused() {
+        // Une faute de frappe donnerait une liste vide, donc un réglage
+        // silencieusement inerte : le hub continuerait d'attribuer l'adresse
+        // du proxy à toutes les sondes en croyant le réglage appliqué.
+        let s = settings();
+        let err = s.put(keys::TRUSTED_PROXIES, "10.0.0/8", false).unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(ref m) if m.contains("10.0.0/8")),
+            "l'erreur doit nommer l'entrée fautive : {err:?}"
+        );
+        assert!(s.trusted_proxies().is_empty(), "rien ne doit avoir été écrit");
     }
 
     #[test]

@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -150,6 +150,9 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/sites/{id}/archive", post(archive_site))
             .route("/api/enroll-codes", post(create_enroll_code))
             .route("/api/enroll-codes/pending", get(list_pending_codes))
+            // Nommer un réseau est un acte de conduite du parc, pas une
+            // consultation : le libellé se retrouve dans tous les rapports.
+            .route("/api/networks/label", put(set_network_label))
             .route("/api/settings/influx-advertise/test", post(test_advertise))
             .route(
                 "/api/notifications/subscriptions",
@@ -168,6 +171,7 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/metrics", get(probe_metrics))
             .route("/api/probes/{id}/inventory", get(probe_inventory))
             .route("/api/probes/{id}/sla.csv", get(probe_sla_csv))
+            .route("/api/probes/{id}/public-ips", get(probe_public_ips))
             .route("/api/probes/{id}/sla", get(probe_sla_samples)),
     );
 
@@ -2484,9 +2488,78 @@ async fn write_metrics(
     }
 }
 
+/// Ne retient une valeur d'identité réseau du battement que si c'est vraiment
+/// une adresse IP. Sinon : traitée comme **absente**.
+///
+/// ⚠️ Le risque n'est pas d'afficher une bêtise, c'est de faire enfler la base.
+/// `record_heartbeat` ouvre un intervalle d'historique dès que `public_ip`
+/// diffère de la précédente, et la purge par rétention ne supprime rien quand
+/// la rétention Influx est illimitée — le réglage par DÉFAUT. Une sonde
+/// authentifiée qui bat avec une valeur différente à chaque fois saturerait
+/// donc le disque du hub, pour tous les sites qu'il porte. Exiger une adresse
+/// ferme d'un coup la porte au nombre ET à la longueur.
+///
+/// ⚠️ On ne fait **pas** échouer le battement : une sonde qui bat mal doit
+/// rester visible, c'est tout l'intérêt du battement. `debug` et pas `warn` —
+/// une sonde antérieure ou fantaisiste ne doit pas remplir le journal.
+///
+/// La valeur est ramenée à sa forme canonique : `::1` et `0:0:0:0:0:0:0:1`
+/// sont la même adresse, et les laisser diverger ouvrirait deux intervalles
+/// pour un réseau qui n'a pas changé.
+fn address_or_none(value: Option<String>, field: &str, probe_id: &str) -> Option<String> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<std::net::IpAddr>() {
+        Ok(addr) => Some(addr.to_string()),
+        Err(_) => {
+            // Jamais la valeur elle-même : elle peut peser un mégaoctet.
+            tracing::debug!(
+                "battement de {probe_id} : {field} ignoré, ce n'est pas une adresse ({} octets)",
+                value.len()
+            );
+            None
+        }
+    }
+}
+
+/// Même règle pour une adresse locale, qui s'écrit en CIDR (`10.6.8.42/24`).
+/// Une entrée illisible est retirée de la liste sans en invalider le reste :
+/// ces valeurs finissent en base et dans les rapports remis aux clients.
+fn local_address_or_none(entry: String, probe_id: &str) -> Option<String> {
+    let trimmed = entry.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (addr, prefix) = match trimmed.split_once('/') {
+        Some((a, bits)) => (a, Some(bits)),
+        None => (trimmed, None),
+    };
+    let parsed = addr.parse::<std::net::IpAddr>().ok().filter(|addr| {
+        prefix.is_none_or(|bits| {
+            let max = if addr.is_ipv4() { 32 } else { 128 };
+            bits.parse::<u8>().is_ok_and(|b| b <= max)
+        })
+    });
+    match (parsed, prefix) {
+        (Some(addr), Some(bits)) => Some(format!("{addr}/{bits}")),
+        (Some(addr), None) => Some(addr.to_string()),
+        (None, _) => {
+            tracing::debug!(
+                "battement de {probe_id} : adresse locale ignorée, forme illisible ({} octets)",
+                entry.len()
+            );
+            None
+        }
+    }
+}
+
 async fn heartbeat(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<HeartbeatBody>,
 ) -> Response {
@@ -2500,10 +2573,14 @@ async fn heartbeat(
     let _ = body.last_write_ok; // remonté par la sonde, exploité par l'interface
 
     let identity = ProbeIdentity {
-        public_ip: body.public_ip.filter(|v| !v.trim().is_empty()),
+        public_ip: address_or_none(body.public_ip, "public_ip", &id),
         interface: body.interface.filter(|v| !v.trim().is_empty()),
-        local_ips: body.local_ips,
-        gateway: body.gateway.filter(|v| !v.trim().is_empty()),
+        local_ips: body
+            .local_ips
+            .into_iter()
+            .filter_map(|entry| local_address_or_none(entry, &id))
+            .collect(),
+        gateway: address_or_none(body.gateway, "gateway", &id),
         // ⚠️ Liste fermée : la sonde décide de son verdict, pas de son
         // vocabulaire. Une valeur inattendue serait affichée telle quelle dans
         // le parc, sans couleur ni sens.
@@ -2586,6 +2663,30 @@ async fn heartbeat(
         Vec::new()
     });
 
+    // ⚠️ L'adresse vue ici DÉTECTE un changement, elle n'est jamais
+    // enregistrée : le battement peut sortir par la route par défaut alors que
+    // les mesures sont liées à une autre interface. C'est la sonde qui mesure,
+    // par la bonne interface, et qui renverra sa valeur au battement suivant.
+    //
+    // ⚠️ Le déclencheur est muet quand le hub est dans le LAN des sondes —
+    // l'adresse source est alors privée et ne dit rien de l'adresse publique.
+    // C'est le cas courant en auto-hébergement ; les déclencheurs locaux de la
+    // sonde le couvrent.
+    //
+    // Un échec de mémorisation ne demande rien plutôt que de faire échouer le
+    // battement : un relevé manqué se rattrape au TTL, un battement refusé
+    // fait passer une sonde saine pour hors ligne.
+    let observed = crate::client_ip::resolve(
+        peer.ip(),
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        &state.settings.trusted_proxies(),
+    )
+    .to_string();
+    let recheck_public_ip = state
+        .db
+        .note_observed_source(&id, &observed)
+        .unwrap_or(false);
+
     let mut response = json!({
         "ok": true,
         "name": probe.name,
@@ -2593,6 +2694,7 @@ async fn heartbeat(
         "site": probe.site_name,
         "heartbeat_interval_secs": state.settings.heartbeat_interval_secs(),
         "commands": commands,
+        "recheck_public_ip": recheck_public_ip,
     });
 
     // Relecture : la rotation vient peut-être d'être accusée.
@@ -2905,6 +3007,17 @@ async fn probe_sla_samples(
     let discovery = state.db.latest_scan(&id, "discovery").ok().flatten();
     let ports = state.db.latest_scan(&id, "ports").ok().flatten();
 
+    // L'historique des adresses voyage AVEC le rapport : le tableau de
+    // l'interface et l'onglet Excel découpent les mêmes relevés avec les mêmes
+    // intervalles. Deux sources séparées finiraient par diverger d'une minute
+    // et donneraient deux disponibilités différentes pour la même période.
+    //
+    // ⚠️ Une fenêtre antérieure à la migration ne contient aucun intervalle :
+    // le volet par adresse ressort alors entièrement en « indéterminé ». C'est
+    // la vérité, pas une panne — à l'interface de le dire.
+    let (from, to) = flux_bounds(&query);
+    let public_ip_history = state.db.public_ip_history(&id, from, to).unwrap_or_default();
+
     ok_json(json!({
         "probe": probe.name,
         "site": probe.site_name,
@@ -2917,7 +3030,83 @@ async fn probe_sla_samples(
         "speedtests": speedtests,
         "discovery": discovery,
         "ports": ports,
+        "public_ip_history": public_ip_history,
     }))
+}
+
+/// Historique des adresses publiques d'une sonde, sur la même fenêtre que le
+/// rapport SLA. Le tableau sous le graphe n'a pas besoin du rapport complet.
+async fn probe_public_ips(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MetricsQuery>,
+) -> Response {
+    let (from, to) = flux_bounds(&query);
+    match state.db.public_ip_history(&id, from, to) {
+        Ok(intervals) => ok_json(json!({ "intervals": intervals })),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Longueur maximale d'un libellé de réseau.
+///
+/// Rien ne la bornait. Un libellé part dans tous les rapports remis aux
+/// clients et dans la colonne du tableau sous le graphe : un roman y serait
+/// illisible, et il n'y a aucune raison de laisser une saisie non bornée
+/// entrer en base.
+const MAX_NETWORK_LABEL_LEN: usize = 128;
+
+#[derive(Deserialize)]
+struct LabelBody {
+    /// Le site auquel appartient le réseau nommé. Obligatoire : c'est lui qui
+    /// rend le libellé vérifiable par la portée de l'appelant.
+    site_id: String,
+    public_ip: String,
+    /// Facultative : une sonde antérieure aux relevés de passerelle n'en a
+    /// pas, et la clé la traite alors comme une chaîne vide.
+    #[serde(default)]
+    gateway: String,
+    label: String,
+}
+
+/// Nomme un réseau (« Maison », « Bureau »).
+///
+/// La clé est `(site_id, public_ip, gateway)`. Ni l'adresse seule ni le couple
+/// `(adresse, passerelle)` ne suffisent : deux réseaux derrière un même
+/// opérateur partagent l'adresse publique, et sous CGNAT deux CLIENTS la
+/// partagent aussi — avec, une fois sur deux, la même `192.168.1.1` de box.
+async fn set_network_label(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Json(body): Json<LabelBody>,
+) -> Response {
+    // ⚠️ Le rôle ne suffisait pas : un opérateur restreint à un site posait
+    // le libellé d'un autre client, et ce texte remonte dans le rapport SLA
+    // qu'on lui remet. Refus en 404 comme partout ailleurs — nommer un site
+    // qu'on n'a pas le droit de voir ne doit pas apprendre qu'il existe.
+    if let Err(refusal) = site_in_scope(&actor, &body.site_id) {
+        return refusal;
+    }
+    // Un site inexistant se solderait sinon par une violation de clé
+    // étrangère, donc un 500 : c'est un 404 que l'appelant doit lire.
+    if let Err(e) = state.db.get_site(body.site_id.trim()) {
+        return error_response(e);
+    }
+    if body.label.trim().chars().count() > MAX_NETWORK_LABEL_LEN {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            &format!("libellé limité à {MAX_NETWORK_LABEL_LEN} caractères"),
+        );
+    }
+    match state.db.set_network_label(
+        body.site_id.trim(),
+        body.public_ip.trim(),
+        body.gateway.trim(),
+        &body.label,
+    ) {
+        Ok(()) => ok_json(json!({ "ok": true })),
+        Err(e) => error_response(e),
+    }
 }
 
 /// Relevés d'accès internet, ramenés à la même forme que les cibles ICMP.
@@ -3395,18 +3584,82 @@ struct MetricsQuery {
     stop: Option<i64>,
 }
 
+/// Bornes explicites, si elles tiennent debout. Des bornes inversées rendraient
+/// une fenêtre vide, donc un rapport à 0 % qu'on prendrait pour une panne
+/// totale : on retombe alors sur la fenêtre glissante.
+fn explicit_bounds(query: &MetricsQuery) -> Option<(i64, i64)> {
+    match (query.start, query.stop) {
+        (Some(start), Some(stop)) if stop > start => Some((start, stop)),
+        _ => None,
+    }
+}
+
 /// Construit la clause `range(...)` de Flux et le libellé de la période.
 fn flux_range(query: &MetricsQuery) -> (String, String) {
-    match (query.start, query.stop) {
-        (Some(start), Some(stop)) if stop > start => (
+    match explicit_bounds(query) {
+        Some((start, stop)) => (
             format!("start: {start}, stop: {stop}"),
             format!("{start}..{stop}"),
         ),
-        _ => {
+        None => {
             let range = query.range.clone().unwrap_or_else(|| "-24h".into());
             (format!("start: {}", flux_duration(&range)), range)
         }
     }
+}
+
+/// La même fenêtre, mais en secondes epoch — c'est l'unité de l'historique des
+/// adresses en SQLite.
+///
+/// ⚠️ Elle passe par `explicit_bounds`, comme `flux_range` : un seul endroit
+/// décide de la période. Deux calculs séparés finiraient par couvrir deux
+/// fenêtres légèrement différentes, et le tableau par adresse contredirait la
+/// courbe qu'il légende.
+fn flux_bounds(query: &MetricsQuery) -> (i64, i64) {
+    match explicit_bounds(query) {
+        Some(bounds) => bounds,
+        None => {
+            let to = crate::db::now();
+            let range = query.range.as_deref().unwrap_or("-24h");
+            (to - relative_range_secs(range), to)
+        }
+    }
+}
+
+/// Durée d'une fenêtre glissante Flux (`-24h`, `7d`, `30m`…), en secondes.
+///
+/// Une valeur illisible vaut 24 h et non zéro : une fenêtre vide ne rendrait
+/// aucun intervalle et ferait ressortir toute la période en « indéterminé »,
+/// ce qui se lit comme une panne du dispositif plutôt que comme une saisie
+/// fautive.
+fn relative_range_secs(range: &str) -> i64 {
+    const DEFAULT: i64 = 24 * 3600;
+    let range = range.trim().trim_start_matches('-');
+    let split = range.find(|c: char| !c.is_ascii_digit()).unwrap_or(range.len());
+    let (count, unit) = range.split_at(split);
+    let Ok(count) = count.parse::<i64>() else {
+        return DEFAULT;
+    };
+    let unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        "w" => 7 * 86_400,
+        _ => return DEFAULT,
+    };
+    count.saturating_mul(unit)
+}
+
+/// Instant avant lequel les intervalles d'adresse ne servent plus à rien : les
+/// mesures qu'ils découpaient sont sorties de la rétention Influx.
+///
+/// ⚠️ `0` (et toute valeur négative) vaut **rétention illimitée**, et c'est le
+/// défaut. Calculer `now - 0 × 86400` donnerait `now` et effacerait tout
+/// l'historique dès le premier passage de la purge, sur l'installation la plus
+/// courante qui soit. On ne purge donc rien du tout dans ce cas.
+pub fn public_ip_history_cutoff(retention_days: i64, now: i64) -> Option<i64> {
+    (retention_days > 0).then(|| now - retention_days * 86_400)
 }
 
 /// Requête Flux proxifiée. Le navigateur ne parle jamais directement à
@@ -4485,7 +4738,20 @@ mod tests {
             h
         }
 
-        async fn call(&self, req: Request<Body>) -> (StatusCode, serde_json::Value, Vec<String>) {
+        async fn call(&self, mut req: Request<Body>) -> (StatusCode, serde_json::Value, Vec<String>) {
+            // En production c'est `into_make_service_with_connect_info` qui
+            // pose l'adresse de la socket ; `oneshot` court-circuite la couche
+            // qui le fait. On la pose donc ici, sauf si le test en a déjà
+            // choisi une (voir `with_peer`).
+            if req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .is_none()
+            {
+                req.extensions_mut().insert(axum::extract::ConnectInfo(
+                    "127.0.0.1:41000".parse::<std::net::SocketAddr>().unwrap(),
+                ));
+            }
             let response = self.router.clone().oneshot(req).await.unwrap();
             let status = response.status();
             let cookies = response
@@ -4995,6 +5261,16 @@ mod tests {
         req
     }
 
+    /// Pose l'adresse de la socket, comme le fait `ConnectInfo` en production.
+    /// Sans elle, `Harness::call` en met une par défaut : c'est le battement
+    /// d'une sonde qui ne bouge pas.
+    fn with_peer(mut req: Request<Body>, peer: &str) -> Request<Body> {
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            format!("{peer}:41000").parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        req
+    }
+
     // ── Statut et premier lancement ────────────────────────────────────────
 
     #[tokio::test]
@@ -5083,6 +5359,159 @@ mod tests {
             .await;
         assert_eq!(fleet[0]["internet_state"], "offline");
         assert!(fleet[0]["internet_state_at"].is_i64());
+    }
+
+    /// Un battement émis depuis `peer`. Rend le corps de la réponse.
+    async fn heartbeat_from(
+        h: &Harness,
+        probe_id: &str,
+        token: &str,
+        peer: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        let req = with_peer(
+            with_bearer(
+                json_request("POST", &format!("/api/probes/{probe_id}/heartbeat"), body),
+                token,
+            ),
+            peer,
+        );
+        h.call(req).await.1
+    }
+
+    #[tokio::test]
+    async fn a_changed_source_address_asks_the_probe_to_recheck_its_public_ip() {
+        // ⚠️ L'adresse vue ici DÉTECTE, elle n'est jamais enregistrée : le
+        // battement peut sortir par la route par défaut alors que les mesures
+        // sont liées à une autre interface. Le hub déclenche, la sonde mesure.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let first =
+            heartbeat_from(&h, &probe_id, &token, "203.0.113.10", serde_json::json!({})).await;
+        assert_eq!(
+            first["recheck_public_ip"], false,
+            "premier battement : rien à comparer, un « changement » serait une invention"
+        );
+
+        let second =
+            heartbeat_from(&h, &probe_id, &token, "203.0.113.10", serde_json::json!({})).await;
+        assert_eq!(second["recheck_public_ip"], false);
+
+        let third =
+            heartbeat_from(&h, &probe_id, &token, "198.51.100.4", serde_json::json!({})).await;
+        assert_eq!(third["recheck_public_ip"], true, "source différente = relevé demandé");
+
+        // Ce que le hub a vu ne devient jamais l'adresse publique de la sonde.
+        let seen = h.state.db.get_probe(&probe_id).unwrap();
+        assert_eq!(seen.public_ip, None, "l'adresse source ne doit jamais être enregistrée");
+    }
+
+    #[tokio::test]
+    async fn without_trusted_proxies_a_forged_header_changes_nothing() {
+        // ⚠️ `X-Forwarded-For` est écrit par le client. Sans proxy de
+        // confiance déclaré, le lire laisserait une sonde faire croire au hub
+        // qu'elle se déplace en boucle et marteler le relevé d'IP publique.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        heartbeat_from(&h, &probe_id, &token, "203.0.113.10", serde_json::json!({})).await;
+        let mut req = with_peer(
+            with_bearer(
+                json_request("POST", &format!("/api/probes/{probe_id}/heartbeat"), serde_json::json!({})),
+                &token,
+            ),
+            "203.0.113.10",
+        );
+        req.headers_mut()
+            .insert("x-forwarded-for", "9.9.9.9".parse().unwrap());
+        let (_, body, _) = h.call(req).await;
+        assert_eq!(body["recheck_public_ip"], false, "l'en-tête doit être ignoré");
+    }
+
+    #[tokio::test]
+    async fn an_identity_that_is_not_made_of_addresses_opens_no_interval() {
+        // ⚠️ Chaque valeur d'adresse DIFFÉRENTE ouvre un intervalle. Une sonde
+        // authentifiée qui bat avec n'importe quoi ferait donc grossir
+        // l'historique sans fin — et la purge ne rattrape rien quand la
+        // rétention est illimitée. Ce qui n'est pas une adresse est traité
+        // comme absent.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/heartbeat"),
+                    serde_json::json!({
+                        "public_ip": "pas-une-ip",
+                        "gateway": "la-box",
+                        "local_ips": ["salon", "10.6.8.42/24", "10.6.8.43"]
+                    }),
+                ),
+                &token,
+            ))
+            .await;
+        // ⚠️ Le battement RÉUSSIT quand même : une sonde qui bat mal doit
+        // rester visible, c'est tout l'intérêt du battement.
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let seen = h.state.db.get_probe(&probe_id).unwrap();
+        assert_eq!(seen.public_ip, None, "« pas-une-ip » n'est pas une adresse");
+        assert_eq!(seen.gateway, None, "« la-box » non plus");
+        assert_eq!(
+            seen.local_ips,
+            vec!["10.6.8.42/24".to_string(), "10.6.8.43".to_string()],
+            "seules les entrées qui parsent sont gardées"
+        );
+
+        let (_, ips, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=24h")),
+                &session,
+            ))
+            .await;
+        assert!(
+            ips["intervals"].as_array().unwrap().is_empty(),
+            "aucun intervalle ne doit s'ouvrir : {ips}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_megabyte_of_junk_as_a_public_ip_opens_no_interval() {
+        // Le cas qui fait enfler le disque du hub pour tous les sites : une
+        // sonde compromise bat avec une valeur énorme et différente à chaque
+        // fois. Rien ne bornait la longueur.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/heartbeat"),
+                    serde_json::json!({ "public_ip": "8".repeat(1024 * 1024) }),
+                ),
+                &token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (_, ips, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=24h")),
+                &session,
+            ))
+            .await;
+        assert!(
+            ips["intervals"].as_array().unwrap().is_empty(),
+            "aucun intervalle ne doit s'ouvrir : {ips}"
+        );
     }
 
     #[tokio::test]
@@ -5452,6 +5881,269 @@ mod tests {
             stop: Some(1_788_000_000),
         });
         assert_eq!(window, "start: -24h");
+    }
+
+    #[test]
+    fn the_window_in_seconds_follows_the_same_rules_as_the_flux_range() {
+        // ⚠️ Un seul endroit décide de la période. Deux calculs séparés
+        // finiraient par couvrir deux fenêtres légèrement différentes, et le
+        // tableau par adresse contredirait la courbe qu'il légende.
+        let explicit = MetricsQuery {
+            measurement: None,
+            range: Some("-7d".into()),
+            start: Some(1_788_000_000),
+            stop: Some(1_788_600_000),
+        };
+        assert_eq!(flux_bounds(&explicit), (1_788_000_000, 1_788_600_000));
+
+        let reversed = MetricsQuery {
+            measurement: None,
+            range: Some("-24h".into()),
+            start: Some(1_788_600_000),
+            stop: Some(1_788_000_000),
+        };
+        let (from, to) = flux_bounds(&reversed);
+        assert_eq!(to - from, 24 * 3600, "bornes inversées : on retombe sur la fenêtre");
+
+        for (range, span) in [("24h", 86_400), ("-7d", 7 * 86_400), ("-30m", 1_800)] {
+            let (from, to) = flux_bounds(&MetricsQuery {
+                measurement: None,
+                range: Some(range.into()),
+                start: None,
+                stop: None,
+            });
+            assert_eq!(to - from, span, "fenêtre {range}");
+        }
+    }
+
+    #[test]
+    fn an_unlimited_retention_purges_nothing() {
+        // ⚠️ `0` = rétention illimitée, et c'est le DÉFAUT. Calculer
+        // `now - 0 × 86400` donnerait `now` et effacerait tout l'historique
+        // dès le premier passage de la tâche de purge, sur l'installation la
+        // plus courante qui soit.
+        assert_eq!(public_ip_history_cutoff(0, 1_788_600_000), None);
+        assert_eq!(public_ip_history_cutoff(-1, 1_788_600_000), None);
+        assert_eq!(
+            public_ip_history_cutoff(30, 1_788_600_000),
+            Some(1_788_600_000 - 30 * 86_400)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sla_payload_carries_the_address_history() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        heartbeat_from(
+            &h,
+            &probe_id,
+            &token,
+            "203.0.113.10",
+            serde_json::json!({ "public_ip": "88.120.0.1", "gateway": "10.6.8.1" }),
+        )
+        .await;
+
+        let (status, sla, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{sla}");
+        let history = sla["public_ip_history"]
+            .as_array()
+            .expect("public_ip_history absent");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["public_ip"], "88.120.0.1");
+        assert_eq!(history[0]["label"], serde_json::Value::Null);
+
+        // La même chose se lit seule, pour le tableau qui n'a pas besoin du
+        // rapport complet.
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["intervals"][0]["public_ip"], "88.120.0.1");
+    }
+
+    #[tokio::test]
+    async fn a_network_label_comes_back_with_the_history() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        let site_id = h.state.db.get_probe(&probe_id).unwrap().site_id;
+        heartbeat_from(
+            &h,
+            &probe_id,
+            &token,
+            "203.0.113.10",
+            serde_json::json!({ "public_ip": "88.120.0.1", "gateway": "10.6.8.1" }),
+        )
+        .await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/networks/label",
+                    serde_json::json!({
+                        "site_id": site_id,
+                        "public_ip": "88.120.0.1",
+                        "gateway": "10.6.8.1",
+                        "label": "Maison"
+                    }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (_, sla, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(sla["public_ip_history"][0]["label"], "Maison");
+    }
+
+    #[tokio::test]
+    async fn an_operator_out_of_scope_cannot_name_a_network() {
+        // ⚠️ Le libellé remonte dans le RAPPORT SLA du site. Un opérateur
+        // restreint qui pourrait le poser écrirait un texte arbitraire dans un
+        // document remis au client d'un autre.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        let site_id = h.state.db.get_probe(&probe_id).unwrap().site_id;
+        heartbeat_from(
+            &h,
+            &probe_id,
+            &token,
+            "203.0.113.10",
+            serde_json::json!({ "public_ip": "88.120.0.1", "gateway": "10.6.8.1" }),
+        )
+        .await;
+
+        // Un autre site, seul dans la portée de l'opérateur.
+        let autre = h.state.db.create_site("Martin").unwrap();
+        h.user("olivier", Role::Operator).await;
+        h.state
+            .db
+            .set_user_sites("olivier", &[autre.site_id.clone()])
+            .unwrap();
+        let restreint = h.login_as("olivier").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/networks/label",
+                    serde_json::json!({
+                        "site_id": site_id,
+                        "public_ip": "88.120.0.1",
+                        "gateway": "10.6.8.1",
+                        "label": "Chez le concurrent"
+                    }),
+                ),
+                &restreint,
+            ))
+            .await;
+        // ⚠️ 404 et non 403 : « ça existe mais pas pour vous » révèle déjà
+        // l'existence du site d'un autre client.
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // Et RIEN n'a été écrit : un refus qui laisse une trace en base n'est
+        // pas un refus.
+        let (_, sla, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                &session,
+            ))
+            .await;
+        assert!(
+            sla["public_ip_history"][0]["label"].is_null(),
+            "aucun libellé ne doit avoir été posé : {sla}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_sites_behind_the_same_public_ip_keep_their_own_label() {
+        // ⚠️ Sous CGNAT deux clients partagent l'adresse publique, et
+        // `192.168.1.1` est la passerelle d'une box sur deux. Sans dimension de
+        // site, « Maison de Durand » s'affichait dans le rapport de Martin.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (durand, t_durand) = h.enroll(&session, "Durand", "Paris").await;
+        let (martin, t_martin) = h.enroll(&session, "Martin", "Lyon").await;
+        let identite =
+            serde_json::json!({ "public_ip": "88.120.0.1", "gateway": "192.168.1.1" });
+        heartbeat_from(&h, &durand, &t_durand, "203.0.113.10", identite.clone()).await;
+        heartbeat_from(&h, &martin, &t_martin, "203.0.113.10", identite).await;
+
+        for (probe_id, label) in [(&durand, "Maison de Durand"), (&martin, "Bureau de Martin")] {
+            let site_id = h.state.db.get_probe(probe_id).unwrap().site_id;
+            let (status, body, _) = h
+                .call(with_cookie(
+                    json_request(
+                        "PUT",
+                        "/api/networks/label",
+                        serde_json::json!({
+                            "site_id": site_id,
+                            "public_ip": "88.120.0.1",
+                            "gateway": "192.168.1.1",
+                            "label": label
+                        }),
+                    ),
+                    &session,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+
+        for (probe_id, attendu) in [(&durand, "Maison de Durand"), (&martin, "Bureau de Martin")] {
+            let (_, sla, _) = h
+                .call(with_cookie(
+                    empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                    &session,
+                ))
+                .await;
+            assert_eq!(
+                sla["public_ip_history"][0]["label"], attendu,
+                "chaque site garde le sien : {sla}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_label_longer_than_the_bound_is_refused() {
+        // Rien ne bornait la longueur : un libellé se retrouve dans tous les
+        // rapports, un roman n'y a pas sa place.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+        let site_id = h.state.db.get_probe(&probe_id).unwrap().site_id;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/networks/label",
+                    serde_json::json!({
+                        "site_id": site_id,
+                        "public_ip": "88.120.0.1",
+                        "gateway": "10.6.8.1",
+                        "label": "M".repeat(129)
+                    }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
     #[test]

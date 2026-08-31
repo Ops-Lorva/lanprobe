@@ -227,6 +227,22 @@ async fn main() -> Result<(), String> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
             loop {
                 tick.tick().await;
+
+                // Historique des adresses publiques : il suit la rétention
+                // Influx, pas celle de l'inventaire. Les mesures que ces
+                // intervalles découpaient n'existent plus, l'intervalle ne
+                // sert donc plus à rien. Les libellés, eux, ne sont jamais
+                // purgés — ils se réappliquent quand le réseau revient.
+                if let Some(cutoff) =
+                    web::public_ip_history_cutoff(settings.retention_days(), lanprobe_web::db::now())
+                {
+                    match db.purge_public_ip_history(cutoff) {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!("historique des adresses : {n} intervalle(s) retirés"),
+                        Err(e) => tracing::warn!("purge de l'historique des adresses : {e}"),
+                    }
+                }
+
                 let days = settings.inventory_days();
                 if days <= 0 {
                     continue;
@@ -273,7 +289,10 @@ async fn main() -> Result<(), String> {
             addr,
             axum_server::tls_rustls::RustlsConfig::from_config(tls_config),
         )
-        .serve(router.into_make_service())
+        // ⚠️ `with_connect_info` et non `into_make_service` : sans lui,
+        // l'adresse de la socket n'atteint jamais les gestionnaires et le
+        // battement ne peut plus détecter qu'une sonde a changé de réseau.
+        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .map_err(|e| e.to_string());
     }
@@ -287,9 +306,12 @@ async fn main() -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| e.to_string())?;
-    axum::serve(listener, router.into_make_service())
-        .await
-        .map_err(|e| e.to_string())
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// La cible InfluxDB pour `influx backup`, ou `None` s'il n'y a pas de jeton

@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -395,6 +395,83 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE notify_states ADD COLUMN internet_state TEXT;
     ALTER TABLE notify_states ADD COLUMN internet_since INTEGER;
+    "#,
+    // v18 → v19 : historique des IP publiques et libellés de réseau.
+    //
+    // ⚠️ `confirmed_until` est le DERNIER battement ayant CONFIRMÉ l'adresse,
+    // pas l'instant où le changement a été détecté. C'est ce qui rend
+    // l'attribution du SLA correcte sans aucun cas particulier : le trou entre
+    // le `confirmed_until` d'un intervalle et le `confirmed_from` du suivant
+    // EST la zone indéterminée. Une coupure suivie d'un retour sur la même
+    // adresse reste dans l'intervalle et lui est imputée ; une coupure suivie
+    // d'une adresse différente tombe dans le trou et n'est imputée à personne.
+    //
+    // L'identité réseau est un INSTANTANÉ figé au moment du relevé : après un
+    // changement, elle décrit le réseau tel qu'il était, pas tel qu'il est.
+    //
+    // ⚠️ Rien de tout cela ne va dans InfluxDB (contrat § 12) : une étiquette
+    // par adresse ferait une série par adresse, et un poste itinérant en voit
+    // des dizaines — l'explosion de cardinalité qui ne se voit pas avant qu'il
+    // soit trop tard.
+    //
+    // `network_labels` est SÉPARÉE de l'historique pour deux raisons : le
+    // libellé survit à la purge des intervalles, et il se réapplique tout seul
+    // quand le même réseau réapparaît. La passerelle fait partie de la clé
+    // parce que deux réseaux derrière un même opérateur partagent l'adresse
+    // publique.
+    //
+    // ⚠️ **Le SITE fait partie de la clé, lui aussi.** `(public_ip, gateway)`
+    // n'est PAS unique entre clients : sous CGNAT deux sites sortent par la
+    // même adresse publique, et `192.168.1.1` est la passerelle par défaut
+    // d'une box sur deux. Sans cette colonne, un libellé nominatif saisi pour
+    // le site A (« Maison de Durand ») s'affichait dans le rapport SLA remis
+    // au client du site B. C'est aussi ce qui donne au libellé une portée
+    // vérifiable : sans site, aucune garde de portée n'a de prise dessus.
+    //
+    // `ON DELETE CASCADE` : le libellé d'un site qui n'existe plus ne veut
+    // rien dire, et sans cascade la clé étrangère ferait échouer la
+    // suppression d'un site vidé de ses sondes.
+    //
+    // `observed_source_ip` est l'adresse source du battement précédent. Elle
+    // ne sert QU'À détecter un changement : la valeur enregistrée dans
+    // l'historique est toujours celle relevée par la sonde via son interface
+    // de mesure (contrat § 15).
+    //
+    // La reprise finale part de ce que le hub savait déjà : sans elle, une
+    // sonde en service depuis des mois repartirait de zéro et sa fenêtre
+    // courante ressortirait entièrement en « indéterminé ».
+    r#"
+    CREATE TABLE probe_public_ip_history (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      probe_id        TEXT    NOT NULL REFERENCES probes(probe_id) ON DELETE CASCADE,
+      public_ip       TEXT    NOT NULL,
+      interface       TEXT,
+      gateway         TEXT,
+      local_subnet    TEXT,
+      confirmed_from  INTEGER NOT NULL,
+      confirmed_until INTEGER NOT NULL
+    );
+    CREATE INDEX idx_pubip_probe_from
+      ON probe_public_ip_history(probe_id, confirmed_from);
+
+    CREATE TABLE network_labels (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      site_id    TEXT NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+      public_ip  TEXT NOT NULL,
+      gateway    TEXT NOT NULL DEFAULT '',
+      label      TEXT NOT NULL,
+      UNIQUE(site_id, public_ip, gateway)
+    );
+
+    ALTER TABLE probes ADD COLUMN observed_source_ip TEXT;
+
+    INSERT INTO probe_public_ip_history
+      (probe_id, public_ip, interface, gateway, local_subnet, confirmed_from, confirmed_until)
+    SELECT probe_id, public_ip, interface, gateway, NULL,
+           COALESCE(public_ip_at, last_seen), COALESCE(last_seen, public_ip_at)
+      FROM probes
+     WHERE public_ip IS NOT NULL
+       AND COALESCE(public_ip_at, last_seen) IS NOT NULL;
     "#,
 ];
 
@@ -891,6 +968,21 @@ pub struct ProbeIdentity {
     pub monitors: Option<String>,
 }
 
+/// Plafond du nombre d'intervalles d'adresse conservés **par sonde**.
+///
+/// ⚠️ Chaque adresse différente ouvre un intervalle, et la purge par rétention
+/// (`purge_public_ip_history`) ne supprime rien quand la rétention Influx est
+/// illimitée — qui est le réglage par DÉFAUT. Sans plafond, une seule sonde
+/// authentifiée qui bat avec une adresse différente à chaque fois fait enfler
+/// `probe_public_ip_history` jusqu'à saturer le disque du hub, et donc pour
+/// tous les sites qu'il porte.
+///
+/// Ce qu'on perd au-delà du plafond, c'est l'historique le PLUS ANCIEN : celui
+/// dont les mesures ont de toute façon le plus de chances d'avoir déjà été
+/// purgées côté Influx, et qu'aucun découpage de SLA ne peut donc plus servir.
+/// 500 intervalles, c'est déjà un poste itinérant sur plusieurs mois.
+pub const MAX_PUBLIC_IP_INTERVALS: usize = 500;
+
 /// Bascule d'IP publique observée à un battement — changement d'opérateur,
 /// passage sur un lien de secours. C'est ce qui mérite une ligne d'audit ;
 /// une adresse inchangée n'en mérite aucune.
@@ -899,6 +991,32 @@ pub struct PublicIpChange {
     /// `None` la première fois que la sonde annonce une adresse.
     pub previous: Option<String>,
     pub current: String,
+}
+
+/// Période pendant laquelle une sonde a été vue derrière une même adresse
+/// publique (contrat § 15).
+///
+/// ⚠️ `confirmed_until` est le **dernier battement ayant confirmé** l'adresse,
+/// jamais l'instant où le changement a été détecté. Le trou entre le
+/// `confirmed_until` d'un intervalle et le `confirmed_from` du suivant **est**
+/// la zone indéterminée : combler ce trou ferait imputer à une adresse une
+/// coupure survenue derrière une autre, et « 99,2 % » collé à la mauvaise
+/// adresse a l'air normal — personne ne le remettrait en cause.
+///
+/// L'identité réseau (`interface`, `gateway`, `local_subnet`) est un
+/// instantané figé au moment du relevé : elle décrit le réseau tel qu'il
+/// était, pas tel qu'il est.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PublicIpInterval {
+    pub public_ip: String,
+    pub interface: Option<String>,
+    pub gateway: Option<String>,
+    pub local_subnet: Option<String>,
+    pub confirmed_from: i64,
+    pub confirmed_until: i64,
+    /// Libellé saisi par l'utilisateur pour `(public_ip, gateway)`, joint
+    /// depuis `network_labels`. `None` tant que personne n'a nommé ce réseau.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2447,6 +2565,65 @@ impl Db {
         if changed == 0 {
             return Err(DbError::NotFound("sonde inconnue".into()));
         }
+        // Historique des adresses. ⚠️ On ne prolonge un intervalle QUE si la
+        // sonde a effectivement annoncé une adresse : un battement muet ne
+        // confirme rien, et le prolonger effacerait la zone indéterminée qui
+        // fait tout l'intérêt de ce tableau.
+        if let Some(current) = identity.public_ip.as_deref() {
+            let ts = now();
+            let subnet = identity
+                .local_ips
+                .first()
+                .and_then(|cidr| cidr.split('/').next())
+                .map(str::to_string);
+            // `id DESC` départage les intervalles ouverts dans la même
+            // seconde : `confirmed_from` seul laisserait SQLite choisir, et
+            // c'est le dernier ouvert qu'on veut prolonger.
+            let extended = conn.execute(
+                "UPDATE probe_public_ip_history
+                    SET confirmed_until = ?3
+                  WHERE id = (SELECT id FROM probe_public_ip_history
+                               WHERE probe_id = ?1
+                            ORDER BY confirmed_from DESC, id DESC LIMIT 1)
+                    AND public_ip = ?2",
+                rusqlite::params![probe_id, current, ts],
+            )?;
+            if extended == 0 {
+                conn.execute(
+                    "INSERT INTO probe_public_ip_history
+                       (probe_id, public_ip, interface, gateway, local_subnet,
+                        confirmed_from, confirmed_until)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                    rusqlite::params![
+                        probe_id,
+                        current,
+                        identity.interface,
+                        identity.gateway,
+                        subnet,
+                        ts
+                    ],
+                )?;
+                // ⚠️ Plafond PAR SONDE, appliqué à l'ouverture d'un intervalle
+                // — c'est le seul moment où leur nombre augmente. Voir
+                // `MAX_PUBLIC_IP_INTERVALS` : sans lui, une sonde qui bat avec
+                // une adresse différente à chaque fois fait grossir cette table
+                // sans borne, la purge par rétention ne rattrapant rien quand
+                // la rétention Influx est illimitée.
+                //
+                // Ce qui saute, c'est le plus ANCIEN : ses mesures ont de toute
+                // façon le plus de chances d'être déjà parties côté Influx, et
+                // un intervalle sans mesures à découper ne sert plus à rien.
+                conn.execute(
+                    "DELETE FROM probe_public_ip_history
+                      WHERE probe_id = ?1
+                        AND id NOT IN (SELECT id FROM probe_public_ip_history
+                                        WHERE probe_id = ?1
+                                     ORDER BY confirmed_from DESC, id DESC
+                                        LIMIT ?2)",
+                    rusqlite::params![probe_id, MAX_PUBLIC_IP_INTERVALS as i64],
+                )?;
+            }
+        }
         Ok(match &identity.public_ip {
             Some(current) if Some(current) != previous.as_ref() => Some(PublicIpChange {
                 previous,
@@ -2485,6 +2662,124 @@ impl Db {
             rusqlite::params![probe_id, at],
         )?;
         Ok(())
+    }
+
+    // ── Historique des adresses publiques (contrat § 15) ───────────────────
+
+    /// Intervalles d'adresse chevauchant la fenêtre `[from, to]`, du plus
+    /// ancien au plus récent. Le libellé est joint ici : l'interface et le
+    /// rapport Excel le veulent tous les deux, et le calculer deux fois
+    /// laisserait deux définitions diverger.
+    ///
+    /// ⚠️ La jointure passe par le SITE de la sonde. Deux clients derrière la
+    /// même IP publique — le cas CGNAT — verraient sinon le libellé l'un de
+    /// l'autre remonter dans leur rapport SLA.
+    pub fn public_ip_history(
+        &self,
+        probe_id: &str,
+        from: i64,
+        to: i64,
+    ) -> DbResult<Vec<PublicIpInterval>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT h.public_ip, h.interface, h.gateway, h.local_subnet,
+                    h.confirmed_from, h.confirmed_until, l.label
+               FROM probe_public_ip_history h
+               JOIN probes p ON p.probe_id = h.probe_id
+          LEFT JOIN network_labels l
+                 ON l.site_id = p.site_id
+                AND l.public_ip = h.public_ip
+                AND l.gateway = COALESCE(h.gateway, '')
+              WHERE h.probe_id = ?1
+                AND h.confirmed_until >= ?2
+                AND h.confirmed_from <= ?3
+           ORDER BY h.confirmed_from, h.id",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![probe_id, from, to], |r| {
+                Ok(PublicIpInterval {
+                    public_ip: r.get(0)?,
+                    interface: r.get(1)?,
+                    gateway: r.get(2)?,
+                    local_subnet: r.get(3)?,
+                    confirmed_from: r.get(4)?,
+                    confirmed_until: r.get(5)?,
+                    label: r.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Mémorise l'adresse source du battement et dit si elle a changé.
+    ///
+    /// ⚠️ Cette adresse ne sert QU'À déclencher un relevé côté sonde : elle
+    /// n'est jamais reprise comme adresse publique. Le battement peut sortir
+    /// par la route par défaut alors que les mesures sont liées à une autre
+    /// interface — on écrirait une adresse plausible et fausse au milieu de
+    /// mesures honnêtes.
+    ///
+    /// Le premier battement ne demande rien : sans point de comparaison, un
+    /// « changement » serait une invention.
+    pub fn note_observed_source(&self, probe_id: &str, observed: &str) -> DbResult<bool> {
+        let conn = self.lock()?;
+        let previous: Option<String> = conn
+            .query_row(
+                "SELECT observed_source_ip FROM probes WHERE probe_id = ?1",
+                [probe_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        conn.execute(
+            "UPDATE probes SET observed_source_ip = ?2 WHERE probe_id = ?1",
+            rusqlite::params![probe_id, observed],
+        )?;
+        Ok(matches!(previous, Some(p) if p != observed))
+    }
+
+    /// Pose ou remplace le libellé d'un réseau **dans un site**. Une chaîne
+    /// vide l'efface : l'utilisateur qui vide le champ veut retirer le
+    /// libellé, pas en poser un vide.
+    ///
+    /// ⚠️ Le site n'est pas décoratif : `(public_ip, gateway)` n'est unique
+    /// que DANS un site. Deux clients derrière la même sortie CGNAT et la même
+    /// passerelle de box partageraient sinon un libellé nominatif.
+    pub fn set_network_label(
+        &self,
+        site_id: &str,
+        public_ip: &str,
+        gateway: &str,
+        label: &str,
+    ) -> DbResult<()> {
+        let conn = self.lock()?;
+        if label.trim().is_empty() {
+            conn.execute(
+                "DELETE FROM network_labels
+                  WHERE site_id = ?1 AND public_ip = ?2 AND gateway = ?3",
+                rusqlite::params![site_id, public_ip, gateway],
+            )?;
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO network_labels (site_id, public_ip, gateway, label)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(site_id, public_ip, gateway) DO UPDATE SET label = excluded.label",
+            rusqlite::params![site_id, public_ip, gateway, label.trim()],
+        )?;
+        Ok(())
+    }
+
+    /// Supprime les intervalles entièrement antérieurs à la rétention Influx :
+    /// les mesures qu'ils découpaient n'existent plus, l'intervalle ne sert
+    /// plus à rien. Les libellés ne sont jamais purgés — ils se réappliquent
+    /// quand le réseau revient.
+    pub fn purge_public_ip_history(&self, before: i64) -> DbResult<usize> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM probe_public_ip_history WHERE confirmed_until < ?1",
+            [before],
+        )?)
     }
 
 
@@ -3044,6 +3339,109 @@ mod tests {
         assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
         assert!(db.table_exists("settings").unwrap());
         assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_v19_migration_creates_the_address_history_and_its_labels() {
+        let db = open_memory();
+        let conn = db.conn.lock().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('probe_public_ip_history')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for expected in [
+            "probe_id",
+            "public_ip",
+            "interface",
+            "gateway",
+            "local_subnet",
+            "confirmed_from",
+            "confirmed_until",
+        ] {
+            assert!(cols.iter().any(|c| c == expected), "colonne {expected} absente : {cols:?}");
+        }
+        let labels: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_table_info('network_labels')", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(labels > 0, "table network_labels absente");
+        // L'adresse source du battement précédent : c'est elle qui sert de
+        // point de comparaison pour demander un relevé (contrat § 15).
+        let probe_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('probes')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            probe_cols.iter().any(|c| c == "observed_source_ip"),
+            "colonne observed_source_ip absente : {probe_cols:?}"
+        );
+    }
+
+    #[test]
+    fn the_public_ip_history_starts_from_what_the_probe_already_had() {
+        // ⚠️ L'historique commence à la migration : sans reprise, toute sonde
+        // déjà en service repartirait de zéro et sa fenêtre courante
+        // ressortirait entièrement en « indéterminé » alors que le hub
+        // connaissait parfaitement son adresse.
+        let dir = tmp_dir("v18-to-v19");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..18] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 18").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO probes (probe_id, site_id, name, token_hash, created_at,
+                                     last_seen, public_ip, public_ip_at, interface, gateway)
+                 VALUES ('p-1', 's-1', 'Paris', 'h', 0, 500, '88.120.0.1', 100, 'en0', '10.6.8.1')",
+                [],
+            )
+            .unwrap();
+            // Une sonde qui n'a jamais annoncé d'adresse ne doit ouvrir aucun
+            // intervalle : un intervalle sans adresse ne veut rien dire.
+            conn.execute(
+                "INSERT INTO probes (probe_id, site_id, name, token_hash, created_at, last_seen)
+                 VALUES ('p-2', 's-1', 'Lyon', 'h', 0, 500)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+
+        let conn = db.conn.lock().unwrap();
+        let rows: Vec<(String, String, i64, i64)> = conn
+            .prepare(
+                "SELECT probe_id, public_ip, confirmed_from, confirmed_until
+                   FROM probe_public_ip_history",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows.len(), 1, "seule la sonde qui avait une adresse est reprise : {rows:?}");
+        assert_eq!(rows[0].0, "p-1");
+        assert_eq!(rows[0].1, "88.120.0.1");
+        assert_eq!(rows[0].2, 100, "l'intervalle part de la date du changement d'adresse");
+        assert_eq!(rows[0].3, 500, "et court jusqu'au dernier battement connu");
+        drop(conn);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4293,6 +4691,216 @@ mod tests {
             .expect("une bascule d'opérateur doit se voir");
         assert_eq!(change.previous.as_deref(), Some("88.120.0.1"));
         assert_eq!(change.current, "88.120.0.2");
+    }
+
+    // ── Historique des adresses publiques (contrat § 15) ───────────────────
+
+    fn beat_with_ip(db: &Db, probe_id: &str, ip: &str) {
+        let identity = ProbeIdentity {
+            public_ip: Some(ip.to_string()),
+            interface: Some("en0".into()),
+            local_ips: vec!["10.6.8.42/24".into()],
+            gateway: Some("10.6.8.1".into()),
+            internet_state: Some("online".into()),
+            monitors: None,
+        };
+        db.record_heartbeat(probe_id, None, None, 0, &identity).unwrap();
+    }
+
+    #[test]
+    fn a_returning_address_extends_its_interval_instead_of_opening_a_new_one() {
+        let (db, probe) = db_with_probe();
+
+        beat_with_ip(&db, &probe, "88.120.0.1");
+        beat_with_ip(&db, &probe, "88.120.0.1");
+        let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 1, "deux battements sur la même adresse = un intervalle");
+        assert!(rows[0].confirmed_until >= rows[0].confirmed_from);
+    }
+
+    #[test]
+    fn a_new_address_opens_an_interval_and_leaves_a_gap_behind_it() {
+        let (db, probe) = db_with_probe();
+
+        beat_with_ip(&db, &probe, "88.120.0.1");
+        beat_with_ip(&db, &probe, "172.58.0.9");
+        let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].public_ip, "88.120.0.1");
+        assert_eq!(rows[1].public_ip, "172.58.0.9");
+        // ⚠️ Le premier intervalle s'arrête au dernier battement qui l'a
+        // CONFIRMÉ. Il ne s'étend pas jusqu'à la détection du changement : ce
+        // qui se passe entre les deux n'appartient à personne.
+        assert!(
+            rows[0].confirmed_until <= rows[1].confirmed_from,
+            "les intervalles ne doivent pas se chevaucher"
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_without_a_public_ip_touches_no_interval() {
+        let (db, probe) = db_with_probe();
+
+        beat_with_ip(&db, &probe, "88.120.0.1");
+        let before = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+        // Une sonde sans accès internet bat SANS adresse : elle ne doit ni
+        // ouvrir un intervalle, ni prolonger le précédent — prolonger
+        // affirmerait qu'on a confirmé l'adresse alors qu'on ne pouvait même
+        // pas la relever, et comblerait la zone indéterminée.
+        db.record_heartbeat(&probe, None, None, 0, &ProbeIdentity::default())
+            .unwrap();
+        let after = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before[0].confirmed_until, after[0].confirmed_until);
+    }
+
+    #[test]
+    fn a_label_reapplies_itself_when_the_same_network_comes_back() {
+        // Le libellé vit à part de l'historique : il tient à `(adresse,
+        // passerelle)`, pas à un intervalle. Repasser par le même réseau doit
+        // le retrouver sans que personne ne le ressaisisse.
+        let (db, probe) = db_with_probe();
+        let site = db.get_probe(&probe).unwrap().site_id;
+        beat_with_ip(&db, &probe, "88.120.0.1");
+        db.set_network_label(&site, "88.120.0.1", "10.6.8.1", "Maison").unwrap();
+        beat_with_ip(&db, &probe, "172.58.0.9");
+        beat_with_ip(&db, &probe, "88.120.0.1");
+
+        let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].label.as_deref(), Some("Maison"));
+        assert_eq!(rows[1].label, None, "l'autre réseau n'a pas de libellé");
+        assert_eq!(rows[2].label.as_deref(), Some("Maison"), "le libellé revient seul");
+
+        // Vider le champ retire le libellé : l'utilisateur qui efface veut
+        // retirer, pas poser un libellé vide.
+        db.set_network_label(&site, "88.120.0.1", "10.6.8.1", "  ").unwrap();
+        let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+        assert!(rows.iter().all(|r| r.label.is_none()));
+    }
+
+    #[test]
+    fn a_label_never_crosses_over_to_another_site() {
+        // ⚠️ Sous CGNAT deux clients sortent par la MÊME adresse publique, et
+        // `192.168.1.1` est la passerelle par défaut d'une box sur deux. Sans
+        // dimension de site, « Maison de Durand » s'affichait dans le rapport
+        // remis à Martin.
+        let (db, durand) = db_with_probe();
+        let site_durand = db.get_probe(&durand).unwrap().site_id;
+        let site_martin = db.create_site("Martin").unwrap().site_id;
+        let (martin, _) = db.enroll_probe(&site_martin, "Lyon").unwrap();
+
+        for probe in [&durand, &martin.probe_id] {
+            let identity = ProbeIdentity {
+                public_ip: Some("88.120.0.1".into()),
+                gateway: Some("192.168.1.1".into()),
+                ..Default::default()
+            };
+            db.record_heartbeat(probe, None, None, 0, &identity).unwrap();
+        }
+        db.set_network_label(&site_durand, "88.120.0.1", "192.168.1.1", "Maison de Durand")
+            .unwrap();
+
+        assert_eq!(
+            db.public_ip_history(&durand, 0, i64::MAX).unwrap()[0]
+                .label
+                .as_deref(),
+            Some("Maison de Durand")
+        );
+        assert_eq!(
+            db.public_ip_history(&martin.probe_id, 0, i64::MAX).unwrap()[0].label,
+            None,
+            "le libellé de Durand n'a rien à faire chez Martin"
+        );
+    }
+
+    #[test]
+    fn the_purge_drops_old_intervals_but_never_the_labels() {
+        let (db, probe) = db_with_probe();
+        let site = db.get_probe(&probe).unwrap().site_id;
+        beat_with_ip(&db, &probe, "88.120.0.1");
+        db.set_network_label(&site, "88.120.0.1", "10.6.8.1", "Maison").unwrap();
+
+        let dropped = db.purge_public_ip_history(now() + 1).unwrap();
+        assert_eq!(dropped, 1);
+        assert!(db.public_ip_history(&probe, 0, i64::MAX).unwrap().is_empty());
+
+        // Le libellé survit : il se réappliquera au retour du réseau.
+        beat_with_ip(&db, &probe, "88.120.0.1");
+        let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+        assert_eq!(rows[0].label.as_deref(), Some("Maison"));
+    }
+
+    #[test]
+    fn the_intervals_of_one_probe_are_capped_and_the_oldest_go_first() {
+        // ⚠️ Une adresse différente à chaque battement ouvre un intervalle à
+        // chaque battement, et la purge par rétention ne rattrape rien quand
+        // la rétention est illimitée : sans plafond, une seule sonde
+        // authentifiée sature le disque du hub pour TOUS les sites.
+        let (db, probe) = db_with_probe();
+        for n in 0..MAX_PUBLIC_IP_INTERVALS + 20 {
+            beat_with_ip(&db, &probe, &format!("88.120.{}.{}", n / 256, n % 256));
+        }
+
+        let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), MAX_PUBLIC_IP_INTERVALS);
+        // Ce qu'on perd, c'est l'historique le plus ancien — celui dont les
+        // mesures ont de toute façon le plus de chances d'être déjà purgées
+        // côté Influx.
+        assert_eq!(rows[0].public_ip, "88.120.0.20", "les plus anciens partent");
+        assert_eq!(
+            rows[rows.len() - 1].public_ip,
+            format!(
+                "88.120.{}.{}",
+                (MAX_PUBLIC_IP_INTERVALS + 19) / 256,
+                (MAX_PUBLIC_IP_INTERVALS + 19) % 256
+            ),
+            "le plus récent reste"
+        );
+    }
+
+    #[test]
+    fn the_cap_never_touches_another_probe() {
+        // Le plafond est PAR SONDE : une sonde bavarde ne doit pas effacer
+        // l'historique de sa voisine.
+        let (db, noisy) = db_with_probe();
+        let site = db.list_sites().unwrap()[0].site_id.clone();
+        let (quiet, _) = db.enroll_probe(&site, "Lyon").unwrap();
+
+        beat_with_ip(&db, &quiet.probe_id, "88.120.9.9");
+        for n in 0..MAX_PUBLIC_IP_INTERVALS + 5 {
+            beat_with_ip(&db, &noisy, &format!("172.58.{}.{}", n / 256, n % 256));
+        }
+
+        let rows = db.public_ip_history(&quiet.probe_id, 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 1, "la voisine garde son intervalle : {rows:?}");
+    }
+
+    #[test]
+    fn a_first_heartbeat_asks_for_nothing_but_a_moved_probe_does() {
+        // ⚠️ Sans point de comparaison, un « changement » serait une
+        // invention : le premier battement ne demande donc rien.
+        let (db, probe) = db_with_probe();
+
+        assert!(!db.note_observed_source(&probe, "203.0.113.10").unwrap());
+        assert!(!db.note_observed_source(&probe, "203.0.113.10").unwrap());
+        assert!(db.note_observed_source(&probe, "198.51.100.4").unwrap());
+        assert!(!db.note_observed_source(&probe, "198.51.100.4").unwrap());
+    }
+
+    #[test]
+    fn the_history_is_clipped_to_the_window_asked_for() {
+        let (db, probe) = db_with_probe();
+        beat_with_ip(&db, &probe, "88.120.0.1");
+        let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
+        let from = rows[0].confirmed_from;
+
+        assert_eq!(db.public_ip_history(&probe, from, from).unwrap().len(), 1);
+        // Une fenêtre entièrement postérieure ne doit rien rendre : l'interface
+        // dira « indéterminé », ce qui est la vérité.
+        assert!(db.public_ip_history(&probe, from + 10, from + 20).unwrap().is_empty());
     }
 
     #[test]
