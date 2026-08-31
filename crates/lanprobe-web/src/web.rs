@@ -2488,6 +2488,74 @@ async fn write_metrics(
     }
 }
 
+/// Ne retient une valeur d'identité réseau du battement que si c'est vraiment
+/// une adresse IP. Sinon : traitée comme **absente**.
+///
+/// ⚠️ Le risque n'est pas d'afficher une bêtise, c'est de faire enfler la base.
+/// `record_heartbeat` ouvre un intervalle d'historique dès que `public_ip`
+/// diffère de la précédente, et la purge par rétention ne supprime rien quand
+/// la rétention Influx est illimitée — le réglage par DÉFAUT. Une sonde
+/// authentifiée qui bat avec une valeur différente à chaque fois saturerait
+/// donc le disque du hub, pour tous les sites qu'il porte. Exiger une adresse
+/// ferme d'un coup la porte au nombre ET à la longueur.
+///
+/// ⚠️ On ne fait **pas** échouer le battement : une sonde qui bat mal doit
+/// rester visible, c'est tout l'intérêt du battement. `debug` et pas `warn` —
+/// une sonde antérieure ou fantaisiste ne doit pas remplir le journal.
+///
+/// La valeur est ramenée à sa forme canonique : `::1` et `0:0:0:0:0:0:0:1`
+/// sont la même adresse, et les laisser diverger ouvrirait deux intervalles
+/// pour un réseau qui n'a pas changé.
+fn address_or_none(value: Option<String>, field: &str, probe_id: &str) -> Option<String> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<std::net::IpAddr>() {
+        Ok(addr) => Some(addr.to_string()),
+        Err(_) => {
+            // Jamais la valeur elle-même : elle peut peser un mégaoctet.
+            tracing::debug!(
+                "battement de {probe_id} : {field} ignoré, ce n'est pas une adresse ({} octets)",
+                value.len()
+            );
+            None
+        }
+    }
+}
+
+/// Même règle pour une adresse locale, qui s'écrit en CIDR (`10.6.8.42/24`).
+/// Une entrée illisible est retirée de la liste sans en invalider le reste :
+/// ces valeurs finissent en base et dans les rapports remis aux clients.
+fn local_address_or_none(entry: String, probe_id: &str) -> Option<String> {
+    let trimmed = entry.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (addr, prefix) = match trimmed.split_once('/') {
+        Some((a, bits)) => (a, Some(bits)),
+        None => (trimmed, None),
+    };
+    let parsed = addr.parse::<std::net::IpAddr>().ok().filter(|addr| {
+        prefix.is_none_or(|bits| {
+            let max = if addr.is_ipv4() { 32 } else { 128 };
+            bits.parse::<u8>().is_ok_and(|b| b <= max)
+        })
+    });
+    match (parsed, prefix) {
+        (Some(addr), Some(bits)) => Some(format!("{addr}/{bits}")),
+        (Some(addr), None) => Some(addr.to_string()),
+        (None, _) => {
+            tracing::debug!(
+                "battement de {probe_id} : adresse locale ignorée, forme illisible ({} octets)",
+                entry.len()
+            );
+            None
+        }
+    }
+}
+
 async fn heartbeat(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2505,10 +2573,14 @@ async fn heartbeat(
     let _ = body.last_write_ok; // remonté par la sonde, exploité par l'interface
 
     let identity = ProbeIdentity {
-        public_ip: body.public_ip.filter(|v| !v.trim().is_empty()),
+        public_ip: address_or_none(body.public_ip, "public_ip", &id),
         interface: body.interface.filter(|v| !v.trim().is_empty()),
-        local_ips: body.local_ips,
-        gateway: body.gateway.filter(|v| !v.trim().is_empty()),
+        local_ips: body
+            .local_ips
+            .into_iter()
+            .filter_map(|entry| local_address_or_none(entry, &id))
+            .collect(),
+        gateway: address_or_none(body.gateway, "gateway", &id),
         // ⚠️ Liste fermée : la sonde décide de son verdict, pas de son
         // vocabulaire. Une valeur inattendue serait affichée telle quelle dans
         // le parc, sans couleur ni sens.
@@ -5320,6 +5392,89 @@ mod tests {
             .insert("x-forwarded-for", "9.9.9.9".parse().unwrap());
         let (_, body, _) = h.call(req).await;
         assert_eq!(body["recheck_public_ip"], false, "l'en-tête doit être ignoré");
+    }
+
+    #[tokio::test]
+    async fn an_identity_that_is_not_made_of_addresses_opens_no_interval() {
+        // ⚠️ Chaque valeur d'adresse DIFFÉRENTE ouvre un intervalle. Une sonde
+        // authentifiée qui bat avec n'importe quoi ferait donc grossir
+        // l'historique sans fin — et la purge ne rattrape rien quand la
+        // rétention est illimitée. Ce qui n'est pas une adresse est traité
+        // comme absent.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/heartbeat"),
+                    serde_json::json!({
+                        "public_ip": "pas-une-ip",
+                        "gateway": "la-box",
+                        "local_ips": ["salon", "10.6.8.42/24", "10.6.8.43"]
+                    }),
+                ),
+                &token,
+            ))
+            .await;
+        // ⚠️ Le battement RÉUSSIT quand même : une sonde qui bat mal doit
+        // rester visible, c'est tout l'intérêt du battement.
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let seen = h.state.db.get_probe(&probe_id).unwrap();
+        assert_eq!(seen.public_ip, None, "« pas-une-ip » n'est pas une adresse");
+        assert_eq!(seen.gateway, None, "« la-box » non plus");
+        assert_eq!(
+            seen.local_ips,
+            vec!["10.6.8.42/24".to_string(), "10.6.8.43".to_string()],
+            "seules les entrées qui parsent sont gardées"
+        );
+
+        let (_, ips, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=24h")),
+                &session,
+            ))
+            .await;
+        assert!(
+            ips["intervals"].as_array().unwrap().is_empty(),
+            "aucun intervalle ne doit s'ouvrir : {ips}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_megabyte_of_junk_as_a_public_ip_opens_no_interval() {
+        // Le cas qui fait enfler le disque du hub pour tous les sites : une
+        // sonde compromise bat avec une valeur énorme et différente à chaque
+        // fois. Rien ne bornait la longueur.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/heartbeat"),
+                    serde_json::json!({ "public_ip": "8".repeat(1024 * 1024) }),
+                ),
+                &token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (_, ips, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=24h")),
+                &session,
+            ))
+            .await;
+        assert!(
+            ips["intervals"].as_array().unwrap().is_empty(),
+            "aucun intervalle ne doit s'ouvrir : {ips}"
+        );
     }
 
     #[tokio::test]
