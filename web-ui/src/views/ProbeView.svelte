@@ -28,8 +28,8 @@
   // ⚠️ Import statique assumé : `sla-report` ne charge exceljs qu'à la
   // demande, à l'intérieur de `downloadSlaReport`. Le tableau par adresse ne
   // tire donc pas le classeur dans le paquet principal.
-  import { byPublicIp, type IpSlaRow, type SlaPayload } from '$lib/sla-report';
-  import { seriesColor, normalizeState } from '$lib/charts';
+  import { byPublicIp, type IpSlaRow, type PublicIpInterval } from '$lib/sla-report';
+  import { seriesColor, normalizeState, internetSamples } from '$lib/charts';
   import { platformLabel } from '$lib/format';
   import StatusMark from '$lib/components/StatusMark.svelte';
   import BufferBadge from '$lib/components/BufferBadge.svelte';
@@ -345,29 +345,33 @@
     // Même fenêtre que les courbes, lue dans la foulée : le graphe et le
     // tableau par adresse doivent parler de la même période, sinon un repère
     // se pose là où le tableau ne compte rien.
-    await loadSla();
+    await loadPublicIps();
   }
 
   // ── Adresses publiques traversées (contrat § 15) ─────────────────────────
   //
-  // L'historique voyage avec le rapport SLA plutôt que par sa propre route :
-  // le tableau ici et l'onglet Excel découpent alors les MÊMES relevés avec
-  // les MÊMES intervalles. Deux lectures séparées finiraient par diverger
-  // d'une minute et donneraient deux disponibilités pour la même période.
-  let sla = $state<SlaPayload | null>(null);
-  let slaLoadError = $state('');
+  // ⚠️ On lit `/public-ips`, PAS `/sla` : le rapport complet embarque le scan
+  // de découverte, les ports ouverts et l'historique des débits. Le rappeler
+  // à chaque rafraîchissement pour deux colonnes ferait transiter un gros
+  // objet en boucle. `/sla` reste réservé à l'export du rapport.
+  //
+  // Les relevés, eux, sont déjà en mémoire : ce sont ceux du graphe. Les
+  // retélécharger donnerait en prime deux jeux de points pour une même
+  // fenêtre, donc deux disponibilités possibles pour la même période.
+  let ipIntervals = $state<PublicIpInterval[] | null>(null);
+  let ipHistoryError = $state('');
 
-  async function loadSla() {
+  async function loadPublicIps() {
     try {
-      sla = await api.sla(id, { range });
-      slaLoadError = '';
+      ipIntervals = (await api.publicIps(id, { range })).intervals ?? [];
+      ipHistoryError = '';
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      // ⚠️ On garde l'erreur au lieu de retomber sur un historique vide : un
-      // tableau absent se lirait comme « aucun changement d'adresse », ce qui
-      // est une affirmation qu'on n'a pas les moyens de faire.
-      sla = null;
-      slaLoadError = e instanceof ApiError ? e.message : String(e);
+      // ⚠️ L'erreur est gardée au lieu de retomber sur un historique vide :
+      // un tableau absent se lirait comme « aucun changement d'adresse »,
+      // affirmation qu'on n'a pas les moyens de faire.
+      ipIntervals = null;
+      ipHistoryError = e instanceof ApiError ? e.message : String(e);
     }
   }
 
@@ -381,17 +385,12 @@
    * changements.
    */
   const ipChanges = $derived(
-    (sla?.public_ip_history ?? []).map((i) => ({
+    (ipIntervals ?? []).map((i) => ({
       at: i.confirmed_from * 1000,
       ip: i.public_ip,
       label: i.label,
     })),
   );
-
-  // Le découpage vit dans `sla-report.ts` : une seconde implémentation ici
-  // donnerait deux pourcentages pour la même période, celui de l'écran et
-  // celui du classeur remis au client.
-  const ipRows = $derived(byPublicIp(sla?.internet ?? [], sla?.public_ip_history ?? []));
 
   /** Libellés en cours de saisie, par couple (adresse, passerelle). */
   let labelDrafts = $state<Record<string, string>>({});
@@ -413,11 +412,11 @@
         gateway: r.gateway ?? '',
         label: labelDraft(r).trim(),
       });
-      // La valeur enregistrée revient par le SLA : garder le brouillon
+      // La valeur enregistrée revient par l'historique : garder le brouillon
       // laisserait l'écran affirmer un libellé que le hub n'a peut-être pas
       // retenu tel quel.
       delete labelDrafts[labelKey(r)];
-      await loadSla();
+      await loadPublicIps();
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
       labelError = $_('probe.ipTable.error', {
@@ -633,6 +632,17 @@
       : monitoredTargets.filter((ip) => !activeMonitors.some((m) => m.ip === ip)),
   );
   const inetPoints = $derived(inet.curves.find((c) => c.field === 'state')?.points ?? []);
+
+  // ⚠️ La conversion millisecondes → secondes vit dans `internetSamples`
+  // (`charts.ts`), avec son test : c'est le piège de ce chantier, et une
+  // conversion écrite dans un composant ne se teste pas ici — le projet ne
+  // monte pas de composants.
+  const inetSamples = $derived(internetSamples(inetPoints));
+
+  // Le découpage vit dans `sla-report.ts` : une seconde implémentation ici
+  // donnerait deux pourcentages pour la même période, celui de l'écran et
+  // celui du classeur remis au client.
+  const ipRows = $derived(byPublicIp(inetSamples, ipIntervals ?? []));
 
   // ── Débits ───────────────────────────────────────────────────────────────
   //
@@ -1037,9 +1047,9 @@
         aucun intervalle. Un tableau sans lignes se lirait comme une panne, la
         phrase dit ce qui se passe réellement.
       -->
-      {#if slaLoadError}
-        <p class="ipnote err">{slaLoadError}</p>
-      {:else if (sla?.public_ip_history ?? []).length === 0}
+      {#if ipHistoryError}
+        <p class="ipnote err">{ipHistoryError}</p>
+      {:else if (ipIntervals ?? []).length === 0}
         <p class="ipnote">{$_('probe.ipHistoryEmpty')}</p>
       {:else}
         <p class="ipcap">{$_('probe.ipTable.title')}</p>
