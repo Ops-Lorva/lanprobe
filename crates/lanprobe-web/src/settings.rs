@@ -226,7 +226,14 @@ impl Settings {
     /// défaut : `X-Forwarded-For` est alors ignoré, ce qui est le comportement
     /// sûr pour un hub exposé directement.
     pub fn trusted_proxies(&self) -> Vec<crate::client_ip::IpNet> {
-        crate::client_ip::parse_cidrs(&self.get_or(keys::TRUSTED_PROXIES, ""))
+        crate::client_ip::parse_cidrs(&self.stored_trusted_proxies())
+    }
+
+    /// La liste telle qu'elle est saisie. C'est elle que le formulaire
+    /// réaffiche : rendre les CIDR re-sérialisés ferait bouger le champ sous
+    /// les doigts de l'opérateur à chaque enregistrement.
+    pub fn stored_trusted_proxies(&self) -> String {
+        self.get_or(keys::TRUSTED_PROXIES, "")
     }
 
     pub fn heartbeat_interval_secs(&self) -> i64 {
@@ -263,6 +270,7 @@ impl Settings {
             keys::BACKUP_KEEP_LAST: self.backup_keep_last(),
             keys::INVENTORY_DAYS: self.inventory_days(),
             keys::TLS_ENABLED: self.tls_enabled(),
+            keys::TRUSTED_PROXIES: self.stored_trusted_proxies(),
         })
     }
 
@@ -289,6 +297,25 @@ impl Settings {
                 for kind in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     if crate::notify::AlertKind::parse(kind).is_none() {
                         return Err(DbError::Conflict(format!("type d'alerte inconnu : {kind}")));
+                    }
+                }
+            }
+            keys::TRUSTED_PROXIES => {
+                // Vide reste valide : c'est le défaut sûr, `X-Forwarded-For`
+                // est alors ignoré.
+                //
+                // ⚠️ Mais une liste dont AUCUNE entrée n'est lisible est
+                // refusée. `parse_cidrs` écarte les entrées fautives pour
+                // qu'un réglage à moitié juste continue de protéger le reste ;
+                // une faute de frappe sur la seule entrée donnerait donc une
+                // liste vide, c'est-à-dire un réglage silencieusement inerte —
+                // le hub attribuerait l'adresse du proxy à toutes les sondes
+                // en croyant le réglage appliqué. On préfère l'échec visible.
+                for entry in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if crate::client_ip::parse_cidrs(entry).is_empty() {
+                        return Err(DbError::Conflict(format!(
+                            "CIDR illisible : {entry} — attendu par exemple 10.0.0.0/8"
+                        )));
                     }
                 }
             }
@@ -448,6 +475,42 @@ mod tests {
         assert_eq!(s.retention_days(), 0, "0 = rétention illimitée");
         assert_eq!(s.heartbeat_interval_secs(), 60);
         assert!(s.stored_advertise_url().is_none());
+    }
+
+    #[test]
+    fn the_trusted_proxies_setting_can_actually_be_written() {
+        // ⚠️ Sans son bras dans `put`, la clé tombe dans `réglage inconnu` :
+        // toute écriture est rejetée, le réglage reste éternellement vide et
+        // le déclencheur `recheck_public_ip` est muet derrière un reverse
+        // proxy — sans que rien ne le dise.
+        let s = settings();
+        s.put(keys::TRUSTED_PROXIES, "10.0.0.0/8, 192.168.1.1", false).unwrap();
+        assert_eq!(s.trusted_proxies().len(), 2);
+
+        // Vider est un réglage valide : c'est le défaut sûr, l'en-tête
+        // redevient ignoré.
+        s.put(keys::TRUSTED_PROXIES, "", false).unwrap();
+        assert!(s.trusted_proxies().is_empty());
+
+        // Le formulaire de réglages doit voir la clé, sinon personne ne peut
+        // la renseigner depuis l'interface.
+        assert_eq!(s.all()[keys::TRUSTED_PROXIES], serde_json::json!(""));
+        s.put(keys::TRUSTED_PROXIES, "10.0.0.0/8", false).unwrap();
+        assert_eq!(s.all()[keys::TRUSTED_PROXIES], serde_json::json!("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn a_trusted_proxies_list_with_nothing_readable_in_it_is_refused() {
+        // Une faute de frappe donnerait une liste vide, donc un réglage
+        // silencieusement inerte : le hub continuerait d'attribuer l'adresse
+        // du proxy à toutes les sondes en croyant le réglage appliqué.
+        let s = settings();
+        let err = s.put(keys::TRUSTED_PROXIES, "10.0.0/8", false).unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(ref m) if m.contains("10.0.0/8")),
+            "l'erreur doit nommer l'entrée fautive : {err:?}"
+        );
+        assert!(s.trusted_proxies().is_empty(), "rien ne doit avoir été écrit");
     }
 
     #[test]
