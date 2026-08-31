@@ -92,6 +92,20 @@ export interface PendingEnroll {
   code?: string | null;
 }
 
+/**
+ * Corps de `PUT /api/networks/label` (contrat § 15).
+ *
+ * ⚠️ La clé est le COUPLE `(public_ip, gateway)`, pas l'adresse seule : deux
+ * réseaux derrière le même opérateur partagent la même IP publique, et
+ * « Maison » se retrouverait collé au bureau d'un autre client.
+ */
+export interface NetworkLabel {
+  public_ip: string;
+  /** Chaîne vide quand la sonde n'a pas remonté de passerelle. */
+  gateway: string;
+  label: string;
+}
+
 /** Vue lecture seule d'InfluxDB (contrat § 8). */
 export interface InfluxInfo {
   url: string;
@@ -918,6 +932,17 @@ export const api = {
       `/api/probes/${encodeURIComponent(id)}/sla?${q}`,
     );
   },
+
+  /**
+   * Nomme un réseau. Le libellé vit dans sa propre table côté hub : il survit
+   * à la purge des intervalles et se réapplique tout seul le jour où la sonde
+   * revient sur ce réseau.
+   */
+  setNetworkLabel: (body: NetworkLabel) =>
+    request<{ ok: boolean }>('/api/networks/label', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   commands: (id: string) =>
     request<{ commands: ProbeCommand[] }>(

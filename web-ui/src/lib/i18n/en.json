@@ -454,7 +454,22 @@
     "profile_infra": "Infra",
     "profile_db": "Databases",
     "discovery_ping": "Watch",
-    "discovery_scan": "Scan ports"
+    "discovery_scan": "Scan ports",
+    "ipHistoryEmpty": "Address history available since the hub was updated.",
+    "ipTable": {
+      "title": "Uptime by public IP",
+      "label": "Label",
+      "address": "Public IP",
+      "gateway": "Gateway",
+      "period": "Period",
+      "duration": "Duration",
+      "uptime": "Uptime",
+      "undetermined": "Undetermined",
+      "undeterminedHint": "Samples no known address covered — an acknowledged unknown, never charged to an address.",
+      "placeholder": "Home, Office…",
+      "save": "Save",
+      "error": "The label could not be saved: {message}"
+    }
   },
   "charts": {
     "latency_title": "Latency of monitored hosts",

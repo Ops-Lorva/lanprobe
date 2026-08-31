@@ -454,7 +454,22 @@
     "profile_infra": "Infra",
     "profile_db": "Bases de datos",
     "discovery_ping": "Vigilar",
-    "discovery_scan": "Escanear puertos"
+    "discovery_scan": "Escanear puertos",
+    "ipHistoryEmpty": "El historial de direcciones está disponible desde la actualización del hub.",
+    "ipTable": {
+      "title": "Disponibilidad por IP pública",
+      "label": "Etiqueta",
+      "address": "IP pública",
+      "gateway": "Puerta de enlace",
+      "period": "Periodo",
+      "duration": "Duración",
+      "uptime": "Disponibilidad",
+      "undetermined": "Indeterminado",
+      "undeterminedHint": "Muestras que ninguna dirección conocida cubría: una parte de desconocido asumida, nunca imputada a una dirección.",
+      "placeholder": "Casa, Oficina…",
+      "save": "Guardar",
+      "error": "No se pudo guardar la etiqueta: {message}"
+    }
   },
   "charts": {
     "latency_title": "Latencia de los hosts vigilados",
@@ -856,6 +871,17 @@
     "from": "Del",
     "to": "al",
     "custom": "Periodo exacto…"
+  },
+  "report": {
+    "ipSheet": "SLA por IP pública",
+    "ipLabel": "Etiqueta",
+    "ipAddress": "IP pública",
+    "ipGateway": "Puerta de enlace",
+    "ipFrom": "Inicio",
+    "ipTo": "Fin",
+    "ipSamples": "Mediciones",
+    "ipUptime": "Disponibilidad",
+    "ipUndetermined": "Indeterminado"
   },
   "account": {
     "change": "Cambiar la contraseña",

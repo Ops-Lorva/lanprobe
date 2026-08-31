@@ -454,7 +454,22 @@
     "profile_infra": "Infra",
     "profile_db": "Bases de données",
     "discovery_ping": "Surveiller",
-    "discovery_scan": "Scanner les ports"
+    "discovery_scan": "Scanner les ports",
+    "ipHistoryEmpty": "Historique des adresses disponible depuis la mise à jour du hub.",
+    "ipTable": {
+      "title": "Disponibilité par IP publique",
+      "label": "Libellé",
+      "address": "IP publique",
+      "gateway": "Passerelle",
+      "period": "Période",
+      "duration": "Durée",
+      "uptime": "Disponibilité",
+      "undetermined": "Indéterminé",
+      "undeterminedHint": "Relevés qu'aucune adresse connue ne couvrait — part d'inconnu assumée, jamais imputée à une adresse.",
+      "placeholder": "Maison, Bureau…",
+      "save": "Enregistrer",
+      "error": "Le libellé n'a pas pu être enregistré : {message}"
+    }
   },
   "charts": {
     "latency_title": "Latence des hôtes suivis",
