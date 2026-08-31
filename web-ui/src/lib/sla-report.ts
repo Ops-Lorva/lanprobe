@@ -77,6 +77,12 @@ export interface SlaPayload {
   speedtests: SpeedtestRow[];
   discovery: Scan | null;
   ports: Scan | null;
+  /**
+   * Intervalles d'adresse publique couvrant la fenêtre. Ils voyagent AVEC le
+   * rapport : le tableau de l'interface et l'onglet Excel découpent les mêmes
+   * relevés avec les mêmes intervalles.
+   */
+  public_ip_history: PublicIpInterval[];
 }
 
 export interface Outage {
@@ -573,4 +579,77 @@ export async function downloadSlaWorkbook(
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+export interface PublicIpInterval {
+  public_ip: string;
+  interface: string | null;
+  gateway: string | null;
+  local_subnet: string | null;
+  confirmed_from: number;
+  confirmed_until: number;
+  label: string | null;
+}
+
+export interface IpSlaRow {
+  /** `null` = indéterminé : aucun intervalle ne couvrait ces relevés. */
+  public_ip: string | null;
+  label: string | null;
+  gateway: string | null;
+  from: number | null;
+  to: number | null;
+  samples: number;
+  uptime_pct: number;
+}
+
+/**
+ * Répartit les relevés d'accès internet par adresse publique.
+ *
+ * ⚠️ Les pourcentages ne totalisent PAS 100 % : un relevé qu'aucun intervalle
+ * ne couvre va en « indéterminé » et n'est imputé à personne. C'est délibéré.
+ * Une coupure attribuée à la mauvaise adresse a l'air normale et personne ne la
+ * remet en cause — c'est exactement le mode de panne que le projet combat
+ * partout ailleurs.
+ *
+ * ⚠️ Tout est en **secondes** ici, des deux côtés de la comparaison : les
+ * relevés comme les bornes d'intervalle viennent du hub. La conversion en
+ * millisecondes n'a lieu qu'au passage au graphe, jamais ici.
+ */
+export function byPublicIp(samples: Sample[], intervals: PublicIpInterval[]): IpSlaRow[] {
+  const ordered = [...intervals].sort((a, b) => a.confirmed_from - b.confirmed_from);
+  const buckets = new Map<string, { meta: PublicIpInterval | null; samples: Sample[] }>();
+
+  const push = (key: string, meta: PublicIpInterval | null, s: Sample) => {
+    const b = buckets.get(key) ?? { meta, samples: [] };
+    b.samples.push(s);
+    buckets.set(key, b);
+  };
+
+  for (const s of samples) {
+    const hit = ordered.find(
+      (i) => s.timestamp >= i.confirmed_from && s.timestamp <= i.confirmed_until,
+    );
+    if (hit) push(hit.public_ip, hit, s);
+    else push('', null, s);
+  }
+
+  const rows: IpSlaRow[] = [];
+  for (const [key, bucket] of buckets) {
+    const times = bucket.samples.map((s) => s.timestamp);
+    rows.push({
+      public_ip: key === '' ? null : key,
+      label: bucket.meta?.label ?? null,
+      gateway: bucket.meta?.gateway ?? null,
+      from: times.length ? Math.min(...times) : null,
+      to: times.length ? Math.max(...times) : null,
+      samples: bucket.samples.length,
+      uptime_pct: stats(bucket.samples).uptime_pct,
+    });
+  }
+  // L'indéterminé en dernier : c'est un reste, pas une ligne comme les autres.
+  return rows.sort((a, b) => {
+    if (a.public_ip === null) return 1;
+    if (b.public_ip === null) return -1;
+    return (a.from ?? 0) - (b.from ?? 0);
+  });
 }
