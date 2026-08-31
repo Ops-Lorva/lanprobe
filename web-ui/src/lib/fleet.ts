@@ -4,6 +4,14 @@ import { api, ApiError, type Probe, type Site } from './api';
 interface FleetState {
   sites: Site[];
   probes: Probe[];
+  /**
+   * Montrer les sites et sondes archivés.
+   *
+   * ⚠️ Le filtre est appliqué par le hub, pas ici : trier après coup ferait
+   * quand même voyager les archives sur le réseau, et le décompte du parc
+   * viendrait d'une liste que l'interface a raccourcie elle-même.
+   */
+  showArchived: boolean;
   /** Filtre serveur : `null` = tout le parc. */
   siteId: string | null;
   /** Premier chargement — c'est le seul cas qui affiche un écran de chargement. */
@@ -17,6 +25,7 @@ interface FleetState {
 const initial: FleetState = {
   sites: [],
   probes: [],
+  showArchived: false,
   siteId: null,
   loading: true,
   refreshing: false,
@@ -43,8 +52,8 @@ function create() {
     }));
     try {
       const [sites, probes] = await Promise.all([
-        api.sites(),
-        api.probes(current.siteId ?? undefined),
+        api.sites(current.showArchived),
+        api.probes(current.siteId ?? undefined, current.showArchived),
       ]);
       update((s) => ({
         ...s,
@@ -93,7 +102,27 @@ function create() {
     }));
   }
 
-  return { subscribe, load, selectSite, patchLocal, dropLocal, renameSiteLocal };
+  /**
+   * Bascule l'affichage des archives et recharge.
+   *
+   * Le rechargement est immédiat et non « au prochain rafraîchissement » :
+   * cocher une case qui ne change rien pendant trente secondes se lit comme
+   * une case cassée.
+   */
+  function toggleArchived(onExpired: () => void) {
+    update((s) => ({ ...s, showArchived: !s.showArchived }));
+    void load(onExpired, { quiet: true });
+  }
+
+  return {
+    subscribe,
+    load,
+    selectSite,
+    patchLocal,
+    dropLocal,
+    renameSiteLocal,
+    toggleArchived,
+  };
 }
 
 export const fleet = create();

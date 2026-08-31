@@ -48,6 +48,9 @@ A probe on its own is perfectly usable: open the window, it measures. The hub ea
 | ⚡ **Speed Test** | Ookla or iperf3, **bound to the selected interface** |
 | 🛡️ **Internet status** | Dual ICMP + HTTP probe, public IP, uptime percentage |
 | 🌐 **Self-hosted hub** | Sites, probes, accounts, roles, audit log, alerts, backups |
+| 🔑 **Two-factor and passkeys** | TOTP everywhere, passkeys over HTTPS — with a rescue command for a lost phone |
+| 👥 **Per-site scope** | An account can see only certain sites: show a client their fleet, not the others' |
+| 🗄️ **Archiving** | A client you no longer serve leaves the fleet without anything being deleted — the SLA report stays exportable |
 | 🎨 **Theme** | Dark / light / system, 6 accent palettes |
 
 ### The rule that governs everything: the selected interface
@@ -113,6 +116,28 @@ For scripted deployment, `--username`, `--password` and `--site` replace `--code
 
 **Firewall:** nothing to open inbound. The probe only needs to reach the hub's address outbound.
 
+**A hub with a self-signed certificate.** The probe does not accept it blindly
+— it **pins** it. Enrol without saying anything and the command stops, showing
+the fingerprint it saw:
+
+```
+Le certificat de hub.example.com ne se vérifie pas.
+  empreinte SHA-256 : 39:73:1A:…:7F:0D
+  --pin 39:73:1A:…:7F:0D
+```
+
+Compare it with the one your hub displays, then re-run with `--pin`. From then
+on that certificate and no other is accepted.
+
+⚠️ Only what needs pinning is pinned: a certificate that verifies on its own is
+left alone, otherwise a renewal at a public authority would cut the probe off
+every three months.
+
+⚠️ `--allow-self-signed` still exists and still works, for probes already
+deployed with it. Prefer `--pin`: the old flag accepts **any** certificate, so
+anyone on the path can impersonate the hub and walk away with the probe's
+token.
+
 **Sealing key.** The probe's local secrets — its hub token — are encrypted at rest. The key is created on first start inside the config directory. To supply your own (immutable container, secret manager):
 
 ```bash
@@ -142,7 +167,7 @@ Accounts carry a role (`admin` / `operator` / `viewer`), every action is written
 - the setup token is readable **only** in `docker logs` — the interface never shows it;
 - if that machine was ever reached over HTTPS, the browser keeps a `Secure` cookie that silently blocks the later HTTP session: sign-in appears to succeed, then bounces back to the login screen, **with no error**. Private window, or clear the site's cookies.
 
-The hub serves **in plain HTTP by default**, meant to live behind your own reverse proxy. `--tls` produces a self-signed certificate, fine on a LAN. The InfluxDB port (`8086`) is closed by default: only open it to point Grafana at it — probes never need it.
+The hub serves **in plain HTTP by default**, meant to live behind your own reverse proxy. A switch under **Settings → General** — or `--tls` — makes it terminate TLS itself with a self-signed certificate, fine on a LAN. ⚠️ It takes effect **on restart**, the address changes, and probes already enrolled on the old one will need theirs corrected. Passkeys require it (or a proxy): browsers refuse WebAuthn outside a secure context. The InfluxDB port (`8086`) is closed by default: only open it to point Grafana at it — probes never need it.
 
 The hub carries **its own version**, independent of the app.
 
@@ -159,17 +184,60 @@ docker exec lanprobe-web lanprobe-web backup     # produces an archive, applies 
 docker exec lanprobe-web lanprobe-web backups    # lists them
 ```
 
-Restoring is done **with the hub stopped** — that is the only moment it takes effect without a restart.
+Restoring is done **with the container running**, then restarted: the InfluxDB
+half talks to the series database, which has to answer. See “Restoring an
+archive” below.
 
-#### Lost administrator password
+#### 🚑 Getting back in when you are locked out
 
-This is self-hosted: there is no recovery e-mail. The way back in goes through the container.
+This is self-hosted: **there is no recovery e-mail and no support**. Every way
+back goes through the container — that is, through access to the machine,
+which is the only thing that can stand in for the credentials you lost.
+
+Each one is written to the audit log: they bypass sign-in, so they must leave
+a trace.
+
+| Situation | Command |
+|---|---|
+| Lost administrator password | `docker exec lanprobe-web lanprobe-web reset-password admin <new>` |
+| Lost phone, second factor in the way | `docker exec lanprobe-web lanprobe-web disable-totp <account>` |
+| Account disabled by mistake | `reset-password` re-enables it on the way |
+| No administrator left | `reset-password <account> <password> --promote` |
+
+⚠️ **`disable-totp` also drops the secret**, not just the flag. An old code
+must not come back to life on a QR you believe is new: turning it on again
+means scanning afresh.
+
+⚠️ **Passkeys have no rescue command, deliberately.** Register more than one —
+the laptop *and* the phone — or keep a working password. A single passkey does
+not replace the password.
+
+⚠️ **An unreadable second factor closes the door on purpose.** Restore a volume
+without its `secret.key` and the hub still knows the account requires a second
+factor but can no longer verify codes: it **refuses** rather than falling back
+to the password alone, and prints the command above. Letting it through would
+switch the protection off in silence, on the very day you have reason to
+distrust it.
+
+#### Restoring an archive
 
 ```bash
-docker exec lanprobe-web lanprobe-web reset-password admin <new-password>
+# 1. the container must be RUNNING: restoring the series talks to InfluxDB
+docker cp my-archive.zip lanprobe-web:/backup/
+docker exec lanprobe-web lanprobe-web restore my-archive.zip --force
+
+# 2. restart: the running process still serves the old database
+docker restart lanprobe-web
 ```
 
-The account is re-enabled if it was disabled, and the operation is written to the audit log — this command bypasses sign-in, so it must leave a trace.
+⚠️ **`--force` is required** as soon as the volume already holds data: a
+restore that overwrites without asking is not a restore, it is an accident.
+
+⚠️ **The previous state is moved aside**, not deleted:
+`avant-restauration-<date>` in the hub's volume.
+
+⚠️ An archive produced by a **newer** hub is refused. Its schema is ahead of
+this binary, and migrations do not run backwards.
 
 ---
 

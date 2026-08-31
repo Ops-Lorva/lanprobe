@@ -306,7 +306,10 @@
     "health_bar": "Répartition des statuts du site {name}",
     "site_add": "Enrôler une sonde dans le site {name}",
     "col_public_ip": "IP publique",
-    "net_help": "La sonde bat, mais son accès internet ne répond pas — ses mesures n'aboutissent probablement plus."
+    "net_help": "La sonde bat, mais son accès internet ne répond pas — ses mesures n'aboutissent probablement plus.",
+    "show_archived": "Archives",
+    "show_archived_n": "Archives ({n})",
+    "hide_archived": "Masquer les archives"
   },
   "status": {
     "online": "En ligne",
@@ -340,7 +343,17 @@
     "conflict": "Un site nommé « {name} » existe déjà. La casse n'entre pas en compte : « Durand » et « durand » sont le même site.",
     "empty_name": "Le nom du site ne peut pas être vide.",
     "populated_note": "Ce site porte {n, plural, one {# sonde} other {# sondes}}. Un site peuplé ne peut pas être retiré : déplacez ses sondes vers un autre site, ou révoquez-les, avant de retirer le site.",
-    "probe_count": "{n, plural, =0 {aucune sonde} one {# sonde} other {# sondes}}"
+    "probe_count": "{n, plural, =0 {aucune sonde} one {# sonde} other {# sondes}}",
+    "archive": "Archiver le site",
+    "unarchive": "Remettre dans le parc",
+    "archived_badge": "archivé",
+    "archive_title": "Archiver « {name} » ?",
+    "unarchive_title": "Remettre « {name} » dans le parc ?",
+    "archive_body": "Le site et ses sondes disparaissent du parc. Elles cessent d'apparaître dans les listes, les décomptes et les abonnements aux alertes.",
+    "archive_keeps": "Rien n'est supprimé : les mesures, l'inventaire et l'historique restent, le rapport SLA reste exportable, et vous pouvez remettre le site dans le parc à tout moment.",
+    "unarchive_body": "Le site et ses sondes réapparaissent dans le parc, telles qu'elles étaient.",
+    "archive_confirm": "Archiver",
+    "unarchive_confirm": "Remettre dans le parc"
   },
   "probe": {
     "back": "Parc",
@@ -659,7 +672,16 @@
       "user_enable": "Compte réactivé",
       "user_password": "Mot de passe changé",
       "user_password_reset_cli": "Mot de passe réinitialisé en ligne de commande",
-      "user_role": "Rôle modifié"
+      "user_role": "Rôle modifié",
+      "user_scope": "Périmètre du compte modifié",
+      "auth_totp_enable": "Second facteur activé",
+      "auth_totp_disable": "Second facteur désactivé",
+      "auth_passkey_add": "Clé d'accès ajoutée",
+      "auth_passkey_remove": "Clé d'accès révoquée",
+      "site_archive": "Site archivé",
+      "site_unarchive": "Site remis dans le parc",
+      "probe_archive": "Sonde archivée",
+      "probe_unarchive": "Sonde remise dans le parc"
     },
     "family": {
       "access": "Accès",
@@ -742,7 +764,19 @@
     "site_panel_lead": "Une sonde suit son site, sauf si on lui pose une exception. Le hub n'annonce que les changements d'état, et il annonce aussi le retour.",
     "subs_moved": "Les alertes se règlent sur chaque site, depuis le parc. Voici ce qui s'applique aujourd'hui.",
     "subs_count": "{n} / {total} sonde(s)",
-    "subs_goto_fleet": "Aller au parc"
+    "subs_goto_fleet": "Aller au parc",
+    "kinds_title": "Alertes reçues",
+    "kinds_lead": "Ce qui part sur les canaux configurés. Le hub n'annonce que des changements d'état, jamais un rappel tant que la panne dure.",
+    "kinds_saved": "Enregistré.",
+    "kinds_none": "Aucun type coché : les canaux resteront muets. C'est un choix valide, pas un oubli.",
+    "kind_probe_down": "Sonde hors ligne",
+    "kind_probe_down_why": "plus de nouvelles au-delà du délai ci-dessus",
+    "kind_probe_up": "Sonde de retour",
+    "kind_probe_up_why": "sans ce retour, il faut aller vérifier à la main",
+    "kind_internet_down": "Perte d'internet",
+    "kind_internet_down_why": "la sonde répond, mais le lien qu'elle mesure est mort — invisible autrement",
+    "kind_internet_up": "Retour d'internet",
+    "kind_internet_up_why": "la fin de la coupure du lien"
   },
   "commands": {
     "col_by": "Par",

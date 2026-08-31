@@ -147,6 +147,7 @@ pub fn build_router(state: AppState) -> Router {
         Router::new()
             .route("/api/sites", post(create_site))
             .route("/api/sites/{id}", patch(rename_site).delete(delete_site))
+            .route("/api/sites/{id}/archive", post(archive_site))
             .route("/api/enroll-codes", post(create_enroll_code))
             .route("/api/enroll-codes/pending", get(list_pending_codes))
             .route("/api/settings/influx-advertise/test", post(test_advertise))
@@ -175,6 +176,7 @@ pub fn build_router(state: AppState) -> Router {
         Role::Operator,
         Router::new()
             .route("/api/probes/{id}", patch(update_probe).delete(revoke_probe))
+            .route("/api/probes/{id}/archive", post(archive_probe))
             .route("/api/probes/{id}/rotate", post(rotate_token))
             .route("/api/probes/{id}/revoke-token", post(revoke_token_now))
             .route("/api/probes/{id}/reenroll-code", post(create_reenroll_code))
@@ -1816,11 +1818,11 @@ async fn list_subscriptions(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
 ) -> Response {
-    let sites = match state.db.list_sites_scoped(&actor.scope) {
+    let sites = match state.db.list_sites_scoped(&actor.scope, false) {
         Ok(sites) => sites,
         Err(e) => return error_response(e),
     };
-    let probes = match state.db.list_probes_scoped(None, &actor.scope) {
+    let probes = match state.db.list_probes_scoped(None, &actor.scope, false) {
         Ok(probes) => probes,
         Err(e) => return error_response(e),
     };
@@ -1945,11 +1947,23 @@ fn validate_url(value: &str) -> Result<(), String> {
 
 // ── Sites ──────────────────────────────────────────────────────────────────
 
+#[derive(Deserialize)]
+struct ArchivedFilter {
+    /// Inclure les sites/sondes archivés. Absent = non.
+    ///
+    /// Un paramètre plutôt qu'une route à part : c'est la même liste, avec
+    /// une ligne de plus. Deux routes auraient fini par diverger sur le tri,
+    /// la portée ou les champs rendus.
+    #[serde(default)]
+    archived: bool,
+}
+
 async fn list_sites(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
+    Query(filter): Query<ArchivedFilter>,
 ) -> Response {
-    match state.db.list_sites_scoped(&actor.scope) {
+    match state.db.list_sites_scoped(&actor.scope, filter.archived) {
         Ok(sites) => ok_json(serde_json::to_value(sites).unwrap_or(serde_json::Value::Null)),
         Err(e) => error_response(e),
     }
@@ -1977,6 +1991,61 @@ async fn create_site(
             Json(serde_json::to_value(site).unwrap_or(serde_json::Value::Null)),
         )
             .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ArchiveBody {
+    /// `true` archive, `false` remet dans le parc. Explicite dans les deux
+    /// sens : une bascule implicite se trompe dès que deux onglets sont
+    /// ouverts sur le même site.
+    archived: bool,
+}
+
+/// Retire un site du parc — ou l'y remet — **sans rien supprimer**.
+///
+/// 🔴 C'est la réponse à « comment je fais partir un client ». Le supprimer
+/// vraiment rendrait ses mesures orphelines : un rapport SLA sur l'année
+/// écoulée n'aurait plus de site auquel se rattacher, et les séries d'Influx
+/// ne désigneraient plus rien. Ici tout reste, et l'opération se défait.
+async fn archive_site(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<ArchiveBody>,
+) -> Response {
+    if let Err(refusal) = site_in_scope(&actor, &id) {
+        return refusal;
+    }
+    let action = if body.archived { "site.archive" } else { "site.unarchive" };
+    match audited(
+        &state,
+        Some(&actor.username),
+        action,
+        Some(&id),
+        state.db.set_site_archived(&id, body.archived),
+    ) {
+        Ok(touched) => ok_json(json!({ "ok": true, "probes": touched })),
+        Err(e) => error_response(e),
+    }
+}
+
+async fn archive_probe(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<ArchiveBody>,
+) -> Response {
+    let action = if body.archived { "probe.archive" } else { "probe.unarchive" };
+    match audited(
+        &state,
+        Some(&actor.username),
+        action,
+        Some(&id),
+        state.db.set_probe_archived(&id, body.archived),
+    ) {
+        Ok(()) => ok_json(json!({ "ok": true })),
         Err(e) => error_response(e),
     }
 }
@@ -2559,6 +2628,8 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 struct ProbeFilter {
     #[serde(default)]
     site: Option<String>,
+    #[serde(default)]
+    archived: bool,
 }
 
 async fn list_probes(
@@ -2570,7 +2641,7 @@ async fn list_probes(
     let now = crate::db::now();
     match state
         .db
-        .list_probes_scoped(filter.site.as_deref(), &actor.scope)
+        .list_probes_scoped(filter.site.as_deref(), &actor.scope, filter.archived)
     {
         Ok(probes) => ok_json(serde_json::Value::Array(
             probes
@@ -2588,6 +2659,7 @@ async fn list_probes(
                         "buffered_points": p.buffered_points,
                         "created_at": p.created_at,
                         "revoked_at": p.revoked_at,
+                        "archived_at": p.archived_at,
                         // Dernière identité réseau connue. Jamais remise à
                         // vide quand la sonde ne répond plus : c'est
                         // précisément là qu'elle sert.

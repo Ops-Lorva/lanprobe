@@ -48,6 +48,9 @@ Une sonde seule est parfaitement utilisable : ouvrez la fenêtre, elle mesure. L
 | ⚡ **Speed Test** | Ookla ou iperf3, **lié à l'interface sélectionnée** |
 | 🛡️ **Statut internet** | Double sonde ICMP + HTTP, IP publique, pourcentage d'uptime |
 | 🌐 **Hub auto-hébergé** | Sites, sondes, comptes, rôles, journal d'audit, alertes, sauvegardes |
+| 🔑 **Second facteur et clés d'accès** | TOTP partout, clés d'accès en HTTPS — avec une commande de secours en cas de téléphone perdu |
+| 👥 **Périmètre par site** | Un compte ne voit que certains sites : montrer son parc à un client sans montrer ceux des autres |
+| 🗄️ **Archivage** | Un client qu'on ne sert plus sort du parc sans que rien ne soit supprimé — son rapport SLA reste exportable |
 | 🎨 **Thème** | Sombre / clair / système, 6 palettes d'accent |
 
 ### La règle qui gouverne tout : l'interface sélectionnée
@@ -113,6 +116,28 @@ Pour un déploiement scripté, `--username`, `--password` et `--site` remplacent
 
 **Pare-feu :** rien à ouvrir en entrée. Il faut seulement que la sonde puisse joindre l'adresse du hub en sortie.
 
+**Un hub à certificat auto-signé.** La sonde ne l'accepte pas les yeux fermés
+— elle l'**épingle**. Enrôlez sans rien dire, la commande s'arrête et affiche
+l'empreinte qu'elle a vue :
+
+```
+Le certificat de hub.exemple.fr ne se vérifie pas.
+  empreinte SHA-256 : 39:73:1A:…:7F:0D
+  --pin 39:73:1A:…:7F:0D
+```
+
+Comparez-la à celle qu'affiche votre hub, puis relancez avec `--pin`. Ensuite,
+seul ce certificat-là est accepté.
+
+⚠️ On n'épingle que ce qui en a besoin : un certificat qui se vérifie tout seul
+est laissé tranquille, sinon un renouvellement chez une autorité publique
+couperait la sonde tous les trois mois.
+
+⚠️ `--allow-self-signed` existe toujours et fonctionne toujours, pour les
+sondes déjà déployées avec. Préférez `--pin` : l'ancienne option accepte
+**n'importe quel** certificat, donc n'importe qui sur le chemin peut se faire
+passer pour le hub et repartir avec le jeton de la sonde.
+
 **Clé de scellement.** Les secrets locaux de la sonde — son jeton de hub — sont chiffrés au repos. La clé est créée au premier démarrage dans le dossier de configuration. Pour la fournir vous-même (conteneur immuable, gestionnaire de secrets) :
 
 ```bash
@@ -142,7 +167,7 @@ Les comptes portent un rôle (`admin` / `operator` / `viewer`), chaque action es
 - le jeton de configuration ne se lit **que** dans `docker logs` — l'interface ne l'affiche jamais ;
 - si cette machine a déjà été jointe en HTTPS, le navigateur garde un cookie `Secure` qui bloque silencieusement la connexion en HTTP ensuite : la connexion semble aboutir puis revient à l'écran de login, **sans erreur**. Fenêtre privée, ou vider les cookies du site.
 
-Le hub sert **en clair par défaut**, pensé pour vivre derrière votre reverse proxy. `--tls` produit un certificat auto-signé, suffisant sur un LAN. Le port InfluxDB (`8086`) est fermé par défaut : ne l'ouvrez que pour brancher Grafana dessus, les sondes n'en ont jamais besoin.
+Le hub sert **en clair par défaut**, pour vivre derrière votre propre reverse proxy. Un interrupteur dans **Réglages → Général** — ou `--tls` — lui fait terminer le TLS lui-même avec un certificat auto-signé, ce qui suffit sur un LAN. ⚠️ L'effet est **au redémarrage**, l'adresse change, et les sondes déjà enrôlées sur l'ancienne devront voir la leur corrigée. Les clés d'accès l'exigent (ou un proxy) : les navigateurs refusent WebAuthn hors contexte sécurisé.
 
 Le hub a **sa propre version**, indépendante de l'application.
 
@@ -159,17 +184,61 @@ docker exec lanprobe-web lanprobe-web backup     # produit une archive, applique
 docker exec lanprobe-web lanprobe-web backups    # liste
 ```
 
-La restauration se fait **hub arrêté** — c'est le seul moment où elle prend effet sans redémarrage.
+La restauration se fait **conteneur en marche** puis redémarrage : le volet InfluxDB
+parle à la base de séries, qui doit répondre. Voir « Restaurer une archive » ci-dessous.
 
-#### Mot de passe administrateur perdu
+#### 🚑 Se remettre dedans quand on est dehors
 
-C'est de l'auto-hébergé : il n'y a pas d'e-mail de récupération. La porte de secours passe par le conteneur.
+C'est de l'auto-hébergé : **il n'y a ni e-mail de récupération, ni support**.
+Toutes les portes de secours passent par le conteneur — c'est-à-dire par un
+accès à la machine, ce qui est la seule chose qui puisse en tenir lieu.
+
+Chacune écrit au journal d'audit : elles contournent la connexion, elles
+doivent laisser une trace.
+
+| Situation | Commande |
+|---|---|
+| Mot de passe administrateur perdu | `docker exec lanprobe-web lanprobe-web reset-password admin <nouveau>` |
+| Téléphone perdu, second facteur bloquant | `docker exec lanprobe-web lanprobe-web disable-totp <compte>` |
+| Compte désactivé par erreur | `reset-password` le réactive au passage |
+| Rôle perdu (plus aucun administrateur) | `reset-password <compte> <mdp> --promote` |
+
+⚠️ **`disable-totp` retire aussi le secret**, pas seulement le drapeau. Un
+ancien code ne doit pas revivre sur un QR que vous croirez neuf : à la
+réactivation, l'application d'authentification devra rescanner.
+
+⚠️ **Les clés d'accès n'ont pas de commande de secours, et c'est voulu.** Il
+en faut plusieurs — le portable *et* le téléphone — ou garder un mot de passe
+qui marche. Une clé d'accès ne remplace pas le mot de passe tant qu'elle est
+seule.
+
+⚠️ **Un second facteur illisible bloque la connexion, exprès.** Si vous
+restaurez un volume sans son `secret.key`, le hub sait encore que le compte
+exige un second facteur mais ne peut plus vérifier les codes : il **refuse**
+plutôt que de repasser au mot de passe seul, et affiche la commande ci-dessus.
+Laisser passer désactiverait la protection en silence, le jour précis où l'on
+a des raisons de s'en méfier.
+
+#### Restaurer une archive
 
 ```bash
-docker exec lanprobe-web lanprobe-web reset-password admin <nouveau-mot-de-passe>
+# 1. le conteneur doit TOURNER : la restauration des mesures parle à InfluxDB
+docker cp mon-archive.zip lanprobe-web:/backup/
+docker exec lanprobe-web lanprobe-web restore mon-archive.zip --force
+
+# 2. redémarrer : le processus en cours sert encore l'ancienne base
+docker restart lanprobe-web
 ```
 
-Le compte est réactivé s'il était désactivé, et l'opération est écrite au journal d'audit — cette commande contourne la connexion, elle doit laisser une trace.
+⚠️ **`--force` est exigé** dès que le volume porte déjà des données : une
+restauration qui écrase sans le demander n'est pas une restauration, c'est un
+accident.
+
+⚠️ **L'ancien état est mis de côté**, pas supprimé : `avant-restauration-<date>`
+dans le volume du hub.
+
+⚠️ Une archive produite par un hub **plus récent** est refusée. Son schéma est
+en avance sur ce binaire, et les migrations ne reviennent pas en arrière.
 
 ---
 

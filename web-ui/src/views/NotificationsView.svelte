@@ -78,6 +78,45 @@
 
   const totalProbes = $derived(subs?.probes.length ?? 0);
 
+  // ══ Types d'alerte ═══════════════════════════════════════════════════════
+  //
+  // ⚠️ Une liste VIDE est une valeur valide : « je ne veux rien recevoir ».
+  // La confondre avec « non réglé » — donc avec le défaut — rendrait
+  // impossible de tout couper sans démonter les canaux.
+  const ALERT_KINDS = ['probe.down', 'probe.up', 'internet.down', 'internet.up'] as const;
+
+  let kinds = $state<string[]>([]);
+  let kindsBusy = $state(false);
+  let kindsError = $state('');
+  let kindsNotice = $state('');
+
+  async function loadKinds() {
+    try {
+      kinds = (await api.settings()).notify_events ?? [];
+    } catch {
+      /* le reste de l'écran n'a pas à tomber pour autant */
+    }
+  }
+
+  async function toggleKind(kind: string) {
+    const next = kinds.includes(kind) ? kinds.filter((k) => k !== kind) : [...kinds, kind];
+    kindsBusy = true;
+    kindsError = '';
+    kindsNotice = '';
+    try {
+      await api.saveSettings({ notify_events: next });
+      kinds = next;
+      kindsNotice = $_('notify.kinds_saved');
+    } catch (e) {
+      kindsError = handle(e);
+      // On relit : la case a déjà bougé dans le navigateur, et la laisser sur
+      // un choix que le hub n'a pas retenu est pire qu'un refus visible.
+      await loadKinds();
+    } finally {
+      kindsBusy = false;
+    }
+  }
+
   // ══ Canaux ═══════════════════════════════════════════════════════════════
 
   /**
@@ -88,16 +127,19 @@
    * touchera pas de l'année. Replié, il laisse voir d'un coup d'œil ce qui est
    * configuré et ce qui ne l'est pas.
    *
-   * ⚠️ Un canal NON configuré s'ouvre tout seul : c'est celui-là qu'on vient
-   * remplir, et le replier reviendrait à cacher la seule chose à faire.
+   * ⚠️ **Fermés d'office, configurés ou non.** Les ouvrir automatiquement
+   * pour le canal non configuré paraissait serviable, mais sur un hub neuf
+   * les deux le sont : la page s'ouvrait entièrement dépliée, c'est-à-dire
+   * exactement ce qu'on voulait éviter. La pastille « non configuré » dit
+   * déjà où cliquer.
    */
   let openCh = $state<Record<string, boolean>>({});
   function chOpen(
-    name: 'webhook' | 'smtp',
-    configured: boolean | undefined,
-    unreadable: boolean | undefined,
+    _name: 'webhook' | 'smtp',
+    _configured: boolean | undefined,
+    _unreadable: boolean | undefined,
   ): boolean {
-    return openCh[name] ?? (!configured || !!unreadable);
+    return openCh[_name] ?? false;
   }
   function toggleCh(name: 'webhook' | 'smtp', currently: boolean) {
     openCh = { ...openCh, [name]: !currently };
@@ -303,7 +345,10 @@
 
   onMount(() => {
     void loadSubs();
-    if (get(isAdmin)) void loadChannels();
+    if (get(isAdmin)) {
+      void loadChannels();
+      void loadKinds();
+    }
   });
 </script>
 
@@ -351,6 +396,36 @@
         {#if delayNotice}<p class="ok" role="status">{delayNotice}</p>{/if}
       </section>
 
+      <!-- Ce qu'on reçoit, avant où on le reçoit : décider des canaux sans
+           savoir ce qui les empruntera met la question à l'envers. -->
+      <section class="card lp-card">
+        <h2 class="lp-title">{$_('notify.kinds_title')}</h2>
+        <p class="sub">{$_('notify.kinds_lead')}</p>
+
+        <div class="kinds">
+          {#each ALERT_KINDS as k (k)}
+            <label class="kind">
+              <input
+                type="checkbox"
+                checked={kinds.includes(k)}
+                disabled={kindsBusy}
+                onchange={() => toggleKind(k)}
+              />
+              <span class="kind-name">{$_(`notify.kind_${k.replace('.', '_')}`)}</span>
+              <span class="kind-why">{$_(`notify.kind_${k.replace('.', '_')}_why`)}</span>
+            </label>
+          {/each}
+        </div>
+
+        {#if kinds.length === 0}
+          <!-- Rien de coché est un choix valide, pas un oubli : le dire évite
+               de chercher pourquoi les canaux configurés restent muets. -->
+          <p class="warn">{$_('notify.kinds_none')}</p>
+        {/if}
+        {#if kindsError}<p class="err" role="alert">{kindsError}</p>{/if}
+        {#if kindsNotice}<p class="ok" role="status">{kindsNotice}</p>{/if}
+      </section>
+
       <!--
         Un intitulé de groupe et un filet, pas un titre de plus : les cartes
         portent déjà leur nom, ce qu'il manque c'est de dire où commence la
@@ -358,7 +433,7 @@
         Réglages — un seul motif pour « groupe de cartes » vaut mieux que
         deux ; c'est la couleur, rouge là-bas, qui distingue l'avertissement.
       -->
-      <div class="group">
+      <div class="group full">
         <span class="group-title">{$_('notify.tab_channels')}</span>
         <span class="group-rule" aria-hidden="true"></span>
       </div>
@@ -589,7 +664,7 @@
        confondus, pour repérer d'un coup d'œil celui qu'on a oublié
        d'activer. C'est un état, pas un formulaire. -->
   {#if $isAdmin}
-    <div class="group">
+    <div class="group full">
       <span class="group-title">{$_('notify.tab_subs')}</span>
       <span class="group-rule" aria-hidden="true"></span>
     </div>
@@ -606,7 +681,7 @@
       <a class="lp-btn primary" href="#/">{$_('notify.no_site_cta')}</a>
     </StateBlock>
   {:else}
-    <section class="card lp-card">
+    <section class="card lp-card full">
       <p class="lead">{$_('notify.subs_moved')}</p>
 
       <div class="overview">
@@ -673,14 +748,51 @@
     background: var(--ep-border);
   }
 
+  /* Deux colonnes : les cartes de cet écran sont étroites et hautes, et
+     empilées elles laissaient les deux tiers de la largeur vides sur un
+     écran de bureau — il fallait faire défiler pour voir SMTP.
+
+     ⚠️ Les intitulés de groupe et la liste des abonnements gardent la pleine
+     largeur (`.full`) : un filet de séparation qui ne traverse qu'une colonne
+     ne sépare rien, et le tableau des sites a besoin de la place. */
   .cards {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
     gap: 12px;
     width: 100%;
   }
+  .cards > :global(.full) {
+    grid-column: 1 / -1;
+  }
+  @media (max-width: 1100px) {
+    .cards {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
   .cards:focus {
     outline: none;
+  }
+  .kinds {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .kind {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: baseline;
+    column-gap: 8px;
+    padding: 6px 0;
+    border-top: 1px solid var(--ep-border, #2a2a35);
+    cursor: pointer;
+    font-size: 12.5px;
+  }
+  .kind-why {
+    grid-column: 2;
+    font-size: 11px;
+    color: var(--ep-text-secondary);
+    line-height: 1.45;
   }
   .card {
     padding: 16px;

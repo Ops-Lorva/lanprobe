@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -369,6 +369,32 @@ const MIGRATIONS: &[&str] = &[
       last_used_at  INTEGER,
       PRIMARY KEY (username, credential_id)
     );
+    "#,
+    // v16 → v17 : archivage d'un site et de ses sondes.
+    //
+    // 🔴 **Archiver, pas supprimer.** Une sonde révoquée reste visible pour
+    // toujours, et un site ne peut pas partir tant qu'il porte une sonde :
+    // un client qu'on ne sert plus encombrait donc le parc à vie. Mais le
+    // supprimer effacerait ce à quoi ses mesures se rattachent — un rapport
+    // SLA sur l'année écoulée deviendrait illisible, et les séries d'Influx
+    // orphelines.
+    //
+    // L'archivage retire du parc sans rien détruire : les mesures restent,
+    // le rapport reste exportable, et l'opération se défait.
+    r#"
+    ALTER TABLE probes ADD COLUMN archived_at INTEGER;
+    ALTER TABLE sites  ADD COLUMN archived_at INTEGER;
+    "#,
+    // v17 → v18 : état annoncé du lien internet, à côté de celui de la sonde.
+    //
+    // Une colonne à part et non une ligne de plus : les deux transitions sont
+    // indépendantes — une sonde peut battre parfaitement avec un lien mort —
+    // et les mélanger dans un même état ferait annoncer un « retour en ligne »
+    // parce que l'internet est revenu, alors que la sonde n'a jamais cessé de
+    // battre.
+    r#"
+    ALTER TABLE notify_states ADD COLUMN internet_state TEXT;
+    ALTER TABLE notify_states ADD COLUMN internet_since INTEGER;
     "#,
 ];
 
@@ -756,6 +782,8 @@ pub struct Site {
     pub name: String,
     pub created_at: i64,
     pub probe_count: i64,
+    /// Retiré du parc sans être supprimé. `None` = actif.
+    pub archived_at: Option<i64>,
 }
 
 /// `probe_count` ne compte que les sondes actives : une sonde révoquée reste
@@ -763,7 +791,9 @@ pub struct Site {
 /// donnerait une taille de parc fausse.
 const SITE_COLUMNS: &str = "s.site_id, s.name, s.created_at, \
                             (SELECT COUNT(*) FROM probes p \
-                              WHERE p.site_id = s.site_id AND p.revoked_at IS NULL)";
+                              WHERE p.site_id = s.site_id AND p.revoked_at IS NULL \
+                                AND p.archived_at IS NULL), \
+                            s.archived_at";
 
 fn site_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
     Ok(Site {
@@ -771,6 +801,7 @@ fn site_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
         name: r.get(1)?,
         created_at: r.get(2)?,
         probe_count: r.get(3)?,
+        archived_at: r.get(4)?,
     })
 }
 
@@ -819,6 +850,8 @@ pub struct ProbeRecord {
     /// dernier battement. JSON brut : le hub le relaie sans l'interpréter.
     pub monitors: Option<String>,
     pub monitors_at: Option<i64>,
+    /// Retirée du parc sans être supprimée. `None` = visible.
+    pub archived_at: Option<i64>,
     /// Configuration déposée par la sonde (profils réseau, profils de scan…).
     /// Opaque pour le hub : il la garde et la rend, il ne la lit pas.
     pub config: Option<String>,
@@ -831,7 +864,7 @@ const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash
                              p.pending_influx_token, p.pending_influx_token_version, \
                              p.public_ip, p.public_ip_at, p.interface, p.local_ips, p.gateway, \
                              p.internet_state, p.internet_state_at, p.monitors, p.monitors_at, \
-                             p.config, p.config_at";
+                             p.config, p.config_at, p.archived_at";
 
 /// Ce qu'une sonde raconte de sa position réseau dans son battement.
 ///
@@ -946,6 +979,7 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
         monitors_at: r.get(24)?,
         config: r.get(25)?,
         config_at: r.get(26)?,
+        archived_at: r.get(27)?,
     })
 }
 
@@ -1726,6 +1760,55 @@ impl Db {
         Ok(())
     }
 
+    /// Les types d'alerte que l'opérateur veut recevoir.
+    ///
+    /// ⚠️ Le défaut n'est PAS « tous » : c'est ce qui existait avant, la
+    /// sonde hors ligne et son retour. Activer d'office les alertes internet
+    /// se serait mis à réveiller quelqu'un pour une raison nouvelle à la
+    /// faveur d'une mise à jour — et trois réveils inutiles suffisent à faire
+    /// couper les notifications pour de bon.
+    pub fn notify_kinds(&self) -> DbResult<Vec<crate::notify::AlertKind>> {
+        let raw = self
+            .get_setting(crate::settings::keys::NOTIFY_EVENTS)?
+            .unwrap_or_else(|| "probe.down,probe.up".to_string());
+        Ok(raw
+            .split(',')
+            .filter_map(crate::notify::AlertKind::parse)
+            .collect())
+    }
+
+    /// L'état internet annoncé pour une sonde. `None` tant que rien ne l'a
+    /// été : c'est ce qui distingue « première évaluation » de « en ligne ».
+    pub fn notify_internet_state(&self, probe_id: &str) -> DbResult<Option<(AlertState, i64)>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT internet_state, internet_since FROM notify_states WHERE probe_id = ?1",
+                [probe_id],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?
+            .and_then(|(state, since)| Some((AlertState::from_stored(&state?), since?))))
+    }
+
+    pub fn set_notify_internet_state(
+        &self,
+        probe_id: &str,
+        state: AlertState,
+        since: i64,
+    ) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO notify_states (probe_id, state, since, internet_state, internet_since)
+             VALUES (?1, 'up', ?3, ?2, ?3)
+             ON CONFLICT(probe_id) DO UPDATE
+               SET internet_state = excluded.internet_state,
+                   internet_since = excluded.internet_since",
+            rusqlite::params![probe_id, state.as_str(), since],
+        )?;
+        Ok(())
+    }
+
     // ── Sites ──────────────────────────────────────────────────────────────
 
     pub fn create_site(&self, name: &str) -> DbResult<Site> {
@@ -1748,6 +1831,7 @@ impl Db {
             name: name.to_string(),
             created_at,
             probe_count: 0,
+            archived_at: None,
         })
     }
 
@@ -1815,6 +1899,57 @@ impl Db {
     /// Refuse tant que le site porte des sondes — y compris révoquées, dont
     /// les mesures restent jointes par `site_id`. Aucune cascade dans ce
     /// projet : on ne fait pas disparaître un parc par un clic.
+    /// Archive ou désarchive un site **et toutes ses sondes**.
+    ///
+    /// 🔴 Rien n'est supprimé. Un client qu'on ne sert plus doit sortir du
+    /// parc, mais effacer son site rendrait ses mesures orphelines : un
+    /// rapport SLA sur l'année écoulée n'aurait plus de quoi se rattacher, et
+    /// les séries d'Influx ne désigneraient plus rien. L'opération se défait.
+    ///
+    /// ⚠️ Les sondes suivent le site, sans exception possible. Une sonde
+    /// restée visible dans un site archivé apparaîtrait dans le parc sans son
+    /// site — donc sans qu'on puisse comprendre d'où elle sort ni la ranger.
+    pub fn set_site_archived(&self, site_id: &str, archived: bool) -> DbResult<usize> {
+        self.get_site(site_id)?;
+        let stamp = archived.then(now);
+        let conn = self.lock()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE sites SET archived_at = ?2 WHERE site_id = ?1",
+            rusqlite::params![site_id, stamp],
+        )?;
+        let touched = tx.execute(
+            "UPDATE probes SET archived_at = ?2 WHERE site_id = ?1",
+            rusqlite::params![site_id, stamp],
+        )?;
+        tx.commit()?;
+        Ok(touched)
+    }
+
+    /// Archive ou désarchive une seule sonde.
+    ///
+    /// ⚠️ Désarchiver une sonde d'un site archivé la laisserait invisible : le
+    /// site filtre avant elle. Le site est donc désarchivé avec elle, sinon
+    /// l'action semble n'avoir aucun effet.
+    pub fn set_probe_archived(&self, probe_id: &str, archived: bool) -> DbResult<()> {
+        let probe = self.get_probe(probe_id)?;
+        let stamp = archived.then(now);
+        let conn = self.lock()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE probes SET archived_at = ?2 WHERE probe_id = ?1",
+            rusqlite::params![probe_id, stamp],
+        )?;
+        if !archived {
+            tx.execute(
+                "UPDATE sites SET archived_at = NULL WHERE site_id = ?1",
+                [&probe.site_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn delete_site(&self, site_id: &str) -> DbResult<()> {
         let conn = self.lock()?;
         let carried: i64 = conn.query_row(
@@ -1927,14 +2062,25 @@ impl Db {
     }
 
     /// Les sites visibles dans cette portée.
-    pub fn list_sites_scoped(&self, scope: &Scope) -> DbResult<Vec<Site>> {
+    ///
+    /// `archived` : les archivés sont exclus par défaut. Les inclure reste
+    /// possible — on ne cache jamais définitivement ce qui existe encore.
+    pub fn list_sites_scoped(&self, scope: &Scope, archived: bool) -> DbResult<Vec<Site>> {
         let (clause, params) = scope.sql_and_params("s.site_id");
         let conn = self.lock()?;
-        let sql = if clause.is_empty() {
+        let mut wheres: Vec<String> = Vec::new();
+        if !clause.is_empty() {
+            wheres.push(clause);
+        }
+        if !archived {
+            wheres.push(" s.archived_at IS NULL".into());
+        }
+        let sql = if wheres.is_empty() {
             format!("SELECT {SITE_COLUMNS} FROM sites s ORDER BY s.name COLLATE NOCASE")
         } else {
             format!(
-                "SELECT {SITE_COLUMNS} FROM sites s WHERE{clause} ORDER BY s.name COLLATE NOCASE"
+                "SELECT {SITE_COLUMNS} FROM sites s WHERE{} ORDER BY s.name COLLATE NOCASE",
+                wheres.join(" AND")
             )
         };
         let mut stmt = conn.prepare(&sql)?;
@@ -1947,6 +2093,7 @@ impl Db {
         &self,
         site_id: Option<&str>,
         scope: &Scope,
+        archived: bool,
     ) -> DbResult<Vec<ProbeRecord>> {
         // Demander un site hors portée ne rend pas « tout le parc » : il ne
         // rend rien. Le contraire ferait d'un paramètre d'URL une clé.
@@ -1969,6 +2116,12 @@ impl Db {
         if !clause.is_empty() {
             wheres.push(clause);
             params.extend(scope_params);
+        }
+        if !archived {
+            // ⚠️ Le site aussi : une sonde non archivée dans un site archivé
+            // apparaîtrait dans le parc sans son site, donc sans qu'on puisse
+            // comprendre d'où elle sort.
+            wheres.push(" p.archived_at IS NULL AND s.archived_at IS NULL".into());
         }
         let sql = if wheres.is_empty() {
             format!("{base} ORDER BY s.name COLLATE NOCASE, p.name COLLATE NOCASE")
@@ -2306,6 +2459,24 @@ impl Db {
     /// Recule le dernier battement d'une sonde. **Tests seulement** : aucun
     /// chemin de production ne remonte le temps, un statut dérivé ne vaut que
     /// si personne ne peut le maquiller.
+    /// Pose directement le dernier signe de vie et le verdict internet.
+    /// Réservé aux tests : le chemin de production passe par le battement.
+    #[cfg(test)]
+    pub fn seed_probe_state(
+        &self,
+        probe_id: &str,
+        last_seen: i64,
+        internet: Option<&str>,
+    ) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE probes SET last_seen = ?2, internet_state = ?3, internet_state_at = ?2
+             WHERE probe_id = ?1",
+            rusqlite::params![probe_id, last_seen, internet],
+        )?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn backdate_last_seen(&self, probe_id: &str, at: i64) -> DbResult<()> {
         let conn = self.lock()?;

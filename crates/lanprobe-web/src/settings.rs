@@ -29,6 +29,12 @@ pub mod keys {
     /// pas un secret : il n'y a que ce réglage-là dans les notifications qui
     /// ait le droit d'être en clair.
     pub const NOTIFY_DELAY_SECS: &str = "notify_delay_secs";
+    /// Types d'alerte retenus, séparés par des virgules.
+    ///
+    /// ⚠️ Une liste vide est une valeur valide : « je ne veux rien recevoir ».
+    /// La confondre avec « non réglé », donc avec le défaut, rendrait
+    /// impossible de tout couper sans démonter les canaux.
+    pub const NOTIFY_EVENTS: &str = "notify_events";
 
     /// La sauvegarde tourne toute seule. Une sauvegarde qu'il faut
     /// déclencher est une sauvegarde qu'on oublie.
@@ -60,6 +66,7 @@ pub mod keys {
         RETENTION_DAYS,
         HEARTBEAT_INTERVAL_SECS,
         NOTIFY_DELAY_SECS,
+        NOTIFY_EVENTS,
         BACKUP_ENABLED,
         BACKUP_INTERVAL_HOURS,
         BACKUP_KEEP_LAST,
@@ -151,6 +158,20 @@ impl Settings {
 
     /// Vrai tant que personne ne l'a explicitement coupée. Le défaut est
     /// « activée » : c'est tout l'intérêt du modèle.
+    /// Types d'alerte retenus. Défaut : ce qui existait avant, à savoir la
+    /// sonde hors ligne et son retour.
+    pub fn notify_events(&self) -> Vec<String> {
+        match self.db.get_setting(keys::NOTIFY_EVENTS) {
+            Ok(Some(raw)) => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            _ => vec!["probe.down".into(), "probe.up".into()],
+        }
+    }
+
     pub fn backup_enabled(&self) -> bool {
         self.get_or(keys::BACKUP_ENABLED, "true") != "false"
     }
@@ -220,6 +241,7 @@ impl Settings {
             keys::RETENTION_DAYS: self.retention_days(),
             keys::HEARTBEAT_INTERVAL_SECS: self.heartbeat_interval_secs(),
             keys::NOTIFY_DELAY_SECS: self.notify_delay_secs(),
+            keys::NOTIFY_EVENTS: self.notify_events(),
             keys::BACKUP_ENABLED: self.backup_enabled(),
             keys::BACKUP_INTERVAL_HOURS: self.backup_interval_hours(),
             keys::BACKUP_KEEP_LAST: self.backup_keep_last(),
@@ -242,6 +264,16 @@ impl Settings {
             keys::INFLUX_ORG | keys::INFLUX_BUCKET => {
                 if value.is_empty() {
                     return Err(DbError::Conflict(format!("{key} ne peut pas être vide")));
+                }
+            }
+            keys::NOTIFY_EVENTS => {
+                // Chaque entrée doit être un type connu : une faute de frappe
+                // qui passe donnerait un réglage qui n'alerte sur rien, sans
+                // que rien ne le dise.
+                for kind in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if crate::notify::AlertKind::parse(kind).is_none() {
+                        return Err(DbError::Conflict(format!("type d'alerte inconnu : {kind}")));
+                    }
                 }
             }
             keys::BACKUP_ENABLED | keys::TLS_ENABLED => {

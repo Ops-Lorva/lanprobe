@@ -283,6 +283,33 @@
   // remet à un client. On choisit les sondes à y faire figurer : toutes ne le
   // concernent pas forcément, et un rapport qui expose une sonde d'un autre
   // client serait pire qu'inutile.
+  // ── Archivage ─────────────────────────────────────────────────────────────
+  //
+  // 🔴 Archiver, pas supprimer. Un client qu'on ne sert plus doit sortir du
+  // parc, mais effacer son site rendrait ses mesures orphelines : son rapport
+  // SLA de l'année écoulée n'aurait plus de site auquel se rattacher. Tout
+  // reste, et l'opération se défait.
+  let archiveTarget = $state<{ id: string; name: string; archived: boolean } | null>(null);
+  let archiveBusy = $state(false);
+  let archiveError = $state('');
+
+  const archivedCount = $derived($fleet.sites.filter((s) => s.archived_at).length);
+
+  async function submitArchive() {
+    if (!archiveTarget) return;
+    archiveBusy = true;
+    archiveError = '';
+    try {
+      await api.archiveSite(archiveTarget.id, archiveTarget.archived);
+      archiveTarget = null;
+      await fleet.load(onExpired, { quiet: true });
+    } catch (e) {
+      archiveError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      archiveBusy = false;
+    }
+  }
+
   // ── Alertes du site ───────────────────────────────────────────────────────
   //
   // Le panneau se monte à l'ouverture et relit ses abonnements à chaque
@@ -413,6 +440,21 @@
     {#if $canOperate}
       <button class="lp-btn sm" onclick={() => (createOpen = true)}>{$_('fleet.new_site')}</button>
     {/if}
+    <!-- ⚠️ Le chemin vers les archives ne disparaît jamais, même à zéro
+         archive : sans lui, on archive un site puis on cherche comment le
+         faire revenir. Le compte s'affiche quand il y en a. -->
+    <button
+      class="lp-btn sm"
+      class:on={$fleet.showArchived}
+      onclick={() => fleet.toggleArchived(onExpired)}
+      aria-pressed={$fleet.showArchived}
+    >
+      {$fleet.showArchived
+        ? $_('fleet.hide_archived')
+        : archivedCount > 0
+          ? $_('fleet.show_archived_n', { values: { n: archivedCount } })
+          : $_('fleet.show_archived')}
+    </button>
     <button
       class="lp-btn sm"
       onclick={() => void fleet.load(onExpired, { quiet: true })}
@@ -557,6 +599,13 @@
           })}
         onrename={() => openRename(g.site.site_id, g.site.name)}
         onalerts={() => openAlerts(g.site.site_id, g.site.name)}
+        archived={!!g.site.archived_at}
+        onarchive={() =>
+          (archiveTarget = {
+            id: g.site.site_id,
+            name: g.site.name,
+            archived: !g.site.archived_at,
+          })}
         onexportSla={() => openSlaExport(g.site.site_id, g.site.name)}
         onfocusSite={() => fleet.selectSite(g.site.site_id, onExpired)}
         onadd={() => void addProbe(g.site.site_id, g.site.name)}
@@ -635,6 +684,31 @@
       disabled={slaBusy || slaPicked.size === 0 || !slaReady}
     >
       {slaBusy ? $_('sla.exporting') : $_('sla.export')}
+    </button>
+  {/snippet}
+</Modal>
+
+<Modal
+  open={archiveTarget !== null}
+  title={archiveTarget?.archived
+    ? $_('site.archive_title', { values: { name: archiveTarget?.name ?? '' } })
+    : $_('site.unarchive_title', { values: { name: archiveTarget?.name ?? '' } })}
+  onclose={() => (archiveTarget = null)}
+>
+  <p class="dlg-lead">
+    {archiveTarget?.archived ? $_('site.archive_body') : $_('site.unarchive_body')}
+  </p>
+  {#if archiveTarget?.archived}
+    <!-- Ce que l'archivage NE fait pas est aussi important que ce qu'il fait :
+         sans cette phrase, on hésite à cliquer de peur de perdre l'historique
+         d'un client, et on garde le site pour toujours. -->
+    <p class="dlg-note">{$_('site.archive_keeps')}</p>
+  {/if}
+  {#if archiveError}<p class="dlg-err" role="alert">{archiveError}</p>{/if}
+  {#snippet footer()}
+    <button class="lp-btn" onclick={() => (archiveTarget = null)}>{$_('common.cancel')}</button>
+    <button class="lp-btn primary" onclick={submitArchive} disabled={archiveBusy}>
+      {archiveTarget?.archived ? $_('site.archive_confirm') : $_('site.unarchive_confirm')}
     </button>
   {/snippet}
 </Modal>

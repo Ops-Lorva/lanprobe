@@ -20,6 +20,9 @@
     onrename: () => void;
     /** Ouvre les alertes DU SITE : c'est ici qu'on décide qui réveille qui. */
     onalerts: () => void;
+    /** Site retiré du parc, mais rien n'a été supprimé. */
+    archived?: boolean;
+    onarchive: () => void;
     onfocusSite: () => void;
     /** Ouvre le rapport SLA du site — la sélection des sondes se fait là. */
     onexportSla: () => void;
@@ -46,6 +49,8 @@
     ontoggle,
     onrename,
     onalerts,
+    archived = false,
+    onarchive,
     onfocusSite,
     onadd,
     addBusy = false,
@@ -89,6 +94,11 @@
         </svg>
       </span>
       <span class="nm">{siteName}</span>
+      {#if archived}
+        <!-- Un site archivé n'apparaît que si on a demandé à les voir : le
+             dire sur la ligne évite de croire qu'il est encore actif. -->
+        <span class="arch-pill">{$_('site.archived_badge')}</span>
+      {/if}
     </button>
 
     <SiteHealth {counts} siteName={siteName} {buffered} {onadd} addBusy={addBusy} />
@@ -139,6 +149,18 @@
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M8 2a3.5 3.5 0 0 0-3.5 3.5c0 3-1.2 4-1.2 4h9.4s-1.2-1-1.2-4A3.5 3.5 0 0 0 8 2z" />
           <path d="M6.8 11.6a1.4 1.4 0 0 0 2.4 0" />
+        </svg>
+      </button>
+      <button
+        class="lp-btn ghost sm"
+        onclick={onarchive}
+        title={archived ? $_('site.unarchive') : $_('site.archive')}
+        aria-label={archived ? $_('site.unarchive') : $_('site.archive')}
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 4.5h12v2H2z" />
+          <path d="M3 6.5v6h10v-6" />
+          <path d="M6.5 9h3" />
         </svg>
       </button>
       <button
@@ -214,6 +236,18 @@
      de plus d'un côté décale tous les intitulés. Ils avaient été aplatis en
      trois règles sans `@media` — la plus étroite gagnait à toute largeur, et
      l'en-tête ne correspondait plus à rien. */
+  .arch-pill {
+    margin-left: 8px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--lp-border);
+    color: var(--lp-muted);
+    vertical-align: middle;
+  }
   .cols {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 118px 120px 118px 92px 84px 78px 18px;

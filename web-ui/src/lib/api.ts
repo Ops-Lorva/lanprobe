@@ -11,6 +11,8 @@ export interface Site {
   site_id: string;
   name: string;
   probe_count: number;
+  /** Retiré du parc sans être supprimé. `null` = actif. */
+  archived_at?: number | null;
 }
 
 export interface Probe {
@@ -18,6 +20,8 @@ export interface Probe {
   name: string;
   site_id: string;
   site: string;
+  /** Retirée du parc sans être supprimée. `null` = visible. */
+  archived_at?: number | null;
   platform: string | null;
   version: string | null;
   /** Epoch en secondes. `null` si la sonde n'a jamais battu. */
@@ -133,6 +137,14 @@ export interface HubSettings {
    * vit dans `settings`, comme le reste, et part par `PUT /api/settings`.
    */
   notify_delay_secs: number;
+  /**
+   * Types d'alerte retenus (`probe.down`, `internet.down`…).
+   *
+   * ⚠️ Une liste **vide** est une valeur valide — « je ne veux rien
+   * recevoir » — et non « non réglé ». Les confondre rendrait impossible de
+   * tout couper sans démonter les canaux.
+   */
+  notify_events: string[];
   /** Sauvegarde planifiée. Coupée, plus aucune archive n'est produite seule. */
   backup_enabled: boolean;
   backup_interval_hours: number;
@@ -161,6 +173,7 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   retention_days: 0,
   heartbeat_interval_secs: 60,
   notify_delay_secs: 300,
+  notify_events: ['probe.down', 'probe.up'],
   backup_enabled: true,
   backup_interval_hours: 24,
   backup_keep_last: 7,
@@ -419,6 +432,15 @@ export const AUDIT_ACTIONS: readonly string[] = [
   'backup.retention',
   'user.password_reset_cli',
   'probe.command',
+  'user.scope',
+  'auth.totp.enable',
+  'auth.totp.disable',
+  'auth.passkey.add',
+  'auth.passkey.remove',
+  'site.archive',
+  'site.unarchive',
+  'probe.archive',
+  'probe.unarchive',
 ];
 
 // ── Notifications (contrat § 13) ────────────────────────────────────────────
@@ -717,7 +739,9 @@ export const api = {
 
   logout: () => request<unknown>('/api/logout', { method: 'POST' }),
 
-  sites: () => request<Site[]>('/api/sites'),
+  /** `archived` inclut les sites archivés — exclus par défaut. */
+  sites: (archived = false) =>
+    request<Site[]>(archived ? '/api/sites?archived=true' : '/api/sites'),
 
   createSite: (name: string) =>
     request<Site>('/api/sites', { method: 'POST', body: JSON.stringify({ name }) }),
@@ -729,8 +753,33 @@ export const api = {
     }),
 
   /** `siteId` absent = tout le parc ; sinon le hub filtre côté serveur. */
-  probes: (siteId?: string) =>
-    request<Probe[]>(siteId ? `/api/probes?site=${encodeURIComponent(siteId)}` : '/api/probes'),
+  probes: (siteId?: string, archived = false) => {
+    const q = new URLSearchParams();
+    if (siteId) q.set('site', siteId);
+    if (archived) q.set('archived', 'true');
+    const qs = q.toString();
+    return request<Probe[]>(qs ? `/api/probes?${qs}` : '/api/probes');
+  },
+
+  /**
+   * Retire un site du parc — ou l'y remet — **sans rien supprimer**.
+   *
+   * 🔴 C'est la réponse à « comment je fais partir un client ». Le supprimer
+   * vraiment rendrait ses mesures orphelines : son rapport SLA de l'année
+   * écoulée n'aurait plus de site auquel se rattacher. Ici tout reste, et
+   * l'opération se défait. Les sondes du site suivent.
+   */
+  archiveSite: (id: string, archived: boolean) =>
+    request<{ ok: boolean; probes: number }>(
+      `/api/sites/${encodeURIComponent(id)}/archive`,
+      { method: 'POST', body: JSON.stringify({ archived }) },
+    ),
+
+  archiveProbe: (id: string, archived: boolean) =>
+    request<{ ok: boolean }>(`/api/probes/${encodeURIComponent(id)}/archive`, {
+      method: 'POST',
+      body: JSON.stringify({ archived }),
+    }),
 
   /** Les deux champs sont facultatifs : renommage, déplacement, ou les deux. */
   patchProbe: (id: string, patch: { name?: string; site_id?: string }) =>

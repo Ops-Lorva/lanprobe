@@ -47,6 +47,14 @@ pub const DEFAULT_DELAY_SECS: i64 = 300;
 pub enum AlertKind {
     Down,
     Up,
+    /// La sonde bat, mais elle annonce ne plus atteindre internet.
+    ///
+    /// ⚠️ Distinct de `Down` et pas un cas particulier de celui-ci : une
+    /// sonde parfaitement joignable dont le lien mesuré est mort ne se voit
+    /// autrement qu'en ouvrant sa fiche, et c'est précisément la panne qu'on
+    /// veut apprendre sans regarder.
+    InternetDown,
+    InternetUp,
 }
 
 impl AlertKind {
@@ -54,7 +62,24 @@ impl AlertKind {
         match self {
             AlertKind::Down => "probe.down",
             AlertKind::Up => "probe.up",
+            AlertKind::InternetDown => "internet.down",
+            AlertKind::InternetUp => "internet.up",
         }
+    }
+
+    /// Tous les types, dans l'ordre où ils se présentent à l'écran.
+    pub const ALL: &'static [AlertKind] = &[
+        AlertKind::Down,
+        AlertKind::Up,
+        AlertKind::InternetDown,
+        AlertKind::InternetUp,
+    ];
+
+    pub fn parse(value: &str) -> Option<AlertKind> {
+        AlertKind::ALL
+            .iter()
+            .copied()
+            .find(|k| k.as_str() == value.trim())
     }
 }
 
@@ -78,6 +103,12 @@ impl Alert {
         match self.kind {
             AlertKind::Down => format!("LanProbe — {} ({}) hors ligne", self.probe, self.site),
             AlertKind::Up => format!("LanProbe — {} ({}) de retour", self.probe, self.site),
+            AlertKind::InternetDown => {
+                format!("LanProbe — {} ({}) a perdu internet", self.probe, self.site)
+            }
+            AlertKind::InternetUp => {
+                format!("LanProbe — {} ({}) a retrouvé internet", self.probe, self.site)
+            }
         }
     }
 
@@ -90,6 +121,15 @@ impl Alert {
                 humanise(self.silence_secs)
             ),
             AlertKind::Up => format!("{} ({}) est revenue en ligne.", self.probe, self.site),
+            // On dit que la sonde répond, sinon on part chercher une panne de
+            // sonde alors que c'est le lien qu'elle mesure qui est tombé.
+            AlertKind::InternetDown => format!(
+                "{} ({}) répond toujours, mais n'atteint plus internet.",
+                self.probe, self.site
+            ),
+            AlertKind::InternetUp => {
+                format!("{} ({}) a retrouvé son accès internet.", self.probe, self.site)
+            }
         }
     }
 }
@@ -172,8 +212,137 @@ pub fn evaluate(db: &Db, now: i64, delay_secs: i64) -> DbResult<Vec<Alert>> {
                 });
             }
         }
+
+        // ── Le lien mesuré, à part ────────────────────────────────────────
+        //
+        // ⚠️ Évalué seulement quand la sonde répond. Une sonde muette ne dit
+        // plus rien de son internet : annoncer « internet perdu » sur son
+        // dernier verdict connu doublerait chaque panne de sonde d'une
+        // fausse panne de lien.
+        if observed == AlertState::Up {
+            if let Some(verdict) = probe.internet_state.as_deref() {
+                let seen = match verdict {
+                    "offline" => AlertState::Down,
+                    "online" => AlertState::Up,
+                    // « inconnu » n'est pas « perdu » : une sonde qui n'a pas
+                    // encore tranché ne doit réveiller personne.
+                    _ => continue,
+                };
+                match db.notify_internet_state(&probe.probe_id)? {
+                    None => db.set_notify_internet_state(&probe.probe_id, seen, now)?,
+                    Some((known, _)) if known == seen => {}
+                    Some(_) => {
+                        db.set_notify_internet_state(&probe.probe_id, seen, now)?;
+                        alerts.push(Alert {
+                            kind: match seen {
+                                AlertState::Down => AlertKind::InternetDown,
+                                AlertState::Up => AlertKind::InternetUp,
+                            },
+                            probe_id: probe.probe_id.clone(),
+                            probe: probe.name.clone(),
+                            site_id: probe.site_id.clone(),
+                            site: probe.site_name.clone(),
+                            last_seen,
+                            silence_secs: 0,
+                        });
+                    }
+                }
+            }
+        }
     }
+
+    // Les types que l'opérateur ne veut pas recevoir tombent ici, à la fin :
+    // l'état mémorisé est mis à jour quand même. Sans ça, réactiver un type
+    // ferait partir d'un coup la transition d'il y a trois semaines.
+    let wanted = db.notify_kinds()?;
+    alerts.retain(|a| wanted.iter().any(|k| *k == a.kind));
     Ok(alerts)
+}
+
+#[cfg(test)]
+mod evaluate_tests {
+    use super::*;
+    use crate::db::Db;
+
+    fn hub_with_probe(internet: Option<&str>) -> (Db, String) {
+        let db = Db::open_in_memory().unwrap();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        db.set_notify_subscription("site", &site.site_id, Some(true))
+            .unwrap();
+        db.seed_probe_state(&probe.probe_id, crate::db::now(), internet)
+            .unwrap();
+        (db, probe.probe_id)
+    }
+
+    #[test]
+    fn a_dead_link_on_a_living_probe_is_its_own_alert() {
+        // 🔴 C'est la panne qu'on ne voit pas autrement : la sonde bat, tout
+        // est vert, et le lien qu'elle mesure est mort.
+        let (db, _id) = hub_with_probe(Some("online"));
+        db.set_setting(crate::settings::keys::NOTIFY_EVENTS, "probe.down,probe.up,internet.down,internet.up")
+            .unwrap();
+        let now = crate::db::now();
+
+        // Première passe : on mémorise, on n'annonce rien.
+        assert!(evaluate(&db, now, 300).unwrap().is_empty());
+
+        let id = db.list_probes(None).unwrap()[0].probe_id.clone();
+        db.seed_probe_state(&id, crate::db::now(), Some("offline")).unwrap();
+        let alerts = evaluate(&db, now, 300).unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].kind, AlertKind::InternetDown);
+        assert!(
+            alerts[0].message().contains("répond toujours"),
+            "le message doit dire que la sonde va bien, sinon on cherche la panne au mauvais endroit : {}",
+            alerts[0].message()
+        );
+    }
+
+    #[test]
+    fn an_unknown_verdict_wakes_nobody() {
+        // « inconnu » n'est pas « perdu » : une sonde qui n'a pas encore
+        // tranché ne doit déclencher aucune alerte.
+        let (db, id) = hub_with_probe(Some("online"));
+        db.set_setting(crate::settings::keys::NOTIFY_EVENTS, "internet.down,internet.up")
+            .unwrap();
+        let now = crate::db::now();
+        evaluate(&db, now, 300).unwrap();
+        db.seed_probe_state(&id, crate::db::now(), Some("unknown")).unwrap();
+        assert!(evaluate(&db, now, 300).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_kind_left_unchecked_is_not_sent() {
+        let (db, id) = hub_with_probe(Some("online"));
+        db.set_setting(crate::settings::keys::NOTIFY_EVENTS, "probe.down,probe.up")
+            .unwrap();
+        let now = crate::db::now();
+        evaluate(&db, now, 300).unwrap();
+        db.seed_probe_state(&id, crate::db::now(), Some("offline")).unwrap();
+        assert!(evaluate(&db, now, 300).unwrap().is_empty());
+    }
+
+    #[test]
+    fn re_enabling_a_kind_does_not_replay_an_old_transition() {
+        // 🔴 L'état est mémorisé même pour les types qu'on ne reçoit pas.
+        // Sans ça, réactiver « internet » ferait partir d'un coup la
+        // transition d'il y a trois semaines.
+        let (db, id) = hub_with_probe(Some("online"));
+        db.set_setting(crate::settings::keys::NOTIFY_EVENTS, "probe.down")
+            .unwrap();
+        let now = crate::db::now();
+        evaluate(&db, now, 300).unwrap();
+        db.seed_probe_state(&id, crate::db::now(), Some("offline")).unwrap();
+        assert!(evaluate(&db, now, 300).unwrap().is_empty(), "type décoché");
+
+        db.set_setting(crate::settings::keys::NOTIFY_EVENTS, "internet.down,internet.up")
+            .unwrap();
+        assert!(
+            evaluate(&db, now, 300).unwrap().is_empty(),
+            "la transition manquée ne doit pas ressortir à la réactivation"
+        );
+    }
 }
 
 // ── Les canaux ─────────────────────────────────────────────────────────────

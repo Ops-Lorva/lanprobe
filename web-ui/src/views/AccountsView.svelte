@@ -497,7 +497,12 @@
      au lieu d'au-dessus. */
   .row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 120px 140px 108px 300px;
+    /* La colonne d'actions se dimensionne sur SON contenu (`max-content`) et
+       non sur une largeur devinée : à 300 px figés, le bouton « Portée »
+       ajouté par le périmètre par site faisait passer « Désactiver » à la
+       ligne suivante. Le nom du compte absorbe le reste, il est le seul dont
+       la longueur soit imprévisible. */
+    grid-template-columns: minmax(0, 1fr) 120px 140px 108px max-content;
     align-items: center;
     gap: 10px;
     padding: 10px 14px;
@@ -672,7 +677,7 @@
      « Créé le » porterait le titre « Portée ». */
   @media (max-width: 900px) {
     .row {
-      grid-template-columns: minmax(0, 1fr) 120px 140px 300px;
+      grid-template-columns: minmax(0, 1fr) 120px 140px max-content;
     }
     .created,
     .row.header span:nth-child(4) {
@@ -681,7 +686,7 @@
   }
   @media (max-width: 760px) {
     .row {
-      grid-template-columns: minmax(0, 1fr) 300px;
+      grid-template-columns: minmax(0, 1fr) max-content;
     }
     .scope,
     .role,

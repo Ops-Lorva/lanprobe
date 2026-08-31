@@ -306,7 +306,10 @@
     "health_bar": "Desglose de estados del sitio {name}",
     "site_add": "Dar de alta una sonda en el sitio {name}",
     "col_public_ip": "IP pública",
-    "net_help": "La sonda late, pero su acceso a internet no responde: es probable que sus mediciones ya no lleguen."
+    "net_help": "La sonda late, pero su acceso a internet no responde: es probable que sus mediciones ya no lleguen.",
+    "show_archived": "Archivos",
+    "show_archived_n": "Archivos ({n})",
+    "hide_archived": "Ocultar los archivos"
   },
   "status": {
     "online": "En línea",
@@ -340,7 +343,17 @@
     "conflict": "Ya existe un sitio llamado «{name}». Las mayúsculas no cuentan: «Durand» y «durand» son el mismo sitio.",
     "empty_name": "El nombre del sitio no puede estar vacío.",
     "populated_note": "Este sitio contiene {n, plural, one {# sonda} other {# sondas}}. Un sitio con sondas no puede retirarse: mueva sus sondas a otro sitio, o revóquelas, antes de retirar el sitio.",
-    "probe_count": "{n, plural, =0 {ninguna sonda} one {# sonda} other {# sondas}}"
+    "probe_count": "{n, plural, =0 {ninguna sonda} one {# sonda} other {# sondas}}",
+    "archive": "Archivar el sitio",
+    "unarchive": "Devolver al parque",
+    "archived_badge": "archivado",
+    "archive_title": "¿Archivar «{name}»?",
+    "unarchive_title": "¿Devolver «{name}» al parque?",
+    "archive_body": "El sitio y sus sondas salen del parque. Dejan de aparecer en las listas, los recuentos y las suscripciones de alertas.",
+    "archive_keeps": "No se borra nada: las medidas, el inventario y el historial permanecen, el informe SLA sigue exportable, y puede devolver el sitio al parque cuando quiera.",
+    "unarchive_body": "El sitio y sus sondas vuelven al parque, tal y como estaban.",
+    "archive_confirm": "Archivar",
+    "unarchive_confirm": "Devolver al parque"
   },
   "probe": {
     "back": "Parque",
@@ -659,7 +672,16 @@
       "user_enable": "Cuenta reactivada",
       "user_password": "Contraseña cambiada",
       "user_password_reset_cli": "Contraseña restablecida por línea de comandos",
-      "user_role": "Rol modificado"
+      "user_role": "Rol modificado",
+      "user_scope": "Alcance de la cuenta modificado",
+      "auth_totp_enable": "Segundo factor activado",
+      "auth_totp_disable": "Segundo factor desactivado",
+      "auth_passkey_add": "Llave de acceso añadida",
+      "auth_passkey_remove": "Llave de acceso revocada",
+      "site_archive": "Sitio archivado",
+      "site_unarchive": "Sitio devuelto al parque",
+      "probe_archive": "Sonda archivada",
+      "probe_unarchive": "Sonda devuelta al parque"
     },
     "family": {
       "access": "Acceso",
@@ -742,7 +764,19 @@
     "site_panel_lead": "Una sonda sigue a su sitio, salvo que se le ponga una excepción. El hub solo anuncia los cambios de estado, y anuncia también la vuelta.",
     "subs_moved": "Las alertas se configuran en cada sitio, desde el parque. Esto es lo que se aplica hoy.",
     "subs_count": "{n} / {total} sonda(s)",
-    "subs_goto_fleet": "Ir al parque"
+    "subs_goto_fleet": "Ir al parque",
+    "kinds_title": "Alertas recibidas",
+    "kinds_lead": "Lo que sale por los canales configurados. El hub solo anuncia cambios de estado, nunca un recordatorio mientras dura la avería.",
+    "kinds_saved": "Guardado.",
+    "kinds_none": "Nada marcado: los canales quedarán mudos. Es una elección válida, no un olvido.",
+    "kind_probe_down": "Sonda fuera de línea",
+    "kind_probe_down_why": "sin noticias más allá del plazo anterior",
+    "kind_probe_up": "Sonda de vuelta",
+    "kind_probe_up_why": "sin la vuelta hay que ir a comprobarlo a mano",
+    "kind_internet_down": "Pérdida de internet",
+    "kind_internet_down_why": "la sonda responde, pero el enlace que mide está muerto — invisible de otro modo",
+    "kind_internet_up": "Vuelta de internet",
+    "kind_internet_up_why": "el fin del corte del enlace"
   },
   "commands": {
     "col_by": "Por",
