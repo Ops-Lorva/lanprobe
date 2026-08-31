@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -395,6 +395,70 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE notify_states ADD COLUMN internet_state TEXT;
     ALTER TABLE notify_states ADD COLUMN internet_since INTEGER;
+    "#,
+    // v18 → v19 : historique des IP publiques et libellés de réseau.
+    //
+    // ⚠️ `confirmed_until` est le DERNIER battement ayant CONFIRMÉ l'adresse,
+    // pas l'instant où le changement a été détecté. C'est ce qui rend
+    // l'attribution du SLA correcte sans aucun cas particulier : le trou entre
+    // le `confirmed_until` d'un intervalle et le `confirmed_from` du suivant
+    // EST la zone indéterminée. Une coupure suivie d'un retour sur la même
+    // adresse reste dans l'intervalle et lui est imputée ; une coupure suivie
+    // d'une adresse différente tombe dans le trou et n'est imputée à personne.
+    //
+    // L'identité réseau est un INSTANTANÉ figé au moment du relevé : après un
+    // changement, elle décrit le réseau tel qu'il était, pas tel qu'il est.
+    //
+    // ⚠️ Rien de tout cela ne va dans InfluxDB (contrat § 12) : une étiquette
+    // par adresse ferait une série par adresse, et un poste itinérant en voit
+    // des dizaines — l'explosion de cardinalité qui ne se voit pas avant qu'il
+    // soit trop tard.
+    //
+    // `network_labels` est SÉPARÉE de l'historique pour deux raisons : le
+    // libellé survit à la purge des intervalles, et il se réapplique tout seul
+    // quand le même réseau réapparaît. La passerelle fait partie de la clé
+    // parce que deux réseaux derrière un même opérateur partagent l'adresse
+    // publique.
+    //
+    // `observed_source_ip` est l'adresse source du battement précédent. Elle
+    // ne sert QU'À détecter un changement : la valeur enregistrée dans
+    // l'historique est toujours celle relevée par la sonde via son interface
+    // de mesure (contrat § 15).
+    //
+    // La reprise finale part de ce que le hub savait déjà : sans elle, une
+    // sonde en service depuis des mois repartirait de zéro et sa fenêtre
+    // courante ressortirait entièrement en « indéterminé ».
+    r#"
+    CREATE TABLE probe_public_ip_history (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      probe_id        TEXT    NOT NULL REFERENCES probes(probe_id) ON DELETE CASCADE,
+      public_ip       TEXT    NOT NULL,
+      interface       TEXT,
+      gateway         TEXT,
+      local_subnet    TEXT,
+      confirmed_from  INTEGER NOT NULL,
+      confirmed_until INTEGER NOT NULL
+    );
+    CREATE INDEX idx_pubip_probe_from
+      ON probe_public_ip_history(probe_id, confirmed_from);
+
+    CREATE TABLE network_labels (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      public_ip  TEXT NOT NULL,
+      gateway    TEXT NOT NULL DEFAULT '',
+      label      TEXT NOT NULL,
+      UNIQUE(public_ip, gateway)
+    );
+
+    ALTER TABLE probes ADD COLUMN observed_source_ip TEXT;
+
+    INSERT INTO probe_public_ip_history
+      (probe_id, public_ip, interface, gateway, local_subnet, confirmed_from, confirmed_until)
+    SELECT probe_id, public_ip, interface, gateway, NULL,
+           COALESCE(public_ip_at, last_seen), COALESCE(last_seen, public_ip_at)
+      FROM probes
+     WHERE public_ip IS NOT NULL
+       AND COALESCE(public_ip_at, last_seen) IS NOT NULL;
     "#,
 ];
 
@@ -3044,6 +3108,109 @@ mod tests {
         assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
         assert!(db.table_exists("settings").unwrap());
         assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_v19_migration_creates_the_address_history_and_its_labels() {
+        let db = open_memory();
+        let conn = db.conn.lock().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('probe_public_ip_history')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for expected in [
+            "probe_id",
+            "public_ip",
+            "interface",
+            "gateway",
+            "local_subnet",
+            "confirmed_from",
+            "confirmed_until",
+        ] {
+            assert!(cols.iter().any(|c| c == expected), "colonne {expected} absente : {cols:?}");
+        }
+        let labels: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_table_info('network_labels')", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(labels > 0, "table network_labels absente");
+        // L'adresse source du battement précédent : c'est elle qui sert de
+        // point de comparaison pour demander un relevé (contrat § 15).
+        let probe_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('probes')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            probe_cols.iter().any(|c| c == "observed_source_ip"),
+            "colonne observed_source_ip absente : {probe_cols:?}"
+        );
+    }
+
+    #[test]
+    fn the_public_ip_history_starts_from_what_the_probe_already_had() {
+        // ⚠️ L'historique commence à la migration : sans reprise, toute sonde
+        // déjà en service repartirait de zéro et sa fenêtre courante
+        // ressortirait entièrement en « indéterminé » alors que le hub
+        // connaissait parfaitement son adresse.
+        let dir = tmp_dir("v18-to-v19");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..18] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 18").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO probes (probe_id, site_id, name, token_hash, created_at,
+                                     last_seen, public_ip, public_ip_at, interface, gateway)
+                 VALUES ('p-1', 's-1', 'Paris', 'h', 0, 500, '88.120.0.1', 100, 'en0', '10.6.8.1')",
+                [],
+            )
+            .unwrap();
+            // Une sonde qui n'a jamais annoncé d'adresse ne doit ouvrir aucun
+            // intervalle : un intervalle sans adresse ne veut rien dire.
+            conn.execute(
+                "INSERT INTO probes (probe_id, site_id, name, token_hash, created_at, last_seen)
+                 VALUES ('p-2', 's-1', 'Lyon', 'h', 0, 500)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+
+        let conn = db.conn.lock().unwrap();
+        let rows: Vec<(String, String, i64, i64)> = conn
+            .prepare(
+                "SELECT probe_id, public_ip, confirmed_from, confirmed_until
+                   FROM probe_public_ip_history",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows.len(), 1, "seule la sonde qui avait une adresse est reprise : {rows:?}");
+        assert_eq!(rows[0].0, "p-1");
+        assert_eq!(rows[0].1, "88.120.0.1");
+        assert_eq!(rows[0].2, 100, "l'intervalle part de la date du changement d'adresse");
+        assert_eq!(rows[0].3, 500, "et court jusqu'au dernier battement connu");
+        drop(conn);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
