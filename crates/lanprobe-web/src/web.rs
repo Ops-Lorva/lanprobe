@@ -3048,8 +3048,19 @@ async fn probe_public_ips(
     }
 }
 
+/// Longueur maximale d'un libellé de réseau.
+///
+/// Rien ne la bornait. Un libellé part dans tous les rapports remis aux
+/// clients et dans la colonne du tableau sous le graphe : un roman y serait
+/// illisible, et il n'y a aucune raison de laisser une saisie non bornée
+/// entrer en base.
+const MAX_NETWORK_LABEL_LEN: usize = 128;
+
 #[derive(Deserialize)]
 struct LabelBody {
+    /// Le site auquel appartient le réseau nommé. Obligatoire : c'est lui qui
+    /// rend le libellé vérifiable par la portée de l'appelant.
+    site_id: String,
     public_ip: String,
     /// Facultative : une sonde antérieure aux relevés de passerelle n'en a
     /// pas, et la clé la traite alors comme une chaîne vide.
@@ -3060,13 +3071,39 @@ struct LabelBody {
 
 /// Nomme un réseau (« Maison », « Bureau »).
 ///
-/// La clé est `(public_ip, gateway)` et non l'adresse seule : deux réseaux
-/// différents derrière un même opérateur partagent l'adresse publique.
-async fn set_network_label(State(state): State<AppState>, Json(body): Json<LabelBody>) -> Response {
-    match state
-        .db
-        .set_network_label(body.public_ip.trim(), body.gateway.trim(), &body.label)
-    {
+/// La clé est `(site_id, public_ip, gateway)`. Ni l'adresse seule ni le couple
+/// `(adresse, passerelle)` ne suffisent : deux réseaux derrière un même
+/// opérateur partagent l'adresse publique, et sous CGNAT deux CLIENTS la
+/// partagent aussi — avec, une fois sur deux, la même `192.168.1.1` de box.
+async fn set_network_label(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Json(body): Json<LabelBody>,
+) -> Response {
+    // ⚠️ Le rôle ne suffisait pas : un opérateur restreint à un site posait
+    // le libellé d'un autre client, et ce texte remonte dans le rapport SLA
+    // qu'on lui remet. Refus en 404 comme partout ailleurs — nommer un site
+    // qu'on n'a pas le droit de voir ne doit pas apprendre qu'il existe.
+    if let Err(refusal) = site_in_scope(&actor, &body.site_id) {
+        return refusal;
+    }
+    // Un site inexistant se solderait sinon par une violation de clé
+    // étrangère, donc un 500 : c'est un 404 que l'appelant doit lire.
+    if let Err(e) = state.db.get_site(body.site_id.trim()) {
+        return error_response(e);
+    }
+    if body.label.trim().chars().count() > MAX_NETWORK_LABEL_LEN {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            &format!("libellé limité à {MAX_NETWORK_LABEL_LEN} caractères"),
+        );
+    }
+    match state.db.set_network_label(
+        body.site_id.trim(),
+        body.public_ip.trim(),
+        body.gateway.trim(),
+        &body.label,
+    ) {
         Ok(()) => ok_json(json!({ "ok": true })),
         Err(e) => error_response(e),
     }
@@ -5938,6 +5975,7 @@ mod tests {
         let h = Harness::with_admin().await;
         let session = h.login().await;
         let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        let site_id = h.state.db.get_probe(&probe_id).unwrap().site_id;
         heartbeat_from(
             &h,
             &probe_id,
@@ -5953,6 +5991,7 @@ mod tests {
                     "PUT",
                     "/api/networks/label",
                     serde_json::json!({
+                        "site_id": site_id,
                         "public_ip": "88.120.0.1",
                         "gateway": "10.6.8.1",
                         "label": "Maison"
@@ -5970,6 +6009,141 @@ mod tests {
             ))
             .await;
         assert_eq!(sla["public_ip_history"][0]["label"], "Maison");
+    }
+
+    #[tokio::test]
+    async fn an_operator_out_of_scope_cannot_name_a_network() {
+        // ⚠️ Le libellé remonte dans le RAPPORT SLA du site. Un opérateur
+        // restreint qui pourrait le poser écrirait un texte arbitraire dans un
+        // document remis au client d'un autre.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        let site_id = h.state.db.get_probe(&probe_id).unwrap().site_id;
+        heartbeat_from(
+            &h,
+            &probe_id,
+            &token,
+            "203.0.113.10",
+            serde_json::json!({ "public_ip": "88.120.0.1", "gateway": "10.6.8.1" }),
+        )
+        .await;
+
+        // Un autre site, seul dans la portée de l'opérateur.
+        let autre = h.state.db.create_site("Martin").unwrap();
+        h.user("olivier", Role::Operator).await;
+        h.state
+            .db
+            .set_user_sites("olivier", &[autre.site_id.clone()])
+            .unwrap();
+        let restreint = h.login_as("olivier").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/networks/label",
+                    serde_json::json!({
+                        "site_id": site_id,
+                        "public_ip": "88.120.0.1",
+                        "gateway": "10.6.8.1",
+                        "label": "Chez le concurrent"
+                    }),
+                ),
+                &restreint,
+            ))
+            .await;
+        // ⚠️ 404 et non 403 : « ça existe mais pas pour vous » révèle déjà
+        // l'existence du site d'un autre client.
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // Et RIEN n'a été écrit : un refus qui laisse une trace en base n'est
+        // pas un refus.
+        let (_, sla, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                &session,
+            ))
+            .await;
+        assert!(
+            sla["public_ip_history"][0]["label"].is_null(),
+            "aucun libellé ne doit avoir été posé : {sla}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_sites_behind_the_same_public_ip_keep_their_own_label() {
+        // ⚠️ Sous CGNAT deux clients partagent l'adresse publique, et
+        // `192.168.1.1` est la passerelle d'une box sur deux. Sans dimension de
+        // site, « Maison de Durand » s'affichait dans le rapport de Martin.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (durand, t_durand) = h.enroll(&session, "Durand", "Paris").await;
+        let (martin, t_martin) = h.enroll(&session, "Martin", "Lyon").await;
+        let identite =
+            serde_json::json!({ "public_ip": "88.120.0.1", "gateway": "192.168.1.1" });
+        heartbeat_from(&h, &durand, &t_durand, "203.0.113.10", identite.clone()).await;
+        heartbeat_from(&h, &martin, &t_martin, "203.0.113.10", identite).await;
+
+        for (probe_id, label) in [(&durand, "Maison de Durand"), (&martin, "Bureau de Martin")] {
+            let site_id = h.state.db.get_probe(probe_id).unwrap().site_id;
+            let (status, body, _) = h
+                .call(with_cookie(
+                    json_request(
+                        "PUT",
+                        "/api/networks/label",
+                        serde_json::json!({
+                            "site_id": site_id,
+                            "public_ip": "88.120.0.1",
+                            "gateway": "192.168.1.1",
+                            "label": label
+                        }),
+                    ),
+                    &session,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+
+        for (probe_id, attendu) in [(&durand, "Maison de Durand"), (&martin, "Bureau de Martin")] {
+            let (_, sla, _) = h
+                .call(with_cookie(
+                    empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                    &session,
+                ))
+                .await;
+            assert_eq!(
+                sla["public_ip_history"][0]["label"], attendu,
+                "chaque site garde le sien : {sla}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_label_longer_than_the_bound_is_refused() {
+        // Rien ne bornait la longueur : un libellé se retrouve dans tous les
+        // rapports, un roman n'y a pas sa place.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+        let site_id = h.state.db.get_probe(&probe_id).unwrap().site_id;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/networks/label",
+                    serde_json::json!({
+                        "site_id": site_id,
+                        "public_ip": "88.120.0.1",
+                        "gateway": "10.6.8.1",
+                        "label": "M".repeat(129)
+                    }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
     #[test]

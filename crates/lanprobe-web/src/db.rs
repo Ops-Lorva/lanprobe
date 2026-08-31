@@ -420,6 +420,18 @@ const MIGRATIONS: &[&str] = &[
     // parce que deux réseaux derrière un même opérateur partagent l'adresse
     // publique.
     //
+    // ⚠️ **Le SITE fait partie de la clé, lui aussi.** `(public_ip, gateway)`
+    // n'est PAS unique entre clients : sous CGNAT deux sites sortent par la
+    // même adresse publique, et `192.168.1.1` est la passerelle par défaut
+    // d'une box sur deux. Sans cette colonne, un libellé nominatif saisi pour
+    // le site A (« Maison de Durand ») s'affichait dans le rapport SLA remis
+    // au client du site B. C'est aussi ce qui donne au libellé une portée
+    // vérifiable : sans site, aucune garde de portée n'a de prise dessus.
+    //
+    // `ON DELETE CASCADE` : le libellé d'un site qui n'existe plus ne veut
+    // rien dire, et sans cascade la clé étrangère ferait échouer la
+    // suppression d'un site vidé de ses sondes.
+    //
     // `observed_source_ip` est l'adresse source du battement précédent. Elle
     // ne sert QU'À détecter un changement : la valeur enregistrée dans
     // l'historique est toujours celle relevée par la sonde via son interface
@@ -444,10 +456,11 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE TABLE network_labels (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      site_id    TEXT NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
       public_ip  TEXT NOT NULL,
       gateway    TEXT NOT NULL DEFAULT '',
       label      TEXT NOT NULL,
-      UNIQUE(public_ip, gateway)
+      UNIQUE(site_id, public_ip, gateway)
     );
 
     ALTER TABLE probes ADD COLUMN observed_source_ip TEXT;
@@ -2657,6 +2670,10 @@ impl Db {
     /// ancien au plus récent. Le libellé est joint ici : l'interface et le
     /// rapport Excel le veulent tous les deux, et le calculer deux fois
     /// laisserait deux définitions diverger.
+    ///
+    /// ⚠️ La jointure passe par le SITE de la sonde. Deux clients derrière la
+    /// même IP publique — le cas CGNAT — verraient sinon le libellé l'un de
+    /// l'autre remonter dans leur rapport SLA.
     pub fn public_ip_history(
         &self,
         probe_id: &str,
@@ -2668,8 +2685,10 @@ impl Db {
             "SELECT h.public_ip, h.interface, h.gateway, h.local_subnet,
                     h.confirmed_from, h.confirmed_until, l.label
                FROM probe_public_ip_history h
+               JOIN probes p ON p.probe_id = h.probe_id
           LEFT JOIN network_labels l
-                 ON l.public_ip = h.public_ip
+                 ON l.site_id = p.site_id
+                AND l.public_ip = h.public_ip
                 AND l.gateway = COALESCE(h.gateway, '')
               WHERE h.probe_id = ?1
                 AND h.confirmed_until >= ?2
@@ -2719,22 +2738,34 @@ impl Db {
         Ok(matches!(previous, Some(p) if p != observed))
     }
 
-    /// Pose ou remplace le libellé d'un réseau. Une chaîne vide l'efface :
-    /// l'utilisateur qui vide le champ veut retirer le libellé, pas en poser
-    /// un vide.
-    pub fn set_network_label(&self, public_ip: &str, gateway: &str, label: &str) -> DbResult<()> {
+    /// Pose ou remplace le libellé d'un réseau **dans un site**. Une chaîne
+    /// vide l'efface : l'utilisateur qui vide le champ veut retirer le
+    /// libellé, pas en poser un vide.
+    ///
+    /// ⚠️ Le site n'est pas décoratif : `(public_ip, gateway)` n'est unique
+    /// que DANS un site. Deux clients derrière la même sortie CGNAT et la même
+    /// passerelle de box partageraient sinon un libellé nominatif.
+    pub fn set_network_label(
+        &self,
+        site_id: &str,
+        public_ip: &str,
+        gateway: &str,
+        label: &str,
+    ) -> DbResult<()> {
         let conn = self.lock()?;
         if label.trim().is_empty() {
             conn.execute(
-                "DELETE FROM network_labels WHERE public_ip = ?1 AND gateway = ?2",
-                rusqlite::params![public_ip, gateway],
+                "DELETE FROM network_labels
+                  WHERE site_id = ?1 AND public_ip = ?2 AND gateway = ?3",
+                rusqlite::params![site_id, public_ip, gateway],
             )?;
             return Ok(());
         }
         conn.execute(
-            "INSERT INTO network_labels (public_ip, gateway, label) VALUES (?1, ?2, ?3)
-             ON CONFLICT(public_ip, gateway) DO UPDATE SET label = excluded.label",
-            rusqlite::params![public_ip, gateway, label.trim()],
+            "INSERT INTO network_labels (site_id, public_ip, gateway, label)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(site_id, public_ip, gateway) DO UPDATE SET label = excluded.label",
+            rusqlite::params![site_id, public_ip, gateway, label.trim()],
         )?;
         Ok(())
     }
@@ -4731,8 +4762,9 @@ mod tests {
         // passerelle)`, pas à un intervalle. Repasser par le même réseau doit
         // le retrouver sans que personne ne le ressaisisse.
         let (db, probe) = db_with_probe();
+        let site = db.get_probe(&probe).unwrap().site_id;
         beat_with_ip(&db, &probe, "88.120.0.1");
-        db.set_network_label("88.120.0.1", "10.6.8.1", "Maison").unwrap();
+        db.set_network_label(&site, "88.120.0.1", "10.6.8.1", "Maison").unwrap();
         beat_with_ip(&db, &probe, "172.58.0.9");
         beat_with_ip(&db, &probe, "88.120.0.1");
 
@@ -4744,16 +4776,52 @@ mod tests {
 
         // Vider le champ retire le libellé : l'utilisateur qui efface veut
         // retirer, pas poser un libellé vide.
-        db.set_network_label("88.120.0.1", "10.6.8.1", "  ").unwrap();
+        db.set_network_label(&site, "88.120.0.1", "10.6.8.1", "  ").unwrap();
         let rows = db.public_ip_history(&probe, 0, i64::MAX).unwrap();
         assert!(rows.iter().all(|r| r.label.is_none()));
     }
 
     #[test]
+    fn a_label_never_crosses_over_to_another_site() {
+        // ⚠️ Sous CGNAT deux clients sortent par la MÊME adresse publique, et
+        // `192.168.1.1` est la passerelle par défaut d'une box sur deux. Sans
+        // dimension de site, « Maison de Durand » s'affichait dans le rapport
+        // remis à Martin.
+        let (db, durand) = db_with_probe();
+        let site_durand = db.get_probe(&durand).unwrap().site_id;
+        let site_martin = db.create_site("Martin").unwrap().site_id;
+        let (martin, _) = db.enroll_probe(&site_martin, "Lyon").unwrap();
+
+        for probe in [&durand, &martin.probe_id] {
+            let identity = ProbeIdentity {
+                public_ip: Some("88.120.0.1".into()),
+                gateway: Some("192.168.1.1".into()),
+                ..Default::default()
+            };
+            db.record_heartbeat(probe, None, None, 0, &identity).unwrap();
+        }
+        db.set_network_label(&site_durand, "88.120.0.1", "192.168.1.1", "Maison de Durand")
+            .unwrap();
+
+        assert_eq!(
+            db.public_ip_history(&durand, 0, i64::MAX).unwrap()[0]
+                .label
+                .as_deref(),
+            Some("Maison de Durand")
+        );
+        assert_eq!(
+            db.public_ip_history(&martin.probe_id, 0, i64::MAX).unwrap()[0].label,
+            None,
+            "le libellé de Durand n'a rien à faire chez Martin"
+        );
+    }
+
+    #[test]
     fn the_purge_drops_old_intervals_but_never_the_labels() {
         let (db, probe) = db_with_probe();
+        let site = db.get_probe(&probe).unwrap().site_id;
         beat_with_ip(&db, &probe, "88.120.0.1");
-        db.set_network_label("88.120.0.1", "10.6.8.1", "Maison").unwrap();
+        db.set_network_label(&site, "88.120.0.1", "10.6.8.1", "Maison").unwrap();
 
         let dropped = db.purge_public_ip_history(now() + 1).unwrap();
         assert_eq!(dropped, 1);
