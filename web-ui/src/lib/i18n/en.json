@@ -123,7 +123,7 @@
     "hub_url_hint": "The address your probes use to reach this hub. It is the only address setting: everything else follows from it.",
     "proxies_title": "Trusted proxies",
     "proxies_label": "Reverse proxies whose header is accepted",
-    "proxies_hint": "Comma-separated CIDRs, e.g. 10.0.0.0/8, 172.16.0.0/12. Leave it empty if the hub is reached directly. Fill it in only if the hub sits behind a reverse proxy you control: without this list, X-Forwarded-For is ignored — that is intended, the header is written by the client.",
+    "proxies_hint": "Comma-separated CIDRs, e.g. 10.0.0.0/8, 172.16.0.0/12. Leave it empty if the hub is reached directly. Fill it in only if the hub sits behind a reverse proxy you control: without this list, X-Forwarded-For is ignored — that is intended, the header is written by the client. 0.0.0.0/0 is refused: it would trust everyone, and any client could then forge its address.",
     "hub_version_title": "Version",
     "hub_version": "Hub {version}",
     "loss_title": "These changes delete data",

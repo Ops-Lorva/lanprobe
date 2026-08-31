@@ -1066,6 +1066,19 @@ on s'arrête au premier saut hors liste.
 portent l'adresse du proxy ; en acceptant l'en-tête naïvement, n'importe qui forge la
 sienne — l'en-tête est écrit par le client.
 
+⚠️ **`0.0.0.0/0` et `::/0` sont REFUSÉS.** C'est la saisie naturelle de qui se dit « je suis
+derrière un proxy, je ne connais pas sa plage, j'autorise tout » — et elle rend **tous** les
+sauts de confiance : le hub retiendrait le premier de la chaîne, celui que le client écrit
+lui-même. Le réglage aurait l'air posé sans plus rien protéger. Aucun montage n'en a besoin :
+un proxy local s'écrit `127.0.0.1/32`, et sur socket unix il n'y a pas d'adresse de pair.
+Une plage réelle, même large, reste acceptée — on refuse le fourre-tout, pas la permissivité
+assumée.
+
+⚠️ Une liste dont **aucune** entrée n'est un CIDR lisible est refusée elle aussi : les entrées
+fautives sont écartées pour qu'un réglage à moitié juste protège le reste, mais une faute de
+frappe sur la seule entrée donnerait une liste vide, c'est-à-dire un réglage silencieusement
+inerte.
+
 ### Historique des adresses
 
 Le hub tient un intervalle par adresse : `public_ip`, `interface`, `gateway`,

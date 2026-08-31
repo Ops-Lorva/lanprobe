@@ -123,7 +123,7 @@
     "hub_url_hint": "L'adresse par laquelle vos sondes joignent ce hub. C'est le seul réglage d'adresse : tout le reste en découle.",
     "proxies_title": "Proxies de confiance",
     "proxies_label": "Reverse proxies dont l'en-tête est accepté",
-    "proxies_hint": "CIDR séparés par des virgules, ex. 10.0.0.0/8, 172.16.0.0/12. Laissez vide si le hub est joint directement. Renseignez-le uniquement si le hub est derrière un reverse proxy que vous contrôlez : sans cette liste, X-Forwarded-For est ignoré — c'est voulu, l'en-tête est écrit par le client.",
+    "proxies_hint": "CIDR séparés par des virgules, ex. 10.0.0.0/8, 172.16.0.0/12. Laissez vide si le hub est joint directement. Renseignez-le uniquement si le hub est derrière un reverse proxy que vous contrôlez : sans cette liste, X-Forwarded-For est ignoré — c'est voulu, l'en-tête est écrit par le client. 0.0.0.0/0 est refusé : il accorderait la confiance à tout le monde et n'importe quel client pourrait forger son adresse.",
     "hub_version_title": "Version",
     "hub_version": "Hub {version}",
     "loss_title": "Ces changements suppriment des données",

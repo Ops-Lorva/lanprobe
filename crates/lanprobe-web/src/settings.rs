@@ -317,6 +317,27 @@ impl Settings {
                             "CIDR illisible : {entry} — attendu par exemple 10.0.0.0/8"
                         )));
                     }
+                    // ⚠️ `/0` est refusé. C'est la saisie naturelle de qui se
+                    // dit « je suis derrière un proxy, je ne connais pas sa
+                    // plage, j'autorise tout » — et elle rend TOUS les sauts de
+                    // confiance : le hub retient alors le premier de la chaîne
+                    // `X-Forwarded-For`, celui que le client écrit lui-même.
+                    // N'importe quelle sonde se fait passer pour n'importe
+                    // quelle adresse, et le réglage a l'air posé tout en ne
+                    // protégeant plus rien.
+                    //
+                    // Aucun montage n'en a besoin : un proxy en local s'écrit
+                    // `127.0.0.1/32`, et sur socket unix il n'y a pas d'adresse
+                    // de pair du tout.
+                    if crate::client_ip::is_catch_all(entry) {
+                        return Err(DbError::Conflict(format!(
+                            "{entry} accorderait la confiance à tout le monde : \
+                             n'importe quel client pourrait alors forger son adresse. \
+                             Indiquez la plage réelle de votre proxy — par exemple \
+                             172.16.0.0/12 pour un réseau Docker, ou 127.0.0.1/32 \
+                             pour un proxy sur la même machine."
+                        )));
+                    }
                 }
             }
             keys::BACKUP_ENABLED | keys::TLS_ENABLED => {
@@ -497,6 +518,33 @@ mod tests {
         assert_eq!(s.all()[keys::TRUSTED_PROXIES], serde_json::json!(""));
         s.put(keys::TRUSTED_PROXIES, "10.0.0.0/8", false).unwrap();
         assert_eq!(s.all()[keys::TRUSTED_PROXIES], serde_json::json!("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn a_catch_all_prefix_is_refused_with_a_usable_message() {
+        // ⚠️ `/0` rend tous les sauts de confiance : le hub retiendrait alors
+        // l'adresse que le client écrit lui-même. Le réglage aurait l'air posé
+        // et ne protégerait plus rien — le mode de panne que ce dépôt refuse.
+        let s = settings();
+        for catch_all in ["0.0.0.0/0", "::/0", "10.0.0.0/8, 0.0.0.0/0"] {
+            let err = s
+                .put(keys::TRUSTED_PROXIES, catch_all, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("forger son adresse"),
+                "message inexploitable pour {catch_all} : {err}"
+            );
+        }
+        assert!(
+            s.trusted_proxies().is_empty(),
+            "un refus qui laisse une trace en base n'est pas un refus"
+        );
+        // Une plage réelle, même large, reste acceptée : on refuse `/0`, pas
+        // les réglages permissifs que l'utilisateur assume.
+        s.put(keys::TRUSTED_PROXIES, "10.0.0.0/8, 172.16.0.0/12", false)
+            .unwrap();
+        assert_eq!(s.trusted_proxies().len(), 2);
     }
 
     #[test]

@@ -55,6 +55,17 @@ impl IpNet {
     }
 }
 
+/// Vrai si l'entrée est un préfixe fourre-tout (`0.0.0.0/0`, `::/0`).
+///
+/// ⚠️ Un tel préfixe rend **tous** les sauts de confiance : `resolve` ne casse
+/// jamais sa boucle et retourne le saut le plus à gauche de `X-Forwarded-For`,
+/// que le client écrit lui-même. Le réglage a alors l'air posé sans protéger
+/// quoi que ce soit — c'est exactement la valeur plausible et fausse que ce
+/// dépôt refuse. La validation de `trusted_proxies` s'en sert pour dire non.
+pub fn is_catch_all(entry: &str) -> bool {
+    parse_cidrs(entry).iter().any(|n| n.bits == 0)
+}
+
 /// Analyse une liste de CIDR séparés par des virgules. Une entrée illisible est
 /// ignorée : un réglage à moitié fautif ne doit pas désactiver tout le reste.
 /// Une adresse nue vaut un préfixe complet (`/32` ou `/128`).
