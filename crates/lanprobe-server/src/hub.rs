@@ -42,6 +42,15 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// et c'est le **changement** qui informe — pas la fraîcheur.
 pub const PUBLIC_IP_TTL: Duration = Duration::from_secs(6 * 3600);
 
+/// Plancher entre deux relevés **forcés**.
+///
+/// Le TTL long protège du martèlement en régime normal ; ce plancher protège du
+/// cas pathologique. Une sortie multi-WAN en répartition de charge fait alterner
+/// l'adresse source d'un battement à l'autre : le hub demanderait alors un
+/// relevé à chaque fois, et on martèlerait le service tiers exactement comme le
+/// TTL cherchait à l'éviter. C'est un compteur en mémoire, jamais un réglage.
+pub const FORCED_REFRESH_FLOOR: Duration = Duration::from_secs(5 * 60);
+
 // ── Ce que la sonde retient ────────────────────────────────────────────────
 
 /// Coordonnées d'écriture InfluxDB remises à l'enrôlement.
@@ -137,6 +146,13 @@ struct CachedPublicIp {
     /// Interface pour laquelle l'adresse a été relevée. Une bascule sur un
     /// lien de secours change l'IP publique.
     interface: Option<String>,
+    /// Passerelle et adresses locales au moment du relevé.
+    ///
+    /// ⚠️ Elles comptent autant que le nom d'interface : passer du Wi-Fi de la
+    /// maison à celui d'un café garde « en0 ». Sans elles, l'adresse publique
+    /// affichée restait fausse jusqu'à six heures — c'était le défaut d'origine.
+    gateway: Option<String>,
+    local_ips: Vec<String>,
     /// `None` quand le dernier relevé a échoué et qu'aucune valeur antérieure
     /// n'était utilisable.
     ip: Option<String>,
@@ -151,31 +167,48 @@ pub struct PublicIpCache {
 }
 
 impl PublicIpCache {
-    /// Vrai s'il faut refaire l'appel sortant : jamais vue, interface
-    /// changée, ou plus vieille que `PUBLIC_IP_TTL`.
-    fn needs_refresh(&self, interface: Option<&str>, now: Instant) -> bool {
+    /// Vrai s'il faut refaire l'appel sortant : jamais vue, réseau changé,
+    /// relevé demandé par le hub, ou plus vieille que `PUBLIC_IP_TTL`.
+    fn needs_refresh(&self, identity: &NetworkIdentity, forced: bool, now: Instant) -> bool {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        match guard.as_ref() {
-            None => true,
-            Some(c) => {
-                c.interface.as_deref() != interface
-                    || now.duration_since(c.asked_at) >= PUBLIC_IP_TTL
-            }
+        let Some(c) = guard.as_ref() else {
+            return true;
+        };
+        // ⚠️ La passerelle et les adresses locales comptent autant que le nom
+        // d'interface : passer du Wi-Fi de la maison à celui d'un café garde
+        // « en0 », et l'interface seule ne détecte alors rien.
+        if c.interface != identity.interface
+            || c.gateway != identity.gateway
+            || c.local_ips != identity.local_ips
+        {
+            return true;
         }
+        // Le hub a vu l'adresse source du battement bouger. On l'écoute, mais
+        // jamais plus souvent que le plancher : c'est un indice, pas un ordre.
+        if forced {
+            return now.duration_since(c.asked_at) >= FORCED_REFRESH_FLOOR;
+        }
+        now.duration_since(c.asked_at) >= PUBLIC_IP_TTL
     }
 
     /// Enregistre le résultat d'un relevé. Un échec (`ip` à `None`) conserve
-    /// la dernière valeur connue **si l'interface n'a pas changé** : sinon
-    /// l'adresse de l'ancienne interface n'a plus rien à voir avec la
-    /// nouvelle, et la garder serait un mensonge.
-    fn store(&self, interface: Option<&str>, ip: Option<String>, now: Instant) {
+    /// la dernière valeur connue **si le réseau n'a pas changé** : sinon
+    /// l'adresse de l'ancien réseau n'a plus rien à voir avec le nouveau, et
+    /// la garder serait un mensonge.
+    fn store(&self, identity: &NetworkIdentity, ip: Option<String>, now: Instant) {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let previous = guard
             .as_ref()
-            .filter(|c| c.interface.as_deref() == interface)
+            .filter(|c| {
+                c.interface == identity.interface
+                    && c.gateway == identity.gateway
+                    && c.local_ips == identity.local_ips
+            })
             .and_then(|c| c.ip.clone());
         *guard = Some(CachedPublicIp {
-            interface: interface.map(str::to_string),
+            interface: identity.interface.clone(),
+            gateway: identity.gateway.clone(),
+            local_ips: identity.local_ips.clone(),
             ip: ip.or(previous),
             asked_at: now,
         });
@@ -237,8 +270,16 @@ fn source_address(identity: &NetworkIdentity) -> Option<std::net::Ipv4Addr> {
 
 /// Rafraîchit l'IP publique **si et seulement si** le cache l'exige. Un échec
 /// n'est pas une erreur de battement : la sonde envoie ce qu'elle sait.
-async fn refresh_public_ip(cache: &PublicIpCache, identity: &NetworkIdentity, now: Instant) {
-    if !cache.needs_refresh(identity.interface.as_deref(), now) {
+///
+/// `forced` porte les déclencheurs qui ne se voient pas d'ici : la demande du
+/// hub et le retour d'internet. Le cache reste seul juge du plancher.
+async fn refresh_public_ip(
+    cache: &PublicIpCache,
+    identity: &NetworkIdentity,
+    forced: bool,
+    now: Instant,
+) {
+    if !cache.needs_refresh(identity, forced, now) {
         return;
     }
     // ⚠️ Une interface choisie mais sans adresse ne doit produire AUCUNE IP
@@ -252,7 +293,7 @@ async fn refresh_public_ip(cache: &PublicIpCache, identity: &NetworkIdentity, no
     // mensongère au milieu de mesures honnêtes est pire que pas de valeur.
     let source = source_address(identity);
     if identity.interface.is_some() && source.is_none() {
-        cache.store(identity.interface.as_deref(), None, now);
+        cache.store(identity, None, now);
         return;
     }
     let found = lanprobe_core::public_ip::get_public_ip(source)
@@ -261,7 +302,7 @@ async fn refresh_public_ip(cache: &PublicIpCache, identity: &NetworkIdentity, no
         .inspect_err(|e| tracing::debug!("hub : IP publique indisponible ({e})"))
         .ok()
         .filter(|ip| !ip.is_empty());
-    cache.store(identity.interface.as_deref(), found, now);
+    cache.store(identity, found, now);
 }
 
 // ── Dialogue avec le hub ───────────────────────────────────────────────────
@@ -333,6 +374,14 @@ pub struct HeartbeatResponse {
     /// n'envoie pas ce champ : la liste est alors simplement vide.
     #[serde(default)]
     pub commands: Vec<crate::commands::Command>,
+    /// Le hub a vu l'adresse source du battement changer et demande un relevé
+    /// d'IP publique (contrat § 15).
+    ///
+    /// ⚠️ Absent d'un hub antérieur : la sonde garde alors ses seuls
+    /// déclencheurs locaux, ce qui est exactement le comportement d'avant.
+    /// Dégradation, pas panne.
+    #[serde(default)]
+    pub recheck_public_ip: bool,
 }
 
 
@@ -809,6 +858,11 @@ pub async fn run(state: AppState, key: SecretKey, status: Arc<WriteStatus>) {
     // exécution pour battre ferait passer la sonde pour hors ligne pendant
     // qu'elle travaille.
     let mut pending_acks: Vec<crate::commands::Ack> = Vec::new();
+    // Demande de relevé formulée par le hub au battement PRÉCÉDENT : sa réponse
+    // arrive forcément trop tard pour le battement en cours.
+    let mut recheck_requested = false;
+    // Sert à repérer la transition `offline` → `online`, pas l'état lui-même.
+    let mut previous_internet: Option<String> = None;
 
     loop {
         let config = load(&state);
@@ -822,9 +876,30 @@ pub async fn run(state: AppState, key: SecretKey, status: Arc<WriteStatus>) {
         let interval = Duration::from_secs(config.heartbeat_interval_secs.max(5));
         let (buffered_points, _) = status.read();
         let acks = std::mem::take(&mut pending_acks);
-        match beat(&state, &key, &config, &status, &public_ip, acks).await {
+
+        // Une transition `offline` → `online` veut dire qu'on vient de
+        // raccrocher : souvent sur un autre lien, donc sous une autre adresse.
+        // C'est un déclencheur purement local, il marche même quand le hub vit
+        // dans le LAN des sondes et ne voit jamais d'adresse publique.
+        let current_internet = internet_state(&state);
+        let came_back = matches!(previous_internet.as_deref(), Some("offline"))
+            && matches!(current_internet.as_deref(), Some("online"));
+        previous_internet = current_internet;
+
+        match beat(
+            &state,
+            &key,
+            &config,
+            &status,
+            &public_ip,
+            recheck_requested || came_back,
+            acks,
+        )
+        .await
+        {
             Ok(response) => {
                 backoff = Duration::from_secs(5);
+                recheck_requested = response.recheck_public_ip;
                 state.hub.record_success(buffered_points, unix_now());
                 let commands = response.commands.clone();
                 if let Err(e) = apply(&state, &key, &config, response) {
@@ -852,6 +927,9 @@ async fn beat(
     config: &HubConfig,
     status: &WriteStatus,
     public_ip: &PublicIpCache,
+    // Relevé d'IP publique demandé par le hub ou par un retour d'internet.
+    // Le cache garde le dernier mot : il applique son plancher de 5 minutes.
+    forced_public_ip: bool,
     command_acks: Vec<crate::commands::Ack>,
 ) -> Result<HeartbeatResponse, BeatError> {
     // Un secret local illisible ne se répare pas en réessayant : c'est un
@@ -860,7 +938,7 @@ async fn beat(
     let (buffered_points, last_write_ok) = status.read();
 
     let identity = network_identity(state);
-    refresh_public_ip(public_ip, &identity, Instant::now()).await;
+    refresh_public_ip(public_ip, &identity, forced_public_ip, Instant::now()).await;
 
     // ⚠️ Une interface sélectionnée sans IPv4 fait échouer le battement plutôt
     // que de le laisser sortir ailleurs. C'est voulu : la sonde doit alors
@@ -882,12 +960,7 @@ async fn beat(
             influx_token_version: config.influx.token_version,
             command_acks,
             monitors: monitor_states(state),
-            internet_state: state.internet.snapshot().map(|t| {
-                serde_json::to_value(&t.state)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_string))
-                    .unwrap_or_else(|| "offline".into())
-            }),
+            internet_state: internet_state(state),
             public_ip: public_ip.value(),
             interface: identity.interface.clone(),
             local_ips: identity.local_ips.clone(),
@@ -908,6 +981,20 @@ async fn beat(
         .json::<HeartbeatResponse>()
         .await
         .map_err(|e| BeatError::Transient(format!("réponse illisible : {e}")))
+}
+
+/// Verdict internet vu par la sonde, sous la forme envoyée au hub.
+///
+/// La boucle et le battement le lisent tous les deux — l'une pour repérer la
+/// transition `offline` → `online`, l'autre pour le remonter. Un seul endroit
+/// pour le calculer : deux définitions finiraient par diverger.
+fn internet_state(state: &AppState) -> Option<String> {
+    state.internet.snapshot().map(|t| {
+        serde_json::to_value(&t.state)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "offline".into())
+    })
 }
 
 /// Horodatage UNIX en secondes.
@@ -1226,18 +1313,28 @@ mod tests {
         assert_eq!(json["last_error"], "réseau coupé");
     }
 
+    /// Identité réseau minimale pour les tests du cache d'IP publique.
+    fn identity(interface: &str, gateway: &str) -> NetworkIdentity {
+        NetworkIdentity {
+            interface: Some(interface.into()),
+            local_ips: vec!["10.6.8.42/24".into()],
+            gateway: Some(gateway.into()),
+        }
+    }
+
     #[test]
     fn the_public_ip_is_not_asked_again_before_six_hours() {
         // Le demander à chaque battement, c'est marteler un service gratuit
         // et publier son trafic à intervalle régulier.
         let cache = PublicIpCache::default();
         let t0 = Instant::now();
-        assert!(cache.needs_refresh(Some("en0"), t0), "cache vide");
-        cache.store(Some("en0"), Some("88.120.0.1".into()), t0);
+        let net = identity("en0", "10.6.8.1");
+        assert!(cache.needs_refresh(&net, false, t0), "cache vide");
+        cache.store(&net, Some("88.120.0.1".into()), t0);
 
-        assert!(!cache.needs_refresh(Some("en0"), t0 + Duration::from_secs(60)));
-        assert!(!cache.needs_refresh(Some("en0"), t0 + PUBLIC_IP_TTL - Duration::from_secs(1)));
-        assert!(cache.needs_refresh(Some("en0"), t0 + PUBLIC_IP_TTL));
+        assert!(!cache.needs_refresh(&net, false, t0 + Duration::from_secs(60)));
+        assert!(!cache.needs_refresh(&net, false, t0 + PUBLIC_IP_TTL - Duration::from_secs(1)));
+        assert!(cache.needs_refresh(&net, false, t0 + PUBLIC_IP_TTL));
         assert_eq!(cache.value().as_deref(), Some("88.120.0.1"));
     }
 
@@ -1247,8 +1344,73 @@ mod tests {
         // seul moment où sa fraîcheur compte vraiment.
         let cache = PublicIpCache::default();
         let t0 = Instant::now();
-        cache.store(Some("en0"), Some("88.120.0.1".into()), t0);
-        assert!(cache.needs_refresh(Some("en1"), t0 + Duration::from_secs(1)));
+        cache.store(&identity("en0", "10.6.8.1"), Some("88.120.0.1".into()), t0);
+        assert!(cache.needs_refresh(
+            &identity("en1", "10.6.8.1"),
+            false,
+            t0 + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn a_new_gateway_forces_a_fresh_lookup_even_on_the_same_interface() {
+        // Changer de Wi-Fi garde « en0 ». Sans ce déclencheur, l'adresse reste
+        // fausse jusqu'à six heures — c'est le défaut d'origine.
+        let cache = PublicIpCache::default();
+        let t0 = Instant::now();
+        cache.store(&identity("en0", "10.6.8.1"), Some("88.120.0.1".into()), t0);
+
+        assert!(!cache.needs_refresh(&identity("en0", "10.6.8.1"), false, t0));
+        assert!(cache.needs_refresh(&identity("en0", "192.168.1.1"), false, t0));
+    }
+
+    #[test]
+    fn a_new_local_address_forces_a_fresh_lookup() {
+        // Deux réseaux peuvent annoncer la même passerelle (`192.168.1.1` est
+        // le défaut de la moitié des box) : l'adresse locale est le dernier
+        // signe local qu'on a changé de réseau.
+        let cache = PublicIpCache::default();
+        let t0 = Instant::now();
+        cache.store(&identity("en0", "10.6.8.1"), Some("88.120.0.1".into()), t0);
+
+        let moved = NetworkIdentity {
+            interface: Some("en0".into()),
+            local_ips: vec!["10.6.9.42/24".into()],
+            gateway: Some("10.6.8.1".into()),
+        };
+        assert!(cache.needs_refresh(&moved, false, t0));
+    }
+
+    #[test]
+    fn the_hub_can_force_a_lookup() {
+        // Le hub a vu l'adresse source bouger : sa demande passe outre le TTL
+        // de six heures, sur un réseau qui n'a pourtant rien changé localement.
+        let cache = PublicIpCache::default();
+        let t0 = Instant::now();
+        cache.store(&identity("en0", "10.6.8.1"), Some("88.120.0.1".into()), t0);
+
+        let past_the_floor = t0 + FORCED_REFRESH_FLOOR;
+        assert!(
+            !cache.needs_refresh(&identity("en0", "10.6.8.1"), false, past_the_floor),
+            "sans demande, le TTL de six heures s'applique encore"
+        );
+        assert!(cache.needs_refresh(&identity("en0", "10.6.8.1"), true, past_the_floor));
+    }
+
+    #[test]
+    fn a_forced_lookup_is_floored_at_five_minutes() {
+        // Une sortie multi-WAN en répartition de charge alterne l'IP source à
+        // chaque battement : sans plancher on martèlerait le service tiers, ce
+        // que le TTL de six heures cherchait justement à éviter.
+        let cache = PublicIpCache::default();
+        let t0 = Instant::now();
+        cache.store(&identity("en0", "10.6.8.1"), Some("88.120.0.1".into()), t0);
+
+        let just_after = t0 + Duration::from_secs(60);
+        assert!(!cache.needs_refresh(&identity("en0", "10.6.8.1"), true, just_after));
+
+        let later = t0 + Duration::from_secs(5 * 60 + 1);
+        assert!(cache.needs_refresh(&identity("en0", "10.6.8.1"), true, later));
     }
 
     #[test]
@@ -1257,11 +1419,12 @@ mod tests {
         // sait, pas rien du tout.
         let cache = PublicIpCache::default();
         let t0 = Instant::now();
-        cache.store(Some("en0"), Some("88.120.0.1".into()), t0);
-        cache.store(Some("en0"), None, t0 + PUBLIC_IP_TTL);
+        let net = identity("en0", "10.6.8.1");
+        cache.store(&net, Some("88.120.0.1".into()), t0);
+        cache.store(&net, None, t0 + PUBLIC_IP_TTL);
         assert_eq!(cache.value().as_deref(), Some("88.120.0.1"));
         // …et on ne réessaie pas dans la foulée.
-        assert!(!cache.needs_refresh(Some("en0"), t0 + PUBLIC_IP_TTL + Duration::from_secs(60)));
+        assert!(!cache.needs_refresh(&net, false, t0 + PUBLIC_IP_TTL + Duration::from_secs(60)));
     }
 
     #[test]
@@ -1270,9 +1433,37 @@ mod tests {
         // nouvelle : la conserver serait un mensonge, pas une précaution.
         let cache = PublicIpCache::default();
         let t0 = Instant::now();
-        cache.store(Some("en0"), Some("88.120.0.1".into()), t0);
-        cache.store(Some("en1"), None, t0 + Duration::from_secs(1));
+        cache.store(&identity("en0", "10.6.8.1"), Some("88.120.0.1".into()), t0);
+        cache.store(&identity("en1", "10.6.8.1"), None, t0 + Duration::from_secs(1));
         assert_eq!(cache.value(), None);
+    }
+
+    #[test]
+    fn a_failed_lookup_after_a_network_change_forgets_the_address() {
+        // Même raison que ci-dessus : la passerelle a changé, donc le réseau.
+        // Garder l'adresse de l'ancien afficherait une valeur plausible et
+        // fausse au milieu de mesures honnêtes.
+        let cache = PublicIpCache::default();
+        let t0 = Instant::now();
+        cache.store(&identity("en0", "10.6.8.1"), Some("88.120.0.1".into()), t0);
+        cache.store(
+            &identity("en0", "192.168.1.1"),
+            None,
+            t0 + Duration::from_secs(1),
+        );
+        assert_eq!(cache.value(), None);
+    }
+
+    #[test]
+    fn a_hub_that_says_nothing_asks_for_no_recheck() {
+        // Compatibilité ascendante : un hub antérieur au champ n'envoie rien,
+        // la sonde doit garder ses seuls déclencheurs locaux. Dégradation,
+        // pas panne.
+        let r: HeartbeatResponse = serde_json::from_str("{}").unwrap();
+        assert!(!r.recheck_public_ip);
+
+        let r: HeartbeatResponse = serde_json::from_str(r#"{"recheck_public_ip":true}"#).unwrap();
+        assert!(r.recheck_public_ip);
     }
 
     #[test]
