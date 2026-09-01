@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { gapLimit, internetSamples, normalizeState, segments, seriesColor } from './charts';
+import {
+  curveTarget,
+  gapLimit,
+  internetSamples,
+  normalizeState,
+  segments,
+  seriesColor,
+} from './charts';
 
 describe('normalizeState', () => {
   it('ramène les états écrits par la sonde à un vocabulaire fermé', () => {
@@ -15,6 +22,27 @@ describe('normalizeState', () => {
     expect(normalizeState(null)).toBe('unknown');
     expect(normalizeState('dégradé')).toBe('unknown');
     expect(normalizeState(42)).toBe('unknown');
+  });
+});
+
+describe('curveTarget', () => {
+  it('préfère l’étiquette `ip`, qui est la source sûre', () => {
+    expect(
+      curveTarget({ label: 'latency_ms · 10.0.30.12', tags: { ip: '10.0.30.12' } }),
+    ).toBe('10.0.30.12');
+  });
+
+  it('retombe sur le libellé en lui retirant le nom du champ', () => {
+    // ⚠️ Un graphe titré « latency_ms · 10.0.30.12 » afficherait un nom de
+    // champ Influx à l'utilisateur ; comparé aux cibles annoncées par la
+    // sonde, ce libellé brut ne correspondait jamais à rien.
+    expect(curveTarget({ label: 'latency_ms · 10.0.30.12', tags: {} })).toBe('10.0.30.12');
+  });
+
+  it('rend une chaîne vide quand la courbe ne porte aucune cible', () => {
+    // Une sonde qui ne surveille rien de nommé donne une courbe sans
+    // étiquette : mieux vaut un titre générique que « latency_ms ».
+    expect(curveTarget({ label: 'latency_ms', tags: {} })).toBe('');
   });
 });
 

@@ -47,6 +47,7 @@
   let restartPending = $state(false);
   let retention = $state('0');
   let heartbeat = $state('60');
+  let realtimeDuration = $state('30');
   let backupEnabled = $state(true);
   let backupInterval = $state('24');
   let backupKeep = $state('7');
@@ -73,6 +74,10 @@
       .catch(() => {});
     retention = String(s.retention_days);
     heartbeat = String(s.heartbeat_interval_secs);
+    // `?? 30` : un hub antérieur à ce réglage ne le renvoie pas, et `undefined`
+    // dans un `<input>` laisserait un champ non contrôlé qui se croit modifié
+    // dès l'ouverture.
+    realtimeDuration = String(s.realtime_duration_min ?? 30);
     backupEnabled = s.backup_enabled;
     backupInterval = String(s.backup_interval_hours);
     backupKeep = String(s.backup_keep_last);
@@ -212,6 +217,7 @@
   // ── Enregistrement ───────────────────────────────────────────────────────
   const retentionNum = $derived(Number.parseInt(retention, 10));
   const heartbeatNum = $derived(Number.parseInt(heartbeat, 10));
+  const realtimeNum = $derived(Number.parseInt(realtimeDuration, 10));
   const intervalNum = $derived(Number.parseInt(backupInterval, 10));
   const keepNum = $derived(Number.parseInt(backupKeep, 10));
   const inventoryNum = $derived(Number.parseInt(inventoryDays, 10));
@@ -288,6 +294,7 @@
     if (hubUrl !== saved.hub_public_url) p.hub_public_url = hubUrl;
     if (retentionNum !== saved.retention_days) p.retention_days = retentionNum;
     if (heartbeatNum !== saved.heartbeat_interval_secs) p.heartbeat_interval_secs = heartbeatNum;
+    if (realtimeNum !== saved.realtime_duration_min) p.realtime_duration_min = realtimeNum;
     if (backupEnabled !== saved.backup_enabled) p.backup_enabled = backupEnabled;
     if (intervalNum !== saved.backup_interval_hours) p.backup_interval_hours = intervalNum;
     if (keepNum !== saved.backup_keep_last) p.backup_keep_last = keepNum;
@@ -520,6 +527,7 @@
     general:
       'hub_public_url' in patch ||
       'heartbeat_interval_secs' in patch ||
+      'realtime_duration_min' in patch ||
       'trusted_proxies' in patch,
     storage:
       'influx_url' in patch ||
@@ -576,6 +584,10 @@
     // affiche un réglage qu'elle n'applique pas.
     if (!Number.isInteger(heartbeatNum) || heartbeatNum < 5)
       return { msg: $_('settings.invalid_heartbeat'), tab: 'general' };
+    // Le hub exige un entier > 0. Une durée nulle armerait un mode déjà
+    // expiré : le bouton répondrait « c'est fait » sans que rien ne change.
+    if (!Number.isInteger(realtimeNum) || realtimeNum < 1)
+      return { msg: $_('settings.invalid_realtime'), tab: 'general' };
     // Le hub refuse une cadence nulle ou négative. On le dit ici plutôt que de
     // laisser partir la requête : le message serait le même, avec un aller-
     // retour et un champ qu'on ne saurait pas retrouver.
@@ -945,6 +957,28 @@
           />
           <span class="unit">{$_('settings.heartbeat_unit')}</span>
         </span>
+      </label>
+
+      <!--
+        ⚠️ Ce réglage est ce qui empêche la dérive silencieuse. Le mode temps
+        réel s'arme sonde par sonde depuis sa fiche, et personne ne revient
+        l'éteindre : sans extinction automatique, tout le parc finit par battre
+        toutes les 5 s, ça marche, et la charge a été multipliée sans raison.
+      -->
+      <label class="lp-field">
+        {$_('settings.realtime_label')}
+        <span class="unit-row">
+          <input
+            class="lp-input num"
+            type="number"
+            min="1"
+            step="1"
+            bind:value={realtimeDuration}
+            disabled={!$isAdmin}
+          />
+          <span class="unit">{$_('settings.realtime_unit')}</span>
+        </span>
+        <span class="hint">{$_('settings.realtime_hint')}</span>
       </label>
     </section>
 

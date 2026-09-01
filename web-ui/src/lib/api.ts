@@ -58,6 +58,16 @@ export interface Probe {
    */
   token_rotation_pending?: boolean;
   token_version?: number;
+  /**
+   * Échéance du mode temps réel, epoch en secondes. `null` ou passée = cadence
+   * normale.
+   *
+   * ⚠️ Aucune extinction n'est notifiée : le hub compare cette date à l'heure
+   * courante à chaque battement, et l'interface fait exactement pareil. Il n'y
+   * a donc rien à invalider, et une sonde ne peut pas rester affichée « en
+   * temps réel » après l'échéance.
+   */
+  realtime_until?: number | null;
 }
 
 /** Code d'enrôlement court, à usage unique (contrat § 3). */
@@ -189,6 +199,15 @@ export interface HubSettings {
    * n'importe qui forger son adresse source.
    */
   trusted_proxies: string;
+  /**
+   * Durée du mode temps réel, en minutes, avant extinction automatique.
+   *
+   * ⚠️ La minuterie n'est pas un confort : on redescend de l'échelle, la
+   * caméra marche, on passe à la suivante — personne ne revient éteindre le
+   * mode. Sans elle, tout le parc finit par battre toutes les 5 s sans que
+   * quiconque sache pourquoi.
+   */
+  realtime_duration_min: number;
 }
 
 export const SETTINGS_DEFAULTS: HubSettings = {
@@ -207,6 +226,7 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   inventory_days: 0,
   tls_enabled: false,
   trusted_proxies: '',
+  realtime_duration_min: 30,
 };
 
 // ── Sauvegarde ──────────────────────────────────────────────────────────────
@@ -873,6 +893,20 @@ export const api = {
     request<EnrollCode>(`/api/probes/${encodeURIComponent(id)}/reenroll-code`, {
       method: 'POST',
     }),
+
+  /**
+   * Arme ou désarme le mode temps réel sur une sonde.
+   *
+   * ⚠️ Le hub ne joint jamais la sonde : la nouvelle cadence voyage dans la
+   * réponse au battement. La réponse dit donc « c'est armé », pas « la sonde a
+   * changé de rythme » — il s'écoule jusqu'à une minute entre les deux, et
+   * l'écran doit l'annoncer.
+   */
+  setRealtime: (id: string, on: boolean) =>
+    request<{ ok: boolean; realtime_until: number | null }>(
+      `/api/probes/${encodeURIComponent(id)}/realtime`,
+      { method: 'POST', body: JSON.stringify({ on }) },
+    ),
 
   /** Rotation d'hygiène : l'ancienne clé ne meurt qu'après accusé de la sonde. */
   rotateToken: (id: string) =>

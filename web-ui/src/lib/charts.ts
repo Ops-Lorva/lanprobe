@@ -26,6 +26,23 @@ export function seriesColor(index: number): string {
   return `var(--lp-series-${n})`;
 }
 
+/**
+ * Cible que porte une courbe : l'adresse pinguée, le moteur de débit…
+ *
+ * ⚠️ L'étiquette Influx fait foi ; le libellé n'est qu'un repli, et son
+ * préfixe de champ doit tomber. Un graphe titré « latency_ms · 10.0.30.12 »
+ * afficherait un nom de champ Influx à l'utilisateur, et ce même libellé brut
+ * comparé aux cibles annoncées par la sonde ne correspondait jamais à rien.
+ *
+ * Chaîne vide = la courbe ne nomme aucune cible : à l'appelant de choisir un
+ * titre générique plutôt que d'afficher « latency_ms ».
+ */
+export function curveTarget(curve: { label: string; tags: Record<string, string> }): string {
+  if (curve.tags.ip) return curve.tags.ip;
+  const sep = curve.label.indexOf('·');
+  return sep === -1 ? '' : curve.label.slice(sep + 1).trim();
+}
+
 /** États internet écrits par la sonde (`crates/lanprobe-core/src/internet.rs`). */
 export type InternetState = 'online' | 'limited' | 'offline' | 'unknown';
 

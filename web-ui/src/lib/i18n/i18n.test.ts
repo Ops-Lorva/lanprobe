@@ -54,4 +54,39 @@ describe('catalogues de traduction', () => {
       expect(REQUISES.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+
+  // Mode temps réel : le bouton, le repère du parc et le réglage de durée.
+  // ⚠️ `probe.realtime_hint` et `probe.realtime_active` ne sont pas décoratifs :
+  // ce sont eux qui annoncent la minute d'attente avant que la sonde change de
+  // cadence. Sans eux, on croit à une panne et on reclique.
+  const REQUISES_TEMPS_REEL = [
+    'probe.realtime',
+    'probe.realtime_stop',
+    'probe.realtime_hint',
+    'probe.realtime_active',
+    'fleet.realtime_flag',
+    'fleet.realtime_help',
+    'settings.realtime_label',
+    'settings.realtime_unit',
+    'settings.realtime_hint',
+    'settings.invalid_realtime',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés du mode temps réel`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_TEMPS_REEL.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
+  // Un graphe par cible sur les onglets dédiés : chacun porte le nom de sa
+  // cible et rappelle qu'il a sa propre échelle.
+  const REQUISES_COURBES_PAR_CIBLE = ['charts.latency_of', 'charts.own_scale'];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des courbes par cible`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_COURBES_PAR_CIBLE.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });
