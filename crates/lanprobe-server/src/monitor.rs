@@ -10,7 +10,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use lanprobe_core::interfaces::get_interface_details;
-use lanprobe_core::ping::{self, ping_once};
+use lanprobe_core::ping::{self, ping_once_checked};
 
 use crate::state::AppState;
 
@@ -74,7 +74,19 @@ pub fn start(state: &AppState, ip: &str) {
                 continue;
             }
             let result = match source_address(&state) {
-                Ok(src) => ping_once(&ip, src).await,
+                // ⚠️ `ping_once_checked` rend `None` quand la machine n'a pas
+                // pu ÉMETTRE — sockets ICMP épuisés, typiquement par un scan
+                // réseau en cours. On saute alors le relevé au lieu d'écrire
+                // « hôte mort » : c'est un fait sur nous, pas sur la cible.
+                // Sans ça, un scan d'un /16 fabriquait 22 % de fausse
+                // indisponibilité sur des cibles parfaitement joignables.
+                Ok(src) => match ping_once_checked(&ip, src).await {
+                    Some(r) => r,
+                    None => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                },
                 Err(()) => ping::PingResult {
                     ip: ip.clone(),
                     alive: false,

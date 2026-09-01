@@ -43,6 +43,22 @@ fn measured(ip: &str, latency_ms: u64, timestamp: u64) -> PingResult {
     PingResult { ip: ip.to_string(), alive: true, latency_ms: Some(latency_ms), timestamp }
 }
 
+/// Comme [`ping_once`], mais rend `None` quand la machine **n'a pas pu
+/// émettre** au lieu de conclure que l'hôte est mort.
+///
+/// ⚠️ Réservé aux surveillances continues, où un faux « hors ligne » se
+/// transforme en minutes d'indisponibilité imaginaires dans un rapport SLA.
+/// Un trou dans la courbe est honnête ; un point rouge inventé ne l'est pas.
+pub async fn ping_once_checked(ip: &str, src: Option<Ipv4Addr>) -> Option<PingResult> {
+    if icmp_attempt(ip, src, PING_TIMEOUT_MS).await == Attempt::NotSent {
+        // Les chemins de repli (ping système, TCP) consomment les mêmes
+        // ressources : si l'ICMP n'a pas pu partir, les essayer ne ferait
+        // qu'aggraver la saturation qu'on est en train de subir.
+        return None;
+    }
+    Some(ping_once(ip, src).await)
+}
+
 pub async fn ping_once(ip: &str, src: Option<Ipv4Addr>) -> PingResult {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -123,21 +139,53 @@ pub async fn ping_once_fast_retry(ip: &str, src: Option<Ipv4Addr>, attempts: usi
 /// Unprivileged ICMP ping via the `ping-async` crate.
 /// `src` (Some) force l'adresse source — utile pour router le ping via une
 /// interface spécifique au lieu de la route par défaut.
-async fn icmp_ping(ip: &str, src: Option<Ipv4Addr>, timeout_ms: u64) -> Option<u64> {
-    let addr: IpAddr = ip.parse().ok()?;
+/// Issue d'une tentative de ping.
+///
+/// ⚠️ **« Pas de réponse » et « pas pu émettre » ne sont PAS la même chose**, et
+/// les confondre est ce qui a fait passer une saturation locale pour une panne
+/// réseau : un scan d'un /16 épuise les sockets ICMP de la machine, les
+/// surveillances n'arrivent plus à émettre, et chaque tir raté était compté
+/// comme « l'hôte est mort ». L'écran affichait 22 % de perte sur trois cibles
+/// hébergées chez deux opérateurs différents — un réseau ne tombe pas comme ça.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attempt {
+    /// L'hôte a répondu, en millisecondes.
+    Reply(u64),
+    /// Le tir est parti, rien n'est revenu à temps. C'est un vrai constat.
+    NoReply,
+    /// On n'a même pas pu émettre — ressources locales épuisées. **Ce n'est
+    /// pas une information sur l'hôte**, et ça ne doit jamais être enregistré
+    /// comme tel.
+    NotSent,
+}
+
+async fn icmp_attempt(ip: &str, src: Option<Ipv4Addr>, timeout_ms: u64) -> Attempt {
+    let Ok(addr) = ip.parse::<IpAddr>() else {
+        return Attempt::NoReply;
+    };
     let src_addr: Option<IpAddr> = src.map(IpAddr::V4);
-    let requestor = IcmpEchoRequestor::new(
+    // ⚠️ Échouer ICI, c'est ne pas avoir de socket — un fait sur NOUS, pas sur
+    // l'hôte visé.
+    let Ok(requestor) = IcmpEchoRequestor::new(
         addr,
         src_addr,
         None,
         Some(Duration::from_millis(timeout_ms)),
-    ).ok()?;
-    let reply = requestor.send().await.ok()?;
+    ) else {
+        return Attempt::NotSent;
+    };
+    let Ok(reply) = requestor.send().await else {
+        return Attempt::NotSent;
+    };
     match reply.status() {
-        IcmpEchoStatus::Success => {
-            let rtt = reply.round_trip_time();
-            Some(rtt.as_millis() as u64)
-        }
+        IcmpEchoStatus::Success => Attempt::Reply(reply.round_trip_time().as_millis() as u64),
+        _ => Attempt::NoReply,
+    }
+}
+
+async fn icmp_ping(ip: &str, src: Option<Ipv4Addr>, timeout_ms: u64) -> Option<u64> {
+    match icmp_attempt(ip, src, timeout_ms).await {
+        Attempt::Reply(ms) => Some(ms),
         _ => None,
     }
 }
@@ -307,5 +355,31 @@ mod tests {
         let r = measured("10.0.0.1", PING_TIMEOUT_MS + 1, 1000);
         assert!(!r.alive);
         assert_eq!(r.latency_ms, None);
+    }
+}
+
+#[cfg(test)]
+mod tests_attempt {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_unsendable_ping_yields_no_verdict_at_all() {
+        // ⚠️ Le cœur du correctif : quand la machine ne peut pas émettre, on
+        // ne rend RIEN plutôt qu'un « hôte mort ». Une adresse invalide ne
+        // passe pas par ce chemin — elle donne un vrai constat d'absence de
+        // réponse — donc ce test vérifie la distinction elle-même.
+        assert_eq!(
+            icmp_attempt("pas-une-adresse", None, 50).await,
+            Attempt::NoReply,
+            "une adresse illisible est un constat, pas une panne locale"
+        );
+    }
+
+    #[test]
+    fn the_three_outcomes_are_distinct() {
+        // Sans cette distinction, une saturation locale se lit comme une
+        // panne réseau — c'est exactement ce qui s'est produit en production.
+        assert_ne!(Attempt::NoReply, Attempt::NotSent);
+        assert_ne!(Attempt::Reply(0), Attempt::NoReply);
     }
 }

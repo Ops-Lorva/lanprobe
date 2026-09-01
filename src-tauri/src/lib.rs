@@ -384,11 +384,29 @@ async fn cmd_scan_network(
             }
         }
 
-        #[cfg(target_os = "windows")]
-        let chunk_size = 32usize;
-        #[cfg(not(target_os = "windows"))]
-        let chunk_size = 128usize;
         let all_ips: Vec<String> = (first..=last).map(|i| Ipv4Addr::from(i).to_string()).collect();
+
+        // ⚠️ Le débit du scan, pas sa taille, est ce qui casse l'application.
+        //
+        // Un /16 (65 536 adresses) était lancé par paquets de 128 tirs en vol,
+        // chacun jusqu'à 3 tentatives ICMP : la machine épuisait ses sockets,
+        // les SURVEILLANCES n'arrivaient plus à émettre, et leurs tirs ratés
+        // étaient comptés comme des pannes. L'utilisateur voyait 22 % de perte
+        // sur des cibles parfaitement joignables et croyait son réseau en
+        // cause — alors que c'était l'outil de diagnostic qui se sabordait.
+        //
+        // On ne limite donc PAS l'étendue autorisée : on garde de la marge.
+        // Un /16 qui met plusieurs minutes sans rien gêner vaut mieux qu'un
+        // /16 qui paralyse tout en trente secondes. Les surveillances sont la
+        // mesure ; le scan n'est qu'un inventaire, et un inventaire ne doit
+        // jamais faire mentir une mesure.
+        #[cfg(target_os = "windows")]
+        let base_chunk = 32usize;
+        #[cfg(not(target_os = "windows"))]
+        let base_chunk = 64usize;
+        // Au-delà d'un /24, on se serre encore : c'est là que la saturation
+        // devient certaine plutôt que probable.
+        let chunk_size = if all_ips.len() > 256 { base_chunk / 4 } else { base_chunk }.max(8);
 
         for chunk in all_ips.chunks(chunk_size) {
             if cancel.load(Ordering::SeqCst) { break; }
