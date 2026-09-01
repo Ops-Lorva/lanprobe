@@ -39,7 +39,7 @@
   // demande, à l'intérieur de `downloadSlaReport`. Le tableau par adresse ne
   // tire donc pas le classeur dans le paquet principal.
   import { byPublicIp, type IpSlaRow, type PublicIpInterval } from '$lib/sla-report';
-  import { seriesColor, normalizeState, internetSamples } from '$lib/charts';
+  import { seriesColor, normalizeState, internetSamples, curveTarget } from '$lib/charts';
   import { platformLabel } from '$lib/format';
   import StatusMark from '$lib/components/StatusMark.svelte';
   import BufferBadge from '$lib/components/BufferBadge.svelte';
@@ -563,6 +563,8 @@
     const latency = ping.curves.filter((c) => c.field === 'latency_ms' && c.points.length > 0);
     return latency.map((c, i) => ({
       key: c.label,
+      /** Adresse pinguée, `''` si la courbe n'en nomme aucune. */
+      target: curveTarget(c),
       // Une seule cible : pas la peine d'afficher son adresse en légende.
       label: latency.length > 1 ? (c.tags.ip ?? c.label) : $_('charts.latency'),
       color: seriesColor(i),
@@ -577,7 +579,7 @@
 
   /** Cibles ICMP surveillées, telles que les mesures les nomment. */
   const monitoredTargets = $derived(
-    [...new Set(pingCurves.map((c) => c.key.replace(/^latency_ms\s*·\s*/, '')))].sort(),
+    [...new Set(pingCurves.map((c) => c.target).filter(Boolean))].sort(),
   );
 
   let newTarget = $state('');
@@ -1364,6 +1366,56 @@
           </form>
           {/if}
         </section>
+
+        <!--
+          ⚠️ Un graphe PAR cible, pas un graphe à N séries. Sur une échelle
+          partagée, un hôte LAN à 1 ms et un hôte WAN à 200 ms se rendent
+          mutuellement illisibles : le premier est une ligne plate au ras de
+          l'axe, le second écrase tout. Le tableau de bord garde sa vue
+          d'ensemble, qui répond à « est-ce que tout va bien ? » ; cet onglet
+          répond à « que fait CETTE cible ? ».
+
+          Les points viennent de `pingCurves`, tels quels : il applique déjà
+          `plausibleLatency`, qui écarte les latences supérieures au délai
+          d'attente. Les reconstruire depuis `ping.curves` contournerait ce
+          filtre, et un portable endormi rendrait de nouveau l'échelle
+          inutilisable.
+        -->
+        {#each pingCurves as c (c.key)}
+          <ChartCard
+            title={c.target
+              ? $_('charts.latency_of', { values: { target: c.target } })
+              : $_('charts.latency_title')}
+            sub={$_('charts.own_scale')}
+            tone="ready"
+            {refreshing}
+          >
+            <TimeSeriesChart series={[c]} {domain} unit={$_('charts.unit_ms')} />
+            {#snippet table()}
+              <ValueTable
+                columns={[
+                  $_('charts.table_time'),
+                  `${$_('charts.latency')} (${$_('charts.unit_ms')})`,
+                ]}
+                rows={c.points.map((p) => [tooltipTime(p.t, lang), p.v.toFixed(0)])}
+              />
+            {/snippet}
+          </ChartCard>
+        {/each}
+
+        <!-- Sans aucune cible, rien de plus n'est dessiné : les deux listes
+             au-dessus disent déjà pourquoi. Une lecture en cours ou en échec,
+             elle, doit se voir — sinon l'onglet paraît simplement vide. -->
+        {#if pingCurves.length === 0 && (pingTone === 'loading' || pingTone === 'error')}
+          <ChartCard
+            title={$_('charts.latency_title')}
+            sub={$_('charts.latency_sub')}
+            tone={pingTone}
+            errorText={ping.error}
+          >
+            <TimeSeriesChart series={[]} {domain} unit={$_('charts.unit_ms')} />
+          </ChartCard>
+        {/if}
       {:else if tab === 'speedtest'}
         <section class="lp-card block">
           <header class="bh">
@@ -1452,6 +1504,40 @@
             </div>
           {/if}
         </section>
+
+        <!--
+          Même principe qu'en surveillance : descendant et montant séparés, et
+          par moteur quand il y en a plusieurs. Un lien fibre asymétrique donne
+          900 Mbit/s en descendant pour 100 en montant — sur une échelle
+          commune, la courbe montante est écrasée au ras de l'axe, précisément
+          là où on cherche à voir si elle décroche.
+
+          `speedCurves` fournit déjà ce découpage : le réutiliser garantit que
+          les graphes, la légende du tableau de bord et le tableau de valeurs
+          parlent des mêmes points.
+        -->
+        {#each speedCurves as c (c.key)}
+          <ChartCard title={c.label} sub={$_('charts.own_scale')} tone="ready" {refreshing}>
+            <TimeSeriesChart series={[c]} {domain} unit={$_('charts.unit_mbps')} decimals={1} />
+            {#snippet table()}
+              <ValueTable
+                columns={[$_('charts.table_time'), `${c.label} (${$_('charts.unit_mbps')})`]}
+                rows={c.points.map((p) => [tooltipTime(p.t, lang), p.v.toFixed(1)])}
+              />
+            {/snippet}
+          </ChartCard>
+        {/each}
+
+        {#if speedCurves.length === 0 && (speedTone === 'loading' || speedTone === 'error')}
+          <ChartCard
+            title={$_('charts.speed_title')}
+            sub={$_('charts.speed_sub')}
+            tone={speedTone}
+            errorText={speed.error}
+          >
+            <TimeSeriesChart series={[]} {domain} unit={$_('charts.unit_mbps')} decimals={1} />
+          </ChartCard>
+        {/if}
       {:else if tab === 'ports'}
         <section class="lp-card block">
           <header class="bh">

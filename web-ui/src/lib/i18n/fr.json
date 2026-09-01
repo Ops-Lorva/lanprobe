@@ -494,6 +494,8 @@
     "download": "Descendant",
     "upload": "Montant",
     "latency": "Latence",
+    "latency_of": "Latence · {target}",
+    "own_scale": "Échelle propre à cette courbe : partagée, elle écraserait les ordres de grandeur les plus faibles.",
     "unit_ms": "ms",
     "unit_mbps": "Mbit/s",
     "empty": "Aucune mesure sur cette fenêtre.",

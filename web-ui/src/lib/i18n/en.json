@@ -494,6 +494,8 @@
     "download": "Download",
     "upload": "Upload",
     "latency": "Latency",
+    "latency_of": "Latency · {target}",
+    "own_scale": "This curve has its own scale: a shared one would flatten the smaller orders of magnitude.",
     "unit_ms": "ms",
     "unit_mbps": "Mbit/s",
     "empty": "No measurement in this window.",

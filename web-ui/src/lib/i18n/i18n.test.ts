@@ -78,4 +78,15 @@ describe('catalogues de traduction', () => {
       expect(REQUISES_TEMPS_REEL.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+
+  // Un graphe par cible sur les onglets dédiés : chacun porte le nom de sa
+  // cible et rappelle qu'il a sa propre échelle.
+  const REQUISES_COURBES_PAR_CIBLE = ['charts.latency_of', 'charts.own_scale'];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des courbes par cible`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_COURBES_PAR_CIBLE.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });

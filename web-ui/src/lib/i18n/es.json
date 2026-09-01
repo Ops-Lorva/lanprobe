@@ -494,6 +494,8 @@
     "download": "Bajada",
     "upload": "Subida",
     "latency": "Latencia",
+    "latency_of": "Latencia · {target}",
+    "own_scale": "Escala propia de esta curva: compartida, aplastaría los órdenes de magnitud más pequeños.",
     "unit_ms": "ms",
     "unit_mbps": "Mbit/s",
     "empty": "Ninguna medición en esta ventana.",
