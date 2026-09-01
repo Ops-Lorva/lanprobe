@@ -305,6 +305,278 @@ async fn refresh_public_ip(
     cache.store(identity, found, now);
 }
 
+// ── Surveillances partagées avec le hub ────────────────────────────────────
+
+/// Clé de la file des changements de surveillance dans `app_config.json`.
+///
+/// ⚠️ Elle est persistée : un retrait fait pendant que le hub est injoignable
+/// doit survivre à un redémarrage de l'app, sinon la cible réapparaît au
+/// battement suivant — c'est précisément le cas que ce dispositif couvre.
+const MONITOR_CHANGES_KEY: &str = "hub_monitor_changes";
+
+/// Un geste de surveillance en attente d'accusé, tel qu'il part au battement.
+///
+/// ⚠️ Il porte une **ancienneté**, jamais une date : le hub la convertit dans
+/// sa propre référence à la réception. C'est ce qui fait qu'aucune horloge
+/// n'est jamais comparée à une autre — ni dérive, ni saut au réveil de veille.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorChange {
+    pub target: String,
+    /// `add` ou `remove` — le vocabulaire fermé du contrat.
+    pub action: String,
+    pub age_secs: u64,
+}
+
+/// La liste effective telle que le hub la tient, retirées comprises.
+///
+/// ⚠️ Les retirées EN FONT PARTIE : sans elles, la sonde ne distinguerait pas
+/// « le hub ne connaît pas cette cible » de « le hub l'a retirée », et
+/// ressusciterait au redémarrage ce qu'on vient de retirer.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HubMonitor {
+    #[serde(default)]
+    pub target: String,
+    /// `None` = active. Une date, c'est la suppression explicite.
+    #[serde(default)]
+    pub removed_at: Option<i64>,
+}
+
+/// Un geste local, avec l'instant **monotone** auquel il a été posé.
+#[derive(Debug)]
+struct PendingChange {
+    target: String,
+    removed: bool,
+    /// ⚠️ `Instant`, jamais `SystemTime` : c'est une durée qu'on mesure, et
+    /// seule l'horloge monotone la mesure honnêtement.
+    since: Instant,
+    /// Instant du dernier envoi au hub. `None` tant que le geste n'est jamais
+    /// parti : un accusé ne peut alors pas le concerner.
+    emitted: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct QueueInner {
+    changes: Vec<PendingChange>,
+    /// La file a-t-elle déjà été relue depuis le disque ? Relire deux fois
+    /// réécraserait les gestes posés entre-temps.
+    restored: bool,
+}
+
+/// File des changements de surveillance non encore accusés.
+///
+/// Même mécanisme que les commandes (contrat § 14) : un changement ne quitte
+/// la file que lorsque le hub l'a accusé. Un battement perdu ne perd donc
+/// jamais un retrait.
+#[derive(Debug, Default)]
+pub struct MonitorChangeQueue {
+    inner: Mutex<QueueInner>,
+}
+
+impl MonitorChangeQueue {
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueueInner> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Note un geste. Un geste plus récent sur la même cible **remplace** le
+    /// précédent : c'est le dernier acte de l'utilisateur qui compte, et
+    /// envoyer les deux ferait arbitrer le hub contre lui-même.
+    pub fn record(&self, target: &str, removed: bool, now: Instant) {
+        let mut g = self.lock();
+        g.changes.retain(|c| c.target != target);
+        g.changes.push(PendingChange {
+            target: target.to_string(),
+            removed,
+            since: now,
+            emitted: None,
+        });
+    }
+
+    /// La file telle qu'elle est, sans rien marquer — pour la persistance.
+    pub fn snapshot(&self, now: Instant) -> Vec<MonitorChange> {
+        self.lock()
+            .changes
+            .iter()
+            .map(|c| MonitorChange {
+                target: c.target.clone(),
+                action: if c.removed { "remove" } else { "add" }.into(),
+                // `saturating_duration_since` : un `now` antérieur donnerait 0
+                // plutôt que de paniquer. L'horloge monotone ne recule pas,
+                // mais rien n'oblige l'appelant à passer un instant croissant.
+                age_secs: now.saturating_duration_since(c.since).as_secs(),
+            })
+            .collect()
+    }
+
+    /// La file à joindre au battement. Marque les gestes comme émis : c'est ce
+    /// qui rend un accusé applicable, et rien d'autre.
+    pub fn outgoing(&self, now: Instant) -> Vec<MonitorChange> {
+        for c in self.lock().changes.iter_mut() {
+            c.emitted = Some(now);
+        }
+        self.snapshot(now)
+    }
+
+    /// Retire de la file les gestes que le hub vient d'accuser.
+    ///
+    /// ⚠️ Seuls ceux qui étaient **partis avant** d'être re-posés : sinon un
+    /// accusé portant sur le geste précédent emporterait avec lui celui que
+    /// l'utilisateur vient de poser pendant que le battement était en vol.
+    pub fn acknowledge(&self, targets: &[String]) {
+        self.lock().changes.retain(|c| {
+            !(targets.iter().any(|t| t == &c.target)
+                && c.emitted.is_some_and(|sent| c.since <= sent))
+        });
+    }
+
+    /// L'action non accusée qui porte sur cette cible, s'il y en a une.
+    /// `Some(true)` = retrait, `Some(false)` = ajout.
+    pub fn pending_action(&self, target: &str) -> Option<bool> {
+        self.lock()
+            .changes
+            .iter()
+            .find(|c| c.target == target)
+            .map(|c| c.removed)
+    }
+
+    /// Vrai si le disque a déjà été relu.
+    fn is_restored(&self) -> bool {
+        self.lock().restored
+    }
+
+    /// Reprend la file laissée par l'exécution précédente. Sans effet si elle
+    /// a déjà été reprise.
+    ///
+    /// ⚠️ L'ancienneté repart de celle qui a été persistée : le temps pendant
+    /// lequel l'app était **arrêtée** n'est pas compté, parce qu'aucune horloge
+    /// monotone ne survit à un processus. On préfère cette sous-estimation à
+    /// une horloge murale, qui saute au réveil de veille et se fait corriger
+    /// par NTP — le geste reste daté, il est seulement rajeuni de la durée de
+    /// l'arrêt.
+    fn restore(&self, stored: Vec<MonitorChange>, now: Instant) {
+        let mut g = self.lock();
+        if g.restored {
+            return;
+        }
+        g.restored = true;
+        for change in stored {
+            let since = now
+                .checked_sub(Duration::from_secs(change.age_secs))
+                // Une ancienneté plus grande que l'âge de l'horloge monotone
+                // (machine tout juste démarrée) : on repart de maintenant
+                // plutôt que de paniquer.
+                .unwrap_or(now);
+            g.changes.push(PendingChange {
+                target: change.target,
+                removed: change.action == "remove",
+                since,
+                emitted: None,
+            });
+        }
+    }
+}
+
+/// Relit la file depuis la configuration, une seule fois par exécution.
+fn ensure_restored(state: &AppState) {
+    if state.monitor_changes.is_restored() {
+        return;
+    }
+    let stored: Vec<MonitorChange> = state
+        .config
+        .get()
+        .get(MONITOR_CHANGES_KEY)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    state.monitor_changes.restore(stored, Instant::now());
+}
+
+/// Écrit la file sur disque. Un échec est signalé mais ne fait rien échouer :
+/// la surveillance elle-même a déjà démarré ou s'est arrêtée.
+fn persist_monitor_changes(state: &AppState) {
+    let changes = state.monitor_changes.snapshot(Instant::now());
+    let mut root = state.config.get();
+    let Some(map) = root.as_object_mut() else {
+        return;
+    };
+    match changes.is_empty() {
+        true => {
+            map.remove(MONITOR_CHANGES_KEY);
+        }
+        false => match serde_json::to_value(&changes) {
+            Ok(value) => {
+                map.insert(MONITOR_CHANGES_KEY.to_string(), value);
+            }
+            Err(e) => return tracing::warn!("file de surveillances illisible : {e}"),
+        },
+    }
+    if let Err(e) = state.config.put(root) {
+        tracing::warn!("file de surveillances non persistée : {e}");
+    }
+}
+
+/// Note un geste de surveillance et le persiste.
+///
+/// ⚠️ **Retirer écrit un fait.** Cesser d'annoncer une cible ne dit rien : le
+/// hub ne peut pas distinguer « retirée » de « l'app était éteinte ». C'est
+/// tout le défaut qu'on corrige, et il vaut dans les deux sens.
+pub fn record_monitor_change(state: &AppState, target: &str, removed: bool) {
+    let target = target.trim();
+    if target.is_empty() {
+        return;
+    }
+    ensure_restored(state);
+    state
+        .monitor_changes
+        .record(target, removed, Instant::now());
+    persist_monitor_changes(state);
+}
+
+/// Les changements à joindre au battement, avec leur ancienneté.
+pub fn outgoing_monitor_changes(state: &AppState) -> Vec<MonitorChange> {
+    ensure_restored(state);
+    state.monitor_changes.outgoing(Instant::now())
+}
+
+/// Aligne les surveillances locales sur la liste que le hub vient de renvoyer.
+///
+/// ⚠️ On accuse **avant** de s'aligner : la liste renvoyée intègre déjà les
+/// changements que le hub vient d'arbitrer, alors qu'un geste resté en file
+/// continue, lui, de faire autorité sur sa cible.
+pub(crate) fn align_monitors(state: &AppState, acks: &[String], monitors: &[HubMonitor]) {
+    ensure_restored(state);
+    if !acks.is_empty() {
+        state.monitor_changes.acknowledge(acks);
+        persist_monitor_changes(state);
+    }
+
+    for entry in monitors {
+        let target = entry.target.trim();
+        if target.is_empty() {
+            continue;
+        }
+        // ⚠️ Un geste non accusé l'emporte : le hub ne l'a pas encore vu, sa
+        // liste est en retard sur cette cible précise. S'y aligner annulerait
+        // le geste sous les doigts de l'utilisateur.
+        if state.monitor_changes.pending_action(target).is_some() {
+            continue;
+        }
+        match entry.removed_at {
+            // ⚠️ La suppression du hub gagne : la sonde ne ressuscite JAMAIS
+            // une cible retirée. Sans ça, une app qui redémarre réactive ce
+            // qu'on vient de retirer depuis le hub — le défaut d'aujourd'hui,
+            // simplement inversé.
+            Some(_) if crate::monitor::is_monitored(state, target) => {
+                tracing::info!("hub : surveillance de {target} retirée");
+                crate::monitor::stop_from_hub(state, target);
+            }
+            Some(_) => {}
+            None => crate::monitor::start_from_hub(state, target),
+        }
+    }
+    // ⚠️ Rien ne s'arrête au motif d'une absence de la liste : une cible que le
+    // hub ne mentionne pas n'a rien subi. C'est la même règle que côté hub, et
+    // c'est elle qui laisse un hub antérieur à ce mécanisme sans effet de bord.
+}
+
 // ── Dialogue avec le hub ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -382,6 +654,18 @@ pub struct HeartbeatResponse {
     /// Dégradation, pas panne.
     #[serde(default)]
     pub recheck_public_ip: bool,
+    /// La liste effective des surveillances, retirées comprises. La sonde s'y
+    /// aligne.
+    ///
+    /// ⚠️ Absente d'un hub antérieur à ce mécanisme : la liste est alors vide,
+    /// et une liste vide n'arrête rien — une absence n'est pas une suppression.
+    #[serde(default)]
+    pub monitors: Vec<HubMonitor>,
+    /// Cibles dont le changement a été pris en compte. Tant qu'un changement
+    /// n'y figure pas, la sonde le réémet — même mécanisme que les commandes
+    /// (contrat § 14).
+    #[serde(default)]
+    pub monitor_acks: Vec<String>,
 }
 
 
@@ -427,6 +711,14 @@ struct HeartbeatRequest<'a> {
     /// l'instant ; elle le dit.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     monitors: Vec<MonitorState>,
+    /// Gestes de surveillance non encore accusés, avec leur **ancienneté**.
+    ///
+    /// ⚠️ Ce ne sont pas des cibles, ce sont des actes datés. Le champ
+    /// au-dessus dit ce qui tourne ; celui-ci dit ce qui a été décidé. Les
+    /// confondre ferait de « je ne l'annonce plus » une suppression, ce qui
+    /// est exactement le défaut corrigé ici.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    monitor_changes: Vec<MonitorChange>,
 }
 
 /// Une cible surveillée, telle que la sonde la voit maintenant.
@@ -960,6 +1252,7 @@ async fn beat(
             influx_token_version: config.influx.token_version,
             command_acks,
             monitors: monitor_states(state),
+            monitor_changes: outgoing_monitor_changes(state),
             internet_state: internet_state(state),
             public_ip: public_ip.value(),
             interface: identity.interface.clone(),
@@ -1014,6 +1307,11 @@ fn apply(
     current: &HubConfig,
     response: HeartbeatResponse,
 ) -> Result<(), String> {
+    // Fait en premier, et sans `?` : une clé illisible plus bas ne doit pas
+    // faire sauter l'alignement des surveillances, ni faire réémettre
+    // indéfiniment des gestes que le hub a pourtant accusés.
+    align_monitors(state, &response.monitor_acks, &response.monitors);
+
     let mut next = current.clone();
     let mut changed = false;
 
@@ -1479,6 +1777,7 @@ mod tests {
             command_acks: Vec::new(),
             internet_state: None,
             monitors: Vec::new(),
+            monitor_changes: Vec::new(),
             public_ip: None,
             interface: None,
             local_ips: Vec::new(),
@@ -1503,6 +1802,7 @@ mod tests {
             command_acks: Vec::new(),
             internet_state: None,
             monitors: Vec::new(),
+            monitor_changes: Vec::new(),
             public_ip: Some("88.120.0.1".into()),
             interface: Some("en0".into()),
             local_ips: vec!["10.6.8.42/24".into()],
@@ -1513,6 +1813,207 @@ mod tests {
         assert_eq!(json["interface"], "en0");
         assert_eq!(json["local_ips"][0], "10.6.8.42/24");
         assert_eq!(json["gateway"], "10.6.8.1");
+    }
+
+    // ── Surveillances partagées avec le hub ────────────────────────────
+
+    /// État minimal pour les tests qui persistent quelque chose.
+    ///
+    /// Un fichier par test **et par processus** : la file des changements est
+    /// écrite sur disque, deux tests qui partageraient le fichier se
+    /// marcheraient dessus.
+    fn state(tag: &str) -> AppState {
+        AppState::new_headless(Arc::new(crate::config::ConfigStore::load(
+            std::env::temp_dir().join(format!("lanprobe-hub-{tag}-{}.json", std::process::id())),
+        )))
+    }
+
+    #[test]
+    fn a_change_carries_a_monotonic_age_never_a_wall_clock_date() {
+        // ⚠️ `Instant`, jamais `SystemTime` : un portable qui sort de veille
+        // voit son horloge murale sauter de plusieurs minutes. L'horloge
+        // monotone ne recule pas et ignore NTP — c'est la seule qui mesure
+        // honnêtement une durée. C'est aussi ce qui fait qu'aucune horloge
+        // n'est jamais comparée à une autre : le hub date à la réception.
+        let queue = MonitorChangeQueue::default();
+        let t0 = Instant::now();
+        queue.record("8.8.4.4", true, t0);
+
+        let sent = queue.outgoing(t0 + Duration::from_secs(11_520));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].target, "8.8.4.4");
+        assert_eq!(sent[0].action, "remove");
+        assert_eq!(sent[0].age_secs, 11_520, "3 h 12 min, mesurées sur Instant");
+
+        // Le contrat n'accepte qu'une ancienneté : envoyer une date rendrait
+        // l'arbitrage dépendant de deux horloges.
+        let json = serde_json::to_value(&sent[0]).unwrap();
+        let map = json.as_object().unwrap();
+        assert_eq!(map.len(), 3, "{json}");
+        assert!(map.contains_key("age_secs"), "{json}");
+    }
+
+    #[test]
+    fn a_change_stays_in_the_queue_until_the_hub_acknowledges_it() {
+        // Même mécanisme que les commandes (§ 14) : un battement perdu ne doit
+        // pas emporter le retrait avec lui.
+        let queue = MonitorChangeQueue::default();
+        let t0 = Instant::now();
+        queue.record("8.8.4.4", true, t0);
+        queue.record("1.1.1.1", false, t0);
+
+        let _ = queue.outgoing(t0 + Duration::from_secs(1));
+        queue.acknowledge(&["1.1.1.1".to_string()]);
+
+        let left = queue.outgoing(t0 + Duration::from_secs(2));
+        assert_eq!(left.len(), 1, "seul l'accusé quitte la file");
+        assert_eq!(left[0].target, "8.8.4.4");
+        assert_eq!(left[0].age_secs, 2, "son ancienneté continue de courir");
+    }
+
+    #[test]
+    fn a_stale_acknowledgement_does_not_swallow_the_newest_gesture() {
+        // L'utilisateur peut refaire un geste sur la même cible pendant qu'un
+        // battement est en vol : l'accusé porte alors sur le geste précédent,
+        // et emporterait le nouveau avec lui.
+        let queue = MonitorChangeQueue::default();
+        let t0 = Instant::now();
+        queue.record("8.8.4.4", true, t0);
+        let _ = queue.outgoing(t0);
+        queue.record("8.8.4.4", false, t0 + Duration::from_secs(1));
+        queue.acknowledge(&["8.8.4.4".to_string()]);
+
+        let left = queue.outgoing(t0 + Duration::from_secs(2));
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].action, "add", "le geste le plus récent survit");
+    }
+
+    #[test]
+    fn the_queue_survives_a_restart_of_the_app() {
+        // ⚠️ Un retrait fait pendant que le hub est injoignable serait perdu au
+        // redémarrage, et la cible reviendrait au battement suivant : c'est
+        // exactement le cas que ce dispositif doit couvrir.
+        let first = state("restart");
+        record_monitor_change(&first, "8.8.4.4", true);
+
+        // Nouvelle instance sur le même fichier : c'est ce que voit l'app au
+        // démarrage suivant.
+        let second = AppState::new_headless(Arc::new(crate::config::ConfigStore::load(
+            std::env::temp_dir()
+                .join(format!("lanprobe-hub-restart-{}.json", std::process::id())),
+        )));
+        let sent = outgoing_monitor_changes(&second);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].target, "8.8.4.4");
+        assert_eq!(sent[0].action, "remove");
+    }
+
+    #[tokio::test]
+    async fn the_probe_does_not_resurrect_a_target_removed_more_recently() {
+        // ⚠️ Sans cette règle, une app qui redémarre ressuscite ce qu'on vient
+        // de retirer depuis le hub : c'est le défaut d'aujourd'hui, inversé.
+        let state = state("resurrect");
+        crate::monitor::start_from_hub(&state, "192.0.2.10");
+        assert!(crate::monitor::is_monitored(&state, "192.0.2.10"));
+
+        align_monitors(
+            &state,
+            &[],
+            &[HubMonitor {
+                target: "192.0.2.10".into(),
+                removed_at: Some(1_787_914_000),
+            }],
+        );
+        assert!(!crate::monitor::is_monitored(&state, "192.0.2.10"));
+    }
+
+    #[tokio::test]
+    async fn a_target_the_hub_keeps_active_is_monitored_again() {
+        // Critère 1 : une cible ajoutée depuis le hub survit au redémarrage de
+        // l'app, qui la reprend au premier battement.
+        let state = state("adopt");
+        align_monitors(
+            &state,
+            &[],
+            &[HubMonitor {
+                target: "192.0.2.11".into(),
+                removed_at: None,
+            }],
+        );
+        assert!(crate::monitor::is_monitored(&state, "192.0.2.11"));
+    }
+
+    #[tokio::test]
+    async fn an_unacknowledged_gesture_still_rules_its_target() {
+        // La liste du hub est en retard sur cette cible précise : il n'a pas
+        // encore vu le geste. S'y aligner l'annulerait sous les doigts de
+        // l'utilisateur.
+        let state = state("pending-wins");
+        crate::monitor::start(&state, "192.0.2.12");
+        align_monitors(
+            &state,
+            &[],
+            &[HubMonitor {
+                target: "192.0.2.12".into(),
+                removed_at: Some(1_787_914_000),
+            }],
+        );
+        assert!(crate::monitor::is_monitored(&state, "192.0.2.12"));
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_gesture_gives_the_hub_the_last_word() {
+        // Une fois accusé, le changement a été arbitré : c'est la liste du hub
+        // qui fait foi, sinon la file ferait autorité pour toujours.
+        let state = state("acked");
+        crate::monitor::start(&state, "192.0.2.13");
+        // Le battement l'a emporté : c'est ce qui rend l'accusé applicable.
+        let _ = outgoing_monitor_changes(&state);
+        align_monitors(
+            &state,
+            &["192.0.2.13".to_string()],
+            &[HubMonitor {
+                target: "192.0.2.13".into(),
+                removed_at: Some(1_787_914_000),
+            }],
+        );
+        assert!(!crate::monitor::is_monitored(&state, "192.0.2.13"));
+        assert!(
+            outgoing_monitor_changes(&state).is_empty(),
+            "l'accusé vide la file"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_the_hub_never_mentions_is_left_alone() {
+        // ⚠️ Une absence n'est pas une suppression. Un hub antérieur à ce
+        // mécanisme n'envoie aucune liste : rien ne doit s'arrêter, sinon la
+        // mise à jour du hub couperait les surveillances en place.
+        let state = state("absent");
+        crate::monitor::start_from_hub(&state, "192.0.2.14");
+
+        let older: HeartbeatResponse = serde_json::from_str("{}").unwrap();
+        assert!(older.monitors.is_empty());
+        assert!(older.monitor_acks.is_empty());
+        align_monitors(&state, &older.monitor_acks, &older.monitors);
+        assert!(crate::monitor::is_monitored(&state, "192.0.2.14"));
+    }
+
+    #[test]
+    fn the_hub_list_is_read_with_its_removals() {
+        // Les retirées font partie de la liste : sans elles, la sonde ne
+        // distinguerait pas « le hub ne connaît pas cette cible » de « le hub
+        // l'a retirée ».
+        let r: HeartbeatResponse = serde_json::from_str(
+            r#"{"monitors":[{"target":"8.8.8.8","added_at":100,"removed_at":200,"last_change_at":200},
+                            {"target":"1.1.1.1","added_at":100,"removed_at":null,"last_change_at":100}],
+                "monitor_acks":["8.8.8.8"]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.monitors.len(), 2);
+        assert_eq!(r.monitors[0].removed_at, Some(200));
+        assert_eq!(r.monitors[1].removed_at, None);
+        assert_eq!(r.monitor_acks, vec!["8.8.8.8".to_string()]);
     }
 
     #[test]
