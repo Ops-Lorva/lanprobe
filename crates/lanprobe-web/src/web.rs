@@ -2687,12 +2687,23 @@ async fn heartbeat(
         .note_observed_source(&id, &observed)
         .unwrap_or(false);
 
+    // ⚠️ Le mode temps réel ne voyage pas dans un champ à lui : il se traduit
+    // simplement par une cadence plus courte dans le champ que la sonde lit
+    // déjà. Aucune modification du contrat, et une sonde ancienne l'honore.
+    //
+    // La comparaison se fait ICI, à chaque battement : c'est ce qui rend
+    // l'extinction automatique et increvable — pas de tâche de fond à rater.
+    let heartbeat_interval_secs = match state.db.realtime_until(&id) {
+        Ok(Some(until)) if until > crate::db::now() => crate::db::REALTIME_HEARTBEAT_SECS,
+        _ => state.settings.heartbeat_interval_secs(),
+    };
+
     let mut response = json!({
         "ok": true,
         "name": probe.name,
         "site_id": probe.site_id,
         "site": probe.site_name,
-        "heartbeat_interval_secs": state.settings.heartbeat_interval_secs(),
+        "heartbeat_interval_secs": heartbeat_interval_secs,
         "commands": commands,
         "recheck_public_ip": recheck_public_ip,
     });
@@ -5377,6 +5388,44 @@ mod tests {
             peer,
         );
         h.call(req).await.1
+    }
+
+    #[tokio::test]
+    async fn a_probe_in_realtime_mode_is_told_to_beat_faster() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let normal = heartbeat_from(&h, &probe_id, &token, "203.0.113.10", json!({})).await;
+        assert_eq!(normal["heartbeat_interval_secs"], 60);
+
+        h.state
+            .db
+            .set_realtime(&probe_id, Some(crate::db::now() + 1800))
+            .unwrap();
+        let fast = heartbeat_from(&h, &probe_id, &token, "203.0.113.10", json!({})).await;
+        assert_eq!(fast["heartbeat_interval_secs"], 5);
+    }
+
+    #[tokio::test]
+    async fn an_expired_realtime_mode_falls_back_on_its_own() {
+        // ⚠️ Le cœur du dispositif : AUCUNE tâche de fond ne nettoie
+        // l'expiration. La décision se prend à la lecture, donc elle est
+        // toujours juste — même après un redémarrage du hub, même si personne
+        // ne repasse derrière.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        h.state
+            .db
+            .set_realtime(&probe_id, Some(crate::db::now() - 1))
+            .unwrap();
+        let back = heartbeat_from(&h, &probe_id, &token, "203.0.113.10", json!({})).await;
+        assert_eq!(
+            back["heartbeat_interval_secs"], 60,
+            "l'échéance passée ne doit plus rien accélérer"
+        );
     }
 
     #[tokio::test]

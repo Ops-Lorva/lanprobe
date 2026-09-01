@@ -13,7 +13,12 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
+
+/// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
+/// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
+/// bas afficherait une valeur que la sonde n'honore pas.
+pub const REALTIME_HEARTBEAT_SECS: i64 = 5;
 
 /// Migrations dans l'ordre. L'index `n` fait passer de la version `n` à `n+1`.
 const MIGRATIONS: &[&str] = &[
@@ -472,6 +477,18 @@ const MIGRATIONS: &[&str] = &[
       FROM probes
      WHERE public_ip IS NOT NULL
        AND COALESCE(public_ip_at, last_seen) IS NOT NULL;
+    "#,
+    // v19 → v20 : mode temps réel par sonde.
+    //
+    // Une seule colonne porte tout l'état : l'instant où le mode s'éteint.
+    // NULL ou passé = rythme normal.
+    //
+    // ⚠️ Il n'y a AUCUNE tâche de nettoyage, et c'est délibéré : le hub compare
+    // cette date à l'heure courante à chaque battement. L'expiration est donc
+    // toujours juste, y compris après un redémarrage ou une panne. Une sonde ne
+    // peut pas rester coincée en temps réel parce qu'un balayage a été manqué.
+    r#"
+    ALTER TABLE probes ADD COLUMN realtime_until INTEGER;
     "#,
 ];
 
@@ -2782,6 +2799,33 @@ impl Db {
         )?)
     }
 
+    // ── Mode temps réel ────────────────────────────────────────────────────
+
+    /// Arme ou désarme le mode temps réel. `None` désarme.
+    pub fn set_realtime(&self, probe_id: &str, until: Option<i64>) -> DbResult<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE probes SET realtime_until = ?2 WHERE probe_id = ?1",
+            rusqlite::params![probe_id, until],
+        )?;
+        if changed == 0 {
+            return Err(DbError::NotFound("sonde inconnue".into()));
+        }
+        Ok(())
+    }
+
+    /// Échéance du mode temps réel, ou `None` s'il n'est pas armé.
+    pub fn realtime_until(&self, probe_id: &str) -> DbResult<Option<i64>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT realtime_until FROM probes WHERE probe_id = ?1",
+                [probe_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
 
     // ── File de commandes (contrat § 14) ───────────────────────────────────
 
@@ -4937,6 +4981,20 @@ mod tests {
 
         assert!(db.vacuum_into(&copy).is_err());
         assert_eq!(std::fs::read(&copy).unwrap(), b"deja la");
+    }
+
+    // ── Mode temps réel ────────────────────────────────────────────────────
+
+    #[test]
+    fn arming_realtime_mode_stores_its_deadline() {
+        let (db, probe) = db_with_probe();
+        assert_eq!(db.realtime_until(&probe).unwrap(), None);
+
+        db.set_realtime(&probe, Some(now() + 1800)).unwrap();
+        assert!(db.realtime_until(&probe).unwrap().unwrap() > now());
+
+        db.set_realtime(&probe, None).unwrap();
+        assert_eq!(db.realtime_until(&probe).unwrap(), None);
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
