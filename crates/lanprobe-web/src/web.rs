@@ -186,6 +186,7 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/reenroll-code", post(create_reenroll_code))
             .route("/api/probes/{id}/realtime", post(set_realtime))
             .route("/api/probes/{id}/monitors/revive", post(revive_monitor))
+            .route("/api/probes/{id}/monitors/remove", post(remove_monitor_entry))
             .route(
                 "/api/probes/{id}/commands",
                 get(list_commands).post(create_command),
@@ -2893,6 +2894,15 @@ async fn list_probes(
                             .as_deref()
                             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok()),
                         "monitors_at": p.monitors_at,
+                        // ⚠️ DEUX champs, deux faits — ce n'est pas une
+                        // redondance. `monitors` ci-dessus dit COMMENT chaque
+                        // cible se porte : c'est la sonde qui mesure, elle
+                        // seule connaît `alive`, la latence, la disponibilité.
+                        // `probe_monitors` dit QUI est surveillé, et depuis
+                        // quand : c'est le hub qui l'arbitre, avec les
+                        // retraits datés que la sonde ignore encore.
+                        // Fusionner les deux ferait perdre l'un ou l'autre.
+                        "probe_monitors": state.db.monitors(&p.probe_id).unwrap_or_default(),
                         // Échéance du mode temps réel, pour que l'interface
                         // affiche le compte à rebours sans un appel de plus
                         // par sonde — et que ce qui tourne se voie.
@@ -2944,6 +2954,40 @@ struct MonitorTarget {
 /// ⚠️ Derrière le garde de portée, comme toute route qui désigne UNE sonde :
 /// 404 hors portée, et rien d'écrit. Réactiver une surveillance relance du
 /// trafic sur le réseau d'un client — ce n'est pas une consultation.
+/// Retire une cible **depuis le hub**, sans passer par la sonde.
+///
+/// ⚠️ Il existait déjà un chemin de retrait, mais il passait par une commande
+/// envoyée à la sonde : retirer une cible pendant que la sonde est **hors
+/// ligne** n'écrivait donc aucune suppression, et le sous-onglet « Retirées »
+/// restait vide jusqu'à son retour. La décision de l'utilisateur disparaissait
+/// dans l'intervalle — exactement le défaut que ce chantier corrige.
+///
+/// Ici la suppression est écrite **tout de suite**, datée de l'horloge du hub.
+/// La sonde s'y alignera à son prochain battement, qu'elle soit là ou non.
+async fn remove_monitor_entry(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<MonitorTarget>,
+) -> Response {
+    let target = body.target.trim();
+    if target.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "cible requise");
+    }
+    match audited(
+        &state,
+        Some(&actor.username),
+        "probe.monitor_remove",
+        Some(&id),
+        state
+            .db
+            .apply_monitor_change(&id, target, true, crate::db::now()),
+    ) {
+        Ok(applied) => ok_json(json!({ "ok": true, "applied": applied })),
+        Err(e) => error_response(e),
+    }
+}
+
 async fn revive_monitor(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
@@ -6000,6 +6044,40 @@ mod tests {
         // lorsqu'ils lui reviennent accusés, comme pour les commandes (§14).
         let acks = r["monitor_acks"].as_array().expect("{r}");
         assert_eq!(acks.len(), 3, "chaque changement reçu est accusé : {r}");
+    }
+
+    #[tokio::test]
+    async fn removing_from_the_hub_works_even_when_the_probe_is_offline() {
+        // ⚠️ Le retrait passait uniquement par une commande envoyée à la
+        // sonde : hors ligne, la décision de l'utilisateur disparaissait dans
+        // l'intervalle et « Retirées » restait vide. Ici elle est écrite tout
+        // de suite ; la sonde s'alignera à son retour.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+        h.state
+            .db
+            .apply_monitor_change(&probe_id, "8.8.8.8", false, crate::db::now() - 60)
+            .unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/monitors/remove"),
+                    json!({ "target": "8.8.8.8" }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let entries = h.state.db.monitors(&probe_id).unwrap();
+        assert_eq!(entries.len(), 1, "la ligne reste, c'est un fait daté");
+        assert!(
+            entries[0].removed_at.is_some(),
+            "la suppression est écrite sans attendre la sonde"
+        );
     }
 
     #[tokio::test]
