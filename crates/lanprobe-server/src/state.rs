@@ -280,6 +280,11 @@ pub struct AppState {
     /// de cœur et lu par l'interface. Il vit ici parce que c'est la boucle
     /// qui le sait et l'interface qui le montre — elles ne se connaissent pas.
     pub hub: Arc<crate::hub::HubStatus>,
+    /// Gestes de surveillance (ajouts, retraits) que le hub n'a pas encore
+    /// accusés. Elle vit ici parce que deux mondes y touchent sans se
+    /// connaître : la fenêtre qui pose le geste et la boucle de battement qui
+    /// l'émet.
+    pub monitor_changes: Arc<crate::hub::MonitorChangeQueue>,
 }
 
 impl AppState {
@@ -309,6 +314,7 @@ impl AppState {
             is_headless,
             monitoring_blackout_until: Arc::new(Mutex::new(None)),
             hub: Arc::new(crate::hub::HubStatus::default()),
+            monitor_changes: Arc::new(crate::hub::MonitorChangeQueue::default()),
         }
     }
 
