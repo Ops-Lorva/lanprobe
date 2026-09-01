@@ -5455,6 +5455,28 @@ mod tests {
             None,
             "rien ne doit avoir été armé"
         );
+
+        // ⚠️ Sans cette moitié, le test ne prouve RIEN : le `fallback` du
+        // routeur rend déjà 404 sur toute route inconnue, donc l'assertion
+        // ci-dessus passerait à l'identique si la route avait été supprimée
+        // par mégarde. On vérifie donc aussi que la MÊME requête aboutit quand
+        // le site est dans la portée — c'est ce qui distingue « refusé » de
+        // « inexistant ».
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/realtime"),
+                    json!({ "on": true }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            h.state.db.realtime_until(&probe_id).unwrap().is_some(),
+            "la route existe bel et bien et arme quand la portée le permet"
+        );
     }
 
     #[tokio::test]
