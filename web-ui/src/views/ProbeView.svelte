@@ -6,7 +6,16 @@
   import { fleet } from '$lib/fleet';
   import { flash } from '$lib/flash';
   import { go } from '$lib/router';
-  import { now, relativeTime, absoluteTime, dateOnly, tooltipTime, logTime } from '$lib/time';
+  import {
+    now,
+    relativeTime,
+    absoluteTime,
+    dateOnly,
+    tooltipTime,
+    logTime,
+    secondsLeft,
+    countdown,
+  } from '$lib/time';
   import {
     api,
     ApiError,
@@ -79,7 +88,12 @@
 
   let tab = $state<Tab>('dashboard');
 
-  const REFRESH_MS = 30_000;
+  // ⚠️ 3 s et non 30 : ouvrir une fiche, c'est dire « je m'intéresse à cette
+  // sonde MAINTENANT ». Ça ne coûte rien à la sonde ni à InfluxDB — c'est le
+  // navigateur qui lit plus souvent, et seulement pour l'onglet ouvert.
+  // Une caméra qu'on vient de brancher pingue déjà : c'est l'affichage qui
+  // retardait.
+  const REFRESH_MS = 3_000;
   let timer: ReturnType<typeof setInterval> | null = null;
 
   onMount(() => {
@@ -128,6 +142,37 @@
             : String(e);
     } finally {
       nameBusy = false;
+    }
+  }
+
+  // ── Mode temps réel ──────────────────────────────────────────────────────
+  //
+  // ⚠️ Rien n'est gardé ici : l'état tient entier dans `realtime_until`, et
+  // c'est sa comparaison à l'heure courante qui dit si le mode tourne. Le hub
+  // fait exactement la même comparaison à chaque battement — l'écran ne peut
+  // donc pas afficher « actif » sur une sonde déjà revenue au rythme normal,
+  // et il n'y a aucune extinction à notifier.
+  let realtimeBusy = $state(false);
+  let realtimeError = $state('');
+
+  const realtimeLeft = $derived(secondsLeft(probe?.realtime_until, $now));
+  const realtimeOn = $derived(realtimeLeft > 0);
+
+  async function toggleRealtime() {
+    if (!probe) return;
+    realtimeBusy = true;
+    realtimeError = '';
+    try {
+      await api.setRealtime(probe.probe_id, !realtimeOn);
+      // Le hub renvoie l'échéance, mais c'est la fiche qui la porte : on relit
+      // le parc plutôt que de la recopier localement, sinon un refus silencieux
+      // laisserait l'écran affirmer un mode que le hub n'a pas armé.
+      await fleet.load(onExpired, { quiet: true });
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      realtimeError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      realtimeBusy = false;
     }
   }
 
@@ -834,6 +879,18 @@
           <h1>{probe.name}</h1>
           {#if $canOperate}
             <button class="lp-btn ghost sm" onclick={startEdit}>{$_('probe.rename')}</button>
+            <!-- Le seul geste de cette fiche qui change le comportement de la
+                 sonde et qu'on veut atteindre sans ouvrir un menu : il s'appuie
+                 au sol, une main sur l'échelle. -->
+            <button
+              class="lp-btn sm rt"
+              class:on={realtimeOn}
+              onclick={toggleRealtime}
+              disabled={realtimeBusy}
+              title={$_('probe.realtime_hint')}
+            >
+              {realtimeOn ? $_('probe.realtime_stop') : $_('probe.realtime')}
+            </button>
           {/if}
         </div>
       {/if}
@@ -850,6 +907,21 @@
           {probe.last_seen ? relativeTime(probe.last_seen, lang, $now) : $_('status.never_seen')}
         </span>
       </div>
+
+      <!--
+        ⚠️ La minute d'attente est écrite noir sur blanc, active ou non. Le hub
+        ne joint jamais la sonde : l'ordre voyage dans la réponse au battement.
+        Sans cette phrase, on appuie, rien ne bouge pendant une minute, et on
+        conclut à une panne — puis on reclique.
+      -->
+      {#if realtimeOn}
+        <p class="rt-note" role="status">
+          {$_('probe.realtime_active', { values: { left: countdown(realtimeLeft, lang) } })}
+        </p>
+      {:else if $canOperate}
+        <p class="rt-hint">{$_('probe.realtime_hint')}</p>
+      {/if}
+      {#if realtimeError}<p class="err" role="alert">{realtimeError}</p>{/if}
     </div>
 
     <!--
@@ -1799,6 +1871,28 @@
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
+  }
+
+  /* Le bouton allumé prend la couleur d'accent : ce qui tourne doit se voir
+     sans lire, y compris du coin de l'œil en revenant sur l'onglet. */
+  .rt.on {
+    border-color: var(--ep-accent);
+    background: var(--ep-accent-dim);
+    color: var(--ep-accent-bright);
+    font-weight: 600;
+  }
+  .rt-note,
+  .rt-hint {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    line-height: 1.55;
+    max-width: 82ch;
+  }
+  .rt-note {
+    color: var(--ep-accent-bright);
+  }
+  .rt-hint {
+    color: var(--ep-text-dim);
   }
 
   .meta {
