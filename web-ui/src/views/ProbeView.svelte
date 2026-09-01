@@ -56,6 +56,9 @@
     type MonitorCard,
     type SpeedCard,
   } from '$lib/probe-cards';
+  // Même raison : l'union « liste tenue par le hub » + « annonce de la sonde »
+  // est la règle qu'on ne peut pas se permettre de casser en silence.
+  import { effectiveMonitors, removedMonitors } from '$lib/monitors';
   import { platformLabel } from '$lib/format';
   import StatusMark from '$lib/components/StatusMark.svelte';
   import BufferBadge from '$lib/components/BufferBadge.svelte';
@@ -659,9 +662,6 @@
   };
   let portProfile = $state<keyof typeof PORT_PROFILES>('common');
 
-  /** Cibles déjà surveillées : inutile de proposer de les ajouter deux fois. */
-  const monitoredNow = $derived(new Set((probe?.monitors ?? []).map((m) => m.ip)));
-
   /** IP dont les ports sont dépliés. Une seule à la fois : la liste est longue. */
   let openHost = $state('');
 
@@ -690,20 +690,75 @@
   });
 
   /**
-   * Surveillances actives annoncées par la sonde, complétées par ce que les
-   * mesures montrent.
+   * Liste partagée tenue par le hub. `null` = hub antérieur à cette table :
+   * il ne sait rien des retraits, et son silence ne dit pas « rien n'est
+   * retiré ». C'est cette distinction qui décide de ce que dit le sous-onglet.
+   */
+  const sharedMonitors = $derived(probe?.probe_monitors ?? null);
+
+  /**
+   * Surveillances actives : la liste du hub fait autorité sur l'appartenance,
+   * l'annonce de la sonde apporte les mesures. La fusion — et le piège de la
+   * sonde qui annonce une cible que le hub ne connaît pas encore — vit dans
+   * `monitors.ts`, avec ses tests.
    *
-   * ⚠️ Les deux sources ne disent pas la même chose : la sonde dit ce qui
-   * tourne MAINTENANT, les mesures disent ce qui a tourné pendant la fenêtre.
-   * Une cible retirée apparaît dans la seconde et pas dans la première — c'est
+   * ⚠️ À ne pas confondre avec ce que les mesures montrent : la sonde dit ce
+   * qui tourne MAINTENANT, les mesures ce qui a tourné pendant la fenêtre. Une
+   * cible retirée apparaît dans la seconde et pas dans la première — c'est
    * exactement ce qu'il faut montrer, mais en le disant.
    */
-  const activeMonitors = $derived(probe?.monitors ?? null);
+  const activeMonitors = $derived(effectiveMonitors(sharedMonitors, probe?.monitors ?? null));
+  /** Retirées, la suppression la plus récente en tête. */
+  const removedList = $derived(removedMonitors(sharedMonitors));
   const staleTargets = $derived(
     activeMonitors === null
       ? []
       : monitoredTargets.filter((ip) => !activeMonitors.some((m) => m.ip === ip)),
   );
+
+  /** Cibles déjà surveillées : inutile de proposer de les ajouter deux fois. */
+  const monitoredNow = $derived(new Set((activeMonitors ?? []).map((m) => m.ip)));
+
+  // ── Sous-onglet « Retirées » ─────────────────────────────────────────────
+  //
+  // ⚠️ Retirer est un fait daté, conservé : les cibles retirées ne sont donc
+  // pas perdues, mais elles n'ont rien à faire dans la grille des actives —
+  // les mêler ferait affirmer une surveillance qui n'existe plus.
+  let monitorSub = $state<'active' | 'removed'>('active');
+  /** Cible dont la réactivation est en cours. `''` = aucune. */
+  let reviveBusy = $state('');
+  let reviveError = $state('');
+  /** Ce que la dernière réactivation a donné, à annoncer à l'écran. */
+  let reviveNote = $state('');
+
+  /**
+   * ⚠️ Le hub ne joint JAMAIS la sonde : effacer la suppression ne relance pas
+   * le ping, c'est le prochain battement qui l'emporte. Sans le dire à
+   * l'écran, une cible réactivée qui reste quelques dizaines de secondes sans
+   * relevé se lit comme une panne — ou comme un bouton qui n'a rien fait.
+   */
+  async function revive(target: string) {
+    reviveBusy = target;
+    reviveError = '';
+    reviveNote = '';
+    try {
+      const r = await api.reviveMonitor(id, target);
+      // `applied` faux : un changement plus récent avait déjà tranché. Le
+      // taire laisserait croire à une réactivation qui n'a pas eu lieu.
+      reviveNote = $_(r?.applied === false ? 'probe.monitoring_revive_moot' : 'probe.monitoring_revive_done', {
+        values: { target },
+      });
+      // On relit le parc plutôt que de retirer la ligne localement : c'est le
+      // hub qui tranche, et un refus silencieux laisserait l'écran affirmer
+      // une réactivation qu'il n'a pas obtenue.
+      await fleet.load(onExpired, { quiet: true });
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      reviveError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      reviveBusy = '';
+    }
+  }
   const inetPoints = $derived(inet.curves.find((c) => c.field === 'state')?.points ?? []);
 
   // ⚠️ La conversion millisecondes → secondes vit dans `internetSamples`
@@ -1376,6 +1431,74 @@
           {/if}
         </header>
 
+        <!-- Sous-onglets. Le compte est porté par l'étiquette : sans lui, rien
+             n'inviterait à ouvrir « Retirées », et une cible retirée par erreur
+             y resterait sans que personne la cherche. -->
+        <div class="chips" role="group" aria-label={$_('probe.monitoring_sub_aria')}>
+          <button
+            class="chip"
+            class:on={monitorSub === 'active'}
+            onclick={() => (monitorSub = 'active')}
+          >{$_('probe.monitoring_active')}</button>
+          <button
+            class="chip"
+            class:on={monitorSub === 'removed'}
+            onclick={() => (monitorSub = 'removed')}
+          >
+            {$_('probe.monitoring_removed')}{removedList.length ? ` (${removedList.length})` : ''}
+          </button>
+        </div>
+
+        {#if monitorSub === 'removed'}
+          <section class="lp-card block">
+            {#if sharedMonitors === null}
+              <!-- ⚠️ « Je ne sais pas » n'est pas « rien n'a été retiré ». Un
+                   hub antérieur à la liste partagée ne tient aucun retrait :
+                   afficher « aucune cible retirée » y serait une affirmation
+                   qu'on ne peut pas tenir. -->
+              <p class="empty">{$_('probe.monitoring_removed_unknown')}</p>
+            {:else if removedList.length === 0}
+              <!-- Un sous-onglet vide et muet passerait pour cassé : on dit à
+                   quoi il sert, puisqu'il servira le jour où l'on retirera. -->
+              <p class="empty">{$_('probe.monitoring_removed_none')}</p>
+            {:else}
+              <p class="bsub">{$_('probe.monitoring_revive_hint')}</p>
+              <ul class="removed">
+                {#each removedList as gone (gone.target)}
+                  <li>
+                    <span class="lp-mono">{gone.target}</span>
+                    <!-- Relatif pour lire d'un coup d'œil, absolu au survol :
+                         « il y a 3 j » répond à « est-ce moi tout à l'heure ? »,
+                         la date exacte répond à « lequel des deux passages ». -->
+                    <span class="rwhen" title={absoluteTime(gone.removed_at, lang)}>
+                      {$_('probe.monitoring_removed_at', {
+                        values: { when: relativeTime(gone.removed_at, lang, $now) },
+                      })}
+                    </span>
+                    {#if $canOperate}
+                      <button
+                        class="lp-btn"
+                        disabled={reviveBusy !== ''}
+                        onclick={() => revive(gone.target)}
+                      >
+                        {reviveBusy === gone.target
+                          ? $_('common.loading')
+                          : $_('probe.monitoring_revive')}
+                      </button>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if reviveNote}<p class="rnote" role="status">{reviveNote}</p>{/if}
+            {#if reviveError}<p class="err" role="alert">{reviveError}</p>{/if}
+          </section>
+        {:else}
+        <!-- Sous-onglet « Actives ». Son contenu garde volontairement son
+             indentation d'origine : le réaligner d'un niveau réécrirait cent
+             quatre-vingts lignes pour un bloc qui n'a pas changé, et noierait
+             la revue. -->
+
         <!--
           ⚠️ Deux listes fusionnées, jamais confondues — c'est `monitorCards`
           qui tient la règle, avec son test. La sonde annonce à chaque
@@ -1461,7 +1584,13 @@
                   <p class="cardnote">{$_('probe.monitoring_awaiting')}</p>
                 {/if}
 
-                {#if card.monitor}
+                <!-- ⚠️ `samples` à 0 = la sonde n'a encore rien mesuré sur
+                     cette cible — soit qu'on vienne de l'ajouter, soit qu'elle
+                     vienne du hub et que le battement ne l'ait pas encore
+                     portée. Afficher le tableau reviendrait alors à annoncer
+                     « ne répond pas » et « 0 % de disponibilité » sur une
+                     cible jamais pinguée : ça se lit comme une panne. -->
+                {#if card.monitor && card.monitor.samples > 0}
                   <!-- ⚠️ Ces valeurs viennent de la sonde, sur SA fenêtre
                        glissante, pas sur la période affichée : elles répondent
                        à « comment va cette cible maintenant ? », le graphe à
@@ -1524,12 +1653,30 @@
         <!-- ⚠️ Seulement quand la sonde annonce ET qu'il reste des cibles
              orphelines : sur une sonde qui n'annonce rien, la liste vaudrait
              « tout est mort », ce qui est faux et bruyant. Discret, en une
-             ligne — c'est une note de bas de page, pas une alerte. -->
+             ligne — c'est une note de bas de page, pas une alerte.
+
+             ⚠️ Quand le hub tient la liste partagée, cette note ne redit plus
+             la même chose que le sous-onglet : elle y CONDUIT. Deux endroits
+             qui énoncent le même fait finissent toujours par diverger, et
+             c'est le plus discret des deux qui ment sans qu'on s'en aperçoive.
+             Sans liste partagée, il n'y a rien vers quoi conduire : la note
+             reste la seule chose qu'on puisse dire. -->
         {#if activeMonitors !== null && activeMonitors.length > 0 && staleTargets.length}
-          <p class="stale-note" title={staleTargets.join(', ')}>
-            {$_('probe.monitoring_stale', { values: { n: staleTargets.length } })}
-          </p>
+          {#if sharedMonitors !== null}
+            <button
+              class="stale-note link"
+              title={staleTargets.join(', ')}
+              onclick={() => (monitorSub = 'removed')}
+            >
+              {$_('probe.monitoring_stale_link', { values: { n: staleTargets.length } })}
+            </button>
+          {:else}
+            <p class="stale-note" title={staleTargets.join(', ')}>
+              {$_('probe.monitoring_stale', { values: { n: staleTargets.length } })}
+            </p>
+          {/if}
         {/if}
+        {/if}<!-- fin du sous-onglet « Actives » -->
 
       {:else if tab === 'speedtest'}
         <header class="tabhead">
@@ -2643,6 +2790,52 @@
     margin: 10px 0 0;
     font-size: 11.5px;
     color: var(--ep-text-dim);
+  }
+  /* La note devenue lien garde exactement l'allure de la note : c'est toujours
+     une ligne de bas de page, pas un bouton d'action. Seul le soulignement au
+     survol dit qu'elle mène quelque part. */
+  .stale-note.link {
+    display: block;
+    padding: 0;
+    border: 0;
+    background: none;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .stale-note.link:hover {
+    color: var(--ep-text-secondary);
+    text-decoration: underline;
+  }
+
+  /* ── Sous-onglet « Retirées » ─────────────────────────────────────────── */
+  .removed {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .removed li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-top: 1px solid var(--ep-border);
+  }
+  /* La date est repoussée à droite du nom, le bouton en fin de ligne : on lit
+     l'adresse, puis quand, puis on décide. */
+  .rwhen {
+    flex: 1;
+    font-size: 11.5px;
+    color: var(--ep-text-dim);
+  }
+  .rnote {
+    margin: 10px 0 0;
+    font-size: 12px;
+    color: var(--ep-text-muted);
   }
 
   .cstate {
