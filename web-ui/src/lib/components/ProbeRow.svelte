@@ -3,7 +3,7 @@
   import { platformLabel } from '$lib/format';
   import StatusMark from './StatusMark.svelte';
   import BufferBadge from './BufferBadge.svelte';
-  import { relativeTime, absoluteTime } from '$lib/time';
+  import { relativeTime, absoluteTime, secondsLeft, countdown } from '$lib/time';
   import type { Probe } from '$lib/api';
 
   interface Props {
@@ -17,6 +17,15 @@
 
   const lang = $derived($locale ?? 'en');
   const seen = $derived(relativeTime(probe.last_seen, lang, now));
+
+  /**
+   * Temps restant de mode temps réel, `0` quand il ne tourne pas.
+   *
+   * ⚠️ C'est le garde-fou contre l'oubli, pas une décoration : on redescend de
+   * l'échelle, la caméra marche, on passe à la suivante — on ne revient pas
+   * éteindre le mode. Ce qui tourne doit se voir depuis le parc, avec sa fin.
+   */
+  const realtimeLeft = $derived(secondsLeft(probe.realtime_until, now));
 
   /**
    * `linux` → `Linux`, `macos` → `macOS`. Une simple capitalisation donnerait
@@ -59,6 +68,15 @@
         class:limited={probe.internet_state === 'limited'}
         title={$_('fleet.net_help')}
       >{$_(`charts.internet_${probe.internet_state}`)}</span>
+    {/if}
+    <!-- ⚠️ Le repère s'affiche quel que soit le statut, contrairement à celui
+         d'internet : une sonde muette peut très bien avoir été armée juste
+         avant de se taire, et c'est précisément le cas qu'on doit voir. -->
+    {#if realtimeLeft > 0}
+      <span
+        class="rtflag"
+        title={$_('fleet.realtime_help', { values: { left: countdown(realtimeLeft, lang) } })}
+      >{$_('fleet.realtime_flag', { values: { left: countdown(realtimeLeft, lang) } })}</span>
     {/if}
   </span>
 
@@ -146,6 +164,12 @@
     gap: 5px;
     min-width: 0;
   }
+  /* La cellule de statut peut porter deux repères ; elle passe à la ligne
+     plutôt que de déborder sur la colonne voisine. */
+  .status {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
   .netflag {
     padding: 1px 5px;
     border-radius: 3px;
@@ -159,6 +183,19 @@
   .netflag.limited {
     color: var(--ep-warning, #f59e0b);
     border-color: var(--ep-warning, #f59e0b);
+  }
+  /* Le temps restant est DANS le repère, pas seulement en infobulle : sur
+     tactile il n'y a pas de survol, et « ça tourne encore longtemps ? » est
+     exactement la question qui empêche l'oubli. */
+  .rtflag {
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9.5px;
+    white-space: nowrap;
+    color: var(--ep-accent-bright);
+    border: 1px solid var(--ep-accent);
+    background: var(--ep-accent-dim);
+    cursor: help;
   }
   .pubip,
   .platform,

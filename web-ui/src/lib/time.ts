@@ -106,3 +106,29 @@ export function humanBytes(n: number | null | undefined, locale: string): string
 export function compactNumber(n: number, locale: string): string {
   return new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 }
+
+/**
+ * Secondes restantes avant une échéance (`until`, epoch en secondes).
+ *
+ * ⚠️ `0` couvre les trois cas « c'est fini » — absente, nulle, dépassée — et
+ * rien ne peut ressortir négatif. Le mode temps réel ne garde que cette
+ * échéance : c'est la comparaison à l'heure courante qui dit s'il tourne, et
+ * elle doit donner la même réponse à l'écran et dans le hub.
+ */
+export function secondsLeft(until: number | null | undefined, atMs: number): number {
+  if (until == null) return 0;
+  return Math.max(0, Math.ceil(until - atMs / 1000));
+}
+
+/**
+ * Compte à rebours court : « 28 min », « 45 s ».
+ *
+ * ⚠️ Pas de « 27:43 » à la seconde près, et c'est délibéré : l'horloge
+ * partagée ne bat que toutes les 15 s. Un chiffre de secondes figé un quart de
+ * minute se lirait comme une minuterie bloquée, donc comme une panne.
+ */
+export function countdown(seconds: number, locale: string): string {
+  const [value, unit]: [number, 'second' | 'minute'] =
+    seconds < 60 ? [Math.round(seconds), 'second'] : [Math.round(seconds / 60), 'minute'];
+  return new Intl.NumberFormat(locale, { style: 'unit', unit, unitDisplay: 'short' }).format(value);
+}
