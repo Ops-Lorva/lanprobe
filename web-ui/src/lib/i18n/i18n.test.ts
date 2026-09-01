@@ -89,4 +89,25 @@ describe('catalogues de traduction', () => {
       expect(REQUISES_COURBES_PAR_CIBLE.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+
+  // Les cartes en grille remplacent les tableaux de tête des onglets
+  // Surveillance et Débit. Ce sont elles qui portent désormais les deux états
+  // que le tableau ne disait pas : une cible ajoutée qui attend son premier
+  // relevé, et une cible mesurée que la sonde ne surveille plus.
+  const REQUISES_CARTES = [
+    'probe.monitoring_awaiting',
+    'probe.monitoring_dropped',
+    'probe.monitoring_dropped_hint',
+    'probe.monitor_stats_hint',
+    'probe.speedtest_last',
+    'probe.speedtest_engine_none',
+    'charts.speed_shared_scale',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des cartes par cible et par moteur`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_CARTES.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });

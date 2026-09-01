@@ -39,7 +39,23 @@
   // demande, à l'intérieur de `downloadSlaReport`. Le tableau par adresse ne
   // tire donc pas le classeur dans le paquet principal.
   import { byPublicIp, type IpSlaRow, type PublicIpInterval } from '$lib/sla-report';
-  import { seriesColor, normalizeState, internetSamples, curveTarget } from '$lib/charts';
+  import {
+    seriesColor,
+    normalizeState,
+    internetSamples,
+    curveTarget,
+    engineLabel,
+  } from '$lib/charts';
+  // Le découpage en cartes vit dans un `.ts` avec son test : le projet ne
+  // monte pas de composants, une règle écrite dans ce gabarit ne serait
+  // couverte par rien — et ce sont justement les deux règles déjà cassées à
+  // l'écran (cible ajoutée invisible, cible retirée montrée comme active).
+  import {
+    monitorCards,
+    speedCards,
+    type MonitorCard,
+    type SpeedCard,
+  } from '$lib/probe-cards';
   import { platformLabel } from '$lib/format';
   import StatusMark from '$lib/components/StatusMark.svelte';
   import BufferBadge from '$lib/components/BufferBadge.svelte';
@@ -708,15 +724,6 @@
   // même question, mais on veut les comparer d'un coup d'œil : une courbe par
   // (sens, moteur) sur le même graphique, jamais une fusion qui ferait croire
   // à un débit unique.
-  const ENGINE_LABEL: Record<string, string> = {
-    ookla: 'Speedtest.net',
-    iperf3: 'iperf3',
-  };
-  function engineLabel(raw: string | undefined): string {
-    if (!raw) return '';
-    return ENGINE_LABEL[raw.toLowerCase()] ?? raw.charAt(0).toUpperCase() + raw.slice(1);
-  }
-
   const speedCurves = $derived.by(() => {
     const wanted: [string, string][] = [
       ['download_mbps', $_('charts.download')],
@@ -725,7 +732,17 @@
     const engines = new Set(
       speed.curves.filter((c) => c.points.length > 0).map((c) => c.tags.engine ?? ''),
     );
-    const out: { key: string; label: string; color: string; points: { t: number; v: number }[] }[] = [];
+    const out: {
+      key: string;
+      label: string;
+      color: string;
+      /** Étiquettes brutes, pour regrouper par moteur sans relire le libellé. */
+      engine: string;
+      field: string;
+      /** Sens seul : dans une carte titrée du moteur, `label` le répéterait. */
+      direction: string;
+      points: { t: number; v: number }[];
+    }[] = [];
     for (const [field, direction] of wanted) {
       for (const c of speed.curves.filter((c) => c.field === field && c.points.length > 0)) {
         const engine = engineLabel(c.tags.engine);
@@ -735,6 +752,9 @@
           // n'en utilise qu'un, « Descendant · Speedtest.net » est du bruit.
           label: engines.size > 1 && engine ? `${direction} · ${engine}` : direction,
           color: seriesColor(out.length),
+          engine: c.tags.engine ?? '',
+          field,
+          direction,
           points: numeric(c.points),
         });
       }
@@ -833,6 +853,60 @@
 
   const shownPing = $derived(pingCurves.filter((c) => !hidden.has(c.key)));
   const shownSpeed = $derived(speedCurves.filter((c) => !hidden.has(c.key)));
+
+  // ── Cartes des onglets Surveillance et Débit ─────────────────────────────
+  //
+  // ⚠️ Les statistiques ne sont plus écrites deux fois. Elles vivaient dans un
+  // tableau en tête d'onglet puis se répétaient sous chaque graphe : deux
+  // lectures de la même chose, à cinq centimètres d'écart. Elles sont
+  // maintenant dans la carte de leur cible, et nulle part ailleurs.
+  const monitorGrid = $derived(monitorCards(activeMonitors, pingCurves));
+  const speedGrid = $derived(speedCards(speedCurves, speedHistory ?? []));
+
+  // Trois graphes par ligne au lieu d'un : la hauteur suit, sinon une ligne de
+  // cartes ne tient plus dans un écran et la grille ne sert à rien.
+  const CARD_HEIGHT = 132;
+
+  /**
+   * Tonalité d'une carte de cible.
+   *
+   * ⚠️ La lecture en cours ou en échec l'emporte sur l'attente : une carte qui
+   * annoncerait « en attente du premier relevé » pendant que les mesures se
+   * chargent ferait conclure à une sonde muette.
+   */
+  function cardTone(card: MonitorCard): 'loading' | 'error' | 'ready' {
+    if (card.curve && card.curve.points.length > 0) return 'ready';
+    if (ping.tone === 'error') return 'error';
+    if (ping.tone === 'loading') return 'loading';
+    return 'ready';
+  }
+
+  /** Millisecondes, ou le tiret qui dit « la sonde n'a pas de valeur ». */
+  const msOrDash = (v: number | null | undefined) => (v != null ? v.toFixed(1) : '—');
+
+  /**
+   * Valeurs d'un moteur, un instant par ligne — descendant et montant côte à
+   * côte. Regroupées sur l'horodatage : à plat, les deux sens donnaient deux
+   * lignes interlignées qu'on prenait pour deux tests successifs.
+   */
+  function engineRows(card: SpeedCard): string[][] {
+    const byRun = new Map<number, { dl?: number; ul?: number }>();
+    for (const s of card.series) {
+      for (const p of s.points) {
+        const row = byRun.get(p.t) ?? {};
+        if (s.field === 'download_mbps') row.dl = p.v;
+        else row.ul = p.v;
+        byRun.set(p.t, row);
+      }
+    }
+    return [...byRun.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([t, r]) => [
+        tooltipTime(t, lang),
+        r.dl != null ? r.dl.toFixed(1) : '—',
+        r.ul != null ? r.ul.toFixed(1) : '—',
+      ]);
+  }
 
 
 </script>
@@ -1266,85 +1340,173 @@
       {/if}
 
       {#if tab === 'monitoring'}
-        <section class="lp-card block">
-          <header class="bh">
-            <div>
-              <h2 class="lp-title">{$_('probe.tab_monitoring')}</h2>
-              <p class="bsub">{$_('probe.monitoring_sub')}</p>
-            </div>
-          </header>
+        <!-- Pas de carte enveloppante autour de la grille : les cartes en sont
+             déjà, et une carte dans une carte n'ajoute qu'un cadre. -->
+        <header class="tabhead">
+          <div>
+            <h2 class="lp-title">{$_('probe.tab_monitoring')}</h2>
+            <p class="bsub">{$_('probe.monitoring_sub')}</p>
+          </div>
+        </header>
 
-          <!--
-            ⚠️ Deux listes, parce que ce sont deux faits différents. La sonde
-            annonce à chaque battement ce qu'elle surveille MAINTENANT ; les
-            mesures, elles, montrent ce qui a tourné pendant la fenêtre
-            affichée. Une cible retirée reste dans la seconde tant que ses
-            points sont dans la fenêtre — la confondre avec la première ferait
-            affirmer une surveillance qui n'existe plus.
-          -->
-          {#if activeMonitors === null}
-            <p class="empty">{$_('probe.monitoring_unknown')}</p>
-          {:else if activeMonitors.length === 0}
-            <p class="empty">{$_('probe.monitoring_none')}</p>
+        <!--
+          ⚠️ Deux listes fusionnées, jamais confondues — c'est `monitorCards`
+          qui tient la règle, avec son test. La sonde annonce à chaque
+          battement ce qu'elle surveille MAINTENANT ; les mesures montrent ce
+          qui a tourné pendant la fenêtre affichée. Une cible retirée reste
+          dans la seconde tant que ses points sont dans la fenêtre — la
+          confondre avec la première ferait affirmer une surveillance qui
+          n'existe plus. D'où, sur la carte : le drapeau « plus surveillée »
+          d'un côté, l'attente du premier relevé de l'autre.
+
+          Les points viennent de `pingCurves`, tels quels : il applique déjà
+          `plausibleLatency`, qui écarte les latences supérieures au délai
+          d'attente. Les reconstruire depuis `ping.curves` contournerait ce
+          filtre, et un portable endormi rendrait l'échelle inutilisable.
+        -->
+        {#if monitorGrid.length === 0}
+          {#if pingTone === 'loading' || pingTone === 'error'}
+            <!-- Une lecture en cours ou en échec doit se voir : sans ça,
+                 l'onglet paraît simplement vide. -->
+            <ChartCard
+              title={$_('charts.latency_title')}
+              sub={$_('charts.latency_sub')}
+              tone={pingTone}
+              errorText={ping.error}
+            >
+              <TimeSeriesChart series={[]} {domain} unit={$_('charts.unit_ms')} />
+            </ChartCard>
           {:else}
-            <div class="tablewrap">
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th>{$_('probe.col_ip')}</th>
-                    <th>{$_('probe.col_state')}</th>
-                    <th class="num">{$_('charts.latency')}</th>
-                    <th class="num">{$_('charts.stat_min')}</th>
-                    <th class="num">{$_('charts.stat_avg')}</th>
-                    <th class="num">{$_('charts.stat_max')}</th>
-                    <th class="num">{$_('probe.col_uptime')}</th>
-                    <th class="num">{$_('sla.col_samples')}</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each activeMonitors as m (m.ip)}
-                    <tr>
-                      <td class="lp-mono">{m.ip}</td>
-                      <td>
-                        <span class="cstate {m.alive ? 'done' : 'failed'}">
-                          {$_(m.alive ? 'probe.monitor_alive' : 'probe.monitor_down')}
+            <section class="lp-card block">
+              <p class="empty">
+                {activeMonitors === null
+                  ? $_('probe.monitoring_unknown')
+                  : $_('probe.monitoring_none')}
+              </p>
+            </section>
+          {/if}
+        {:else}
+          <!-- ⚠️ Un graphe PAR cible, et donc une échelle par cible. Sur une
+               échelle partagée, un hôte LAN à 1 ms et un hôte WAN à 200 ms se
+               rendent mutuellement illisibles : le premier est une ligne plate
+               au ras de l'axe, le second écrase tout. -->
+          <div class="cardgrid">
+            {#each monitorGrid as card (card.key)}
+              <ChartCard
+                title={card.target
+                  ? $_('charts.latency_of', { values: { target: card.target } })
+                  : $_('charts.latency_title')}
+                sub={$_('charts.own_scale')}
+                tone={cardTone(card)}
+                errorText={ping.error}
+                {refreshing}
+              >
+                {#snippet action()}
+                  {#if card.stale}
+                    <span class="flag" title={$_('probe.monitoring_dropped_hint')}>
+                      {$_('probe.monitoring_dropped')}
+                    </span>
+                  {:else if card.monitor && $canOperate}
+                    <!-- Le retrait se joue là où l'on regarde la cible : c'est
+                         le bouton que portait la ligne du tableau de tête. -->
+                    <CommandButton
+                      probeId={id}
+                      kind="remove_monitor"
+                      args={{ ip: card.monitor.ip }}
+                      label={$_('probe.monitoring_remove')}
+                      allowed={$canOperate}
+                      onsent={afterCommand}
+                    />
+                  {/if}
+                {/snippet}
+
+                {#if card.curve && card.curve.points.length > 0}
+                  <TimeSeriesChart
+                    series={[card.curve]}
+                    {domain}
+                    unit={$_('charts.unit_ms')}
+                    height={CARD_HEIGHT}
+                  />
+                {:else}
+                  <!-- La cible qu'on vient d'ajouter : sa carte existe avant
+                       son premier point, sinon on la croirait refusée et on
+                       la saisirait une seconde fois. -->
+                  <p class="cardnote">{$_('probe.monitoring_awaiting')}</p>
+                {/if}
+
+                {#if card.monitor}
+                  <!-- ⚠️ Ces valeurs viennent de la sonde, sur SA fenêtre
+                       glissante, pas sur la période affichée : elles répondent
+                       à « comment va cette cible maintenant ? », le graphe à
+                       « qu'a-t-elle fait ? ». D'où le rappel au survol, sans
+                       quoi on lirait un min/max de six heures là où il n'y en
+                       a pas. -->
+                  <dl class="cstats" title={$_('probe.monitor_stats_hint')}>
+                    <div>
+                      <dt>{$_('probe.col_state')}</dt>
+                      <dd>
+                        <span class="cstate {card.monitor.alive ? 'done' : 'failed'}">
+                          {$_(card.monitor.alive ? 'probe.monitor_alive' : 'probe.monitor_down')}
                         </span>
-                      </td>
-                      <td class="num lp-mono">{m.latency_ms != null ? m.latency_ms.toFixed(1) : '—'}</td>
-                      <td class="num lp-mono">{m.min_ms != null ? m.min_ms.toFixed(1) : '—'}</td>
-                      <td class="num lp-mono">{m.avg_ms != null ? m.avg_ms.toFixed(1) : '—'}</td>
-                      <td class="num lp-mono">{m.max_ms != null ? m.max_ms.toFixed(1) : '—'}</td>
-                      <td class="num lp-mono">{m.uptime_pct.toFixed(1)} %</td>
-                      <td class="num lp-mono">{m.samples}</td>
-                      <td class="right">
-                        <CommandButton
-                          probeId={id}
-                          kind="remove_monitor"
-                          args={{ ip: m.ip }}
-                          label={$_('probe.monitoring_remove')}
-                          allowed={$canOperate}
-                          onsent={afterCommand}
-                        />
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{$_('charts.latency')}</dt>
+                      <dd class="lp-mono">{msOrDash(card.monitor.latency_ms)}</dd>
+                    </div>
+                    <div>
+                      <dt>{$_('charts.stat_min')}</dt>
+                      <dd class="lp-mono">{msOrDash(card.monitor.min_ms)}</dd>
+                    </div>
+                    <div>
+                      <dt>{$_('charts.stat_avg')}</dt>
+                      <dd class="lp-mono">{msOrDash(card.monitor.avg_ms)}</dd>
+                    </div>
+                    <div>
+                      <dt>{$_('charts.stat_max')}</dt>
+                      <dd class="lp-mono">{msOrDash(card.monitor.max_ms)}</dd>
+                    </div>
+                    <div>
+                      <dt>{$_('probe.col_uptime')}</dt>
+                      <dd class="lp-mono">{card.monitor.uptime_pct.toFixed(1)} %</dd>
+                    </div>
+                    <div>
+                      <dt>{$_('sla.col_samples')}</dt>
+                      <dd class="lp-mono">{card.monitor.samples}</dd>
+                    </div>
+                  </dl>
+                {/if}
 
-          <!-- ⚠️ Seulement quand la sonde annonce ET qu'il reste des cibles
-               orphelines : sur une sonde qui n'annonce rien, la liste vaudrait
-               « tout est mort », ce qui est faux et bruyant. Discret, en une
-               ligne — c'est une note de bas de page, pas une alerte. -->
-          {#if activeMonitors !== null && activeMonitors.length > 0 && staleTargets.length}
-            <p class="stale-note" title={staleTargets.join(', ')}>
-              {$_('probe.monitoring_stale', { values: { n: staleTargets.length } })}
-            </p>
-          {/if}
+                {#snippet table()}
+                  <ValueTable
+                    columns={[
+                      $_('charts.table_time'),
+                      `${$_('charts.latency')} (${$_('charts.unit_ms')})`,
+                    ]}
+                    rows={(card.curve?.points ?? []).map((p) => [
+                      tooltipTime(p.t, lang),
+                      p.v.toFixed(0),
+                    ])}
+                  />
+                {/snippet}
+              </ChartCard>
+            {/each}
+          </div>
+        {/if}
 
-          {#if $canOperate}
+        <!-- ⚠️ Seulement quand la sonde annonce ET qu'il reste des cibles
+             orphelines : sur une sonde qui n'annonce rien, la liste vaudrait
+             « tout est mort », ce qui est faux et bruyant. Discret, en une
+             ligne — c'est une note de bas de page, pas une alerte. -->
+        {#if activeMonitors !== null && activeMonitors.length > 0 && staleTargets.length}
+          <p class="stale-note" title={staleTargets.join(', ')}>
+            {$_('probe.monitoring_stale', { values: { n: staleTargets.length } })}
+          </p>
+        {/if}
+
+        {#if $canOperate}
+          <!-- Sous la grille : on ajoute une cible après avoir regardé celles
+               qu'on a déjà, pas avant. -->
           <form class="addrow" onsubmit={(e) => e.preventDefault()}>
             <input
               class="lp-input"
@@ -1364,179 +1526,150 @@
               />
             {/if}
           </form>
-          {/if}
-        </section>
-
-        <!--
-          ⚠️ Un graphe PAR cible, pas un graphe à N séries. Sur une échelle
-          partagée, un hôte LAN à 1 ms et un hôte WAN à 200 ms se rendent
-          mutuellement illisibles : le premier est une ligne plate au ras de
-          l'axe, le second écrase tout. Le tableau de bord garde sa vue
-          d'ensemble, qui répond à « est-ce que tout va bien ? » ; cet onglet
-          répond à « que fait CETTE cible ? ».
-
-          Les points viennent de `pingCurves`, tels quels : il applique déjà
-          `plausibleLatency`, qui écarte les latences supérieures au délai
-          d'attente. Les reconstruire depuis `ping.curves` contournerait ce
-          filtre, et un portable endormi rendrait de nouveau l'échelle
-          inutilisable.
-        -->
-        {#each pingCurves as c (c.key)}
-          <ChartCard
-            title={c.target
-              ? $_('charts.latency_of', { values: { target: c.target } })
-              : $_('charts.latency_title')}
-            sub={$_('charts.own_scale')}
-            tone="ready"
-            {refreshing}
-          >
-            <TimeSeriesChart series={[c]} {domain} unit={$_('charts.unit_ms')} />
-            {#snippet table()}
-              <ValueTable
-                columns={[
-                  $_('charts.table_time'),
-                  `${$_('charts.latency')} (${$_('charts.unit_ms')})`,
-                ]}
-                rows={c.points.map((p) => [tooltipTime(p.t, lang), p.v.toFixed(0)])}
-              />
-            {/snippet}
-          </ChartCard>
-        {/each}
-
-        <!-- Sans aucune cible, rien de plus n'est dessiné : les deux listes
-             au-dessus disent déjà pourquoi. Une lecture en cours ou en échec,
-             elle, doit se voir — sinon l'onglet paraît simplement vide. -->
-        {#if pingCurves.length === 0 && (pingTone === 'loading' || pingTone === 'error')}
-          <ChartCard
-            title={$_('charts.latency_title')}
-            sub={$_('charts.latency_sub')}
-            tone={pingTone}
-            errorText={ping.error}
-          >
-            <TimeSeriesChart series={[]} {domain} unit={$_('charts.unit_ms')} />
-          </ChartCard>
         {/if}
       {:else if tab === 'speedtest'}
-        <section class="lp-card block">
-          <header class="bh">
-            <div>
-              <h2 class="lp-title">{$_('probe.tab_speedtest')}</h2>
-              <p class="bsub">{$_('probe.speedtest_sub')}</p>
+        <header class="tabhead">
+          <div>
+            <h2 class="lp-title">{$_('probe.tab_speedtest')}</h2>
+            <p class="bsub">{$_('probe.speedtest_sub')}</p>
+          </div>
+          <div class="runbox">
+            <div class="engines" role="group" aria-label={$_('charts.table_engine')}>
+              <button
+                class="chip"
+                class:on={speedEngine === 'ookla'}
+                onclick={() => { speedEngine = 'ookla'; remember('engine', 'ookla'); }}
+              >Speedtest.net</button>
+              <button
+                class="chip"
+                class:on={speedEngine === 'iperf3'}
+                onclick={() => { speedEngine = 'iperf3'; remember('engine', 'iperf3'); }}
+              >iperf3</button>
             </div>
-            <div class="runbox">
-              <div class="engines" role="group" aria-label={$_('charts.table_engine')}>
-                <button
-                  class="chip"
-                  class:on={speedEngine === 'ookla'}
-                  onclick={() => { speedEngine = 'ookla'; remember('engine', 'ookla'); }}
-                >Speedtest.net</button>
-                <button
-                  class="chip"
-                  class:on={speedEngine === 'iperf3'}
-                  onclick={() => { speedEngine = 'iperf3'; remember('engine', 'iperf3'); }}
-                >iperf3</button>
-              </div>
-              {#if speedEngine === 'iperf3'}
-                <input
-                  class="lp-input"
-                  bind:value={iperfServer}
-                  onblur={() => remember('iperf', iperfServer)}
-                  placeholder={$_('probe.iperf_placeholder')}
-                  spellcheck="false"
-                  autocomplete="off"
-                />
-              {/if}
-              <!-- iperf3 sans serveur n'a rien à mesurer : le bouton n'existe
-                   pas plutôt que d'envoyer une commande vouée à l'échec. -->
-              {#if speedEngine === 'ookla' || iperfServer.trim()}
-                <CommandButton
-                  probeId={id}
-                  kind="speedtest"
-                  args={speedEngine === 'iperf3'
-                    ? { engine: 'iperf3', server: iperfServer.trim() }
-                    : { engine: 'ookla' }}
-                  allowed={$canOperate}
-                  label={$_('probe.speedtest_run')}
-                  onsent={afterCommand}
-                />
-              {/if}
-            </div>
-          </header>
-
-          {#if speedHistory === undefined}
-            <p class="empty">{$_('charts.loading')}</p>
-          {:else if speedHistory.length === 0}
-            <p class="empty">{$_('probe.speedtest_none')}</p>
-          {:else}
-            <div class="tablewrap">
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th>{$_('charts.table_time')}</th>
-                    <th>{$_('charts.table_engine')}</th>
-                    <th>{$_('charts.speed_server')}</th>
-                    <th class="num">{$_('charts.download')}</th>
-                    <th class="num">{$_('charts.upload')}</th>
-                    <th class="num">{$_('charts.latency')}</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each speedHistory as r (r.started_at)}
-                    <tr>
-                      <td class="lp-mono">{logTime(r.started_at, lang)}</td>
-                      <td>{r.engine ?? '—'}</td>
-                      <td class="srv">{r.server_name ?? '—'}</td>
-                      <td class="num lp-mono">{r.download_mbps?.toFixed(1) ?? '—'}</td>
-                      <td class="num lp-mono">{r.upload_mbps?.toFixed(1) ?? '—'}</td>
-                      <td class="num lp-mono">{r.latency_ms ?? '—'}</td>
-                      <td>
-                        {#if r.result_url}
-                          <a href={r.result_url} target="_blank" rel="noopener noreferrer">
-                            {$_('charts.speed_result_link')}
-                          </a>
-                        {/if}
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-        </section>
+            {#if speedEngine === 'iperf3'}
+              <input
+                class="lp-input"
+                bind:value={iperfServer}
+                onblur={() => remember('iperf', iperfServer)}
+                placeholder={$_('probe.iperf_placeholder')}
+                spellcheck="false"
+                autocomplete="off"
+              />
+            {/if}
+            <!-- iperf3 sans serveur n'a rien à mesurer : le bouton n'existe
+                 pas plutôt que d'envoyer une commande vouée à l'échec. -->
+            {#if speedEngine === 'ookla' || iperfServer.trim()}
+              <CommandButton
+                probeId={id}
+                kind="speedtest"
+                args={speedEngine === 'iperf3'
+                  ? { engine: 'iperf3', server: iperfServer.trim() }
+                  : { engine: 'ookla' }}
+                allowed={$canOperate}
+                label={$_('probe.speedtest_run')}
+                onsent={afterCommand}
+              />
+            {/if}
+          </div>
+        </header>
 
         <!--
-          Même principe qu'en surveillance : descendant et montant séparés, et
-          par moteur quand il y en a plusieurs. Un lien fibre asymétrique donne
-          900 Mbit/s en descendant pour 100 en montant — sur une échelle
-          commune, la courbe montante est écrasée au ras de l'axe, précisément
-          là où on cherche à voir si elle décroche.
+          ⚠️ Une carte par moteur, descendant ET montant dans le même graphe.
+          C'est l'inverse de la surveillance, et pour une raison précise :
+          l'argument de l'échelle propre vaut pour un hôte LAN à 1 ms face à un
+          hôte WAN à 200 ms, pas pour deux débits de même unité et de même
+          ordre de grandeur, qu'on lit justement l'un contre l'autre. Les
+          séparer donnait deux graphes aux axes identiques.
 
-          `speedCurves` fournit déjà ce découpage : le réutiliser garantit que
-          les graphes, la légende du tableau de bord et le tableau de valeurs
-          parlent des mêmes points.
+          `speedCards` réutilise `speedCurves` : les cartes, la légende du
+          tableau de bord et le tableau de valeurs parlent des mêmes points.
         -->
-        {#each speedCurves as c (c.key)}
-          <ChartCard title={c.label} sub={$_('charts.own_scale')} tone="ready" {refreshing}>
-            <TimeSeriesChart series={[c]} {domain} unit={$_('charts.unit_mbps')} decimals={1} />
-            {#snippet table()}
-              <ValueTable
-                columns={[$_('charts.table_time'), `${c.label} (${$_('charts.unit_mbps')})`]}
-                rows={c.points.map((p) => [tooltipTime(p.t, lang), p.v.toFixed(1)])}
-              />
-            {/snippet}
-          </ChartCard>
-        {/each}
+        {#if speedGrid.length === 0}
+          <section class="lp-card block">
+            {#if speedHistory === undefined && speedTone === 'loading'}
+              <p class="empty">{$_('charts.loading')}</p>
+            {:else}
+              <p class="empty">{$_('probe.speedtest_none')}</p>
+            {/if}
+          </section>
+        {:else}
+          <div class="cardgrid two">
+            {#each speedGrid as card (card.key)}
+              <ChartCard
+                title={card.label || $_('charts.speed_title')}
+                sub={$_('charts.speed_shared_scale')}
+                tone={card.series.length > 0
+                  ? 'ready'
+                  : speedTone === 'error' || speedTone === 'loading'
+                    ? speedTone
+                    : 'empty'}
+                errorText={speed.error}
+                {refreshing}
+              >
+                {#snippet action()}
+                  <!-- iperf3 ne produit pas de page de résultat : l'absence de
+                       lien est une information, pas une panne. -->
+                  {#if card.last?.result_url}
+                    <a
+                      class="lp-btn ghost sm"
+                      href={card.last.result_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {$_('charts.speed_result_link')}
+                    </a>
+                  {/if}
+                {/snippet}
 
-        {#if speedCurves.length === 0 && (speedTone === 'loading' || speedTone === 'error')}
-          <ChartCard
-            title={$_('charts.speed_title')}
-            sub={$_('charts.speed_sub')}
-            tone={speedTone}
-            errorText={speed.error}
-          >
-            <TimeSeriesChart series={[]} {domain} unit={$_('charts.unit_mbps')} decimals={1} />
-          </ChartCard>
+                <TimeSeriesChart
+                  series={card.series.filter((s) => !hidden.has(s.key))}
+                  {domain}
+                  unit={$_('charts.unit_mbps')}
+                  decimals={1}
+                  height={CARD_HEIGHT}
+                />
+                <SeriesLegend
+                  rows={card.series}
+                  unit={$_('charts.unit_mbps')}
+                  {hidden}
+                  ontoggle={toggle}
+                />
+
+                <!-- Ce que le tableau de tête portait, rendu à son moteur :
+                     « 216 Mbit/s » ne dit rien sans sa date ni son serveur. -->
+                {#if card.last}
+                  <dl class="cstats">
+                    <div>
+                      <dt>{$_('probe.speedtest_last')}</dt>
+                      <dd class="lp-mono">{logTime(card.last.started_at, lang)}</dd>
+                    </div>
+                    <div>
+                      <dt>{$_('charts.latency')}</dt>
+                      <dd class="lp-mono">{msOrDash(card.last.latency_ms)}</dd>
+                    </div>
+                  </dl>
+                  {#if card.last.server_name}
+                    <p class="server lp-mono">
+                      {$_('charts.speed_server')} {card.last.server_name}
+                    </p>
+                  {/if}
+                {:else}
+                  <p class="cardnote">{$_('probe.speedtest_engine_none')}</p>
+                {/if}
+
+                {#snippet table()}
+                  <ValueTable
+                    columns={[
+                      $_('charts.table_time'),
+                      `${$_('charts.download')} (${$_('charts.unit_mbps')})`,
+                      `${$_('charts.upload')} (${$_('charts.unit_mbps')})`,
+                    ]}
+                    rows={engineRows(card)}
+                  />
+                {/snippet}
+              </ChartCard>
+            {/each}
+          </div>
         {/if}
       {:else if tab === 'ports'}
         <section class="lp-card block">
@@ -2250,6 +2383,78 @@
     margin: 3px 0 0;
     font-size: 12px;
     color: var(--ep-text-dim);
+  }
+  /* En-tête d'un onglet qui n'a pas de carte enveloppante : la grille en
+     dessous est déjà faite de cartes. */
+  .tabhead {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  /* Trois cartes par ligne, deux puis une sur écran étroit. En dessous
+     d'environ 300 px de large, l'axe des valeurs n'a plus la place d'écrire
+     ses graduations et le graphe ne se lit plus. */
+  .cardgrid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+  /* Deux moteurs de débit, donc deux colonnes : les étirer sur trois laisserait
+     une colonne vide et rétrécirait les graphes pour rien. */
+  .cardgrid.two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  @media (max-width: 1100px) {
+    .cardgrid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 720px) {
+    .cardgrid,
+    .cardgrid.two {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  /* Les statistiques de la cible, dans SA carte. C'est le tableau de tête qui
+     les écrivait une première fois, juste au-dessus des mêmes graphes. */
+  .cstats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
+    gap: 6px 10px;
+    margin: 10px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--ep-border);
+  }
+  .cstats div {
+    min-width: 0;
+  }
+  /* Même hauteur qu'un message de carte : une carte en attente ne doit pas
+     décaler ses voisines de la même ligne. */
+  .cardnote {
+    display: flex;
+    align-items: center;
+    min-height: 96px;
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--ep-text-muted);
+  }
+  /* Le retrait se lit sur la carte concernée : la note de bas de page dit
+     combien de cibles ne sont plus surveillées, jamais lesquelles. */
+  .flag {
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--ep-border-strong);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--ep-text-dim);
+    white-space: nowrap;
+    cursor: help;
   }
   .empty {
     margin: 0;
