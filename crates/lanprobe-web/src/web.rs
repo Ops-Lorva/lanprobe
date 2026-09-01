@@ -185,6 +185,7 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/revoke-token", post(revoke_token_now))
             .route("/api/probes/{id}/reenroll-code", post(create_reenroll_code))
             .route("/api/probes/{id}/realtime", post(set_realtime))
+            .route("/api/probes/{id}/monitors/revive", post(revive_monitor))
             .route(
                 "/api/probes/{id}/commands",
                 get(list_commands).post(create_command),
@@ -2399,6 +2400,43 @@ struct CommandAck {
     error: Option<String>,
 }
 
+/// Un ajout ou un retrait annoncé par la sonde, avec son **ancienneté**.
+///
+/// ⚠️ `age_secs`, jamais une date. La sonde la mesure sur son horloge monotone
+/// et le hub la soustrait de son propre `now()` : deux horloges ne sont jamais
+/// comparées. Accepter une date à la place réintroduirait la dérive — et un
+/// portable qui sort de veille saute de plusieurs minutes d'un coup, ce qui
+/// lui ferait gagner des arbitrages qu'il doit perdre, sans que rien ne le
+/// signale.
+#[derive(Deserialize)]
+struct MonitorChange {
+    target: String,
+    /// `add` | `remove`.
+    action: String,
+    #[serde(default)]
+    age_secs: i64,
+}
+
+/// Ancienneté maximale acceptée dans un changement de surveillance : 30 jours.
+///
+/// ⚠️ Cette borne n'est pas une coquetterie. Une valeur aberrante — champ
+/// corrompu, bug de la sonde, sonde malveillante — daterait le changement en
+/// 1970 et lui ferait gagner **tous** les arbitrages à l'envers : plus aucun
+/// ajout fait depuis le hub ne pourrait défaire ce retrait. Au-delà de la
+/// borne on ignore la valeur et on date à la réception : on perd la précision
+/// d'un cas invraisemblable, on ne perd jamais la main.
+const MAX_MONITOR_AGE_SECS: i64 = 30 * 24 * 3600;
+
+/// Convertit l'ancienneté annoncée en date dans la référence du hub.
+fn monitor_change_instant(age_secs: i64) -> i64 {
+    let now = crate::db::now();
+    // Négatif = un changement dans le futur, qui gagnerait tout lui aussi.
+    if !(0..=MAX_MONITOR_AGE_SECS).contains(&age_secs) {
+        return now;
+    }
+    now - age_secs
+}
+
 #[derive(Deserialize)]
 struct HeartbeatBody {
     #[serde(default)]
@@ -2428,6 +2466,14 @@ struct HeartbeatBody {
     /// qui vient d'une sonde antérieure à ce champ.
     #[serde(default)]
     monitors: Option<Vec<serde_json::Value>>,
+    /// Changements de surveillance non encore accusés (ajouts et retraits).
+    ///
+    /// ⚠️ **Ce n'est pas la liste de la sonde, ce sont ses actes.** Une cible
+    /// qui n'y figure pas n'a rien subi : c'est toute la conception. En
+    /// déduire un retrait est le défaut qu'on corrige — l'app qui redémarre
+    /// effaçait en silence ce qu'on avait ajouté depuis le hub.
+    #[serde(default)]
+    monitor_changes: Vec<MonitorChange>,
     /// Identité réseau du site (contrat, section 15). Chaque champ est
     /// facultatif : une sonde sans accès internet bat **sans** IP publique
     /// plutôt que d'échouer, et un champ absent n'efface jamais ce que le hub
@@ -2655,6 +2701,55 @@ async fn heartbeat(
         }
     }
 
+    // ⚠️ Les changements de surveillance sont des FAITS DATÉS, pas une liste.
+    // Une cible qui n'y figure pas n'a rien subi : c'est ce qui empêche l'app
+    // qui redémarre d'effacer en silence ce qui a été ajouté depuis le hub.
+    //
+    // ⚠️ Un battement sans ce champ n'efface donc rien et ne change rien : une
+    // sonde antérieure à ce mécanisme se comporte exactement comme avant.
+    let mut monitor_acks: Vec<String> = Vec::new();
+    for change in &body.monitor_changes {
+        let target = change.target.trim();
+        if target.is_empty() {
+            continue;
+        }
+        let removed = match change.action.trim() {
+            "remove" => true,
+            "add" => false,
+            // Vocabulaire fermé, comme pour le verdict internet. On accuse
+            // quand même : réémettre à chaque battement un changement
+            // illisible ne le rendrait pas lisible, et la file de la sonde ne
+            // se viderait jamais.
+            other => {
+                tracing::debug!("battement de {id} : action de surveillance inconnue ({other})");
+                monitor_acks.push(target.to_string());
+                continue;
+            }
+        };
+        match state
+            .db
+            .apply_monitor_change(&id, target, removed, monitor_change_instant(change.age_secs))
+        {
+            // Accusé dans les deux cas : `false` veut dire « arbitré, et c'est
+            // un autre changement qui a gagné » — la sonde n'a plus rien à
+            // faire de celui-ci, elle s'alignera sur la liste ci-dessous.
+            Ok(_) => monitor_acks.push(target.to_string()),
+            // Pas d'accusé : la sonde réémettra au battement suivant. Le
+            // battement, lui, aboutit — une écriture manquée ne doit pas faire
+            // passer une sonde saine pour hors ligne.
+            Err(e) => tracing::warn!("changement de surveillance refusé pour {id} : {e}"),
+        }
+    }
+
+    // La liste effective, retirées comprises : c'est elle que la sonde suit.
+    // Les retirées EN FONT PARTIE — sans elles, la sonde ne distinguerait pas
+    // « le hub ne connaît pas cette cible » de « le hub l'a retirée », et la
+    // ressusciterait au redémarrage.
+    let monitors = state.db.monitors(&id).unwrap_or_else(|e| {
+        tracing::warn!("surveillances illisibles pour {id} : {e}");
+        Vec::new()
+    });
+
     // ⚠️ Le hub ne joint jamais la sonde : c'est ce battement qui porte les
     // commandes. Les remettre échoue en silence plutôt que de faire échouer le
     // battement — une file cassée ne doit pas faire passer une sonde saine
@@ -2707,6 +2802,11 @@ async fn heartbeat(
         "heartbeat_interval_secs": heartbeat_interval_secs,
         "commands": commands,
         "recheck_public_ip": recheck_public_ip,
+        "monitors": monitors,
+        // Accusé de réception, même mécanisme que les commandes (§ 14) : la
+        // sonde ne retire un changement de sa file que lorsqu'il lui revient
+        // accusé. Sans lui, un battement perdu perdrait le retrait avec.
+        "monitor_acks": monitor_acks,
     });
 
     // Relecture : la rotation vient peut-être d'être accusée.
@@ -2827,6 +2927,45 @@ async fn set_realtime(
         .then(|| crate::db::now() + state.settings.realtime_duration_min() * 60);
     match state.db.set_realtime(&id, until) {
         Ok(()) => ok_json(json!({ "ok": true, "realtime_until": until })),
+        Err(e) => error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct MonitorTarget {
+    target: String,
+}
+
+/// Réactive une surveillance retirée. **Réactiver, c'est effacer la
+/// suppression** — il n'y a pas d'autre mécanisme, et c'est ce qui fait que le
+/// « revive des deux côtés » tombe seul : la sonde reprend la cible au
+/// battement suivant parce qu'elle ne porte plus de date de retrait.
+///
+/// ⚠️ Derrière le garde de portée, comme toute route qui désigne UNE sonde :
+/// 404 hors portée, et rien d'écrit. Réactiver une surveillance relance du
+/// trafic sur le réseau d'un client — ce n'est pas une consultation.
+async fn revive_monitor(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<MonitorTarget>,
+) -> Response {
+    let target = body.target.trim();
+    if target.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "cible requise");
+    }
+    // `now()` du hub : la réactivation vient du hub, elle est donc déjà dans
+    // sa référence. Rien à convertir, et surtout aucune horloge à comparer.
+    match audited(
+        &state,
+        Some(&actor.username),
+        "probe.monitor_revive",
+        Some(&id),
+        state
+            .db
+            .apply_monitor_change(&id, target, false, crate::db::now()),
+    ) {
+        Ok(applied) => ok_json(json!({ "ok": true, "applied": applied })),
         Err(e) => error_response(e),
     }
 }
@@ -5759,6 +5898,162 @@ mod tests {
             ))
             .await;
         assert!(fleet[0]["internet_state"].is_null(), "{fleet}");
+    }
+
+    // ── Surveillances partagées ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn an_age_is_converted_into_a_date_by_the_hub() {
+        // ⚠️ La sonde n'envoie JAMAIS de date : elle dit « il y a N secondes ».
+        // Aucune horloge n'est comparée à une autre — c'est ce qui rend le
+        // dispositif insensible à la dérive et aux réveils de veille.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        heartbeat_from(&h, &probe_id, &token, "203.0.113.10", json!({
+            "monitor_changes": [{ "target": "8.8.8.8", "action": "add", "age_secs": 60 }]
+        })).await;
+
+        let m = h.state.db.monitors(&probe_id).unwrap();
+        assert_eq!(m.len(), 1);
+        let now = crate::db::now();
+        assert!(m[0].added_at <= now - 59 && m[0].added_at >= now - 62,
+                "daté il y a ~60 s, pas à la réception");
+    }
+
+    #[tokio::test]
+    async fn an_absurd_age_is_ignored_and_the_change_is_dated_on_arrival() {
+        // ⚠️ Une ancienneté aberrante — champ corrompu, bug de la sonde, sonde
+        // malveillante — placerait le changement en 1970 et lui ferait gagner
+        // TOUS les arbitrages à l'envers : un retrait vieux d'un demi-siècle
+        // ne peut plus jamais être défait par un ajout fait depuis le hub.
+        // Au-delà de la borne, on ignore la valeur et on date à la réception.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        heartbeat_from(&h, &probe_id, &token, "203.0.113.10", json!({
+            "monitor_changes": [
+                { "target": "8.8.8.8", "action": "add", "age_secs": 4_000_000_000i64 },
+                // Une ancienneté négative n'a pas de sens non plus : elle
+                // daterait le changement dans le futur, ce qui gagne tout.
+                { "target": "1.1.1.1", "action": "add", "age_secs": -86_400 },
+            ]
+        })).await;
+
+        let now = crate::db::now();
+        let entries = h.state.db.monitors(&probe_id).unwrap();
+        // Sans ce compte, la boucle qui suit ne parcourrait rien et le test
+        // passerait à vide — y compris si le champ était ignoré en entier.
+        assert_eq!(entries.len(), 2, "les deux changements sont bien enregistrés");
+        for entry in entries {
+            assert!(
+                entry.added_at >= now - 5 && entry.added_at <= now,
+                "{} daté à la réception, pas en 1970 ni dans le futur : {}",
+                entry.target,
+                entry.added_at
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_old_probe_without_changes_keeps_working() {
+        // Compatibilité : sans le champ, rien ne casse et rien n'est effacé.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        h.state.db.apply_monitor_change(&probe_id, "1.1.1.1", false, crate::db::now()).unwrap();
+
+        let r = heartbeat_from(&h, &probe_id, &token, "203.0.113.10", json!({})).await;
+        assert_eq!(r["ok"], true);
+        assert_eq!(h.state.db.monitors(&probe_id).unwrap().len(), 1,
+                   "un battement muet n'efface rien");
+    }
+
+    #[tokio::test]
+    async fn the_heartbeat_answers_with_the_effective_list_removals_included() {
+        // La sonde s'aligne sur cette liste. Les retirées EN FONT PARTIE : sans
+        // elles, la sonde ne saurait pas distinguer « le hub ne connaît pas
+        // cette cible » de « le hub l'a retirée », et la ressusciterait au
+        // redémarrage — le défaut d'aujourd'hui, inversé.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let r = heartbeat_from(&h, &probe_id, &token, "203.0.113.10", json!({
+            "monitor_changes": [
+                { "target": "8.8.8.8", "action": "add",    "age_secs": 300 },
+                { "target": "9.9.9.9", "action": "add",    "age_secs": 200 },
+                { "target": "9.9.9.9", "action": "remove", "age_secs": 100 },
+            ]
+        })).await;
+
+        let list = r["monitors"].as_array().expect("la liste effective : {r}");
+        assert_eq!(list.len(), 2, "{r}");
+        assert_eq!(list[0]["target"], "8.8.8.8");
+        assert!(list[0]["removed_at"].is_null(), "{r}");
+        assert_eq!(list[1]["target"], "9.9.9.9");
+        assert!(list[1]["removed_at"].is_i64(), "la retirée garde sa date : {r}");
+
+        // Accusé de réception : la sonde ne réémet ses changements que
+        // lorsqu'ils lui reviennent accusés, comme pour les commandes (§14).
+        let acks = r["monitor_acks"].as_array().expect("{r}");
+        assert_eq!(acks.len(), 3, "chaque changement reçu est accusé : {r}");
+    }
+
+    #[tokio::test]
+    async fn reviving_needs_the_site_in_scope() {
+        // Même garde que partout : 404 hors portée, et rien d'écrit.
+        // ⚠️ Ce test doit aussi vérifier le cas EN portée, sinon il passerait
+        // à l'identique si la route n'existait pas — le routeur rend 404 sur
+        // toute URL inconnue.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+        h.state.db.apply_monitor_change(&probe_id, "8.8.8.8", false, 100).unwrap();
+        h.state.db.apply_monitor_change(&probe_id, "8.8.8.8", true, 200).unwrap();
+
+        let autre = h.state.db.create_site("Martin").unwrap();
+        h.user("olivier", Role::Operator).await;
+        h.state.db.set_user_sites("olivier", &[autre.site_id.clone()]).unwrap();
+        let restreint = h.login_as("olivier").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/monitors/revive"),
+                    json!({ "target": "8.8.8.8" }),
+                ),
+                &restreint,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(
+            h.state.db.monitors(&probe_id).unwrap()[0].removed_at.is_some(),
+            "rien ne doit avoir été réactivé"
+        );
+
+        // ⚠️ La moitié qui prouve que la route existe : la MÊME requête, en
+        // portée, doit aboutir. Sans elle le refus ci-dessus serait
+        // indiscernable d'une route absente.
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/monitors/revive"),
+                    json!({ "target": "8.8.8.8" }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            h.state.db.monitors(&probe_id).unwrap()[0].removed_at,
+            None,
+            "réactiver, c'est effacer la suppression"
+        );
     }
 
     // ── Inventaire réseau (contrat § 12) ───────────────────────────────────
