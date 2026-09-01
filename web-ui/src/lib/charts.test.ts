@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   curveTarget,
+  engineLabel,
   gapLimit,
   internetSamples,
   normalizeState,
@@ -43,6 +44,27 @@ describe('curveTarget', () => {
     // Une sonde qui ne surveille rien de nommé donne une courbe sans
     // étiquette : mieux vaut un titre générique que « latency_ms ».
     expect(curveTarget({ label: 'latency_ms', tags: {} })).toBe('');
+  });
+});
+
+describe('engineLabel', () => {
+  it('donne au moteur son nom de marque, pas son étiquette Influx', () => {
+    // « ookla » est ce qu'écrit la sonde ; personne n'appelle ça autrement que
+    // Speedtest.net, et c'est ce nom-là qui titre la carte de l'onglet Débit.
+    expect(engineLabel('ookla')).toBe('Speedtest.net');
+    expect(engineLabel('OOKLA')).toBe('Speedtest.net');
+    expect(engineLabel('iperf3')).toBe('iperf3');
+  });
+
+  it('capitalise un moteur inconnu plutôt que de le masquer', () => {
+    // Un moteur ajouté côté sonde avant l'interface doit rester lisible : le
+    // taire ferait disparaître ses mesures de l'onglet.
+    expect(engineLabel('bidule')).toBe('Bidule');
+  });
+
+  it('rend une chaîne vide quand la courbe ne nomme aucun moteur', () => {
+    expect(engineLabel(undefined)).toBe('');
+    expect(engineLabel('')).toBe('');
   });
 });
 

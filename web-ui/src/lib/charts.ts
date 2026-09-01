@@ -43,6 +43,29 @@ export function curveTarget(curve: { label: string; tags: Record<string, string>
   return sep === -1 ? '' : curve.label.slice(sep + 1).trim();
 }
 
+/** Nom de marque des moteurs de débit, par étiquette Influx. */
+const ENGINE_LABEL: Record<string, string> = {
+  ookla: 'Speedtest.net',
+  iperf3: 'iperf3',
+};
+
+/**
+ * Nom affichable d'un moteur de débit.
+ *
+ * ⚠️ La sonde écrit `ookla` ; personne n'appelle ça autrement que
+ * Speedtest.net. Un moteur inconnu est capitalisé plutôt que masqué : ajouté
+ * côté sonde avant l'interface, il doit rester lisible, sinon ses mesures
+ * disparaissent de l'onglet sans que rien ne l'explique.
+ *
+ * Chaîne vide = la courbe ne nomme aucun moteur ; à l'appelant de choisir un
+ * titre générique.
+ */
+export function engineLabel(raw: string | null | undefined): string {
+  if (!raw) return '';
+  const key = raw.toLowerCase();
+  return ENGINE_LABEL[key] ?? raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
 /** États internet écrits par la sonde (`crates/lanprobe-core/src/internet.rs`). */
 export type InternetState = 'online' | 'limited' | 'offline' | 'unknown';
 
