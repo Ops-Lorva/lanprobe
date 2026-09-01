@@ -112,11 +112,59 @@ fn cmd_check_permissions() -> bool { has_permissions() }
 #[tauri::command]
 fn cmd_install_permissions() -> Result<(), String> { install_permissions() }
 
-#[tauri::command]
-fn cmd_list_interfaces() -> Vec<String> { list_interfaces() }
+/// Durée de vie du cache de la liste d'interfaces.
+///
+/// Le Dashboard la redemande à plusieurs endroits (montage, changement
+/// d'interface, rafraîchissement) et chaque appel relançait un processus.
+/// Quelques secondes suffisent : une interface qu'on branche ou qu'on
+/// débranche n'échappe pas longtemps à la liste.
+const INTERFACES_CACHE: std::time::Duration = std::time::Duration::from_secs(5);
+
+static INTERFACES: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
+> = std::sync::OnceLock::new();
+
+/// Liste des interfaces, avec un cache court. **Bloquant** : à n'appeler que
+/// depuis un fil de travail.
+fn list_interfaces_cached() -> Vec<String> {
+    let cell = INTERFACES.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cell.lock() {
+        if let Some((at, list)) = guard.as_ref() {
+            if at.elapsed() < INTERFACES_CACHE {
+                return list.clone();
+            }
+        }
+    }
+    let list = list_interfaces();
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some((std::time::Instant::now(), list.clone()));
+    }
+    list
+}
+
+// ⚠️ Ces deux commandes sont `async` et passent par `spawn_blocking`, et ce
+// n'est pas cosmétique : Tauri exécute une commande SYNCHRONE sur le fil de
+// l'interface. Or elles lancent des processus — `powershell Get-NetAdapter`
+// sous Windows, `networksetup` sous macOS — qui coûtent plusieurs secondes
+// chacun. Le Dashboard en enchaînait trois ou quatre à l'ouverture : la
+// fenêtre restait figée 10 à 15 s, et Windows affichait le curseur d'attente
+// parce que l'application ne répondait effectivement plus.
+//
+// Le relevé reste aussi lent ; ce qui change, c'est qu'il ne gèle plus rien.
 
 #[tauri::command]
-fn cmd_get_interface_details(name: String) -> InterfaceDetails { get_interface_details(&name) }
+async fn cmd_list_interfaces() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(list_interfaces_cached)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn cmd_get_interface_details(name: String) -> InterfaceDetails {
+    tauri::async_runtime::spawn_blocking(move || get_interface_details(&name))
+        .await
+        .unwrap_or_default()
+}
 
 #[tauri::command]
 fn cmd_set_selected_interface(name: Option<String>, state: tauri::State<'_, SharedState>) -> Result<(), String> {
