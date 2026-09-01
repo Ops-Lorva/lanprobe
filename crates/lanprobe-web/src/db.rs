@@ -950,6 +950,9 @@ pub struct ProbeRecord {
     /// Opaque pour le hub : il la garde et la rend, il ne la lit pas.
     pub config: Option<String>,
     pub config_at: Option<i64>,
+    /// Échéance du mode temps réel. `None` ou passée = rythme normal — la
+    /// comparaison se fait à la lecture, jamais par un balayage.
+    pub realtime_until: Option<i64>,
 }
 
 const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash, p.platform, \
@@ -958,7 +961,7 @@ const PROBE_COLUMNS: &str = "p.probe_id, p.site_id, s.name, p.name, p.token_hash
                              p.pending_influx_token, p.pending_influx_token_version, \
                              p.public_ip, p.public_ip_at, p.interface, p.local_ips, p.gateway, \
                              p.internet_state, p.internet_state_at, p.monitors, p.monitors_at, \
-                             p.config, p.config_at, p.archived_at";
+                             p.config, p.config_at, p.archived_at, p.realtime_until";
 
 /// Ce qu'une sonde raconte de sa position réseau dans son battement.
 ///
@@ -1115,6 +1118,7 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
         config: r.get(25)?,
         config_at: r.get(26)?,
         archived_at: r.get(27)?,
+        realtime_until: r.get(28)?,
     })
 }
 

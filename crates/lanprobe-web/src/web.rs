@@ -184,6 +184,7 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/rotate", post(rotate_token))
             .route("/api/probes/{id}/revoke-token", post(revoke_token_now))
             .route("/api/probes/{id}/reenroll-code", post(create_reenroll_code))
+            .route("/api/probes/{id}/realtime", post(set_realtime))
             .route(
                 "/api/probes/{id}/commands",
                 get(list_commands).post(create_command),
@@ -2792,10 +2793,40 @@ async fn list_probes(
                             .as_deref()
                             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok()),
                         "monitors_at": p.monitors_at,
+                        // Échéance du mode temps réel, pour que l'interface
+                        // affiche le compte à rebours sans un appel de plus
+                        // par sonde — et que ce qui tourne se voie.
+                        "realtime_until": p.realtime_until,
                     })
                 })
                 .collect(),
         )),
+        Err(e) => error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RealtimeBody {
+    on: bool,
+}
+
+/// Arme le mode temps réel sur une sonde, pour la durée réglée.
+///
+/// ⚠️ La minuterie n'est pas une précaution optionnelle : on redescend de
+/// l'échelle, la caméra marche, on passe à la suivante — on ne revient pas
+/// éteindre le mode. Sans elle, au bout de quelques mois tout le parc bat
+/// toutes les 5 secondes et personne ne sait pourquoi. Ce n'est pas une panne,
+/// c'est pire : ça marche, et la charge a été multipliée sans raison.
+async fn set_realtime(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RealtimeBody>,
+) -> Response {
+    let until = body
+        .on
+        .then(|| crate::db::now() + state.settings.realtime_duration_min() * 60);
+    match state.db.set_realtime(&id, until) {
+        Ok(()) => ok_json(json!({ "ok": true, "realtime_until": until })),
         Err(e) => error_response(e),
     }
 }
@@ -5388,6 +5419,95 @@ mod tests {
             peer,
         );
         h.call(req).await.1
+    }
+
+    #[tokio::test]
+    async fn arming_realtime_needs_the_site_in_scope() {
+        // ⚠️ Le mode change le comportement d'une sonde et la charge du hub : un
+        // opérateur restreint ne doit pas pouvoir l'armer chez un autre client.
+        // 404 et non 403 — « ça existe mais pas pour vous » révèle déjà
+        // l'existence de la sonde d'un tiers.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let autre = h.state.db.create_site("Martin").unwrap();
+        h.user("olivier", Role::Operator).await;
+        h.state
+            .db
+            .set_user_sites("olivier", &[autre.site_id.clone()])
+            .unwrap();
+        let restreint = h.login_as("olivier").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/realtime"),
+                    json!({ "on": true }),
+                ),
+                &restreint,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(
+            h.state.db.realtime_until(&probe_id).unwrap(),
+            None,
+            "rien ne doit avoir été armé"
+        );
+    }
+
+    #[tokio::test]
+    async fn arming_then_disarming_realtime_round_trips() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        h.call(with_cookie(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/realtime"),
+                json!({ "on": true }),
+            ),
+            &session,
+        ))
+        .await;
+        let armed = h.state.db.realtime_until(&probe_id).unwrap().unwrap();
+        assert!(armed > crate::db::now(), "l'échéance doit être dans le futur");
+
+        // L'interface affiche le compte à rebours depuis la liste des sondes :
+        // sans ce champ, il lui faudrait un appel de plus par sonde.
+        let (_, fleet, _) = h
+            .call(with_cookie(
+                json_request("GET", "/api/probes", json!({})),
+                &session,
+            ))
+            .await;
+        assert_eq!(fleet[0]["realtime_until"], armed, "{fleet}");
+
+        // Réappuyer relance la minuterie : un chantier qui dure ne doit pas
+        // obliger à ruser.
+        h.call(with_cookie(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/realtime"),
+                json!({ "on": true }),
+            ),
+            &session,
+        ))
+        .await;
+        assert!(h.state.db.realtime_until(&probe_id).unwrap().unwrap() >= armed);
+
+        h.call(with_cookie(
+            json_request(
+                "POST",
+                &format!("/api/probes/{probe_id}/realtime"),
+                json!({ "on": false }),
+            ),
+            &session,
+        ))
+        .await;
+        assert_eq!(h.state.db.realtime_until(&probe_id).unwrap(), None);
     }
 
     #[tokio::test]

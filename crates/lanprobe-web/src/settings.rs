@@ -65,6 +65,15 @@ pub mod keys {
     /// présent » laisserait n'importe quelle sonde forger son adresse source.
     pub const TRUSTED_PROXIES: &str = "trusted_proxies";
 
+    /// Durée du mode temps réel d'une sonde, en minutes, avant extinction
+    /// automatique.
+    ///
+    /// ⚠️ Ce n'est pas une précaution optionnelle : on ne retourne pas
+    /// éteindre le mode une fois redescendu de l'échelle. Sans minuterie, tout
+    /// le parc finit par battre toutes les 5 s sans que personne sache
+    /// pourquoi — ça marche, et la charge a été multipliée pour rien.
+    pub const REALTIME_DURATION_MIN: &str = "realtime_duration_min";
+
     pub const ALL: &[&str] = &[
         INFLUX_URL,
         INFLUX_ORG,
@@ -81,6 +90,7 @@ pub mod keys {
         INVENTORY_DAYS,
         TLS_ENABLED,
         TRUSTED_PROXIES,
+        REALTIME_DURATION_MIN,
     ];
 }
 
@@ -100,6 +110,8 @@ pub const MIN_HEARTBEAT_INTERVAL_SECS: i64 = 5;
 /// explicite — la rétention de l'inventaire s'active donc à la main, et
 /// l'interface explique pourquoi on voudrait le faire.
 pub const DEFAULT_INVENTORY_DAYS: i64 = 0;
+/// Une demi-heure : le temps de monter, brancher, vérifier et redescendre.
+pub const DEFAULT_REALTIME_DURATION_MIN: i64 = 30;
 
 /// Une rétention passe-t-elle de `current` à `new` en effaçant quelque chose ?
 /// `0` vaut « illimitée » : y aller n'efface rien, en partir efface tout ce
@@ -249,6 +261,16 @@ impl Settings {
         .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS)
     }
 
+    /// Durée du mode temps réel, en minutes.
+    pub fn realtime_duration_min(&self) -> i64 {
+        self.get_or(
+            keys::REALTIME_DURATION_MIN,
+            &DEFAULT_REALTIME_DURATION_MIN.to_string(),
+        )
+        .parse()
+        .unwrap_or(DEFAULT_REALTIME_DURATION_MIN)
+    }
+
     /// Tous les réglages, valeurs effectives (défaut compris). Aucun secret
     /// n'y figure : la table `settings` n'en contient aucun, par construction.
     ///
@@ -275,6 +297,7 @@ impl Settings {
             keys::INVENTORY_DAYS: self.inventory_days(),
             keys::TLS_ENABLED: self.tls_enabled(),
             keys::TRUSTED_PROXIES: self.stored_trusted_proxies(),
+            keys::REALTIME_DURATION_MIN: self.realtime_duration_min(),
         })
     }
 
@@ -365,7 +388,9 @@ impl Settings {
                     )));
                 }
             }
-            keys::NOTIFY_DELAY_SECS | keys::BACKUP_INTERVAL_HOURS => {
+            keys::NOTIFY_DELAY_SECS
+            | keys::BACKUP_INTERVAL_HOURS
+            | keys::REALTIME_DURATION_MIN => {
                 let parsed: i64 = value
                     .parse()
                     .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
@@ -671,6 +696,16 @@ mod tests {
         assert!(s.put(keys::HEARTBEAT_INTERVAL_SECS, "-1", false).is_err());
         assert!(s.put(keys::HEARTBEAT_INTERVAL_SECS, "30", false).is_ok());
         assert_eq!(s.heartbeat_interval_secs(), 30);
+    }
+
+    #[test]
+    fn the_realtime_duration_is_a_positive_number_of_minutes() {
+        let s = settings();
+        assert_eq!(s.realtime_duration_min(), 30, "défaut");
+        s.put(keys::REALTIME_DURATION_MIN, "120", false).unwrap();
+        assert_eq!(s.realtime_duration_min(), 120);
+        assert!(s.put(keys::REALTIME_DURATION_MIN, "0", false).is_err());
+        assert!(s.put(keys::REALTIME_DURATION_MIN, "trente", false).is_err());
     }
 
     #[test]
