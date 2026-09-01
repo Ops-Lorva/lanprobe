@@ -52,6 +52,24 @@ export interface Probe {
   monitors?: MonitorState[] | null;
   monitors_at?: number | null;
   /**
+   * Liste partagée tenue par le hub (table `probe_monitors`) : c'est elle qui
+   * dit QUI est surveillé, et qui porte les suppressions datées.
+   *
+   * ⚠️ Elle ne remplace pas `monitors`, elle la complète : les mesures — répond,
+   * latence, disponibilité — n'existent que dans l'annonce de la sonde. La
+   * fusion des deux est dans `monitors.ts`, avec ses tests.
+   *
+   * Facultative : un hub antérieur à la liste partagée ne sert pas le champ.
+   * Son absence ne veut donc PAS dire « plus rien n'est surveillé » — c'est
+   * `monitors.ts` qui tient cette distinction, et l'écran retombe alors sur le
+   * comportement d'avant.
+   *
+   * Attendu de `GET /api/probes`, sérialisé depuis `Db::monitors()` côté hub
+   * (`MonitorEntry`) — la même liste que celle rendue au battement, retirées
+   * comprises.
+   */
+  probe_monitors?: MonitorEntry[] | null;
+  /**
    * Rotation de clé en attente de remise (contrat § 9). Champs facultatifs :
    * ils ne figurent pas encore dans l'exemple de `GET /api/probes`, l'interface
    * ne les affiche donc que si le hub les fournit.
@@ -404,6 +422,27 @@ export interface MonitorState {
   max_ms?: number | null;
   uptime_pct: number;
   samples: number;
+}
+
+/**
+ * Une surveillance telle que le hub la tient, hors mesures.
+ *
+ * ⚠️ `removed_at` non nul EST la suppression : un fait explicite et daté, qu'on
+ * conserve. La ligne n'est jamais retirée — c'est elle qui alimente le
+ * sous-onglet « Retirées » et qui rend la réactivation possible. « Retirée » et
+ * « jamais connue » doivent rester discernables.
+ *
+ * Toutes ces dates sont dans la référence du hub : la sonde n'envoie jamais de
+ * date mais une ancienneté, que le hub soustrait de sa propre heure.
+ */
+export interface MonitorEntry {
+  target: string;
+  /** Epoch en secondes. */
+  added_at: number;
+  /** Epoch en secondes. `null` = active. */
+  removed_at: number | null;
+  /** Dernier changement arbitré, epoch en secondes. Le plus récent gagne. */
+  last_change_at: number;
 }
 
 export interface ScanHost {
@@ -906,6 +945,24 @@ export const api = {
     request<{ ok: boolean; realtime_until: number | null }>(
       `/api/probes/${encodeURIComponent(id)}/realtime`,
       { method: 'POST', body: JSON.stringify({ on }) },
+    ),
+
+  /**
+   * Réactive une surveillance retirée. **Réactiver, c'est effacer la
+   * suppression** — il n'y a pas d'autre mécanisme.
+   *
+   * ⚠️ Même remarque que pour le mode temps réel : le hub ne joint jamais la
+   * sonde. La réponse dit « la suppression est effacée côté hub », pas « la
+   * sonde pingue de nouveau » — elle reprendra la cible à son prochain
+   * battement, et l'écran doit le dire.
+   *
+   * `applied` à faux = un changement plus récent avait déjà tranché ; rien n'a
+   * été écrit.
+   */
+  reviveMonitor: (id: string, target: string) =>
+    request<{ ok: boolean; applied: boolean }>(
+      `/api/probes/${encodeURIComponent(id)}/monitors/revive`,
+      { method: 'POST', body: JSON.stringify({ target }) },
     ),
 
   /** Rotation d'hygiène : l'ancienne clé ne meurt qu'après accusé de la sonde. */
