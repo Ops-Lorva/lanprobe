@@ -11,7 +11,7 @@
    * doit se lire comme une seule série, pas comme deux familles côte à côte.
    */
   /** Les noms du jeu partagé que la barre du hub utilise réellement. */
-  type SharedName = 'server' | 'settings';
+  type SharedName = 'server' | 'settings' | 'gear';
   export type HubIconName = 'users' | 'journal' | 'bell' | SharedName;
 
   const { name, size = 16 } = $props<{ name: HubIconName; size?: number }>();

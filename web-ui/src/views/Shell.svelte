@@ -36,7 +36,11 @@
   const items: { id: string; href: string; icon: HubIconName; key: string; admin?: true }[] = [
     { id: 'fleet', href: '#/', icon: 'server', key: 'nav.fleet' },
     { id: 'audit', href: '#/audit', icon: 'journal', key: 'nav.audit', admin: true },
-    { id: 'settings', href: '#/settings', icon: 'settings', key: 'nav.settings' },
+    // ⚠️ `gear`, pas `settings` : cette dernière est un cercle entouré de rayons,
+    // c'est-à-dire le symbole universel du mode clair. Benjamin l'a prise pour un
+    // sélecteur de thème sur mobile. Le dépôt distingue déjà les deux dessins pour
+    // cette raison exacte (voir le commentaire dans `Icons.svelte`).
+    { id: 'settings', href: '#/settings', icon: 'gear', key: 'nav.settings' },
   ];
 
   const visible = $derived(items.filter((i) => !i.admin || $isAdmin));

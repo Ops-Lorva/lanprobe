@@ -1347,6 +1347,33 @@
             <h2 class="lp-title">{$_('probe.tab_monitoring')}</h2>
             <p class="bsub">{$_('probe.monitoring_sub')}</p>
           </div>
+          <!-- ⚠️ En TÊTE, pas sous la grille. Le raisonnement d'avant — « on
+               ajoute une cible après avoir regardé celles qu'on a déjà » — ne
+               tient pas sur le terrain : sur mobile, avec plusieurs cartes, le
+               champ se retrouvait à un écran et demi de défilement. Or le geste
+               réel, c'est de déclarer l'adresse d'un équipement AVANT d'aller
+               le brancher, pas après avoir contemplé les autres. -->
+          {#if $canOperate}
+            <form class="addrow" onsubmit={(e) => e.preventDefault()}>
+              <input
+                class="lp-input"
+                bind:value={newTarget}
+                placeholder={$_('probe.monitoring_placeholder')}
+                spellcheck="false"
+                autocomplete="off"
+              />
+              {#if newTarget.trim()}
+                <CommandButton
+                  probeId={id}
+                  kind="add_monitor"
+                  args={{ ip: newTarget.trim() }}
+                  label={$_('probe.monitoring_add')}
+                  allowed={$canOperate}
+                  onsent={() => { newTarget = ''; afterCommand(); }}
+                />
+              {/if}
+            </form>
+          {/if}
         </header>
 
         <!--
@@ -1504,29 +1531,6 @@
           </p>
         {/if}
 
-        {#if $canOperate}
-          <!-- Sous la grille : on ajoute une cible après avoir regardé celles
-               qu'on a déjà, pas avant. -->
-          <form class="addrow" onsubmit={(e) => e.preventDefault()}>
-            <input
-              class="lp-input"
-              bind:value={newTarget}
-              placeholder={$_('probe.monitoring_placeholder')}
-              spellcheck="false"
-              autocomplete="off"
-            />
-            {#if newTarget.trim()}
-              <CommandButton
-                probeId={id}
-                kind="add_monitor"
-                args={{ ip: newTarget.trim() }}
-                label={$_('probe.monitoring_add')}
-                allowed={$canOperate}
-                onsent={() => { newTarget = ''; afterCommand(); }}
-              />
-            {/if}
-          </form>
-        {/if}
       {:else if tab === 'speedtest'}
         <header class="tabhead">
           <div>
