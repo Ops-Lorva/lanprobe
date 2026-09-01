@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -490,6 +490,45 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE probes ADD COLUMN realtime_until INTEGER;
     "#,
+    // v20 → v21 : la liste des surveillances devient l'union app + hub.
+    //
+    // ⚠️ **`removed_at` non nul EST la suppression** : un fait explicite, daté,
+    // que l'on conserve. Jusqu'ici la liste vivait dans la colonne
+    // `probes.monitors`, réécrite telle quelle à chaque battement — une cible
+    // ABSENTE de l'annonce y passait pour retirée. Tenable tant que la sonde
+    // était seule à écrire ; dès que le hub écrit aussi, l'app qui redémarre
+    // et annonce sa liste locale efface en silence ce qu'on avait ajouté
+    // depuis le hub. Rien n'échoue, rien n'alerte, la surveillance disparaît.
+    // On ne supprime donc JAMAIS la ligne : c'est elle qui alimente le
+    // sous-onglet « Retirées » et qui rend la réactivation possible — réactiver
+    // n'est qu'effacer `removed_at`, sans mécanisme dédié.
+    //
+    // `last_change_at` porte l'arbitrage « le plus récent gagne ». Il est
+    // séparé de `added_at`/`removed_at` parce qu'il doit avancer même quand un
+    // changement est ignoré comme trop ancien — c'est lui qu'on compare, une
+    // seule colonne, sans avoir à raisonner sur laquelle des deux dates fait
+    // foi selon le sens du changement.
+    //
+    // ⚠️ Ces dates sont TOUJOURS dans la référence du hub. La sonde n'envoie
+    // jamais de date mais une ancienneté en secondes, que le hub soustrait de
+    // son propre `now()` : aucune horloge n'est comparée à une autre, donc
+    // aucune dérive ni réveil de veille ne peut faire gagner un arbitrage à
+    // l'envers.
+    //
+    // `UNIQUE(probe_id, target)` : une cible n'a qu'un état par sonde. Sans
+    // cette contrainte, un battement rejoué empilerait des doublons dont
+    // l'affichage dépendrait de l'ordre de lecture.
+    r#"
+    CREATE TABLE probe_monitors (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      probe_id       TEXT    NOT NULL REFERENCES probes(probe_id) ON DELETE CASCADE,
+      target         TEXT    NOT NULL,
+      added_at       INTEGER NOT NULL,
+      removed_at     INTEGER,
+      last_change_at INTEGER NOT NULL,
+      UNIQUE(probe_id, target)
+    );
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
@@ -644,6 +683,20 @@ pub struct CommandRow {
     pub delivered_count: i64,
     pub settled_at: Option<i64>,
     pub error: Option<String>,
+}
+
+/// Une surveillance telle que le hub la connaît, active ou retirée.
+///
+/// ⚠️ `removed_at` à `None` veut dire « active ». Une valeur, c'est la
+/// suppression explicite et sa date — jamais une absence de ligne : « retirée »
+/// et « jamais connue » doivent rester discernables, sans quoi la sonde qui
+/// redémarre ressusciterait ce qu'on vient de retirer depuis le hub.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitorEntry {
+    pub target: String,
+    pub added_at: i64,
+    pub removed_at: Option<i64>,
+    pub last_change_at: i64,
 }
 
 /// Erreurs remontées jusqu'à la couche HTTP, qui les traduit en codes. Un
@@ -2831,6 +2884,98 @@ impl Db {
             .flatten())
     }
 
+    // ── Surveillances partagées ────────────────────────────────────────────
+
+    /// Tout ce que le hub connaît des surveillances d'une sonde : les actives
+    /// **et** les retirées, ces dernières avec leur date.
+    ///
+    /// ⚠️ Les retirées ne sont pas filtrées ici. Ce sont elles qui alimentent
+    /// le sous-onglet « Retirées » et qui disent à la sonde de ne pas
+    /// ressusciter une cible : les taire à ce niveau ferait retomber tout le
+    /// reste du code dans le défaut qu'on corrige — absence lue comme retrait.
+    pub fn monitors(&self, probe_id: &str) -> DbResult<Vec<MonitorEntry>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT target, added_at, removed_at, last_change_at
+               FROM probe_monitors
+              WHERE probe_id = ?1
+              ORDER BY target",
+        )?;
+        let rows = stmt.query_map([probe_id], |r| {
+            Ok(MonitorEntry {
+                target: r.get(0)?,
+                added_at: r.get(1)?,
+                removed_at: r.get(2)?,
+                last_change_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Applique un changement daté sur une surveillance. `removed` à vrai
+    /// écrit la suppression, faux (ré)active. `at` est TOUJOURS une date dans
+    /// la référence du hub — l'appelant a déjà converti l'ancienneté envoyée
+    /// par la sonde.
+    ///
+    /// Rend `false` quand le changement est plus ancien que le dernier connu :
+    /// il est alors ignoré. C'est l'arbitrage « le plus récent gagne », et il
+    /// couvre sans cas particulier la sonde longtemps hors ligne qui rejoue
+    /// un vieux retrait contre un ajout fait depuis le hub entre-temps.
+    ///
+    /// ⚠️ Aucun chemin ne supprime la ligne. Retirer, c'est écrire une date ;
+    /// réactiver, c'est l'effacer. Le « revive des deux côtés » demandé en
+    /// découle seul, sans mécanisme dédié.
+    pub fn apply_monitor_change(
+        &self,
+        probe_id: &str,
+        target: &str,
+        removed: bool,
+        at: i64,
+    ) -> DbResult<bool> {
+        let conn = self.lock()?;
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT last_change_at FROM probe_monitors WHERE probe_id = ?1 AND target = ?2",
+                rusqlite::params![probe_id, target],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        match existing {
+            // `<=` et non `<` : rejouer le même changement à la même seconde
+            // ne doit rien réécrire, sans quoi un battement répété ferait
+            // avancer les dates d'un état qui n'a pas bougé.
+            Some(last) if at <= last => Ok(false),
+            Some(_) => {
+                // Un retrait garde `added_at` : la date d'ajout d'origine reste
+                // affichable dans le sous-onglet. Une réactivation la remet à
+                // jour, parce que c'en est un nouveau.
+                conn.execute(
+                    "UPDATE probe_monitors
+                        SET removed_at = ?3,
+                            added_at = CASE WHEN ?3 IS NULL THEN ?4 ELSE added_at END,
+                            last_change_at = ?4
+                      WHERE probe_id = ?1 AND target = ?2",
+                    rusqlite::params![probe_id, target, removed.then_some(at), at],
+                )?;
+                Ok(true)
+            }
+            // Un retrait sur une cible inconnue s'enregistre quand même : la
+            // sonde peut annoncer le retrait d'une cible que le hub n'a jamais
+            // vue (ajoutée puis retirée pendant qu'il était injoignable), et
+            // l'ignorer la ferait réapparaître au battement suivant.
+            None => {
+                conn.execute(
+                    "INSERT INTO probe_monitors
+                       (probe_id, target, added_at, removed_at, last_change_at)
+                     VALUES (?1, ?2, ?3, ?4, ?3)",
+                    rusqlite::params![probe_id, target, at, removed.then_some(at)],
+                )?;
+                Ok(true)
+            }
+        }
+    }
+
     // ── File de commandes (contrat § 14) ───────────────────────────────────
 
     /// Empile une commande pour une sonde. Rend son identifiant.
@@ -4999,6 +5144,43 @@ mod tests {
 
         db.set_realtime(&probe, None).unwrap();
         assert_eq!(db.realtime_until(&probe).unwrap(), None);
+    }
+
+    // ── Surveillances partagées ────────────────────────────────────────────
+
+    #[test]
+    fn a_removal_is_kept_as_a_fact_not_a_disappearance() {
+        // ⚠️ Toute la conception tient là-dessus : une cible retirée reste en base
+        // avec sa date. C'est elle qui alimente le sous-onglet « Retirées » et qui
+        // permet la réactivation. La supprimer rendrait « retirée » indiscernable
+        // de « jamais connue ».
+        let (db, probe) = db_with_probe();
+        db.apply_monitor_change(&probe, "8.8.8.8", false, 100).unwrap();
+        db.apply_monitor_change(&probe, "8.8.8.8", true, 200).unwrap();
+
+        let all = db.monitors(&probe).unwrap();
+        assert_eq!(all.len(), 1, "la ligne reste");
+        assert_eq!(all[0].removed_at, Some(200));
+    }
+
+    #[test]
+    fn the_most_recent_change_wins_whoever_sent_it() {
+        let (db, probe) = db_with_probe();
+        db.apply_monitor_change(&probe, "1.1.1.1", false, 300).unwrap();
+        // Un retrait ANTÉRIEUR ne doit pas défaire un ajout postérieur : c'est le
+        // cas d'une sonde longtemps hors ligne qui rejoue un vieux changement.
+        let applied = db.apply_monitor_change(&probe, "1.1.1.1", true, 200).unwrap();
+        assert!(!applied, "un changement plus ancien est ignoré");
+        assert_eq!(db.monitors(&probe).unwrap()[0].removed_at, None);
+    }
+
+    #[test]
+    fn reviving_is_just_clearing_the_removal() {
+        let (db, probe) = db_with_probe();
+        db.apply_monitor_change(&probe, "9.9.9.9", false, 100).unwrap();
+        db.apply_monitor_change(&probe, "9.9.9.9", true, 200).unwrap();
+        db.apply_monitor_change(&probe, "9.9.9.9", false, 300).unwrap();
+        assert_eq!(db.monitors(&probe).unwrap()[0].removed_at, None);
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
