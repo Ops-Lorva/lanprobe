@@ -210,6 +210,16 @@ describe('catalogues de traduction', () => {
     });
   }
 
+  // Taux de disponibilité par cible, affiché sur la fiche.
+  const REQUISES_UPTIME = ['probe.uptime_period', 'probe.uptime_samples', 'sla.undetermined'];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés du taux par cible`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_UPTIME.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
   // Agrégation : le pas et le maximum de l'intervalle.
   // ⚠️ Sans ces deux libellés, l'écran trace une moyenne de trois heures sans
   // le dire — une courbe crédible dont personne ne sait qu'elle est moyennée.

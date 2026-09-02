@@ -35,6 +35,10 @@
     type Curve,
     type PairedCurve,
   } from '$lib/metrics';
+  // ⚠️ Le taux sur la PÉRIODE AFFICHÉE, à ne pas confondre avec celui que la
+  // sonde annonce sur sa propre fenêtre glissante (`card.monitor.uptime_pct`).
+  // Les deux répondent à des questions différentes et sont affichés séparément.
+  import { normalizeUptime, uptimeOf, type TargetUptime } from '$lib/uptime';
   // ⚠️ Une seule fenêtre pour toute la fiche, tenue dans un store partagé :
   // avant, elle n'existait que sur le tableau de bord et les quatre autres
   // onglets affichaient son choix sans le dire.
@@ -417,6 +421,15 @@
    */
   let chartsWidth = $state(800);
 
+  /**
+   * Taux de disponibilité par cible, sur la fenêtre affichée.
+   *
+   * ⚠️ Lu sur `/uptime`, agrégé côté Influx — PAS sur `/sla`, qui rend des
+   * relevés bruts et que la fiche relit toutes les 3 secondes. Le hub tient
+   * sous test l'égalité entre les deux chemins : un seul pourcentage possible.
+   */
+  let uptimeByTarget = $state<Record<string, TargetUptime>>({});
+
   const win = $derived($timeWindow.choice);
   let ping = $state<ChartState>({ ...blank });
   let inet = $state<ChartState>({ ...blank });
@@ -498,6 +511,7 @@
     // tableau par adresse doivent parler de la même période, sinon un repère
     // se pose là où le tableau ne compte rien.
     await loadPublicIps(choice);
+    await loadUptime(choice);
   }
 
   // ── Adresses publiques traversées (contrat § 15) ─────────────────────────
@@ -525,6 +539,19 @@
       // affirmation qu'on n'a pas les moyens de faire.
       ipIntervals = null;
       ipHistoryError = e instanceof ApiError ? e.message : String(e);
+    }
+  }
+
+  /**
+   * ⚠️ Un échec laisse le taux ABSENT, jamais à zéro : l'indicateur disparaît
+   * plutôt que d'affirmer une disponibilité qu'on n'a pas obtenue.
+   */
+  async function loadUptime(choice: WindowChoice = win) {
+    try {
+      uptimeByTarget = normalizeUptime(await api.uptime(id, toMetricsWindow(choice, Date.now())));
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      uptimeByTarget = {};
     }
   }
 
@@ -1852,6 +1879,31 @@
                       <dt>{$_('probe.col_uptime')}</dt>
                       <dd class="lp-mono">{card.monitor.uptime_pct.toFixed(1)} %</dd>
                     </div>
+                    <!--
+                      ⚠️ Le taux sur la PÉRIODE AFFICHÉE, distinct de celui
+                      juste au-dessus, qui vient de la sonde sur SA fenêtre
+                      glissante. Les fusionner ferait répondre à une question
+                      qu'on n'a pas posée.
+
+                      Rien du tout quand le hub ne connaît pas la cible :
+                      absence d'information n'est pas absence de
+                      disponibilité, et une cible qu'on vient d'ajouter n'a
+                      pas encore de ligne.
+                    -->
+                    {#if card.target && uptimeOf(uptimeByTarget, card.target)}
+                      {@const u = uptimeOf(uptimeByTarget, card.target)!}
+                      <div>
+                        <dt>{$_('probe.uptime_period')}</dt>
+                        <dd class="lp-mono">
+                          <!-- ⚠️ Jamais « 0 % » quand aucun relevé ne porte de
+                               verdict : ça se lirait comme une panne totale. -->
+                          {u.pct != null ? `${u.pct.toFixed(2)} %` : $_('sla.undetermined')}
+                          <span class="uon">
+                            {$_('probe.uptime_samples', { values: { n: u.samples } })}
+                          </span>
+                        </dd>
+                      </div>
+                    {/if}
                     <div>
                       <dt>{$_('sla.col_samples')}</dt>
                       <dd class="lp-mono">{card.monitor.samples}</dd>
@@ -2916,6 +2968,13 @@
     overflow-wrap: anywhere;
   }
 
+  /* Le dénominateur, en retrait : « 99,86 % » sans « sur combien » se discute
+     mal, mais il ne doit pas concurrencer le chiffre. */
+  .uon {
+    display: block;
+    font-size: 10.5px;
+    color: var(--ep-text-muted);
+  }
   .slaerr {
     font-size: 11px;
     color: var(--ep-danger);

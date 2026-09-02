@@ -380,6 +380,8 @@
     "unarchive_confirm": "Devolver al parque"
   },
   "probe": {
+    "uptime_period": "Disponibilidad en el periodo",
+    "uptime_samples": "sobre {n} mediciones",
     "back": "Parque",
     "rename": "Renombrar",
     "rename_label": "Nombre de la sonda",

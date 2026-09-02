@@ -380,6 +380,8 @@
     "unarchive_confirm": "Return to the fleet"
   },
   "probe": {
+    "uptime_period": "Availability over the period",
+    "uptime_samples": "over {n} samples",
     "back": "Fleet",
     "rename": "Rename",
     "rename_label": "Probe name",

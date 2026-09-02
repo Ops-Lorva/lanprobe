@@ -1146,6 +1146,19 @@ export const api = {
    * reviennent brutes ; quatre-vingts jours reviennent moyennés, avec le
    * maximum de chaque intervalle à côté et `aggregated_every` dans la réponse.
    */
+  /**
+   * Taux de disponibilité par cible sur la fenêtre, **agrégé côté hub**.
+   *
+   * ⚠️ Route séparée de `/sla`, et ce n'est pas un doublon : `/sla` rend des
+   * relevés bruts et la fiche se rafraîchit toutes les 3 s. Ici Influx ne
+   * renvoie qu'une ligne par cible. Le calcul est le même — le hub tient sous
+   * test l'égalité entre ce chemin et `compute_sla`.
+   */
+  uptime: (id: string, window: MetricsWindow) =>
+    request<unknown>(
+      `/api/probes/${encodeURIComponent(id)}/uptime?${windowQuery(window)}`,
+    ),
+
   metrics: (id: string, measurement: string, window: MetricsWindow, maxPoints: number) => {
     const q = windowQuery(window);
     q.set('measurement', measurement);
