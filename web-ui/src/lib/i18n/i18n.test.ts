@@ -147,6 +147,19 @@ describe('catalogues de traduction', () => {
     });
   }
 
+  // InfluxDB et Sauvegardes ont divorcé : la base de mesures et la politique
+  // d'archivage répondent à deux questions différentes — « mes mesures
+  // arrivent-elles ? » et « que me reste-t-il si cette machine disparaît ? ».
+  // Mêlées, on cherchait la seconde en scrollant la première.
+  const REQUISES_STOCKAGE = ['settings.tab_backups', 'settings.tab_measures'];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des onglets Mesures et Sauvegardes`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_STOCKAGE.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
   // Fenêtre de 10 min : en mode temps réel, la plus courte des fenêtres
   // existantes (1 h) écrase ce qui vient de se passer.
   for (const [lang, catalog] of Object.entries(CATALOGS)) {

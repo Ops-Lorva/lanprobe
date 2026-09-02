@@ -514,7 +514,10 @@
     // champ isolé au milieu de la cadence normale, avec lequel on le confond.
     { id: 'realtime', key: 'settings.tab_realtime' },
     { id: 'alerts', key: 'settings.tab_alerts' },
-    { id: 'storage', key: 'settings.tab_storage' },
+    // Deux onglets et non deux cartes : la base de mesures et la politique
+    // d'archivage ne se consultent ni au même moment ni pour la même raison.
+    { id: 'storage', key: 'settings.tab_measures' },
+    { id: 'backups', key: 'settings.tab_backups', admin: true },
     { id: 'accounts', key: 'settings.tab_accounts', admin: true },
   ];
 
@@ -555,6 +558,11 @@
       'influx_org' in patch ||
       'influx_bucket' in patch ||
       'retention_days' in patch ||
+      'inventory_days' in patch,
+    // ⚠️ Les trois champs de sauvegarde ont suivi leur panneau. Laissés sur
+    // « Mesures », la pastille se serait allumée sur l'onglet où le champ
+    // modifié n'est plus visible — donc introuvable.
+    backups:
       'backup_enabled' in patch ||
       'backup_interval_hours' in patch ||
       'backup_keep_last' in patch,
@@ -568,7 +576,9 @@
    * Ailleurs (langue et thème, jetons, comptes, canaux), chaque geste s'applique
    * seul : un bouton « Enregistrer » y laisserait croire qu'il reste à valider.
    */
-  const savable = $derived(tab === 'general' || tab === 'realtime' || tab === 'storage');
+  const savable = $derived(
+    tab === 'general' || tab === 'realtime' || tab === 'storage' || tab === 'backups',
+  );
 
   function onTabKey(e: KeyboardEvent) {
     const i = TABS.findIndex((t) => t.id === tab);
@@ -625,9 +635,9 @@
     // laisser partir la requête : le message serait le même, avec un aller-
     // retour et un champ qu'on ne saurait pas retrouver.
     if (!Number.isInteger(intervalNum) || intervalNum < 1)
-      return { msg: $_('backup.invalid_interval'), tab: 'storage' };
+      return { msg: $_('backup.invalid_interval'), tab: 'backups' };
     if (!Number.isInteger(keepNum) || keepNum < 0)
-      return { msg: $_('backup.invalid_keep'), tab: 'storage' };
+      return { msg: $_('backup.invalid_keep'), tab: 'backups' };
     return null;
   }
 
@@ -1151,7 +1161,7 @@
   {:else if tab === 'storage'}
   <div class="cards" role="tabpanel" id="panel-storage" aria-labelledby="tab-storage" tabindex="-1">
     <!--
-      Ce qu'il y a dans la base avant l'adresse de la base : on ouvre « Stockage »
+      Ce qu'il y a dans la base avant l'adresse de la base : on ouvre « Mesures »
       pour savoir si les mesures arrivent et ce qu'elles pèsent. L'org et le
       bucket ne se lisent que si la réponse à ça ne suffit pas.
     -->
@@ -1289,52 +1299,25 @@
       {/if}
     </section>
 
-    <!--
-      La sauvegarde vient après les jetons parce qu'elle répond à une question
-      plus rare : « qu'est-ce qui me reste si cette machine disparaît ? ». On
-      ouvre « Stockage » d'abord pour voir si les mesures arrivent ; on y
-      revient, plus tard et moins souvent, pour vérifier le filet. Réservée à
-      `admin` comme les routes qu'elle appelle.
-    -->
-    <BackupPanel
-      list={backups}
-      listError={backupsError}
-      onReload={loadBackups}
-      {onExpired}
-      bind:enabled={backupEnabled}
-      bind:intervalHours={backupInterval}
-      bind:keepLast={backupKeep}
-    />
     {/if}
 
     <!--
       La conservation appartient bien à InfluxDB — c'est la rétention du bucket,
-      appliquée par la base. Mais c'est aussi le seul réglage de cet écran qui
+      appliquée par la base. Mais c'est aussi le seul réglage de cet onglet qui
       DÉTRUIT des mesures : il est donc renvoyé tout en bas, derrière une
       séparation nommée, pour qu'on ne le croise pas en venant corriger une URL.
       Isolé sans être exilé : au même endroit que ce qu'il règle, jamais sur le
       chemin de ce qu'on est venu faire.
+
+      ⚠️ La restauration a suivi les sauvegardes dans leur propre onglet : elle
+      remplace tout le hub, pas seulement les mesures, et la ranger sous la
+      barre rouge des mesures lui donnait une portée qu'elle n'a pas.
     -->
     <div class="zone">
       <div class="zone-head">
         <span class="zone-title">{$_('settings.destructive_zone')}</span>
         <span class="zone-rule" aria-hidden="true"></span>
       </div>
-
-      <!--
-        La restauration ouvre la zone : c'est la plus lourde des deux. Elle
-        remplace tout le hub, là où la rétention ne touche qu'aux mesures. Et
-        elle est ici, sous la même barre rouge, plutôt qu'à côté de la liste
-        des archives : la liste se consulte pour se rassurer, on ne veut pas y
-        croiser le bouton qui écrase la base.
-      -->
-      {#if $isAdmin}
-        <RestoreCard
-          archives={backups?.backups ?? []}
-          onReload={loadBackups}
-          {onExpired}
-        />
-      {/if}
 
       <section class="card lp-card danger-frame" class:risky={isShrink}>
         <h2 class="lp-title">{$_('settings.section_retention')}</h2>
@@ -1426,6 +1409,47 @@
         {/if}
       </section>
     </div>
+  </div>
+  {:else if tab === 'backups'}
+  <div class="cards" role="tabpanel" id="panel-backups" aria-labelledby="tab-backups" tabindex="-1">
+    <!--
+      InfluxDB et les sauvegardes ont divorcé. Ce sont deux questions, pas deux
+      rubriques d'une même question : « mes mesures arrivent-elles ? » se pose
+      souvent et vite, « que me reste-t-il si cette machine disparaît ? » se
+      pose rarement et longuement. Mêlées sur un même onglet, la seconde se
+      cherchait en faisant défiler la première — et une politique d'archivage
+      qu'on ne trouve pas est une politique qu'on ne relit jamais.
+
+      ⚠️ Les deux onglets partagent le MÊME bouton d'enregistrement, parce que
+      le hub n'expose qu'un `PUT /api/settings`. La pastille de l'onglet dit où
+      sont les modifications en attente : sans elle, on enregistrerait depuis
+      « Mesures » une valeur saisie ici, sans la voir.
+    -->
+    {#if $isAdmin}
+      <BackupPanel
+        list={backups}
+        listError={backupsError}
+        onReload={loadBackups}
+        {onExpired}
+        bind:enabled={backupEnabled}
+        bind:intervalHours={backupInterval}
+        bind:keepLast={backupKeep}
+      />
+
+      <div class="zone">
+        <div class="zone-head">
+          <span class="zone-title">{$_('settings.destructive_zone')}</span>
+          <span class="zone-rule" aria-hidden="true"></span>
+        </div>
+
+        <!--
+          La restauration est ici, sous la barre rouge, plutôt qu'à côté de la
+          liste des archives : la liste se consulte pour se rassurer, on ne
+          veut pas y croiser le bouton qui écrase la base.
+        -->
+        <RestoreCard archives={backups?.backups ?? []} onReload={loadBackups} {onExpired} />
+      </div>
+    {/if}
   </div>
   {/if}
 

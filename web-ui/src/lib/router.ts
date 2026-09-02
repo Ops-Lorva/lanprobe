@@ -24,6 +24,7 @@ export const SETTINGS_TABS = [
   'realtime',
   'alerts',
   'storage',
+  'backups',
   'accounts',
 ] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];

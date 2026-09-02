@@ -123,6 +123,8 @@
     "tab_influx": "InfluxDB",
     "tab_retention": "Retención",
     "tab_storage": "Almacenamiento",
+    "tab_measures": "Mediciones",
+    "tab_backups": "Copias de seguridad",
     "tab_dirty": "Cambios sin guardar en esta pestaña.",
     "destructive_zone": "Zona destructiva",
     "retention_lead": "Cuánto tiempo conserva InfluxDB las mediciones antes de borrarlas. Es el único ajuste de esta pantalla que borra datos.",
