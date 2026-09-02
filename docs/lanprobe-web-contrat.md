@@ -566,14 +566,21 @@ contient donc **aucun** intervalle et ressort entièrement en « indéterminé �
 c'est la vérité, pas une panne, et c'est à l'interface de le dire ainsi. Une sonde
 sans historique rend un tableau vide : l'absence d'intervalle n'est pas une erreur.
 
-⚠️ **Une sonde INEXISTANTE rend elle aussi `200 { "intervals": [] }`**, là où les
-cinq autres routes de la fiche (`/metrics`, `/uptime`, `/inventory`, `/sla`,
-`/sla.csv`) rendent `404 { "error": "sonde inconnue" }` :
-c'est la seule à ne pas vérifier l'existence de la sonde avant de répondre. Rien de
-grave — la portée de site protège déjà les sondes des autres clients, et
-l'interface ne propose que des sondes existantes — mais « aucun intervalle » et
-« cette sonde n'existe pas » ne se distinguent pas ici. Ne pas bâtir de test
-d'existence sur cette route.
+⚠️ **Une sonde inexistante rend `404 { "error": "sonde inconnue" }`**, comme sur
+les cinq autres routes de la fiche. Un tableau vide **affirmerait** que la sonde
+existe et n'a jamais changé d'adresse : sur un identifiant mal saisi, c'est une
+réponse plausible et fausse, et elle se lit exactement à l'envers de la vérité.
+« Aucun intervalle » et « cette sonde n'existe pas » sont donc deux réponses
+distinctes, et le cas légitime est intact : une sonde qui **existe** sans
+historique rend toujours `200` avec un tableau vide.
+
+🔴 **Une sonde hors portée rend le même code et le même message qu'une sonde
+inexistante — et c'est une propriété, pas une négligence.** Distinguer les deux
+apprendrait à un compte restreint que la sonde d'un autre client existe (§17),
+c'est-à-dire exactement ce que la portée protège. Elle est tenue sous test
+(`the_address_history_hides_an_out_of_scope_probe_behind_the_same_404`) parce
+qu'un correctif bien intentionné qui « améliore les messages d'erreur » la casserait
+sans y penser : le message le plus utile est ici celui qui en dit le moins.
 
 Le libellé de réseau (« Maison », « Bureau ») est joint ici, résolu par le **site**
 de la sonde : sous CGNAT deux clients partagent l'adresse publique, et souvent la
@@ -1725,6 +1732,29 @@ du site d'un autre client.
 lever sa propre restriction en trois clics. Une limite qu'on peut retirer
 soi-même n'est pas une limite, et prétendre le contraire serait pire que ne rien
 promettre.
+
+### 🔴 Le garde de portée ne vérifie pas qu'une sonde EXISTE
+
+Il vérifie qu'elle est **visible**, et il **court-circuite** pour un compte qui
+voit tout : sur `Scope::All`, la requête traverse sans qu'aucune vérification ait
+eu lieu. Un handler qui compte sur lui pour écarter un identifiant inconnu n'est
+donc protégé que pour les comptes **restreints** — et pas pour l'administrateur,
+c'est-à-dire précisément l'utilisateur le plus susceptible de taper un identifiant
+à la main.
+
+C'est constaté deux fois, et corrigé deux fois par une garde explicite **dans le
+handler** :
+
+| Route | Symptôme | Correctif |
+|---|---|---|
+| `POST /api/probes/{id}/monitors/{remove,revive}` | `500 FOREIGN KEY constraint failed` | `f8629b6` |
+| `GET /api/probes/{id}/public-ips` | `200 { "intervals": [] }` | `c89ddf2` |
+
+⚠️ **Une route peut donc paraître gardée sans l'être** pour le cas de la sonde
+inconnue. Le garde et la vérification d'existence répondent à deux questions
+différentes ; seule la seconde dit qu'une sonde existe, et elle appartient au
+handler. Les deux doivent rendre le **même** `404 { "error": "sonde inconnue" }`,
+sans quoi la différence entre les deux réponses trahit ce que la portée cache.
 
 ## 18. Ce qu'un rôle ne peut pas faire ne s'affiche pas
 
