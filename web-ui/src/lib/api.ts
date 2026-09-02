@@ -226,6 +226,21 @@ export interface HubSettings {
    * quiconque sache pourquoi.
    */
   realtime_duration_min: number;
+  /**
+   * Fenêtre affichée pendant le mode temps réel, en minutes.
+   *
+   * ⚠️ Une heure écrase l'instant : à un ping par seconde, ce qu'on est venu
+   * regarder tient dans quelques pixels. L'historique, lui, est le travail du
+   * rapport SLA — pas de l'écran qu'on regarde en intervenant.
+   */
+  realtime_window_min: number;
+  /**
+   * Cadence du battement pendant le mode temps réel, en secondes.
+   *
+   * ⚠️ Plancher de 5 s côté hub, parce que la sonde applique `max(5)`.
+   * Accepter moins ici afficherait une cadence qu'elle n'honore pas.
+   */
+  realtime_heartbeat_secs: number;
 }
 
 export const SETTINGS_DEFAULTS: HubSettings = {
@@ -245,6 +260,8 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   tls_enabled: false,
   trusted_proxies: '',
   realtime_duration_min: 30,
+  realtime_window_min: 10,
+  realtime_heartbeat_secs: 5,
 };
 
 // ── Sauvegarde ──────────────────────────────────────────────────────────────

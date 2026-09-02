@@ -25,6 +25,7 @@
   import { canOperate, identity, isAdmin } from '$lib/session';
   import { dateOnly, humanBytes } from '$lib/time';
   import { passkeysSupported, createCredential, ceremonyError } from '$lib/webauthn';
+  import { validateRealtime, type RealtimeIssue } from '$lib/realtime-settings';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
   const lang = $derived($locale ?? 'en');
@@ -48,6 +49,8 @@
   let retention = $state('0');
   let heartbeat = $state('60');
   let realtimeDuration = $state('30');
+  let realtimeWindow = $state('10');
+  let realtimeHeartbeat = $state('5');
   let backupEnabled = $state(true);
   let backupInterval = $state('24');
   let backupKeep = $state('7');
@@ -78,6 +81,11 @@
     // dans un `<input>` laisserait un champ non contrôlé qui se croit modifié
     // dès l'ouverture.
     realtimeDuration = String(s.realtime_duration_min ?? 30);
+    // Même repli que la durée, et pour la même raison : un hub antérieur à ces
+    // réglages ne les renvoie pas, et `undefined` dans un `<input>` laisserait
+    // un champ non contrôlé qui se croit modifié dès l'ouverture.
+    realtimeWindow = String(s.realtime_window_min ?? 10);
+    realtimeHeartbeat = String(s.realtime_heartbeat_secs ?? 5);
     backupEnabled = s.backup_enabled;
     backupInterval = String(s.backup_interval_hours);
     backupKeep = String(s.backup_keep_last);
@@ -218,6 +226,8 @@
   const retentionNum = $derived(Number.parseInt(retention, 10));
   const heartbeatNum = $derived(Number.parseInt(heartbeat, 10));
   const realtimeNum = $derived(Number.parseInt(realtimeDuration, 10));
+  const realtimeWindowNum = $derived(Number.parseInt(realtimeWindow, 10));
+  const realtimeHeartbeatNum = $derived(Number.parseInt(realtimeHeartbeat, 10));
   const intervalNum = $derived(Number.parseInt(backupInterval, 10));
   const keepNum = $derived(Number.parseInt(backupKeep, 10));
   const inventoryNum = $derived(Number.parseInt(inventoryDays, 10));
@@ -295,6 +305,9 @@
     if (retentionNum !== saved.retention_days) p.retention_days = retentionNum;
     if (heartbeatNum !== saved.heartbeat_interval_secs) p.heartbeat_interval_secs = heartbeatNum;
     if (realtimeNum !== saved.realtime_duration_min) p.realtime_duration_min = realtimeNum;
+    if (realtimeWindowNum !== saved.realtime_window_min) p.realtime_window_min = realtimeWindowNum;
+    if (realtimeHeartbeatNum !== saved.realtime_heartbeat_secs)
+      p.realtime_heartbeat_secs = realtimeHeartbeatNum;
     if (backupEnabled !== saved.backup_enabled) p.backup_enabled = backupEnabled;
     if (intervalNum !== saved.backup_interval_hours) p.backup_interval_hours = intervalNum;
     if (keepNum !== saved.backup_keep_last) p.backup_keep_last = keepNum;
@@ -495,6 +508,11 @@
     // ferait chercher parmi des onglets qui ne le concernent pas.
     { id: 'account', key: 'settings.tab_account' },
     { id: 'general', key: 'settings.tab_general' },
+    // Les trois réglages du mode se règlent ensemble : la durée était sur
+    // « Général », les deux autres n'étaient nulle part. Un onglet qui porte
+    // la question — « comment se comporte le temps réel ? » — plutôt qu'un
+    // champ isolé au milieu de la cadence normale, avec lequel on le confond.
+    { id: 'realtime', key: 'settings.tab_realtime' },
     { id: 'alerts', key: 'settings.tab_alerts' },
     { id: 'storage', key: 'settings.tab_storage' },
     { id: 'accounts', key: 'settings.tab_accounts', admin: true },
@@ -527,8 +545,11 @@
     general:
       'hub_public_url' in patch ||
       'heartbeat_interval_secs' in patch ||
-      'realtime_duration_min' in patch ||
       'trusted_proxies' in patch,
+    realtime:
+      'realtime_duration_min' in patch ||
+      'realtime_window_min' in patch ||
+      'realtime_heartbeat_secs' in patch,
     storage:
       'influx_url' in patch ||
       'influx_org' in patch ||
@@ -547,7 +568,7 @@
    * Ailleurs (langue et thème, jetons, comptes, canaux), chaque geste s'applique
    * seul : un bouton « Enregistrer » y laisserait croire qu'il reste à valider.
    */
-  const savable = $derived(tab === 'general' || tab === 'storage');
+  const savable = $derived(tab === 'general' || tab === 'realtime' || tab === 'storage');
 
   function onTabKey(e: KeyboardEvent) {
     const i = TABS.findIndex((t) => t.id === tab);
@@ -559,6 +580,13 @@
     openTab(next);
     (e.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus();
   }
+
+  /** Un champ fautif, un message. Le mappage est ici, la règle dans le `.ts`. */
+  const REALTIME_MSG: Record<RealtimeIssue, string> = {
+    duration: 'settings.invalid_realtime',
+    window: 'settings.invalid_realtime_window',
+    heartbeat: 'settings.invalid_realtime_heartbeat',
+  };
 
   /** Le message ET l'onglet où se trouve le champ fautif : une erreur sur un
       onglet fermé serait invisible, donc incompréhensible. */
@@ -584,10 +612,15 @@
     // affiche un réglage qu'elle n'applique pas.
     if (!Number.isInteger(heartbeatNum) || heartbeatNum < 5)
       return { msg: $_('settings.invalid_heartbeat'), tab: 'general' };
-    // Le hub exige un entier > 0. Une durée nulle armerait un mode déjà
-    // expiré : le bouton répondrait « c'est fait » sans que rien ne change.
-    if (!Number.isInteger(realtimeNum) || realtimeNum < 1)
-      return { msg: $_('settings.invalid_realtime'), tab: 'general' };
+    // Les trois réglages du mode temps réel, validés par le module testé :
+    // le plancher de 5 s doit être le MÊME qu'au hub et qu'à la sonde, et
+    // trois planchers dans trois fichiers se seraient contredits en silence.
+    const rtIssue = validateRealtime({
+      durationMin: realtimeNum,
+      windowMin: realtimeWindowNum,
+      heartbeatSecs: realtimeHeartbeatNum,
+    });
+    if (rtIssue) return { msg: $_(REALTIME_MSG[rtIssue]), tab: 'realtime' };
     // Le hub refuse une cadence nulle ou négative. On le dit ici plutôt que de
     // laisser partir la requête : le message serait le même, avec un aller-
     // retour et un champ qu'on ne saurait pas retrouver.
@@ -700,7 +733,7 @@
        `admin` (contrat § 11). On montre donc les valeurs — c'est souvent ce
        qu'on vient vérifier — mais on dit tout de suite qu'elles ne partiront
        pas, plutôt que de laisser saisir puis refuser. -->
-  {#if !$isAdmin && (tab === 'general' || tab === 'storage')}
+  {#if !$isAdmin && (tab === 'general' || tab === 'realtime' || tab === 'storage')}
     <p class="readonly">{$_('settings.readonly_note')}</p>
   {/if}
 
@@ -959,27 +992,9 @@
         </span>
       </label>
 
-      <!--
-        ⚠️ Ce réglage est ce qui empêche la dérive silencieuse. Le mode temps
-        réel s'arme sonde par sonde depuis sa fiche, et personne ne revient
-        l'éteindre : sans extinction automatique, tout le parc finit par battre
-        toutes les 5 s, ça marche, et la charge a été multipliée sans raison.
-      -->
-      <label class="lp-field">
-        {$_('settings.realtime_label')}
-        <span class="unit-row">
-          <input
-            class="lp-input num"
-            type="number"
-            min="1"
-            step="1"
-            bind:value={realtimeDuration}
-            disabled={!$isAdmin}
-          />
-          <span class="unit">{$_('settings.realtime_unit')}</span>
-        </span>
-        <span class="hint">{$_('settings.realtime_hint')}</span>
-      </label>
+      <!-- Le mode temps réel a son propre onglet : ses trois réglages se
+           règlent ensemble, et posé ici le seul champ « durée » se confondait
+           avec la cadence normale juste au-dessus. -->
     </section>
 
     <!--
@@ -1037,6 +1052,89 @@
     <section class="card lp-card">
       <h2 class="lp-title">{$_('settings.hub_version_title')}</h2>
       <p class="ro lp-mono">{$_('settings.hub_version', { values: { version: hubVersion } })}</p>
+    </section>
+  </div>
+  {:else if tab === 'realtime'}
+  <div class="cards" role="tabpanel" id="panel-realtime" aria-labelledby="tab-realtime" tabindex="-1">
+    <!--
+      Un onglet plutôt qu'un champ isolé : les trois réglages répondent à la
+      même question — « comment se comporte une sonde qu'on vient d'accélérer ? ».
+      Séparés, on en réglait un et on cherchait les deux autres.
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.realtime_title')}</h2>
+      <p class="sub">{$_('settings.realtime_lead')}</p>
+
+      <!--
+        ⚠️ Ce réglage est ce qui empêche la dérive silencieuse. Le mode s'arme
+        sonde par sonde depuis sa fiche, et personne ne revient l'éteindre :
+        sans extinction automatique, tout le parc finit par battre toutes les
+        5 s, ça marche, et la charge a été multipliée sans raison.
+      -->
+      <label class="lp-field">
+        {$_('settings.realtime_label')}
+        <span class="unit-row">
+          <input
+            class="lp-input num"
+            type="number"
+            min="1"
+            step="1"
+            bind:value={realtimeDuration}
+            disabled={!$isAdmin}
+          />
+          <span class="unit">{$_('settings.realtime_unit')}</span>
+        </span>
+        <span class="hint">{$_('settings.realtime_hint')}</span>
+      </label>
+
+      <!--
+        La fenêtre que l'écran adopte tout seul quand le mode s'active. Une
+        heure écrase l'instant : à un ping par seconde, ce qu'on est venu
+        regarder tient dans quelques pixels.
+      -->
+      <label class="lp-field">
+        {$_('settings.realtime_window_label')}
+        <span class="unit-row">
+          <input
+            class="lp-input num"
+            type="number"
+            min="1"
+            step="1"
+            bind:value={realtimeWindow}
+            disabled={!$isAdmin}
+          />
+          <span class="unit">{$_('settings.realtime_unit')}</span>
+        </span>
+        <span class="hint">{$_('settings.realtime_window_hint')}</span>
+      </label>
+
+      <!--
+        ⚠️ `min="5"` n'est pas une préférence d'affichage : la sonde applique
+        `max(5)` et le hub refuse en dessous. Un champ plus permissif
+        afficherait « 2 s » pendant qu'elle bat à 5 — une valeur plausible et
+        fausse, que personne ne remet en cause puisqu'elle vient du formulaire.
+        Le `min` du navigateur ne suffit pas : il ne bloque pas une saisie au
+        clavier, d'où la même règle dans `validateRealtime`.
+      -->
+      <label class="lp-field">
+        {$_('settings.realtime_heartbeat_label')}
+        <span class="unit-row">
+          <input
+            class="lp-input num"
+            type="number"
+            min="5"
+            step="1"
+            bind:value={realtimeHeartbeat}
+            disabled={!$isAdmin}
+          />
+          <span class="unit">{$_('settings.heartbeat_unit')}</span>
+        </span>
+        <span class="hint">{$_('settings.realtime_heartbeat_hint')}</span>
+      </label>
+
+      <!-- Le rappel qui évite le deuxième clic : la sonde ne l'apprend qu'à
+           son prochain battement normal, pas à l'appui. -->
+      <p class="hint">{$_('settings.realtime_delay_note')}</p>
     </section>
   </div>
   {:else if tab === 'alerts'}

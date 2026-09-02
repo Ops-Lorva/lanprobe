@@ -70,6 +70,20 @@ describe('catalogues de traduction', () => {
     'settings.realtime_unit',
     'settings.realtime_hint',
     'settings.invalid_realtime',
+    // Onglet « Temps réel » : les trois réglages se règlent ensemble, la durée
+    // n'est plus seule sur « Général ».
+    'settings.tab_realtime',
+    'settings.realtime_title',
+    'settings.realtime_lead',
+    'settings.realtime_window_label',
+    'settings.realtime_window_hint',
+    'settings.realtime_heartbeat_label',
+    'settings.realtime_heartbeat_hint',
+    'settings.realtime_delay_note',
+    'settings.invalid_realtime_window',
+    // ⚠️ Le plancher de 5 s doit se DIRE, pas seulement se refuser : un champ
+    // qui rejette sans expliquer se relit trois fois avant qu'on comprenne.
+    'settings.invalid_realtime_heartbeat',
   ];
 
   for (const [lang, catalog] of Object.entries(CATALOGS)) {
