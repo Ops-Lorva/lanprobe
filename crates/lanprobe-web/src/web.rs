@@ -3910,12 +3910,18 @@ async fn probe_metrics(
     if state.db.get_probe(&id).is_err() {
         return fail(StatusCode::NOT_FOUND, "sonde inconnue");
     }
-    let range = query.range.unwrap_or_else(|| "-1h".into());
+    // ⚠️ `flux_range`, comme `/sla` et `/public-ips` — et non plus le seul
+    // `range`. Cette route déclarait `start`/`stop` dans sa requête et les
+    // IGNORAIT en silence : demander « du 20 au 22 » renvoyait la dernière
+    // heure, sous une légende annonçant trois jours. L'interface devait
+    // sur-tirer puis découper elle-même, ce qui faisait lire quatre-vingts
+    // jours de points pour en afficher un.
+    let (window, range) = flux_range(&query);
     let bucket = state.settings.influx_bucket();
     let mut flux = format!(
-        "from(bucket: {})\n  |> range(start: {})\n  |> filter(fn: (r) => r[\"probe_id\"] == {})",
+        "from(bucket: {})\n  |> range({})\n  |> filter(fn: (r) => r[\"probe_id\"] == {})",
         flux_string(&bucket),
-        flux_duration(&range),
+        window,
         flux_string(&id)
     );
     if let Some(measurement) = query.measurement.filter(|m| !m.is_empty()) {

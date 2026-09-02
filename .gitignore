@@ -1,3 +1,7 @@
+# ⚠️ Sans barre oblique : `node_modules/` ne couvre pas un LIEN SYMBOLIQUE
+# nommé `node_modules`, et les worktrees en créent un pour pouvoir lancer les
+# tests. Un agent l'a commité par mégarde le 02/09.
+node_modules
 node_modules/
 node_modules.old*/
 target/
