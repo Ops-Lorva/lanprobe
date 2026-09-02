@@ -2983,6 +2983,16 @@ async fn remove_monitor_entry(
     Path(id): Path<String>,
     Json(body): Json<MonitorTarget>,
 ) -> Response {
+    // ⚠️ **404, pas 500.** Sans cette garde, la clé étrangère
+    // `probe_monitors.probe_id` refusait l'écriture, l'erreur rusqlite
+    // devenait `DbError::Internal`, et le client recevait « FOREIGN KEY
+    // constraint failed » sous un 500 — c'est-à-dire « le hub est en panne »
+    // là où la vérité est « cette sonde n'existe pas ». Même formulation que
+    // `probe_metrics`, et surtout la MÊME que le refus de portée : une sonde
+    // hors portée doit rester indiscernable d'une sonde inexistante.
+    if state.db.get_probe(&id).is_err() {
+        return fail(StatusCode::NOT_FOUND, "sonde inconnue");
+    }
     let target = body.target.trim();
     if target.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "cible requise");
@@ -3007,6 +3017,16 @@ async fn revive_monitor(
     Path(id): Path<String>,
     Json(body): Json<MonitorTarget>,
 ) -> Response {
+    // ⚠️ **404, pas 500.** Sans cette garde, la clé étrangère
+    // `probe_monitors.probe_id` refusait l'écriture, l'erreur rusqlite
+    // devenait `DbError::Internal`, et le client recevait « FOREIGN KEY
+    // constraint failed » sous un 500 — c'est-à-dire « le hub est en panne »
+    // là où la vérité est « cette sonde n'existe pas ». Même formulation que
+    // `probe_metrics`, et surtout la MÊME que le refus de portée : une sonde
+    // hors portée doit rester indiscernable d'une sonde inexistante.
+    if state.db.get_probe(&id).is_err() {
+        return fail(StatusCode::NOT_FOUND, "sonde inconnue");
+    }
     let target = body.target.trim();
     if target.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "cible requise");
@@ -6332,6 +6352,79 @@ mod tests {
             entries[0].removed_at.is_some(),
             "la suppression est écrite sans attendre la sonde"
         );
+    }
+
+    #[tokio::test]
+    async fn monitor_routes_answer_404_on_an_unknown_probe_not_500() {
+        // ⚠️ Un 500 AFFIRME que le hub est en panne. Ici la vérité est « cette
+        // sonde n'existe pas » : la clé étrangère `probe_monitors.probe_id`
+        // refusait l'écriture, l'erreur rusqlite devenait `DbError::Internal`,
+        // et le client partait chercher une panne qui n'existe pas.
+        //
+        // ⚠️ La garde de portée ne couvre PAS ce cas : elle court-circuite pour
+        // un compte `Scope::All`, donc un admin atteignait le handler.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        for route in ["remove", "revive"] {
+            let (status, body, _) = h
+                .call(with_cookie(
+                    json_request(
+                        "POST",
+                        &format!("/api/probes/sonde-qui-nexiste-pas/monitors/{route}"),
+                        json!({ "target": "8.8.8.8" }),
+                    ),
+                    &session,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "/{route} : {body}");
+            assert_eq!(body["error"], "sonde inconnue", "/{route} : {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_probe_is_indistinguishable_from_one_out_of_scope() {
+        // 🔴 Le piège de la correction précédente. La portée rend déjà 404 pour
+        // une sonde qui EXISTE mais qu'on n'a pas le droit de voir, et c'est
+        // volontaire : « ça existe mais pas pour vous » révèle l'existence du
+        // site d'un autre client. Distinguer les deux cas côté client — par le
+        // code OU par le message — annulerait cette protection.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let autre = h.state.db.create_site("Martin").unwrap();
+        h.user("olivier", Role::Operator).await;
+        h.state.db.set_user_sites("olivier", &[autre.site_id.clone()]).unwrap();
+        let restreint = h.login_as("olivier").await;
+
+        // Sonde réelle, hors portée.
+        let (hors_portee, corps_hors_portee, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/monitors/remove"),
+                    json!({ "target": "8.8.8.8" }),
+                ),
+                &restreint,
+            ))
+            .await;
+
+        // Sonde inexistante, même compte.
+        let (inexistante, corps_inexistante, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    "/api/probes/sonde-qui-nexiste-pas/monitors/remove",
+                    json!({ "target": "8.8.8.8" }),
+                ),
+                &restreint,
+            ))
+            .await;
+
+        assert_eq!(hors_portee, inexistante, "les deux refus doivent être le même");
+        assert_eq!(corps_hors_portee, corps_inexistante, "et dire exactement la même chose");
+        assert_eq!(hors_portee, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
