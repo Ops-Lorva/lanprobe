@@ -1278,3 +1278,97 @@ pas avec le rendu, et ces trois défauts y étaient tous attrapables.
 Le CSS, lui, reste hors de portée d'un test unitaire. Le défaut n°1 se serait
 vu à l'œil, pas dans une assertion : une capture avant/après reste nécessaire
 pour toute modification de mise en page.
+
+
+## 20. Surveillances partagées entre l'app et le hub ✅ implémenté
+
+Avant : **la sonde était seule maîtresse de sa liste**. Elle l'annonçait à chaque
+battement, le hub en déduisait tout, et une cible **absente de l'annonce était traitée
+comme retirée**.
+
+⚠️ **C'est ce qui effaçait en silence ce qu'on ajoutait depuis le hub** : on ajoutait
+`8.8.8.8` côté hub, l'app ajoutait `1.1.1.1` de son côté, annonçait sa liste locale — et
+`8.8.8.8` disparaissait. Rien n'échouait, rien n'alertait. Constaté en production le
+02/09/2026.
+
+### Le principe
+
+⚠️ **Une suppression est un fait EXPLICITE, jamais une absence.**
+
+Même règle que le `confirmed_until` du §15 : ne jamais déduire un fait d'un silence. Là,
+« je n'ai pas relevé » était confondu avec « c'était en panne » ; ici, « je ne l'ai pas
+annoncée » avec « je l'ai retirée ».
+
+- la liste effective est l'**union** de ce que connaissent l'app et le hub ;
+- retirer **écrit une suppression datée**, conservée — c'est elle qui alimente le
+  sous-onglet « Retirées » ;
+- **réactiver, c'est effacer la suppression**. Le « revive des deux côtés » en découle,
+  sans mécanisme dédié.
+
+### Arbitrage — le plus récent gagne
+
+Chaque changement porte une date ; le plus récent l'emporte. Le cas « la sonde était
+éteinte » ne demande aucune règle particulière : sa liste est simplement antérieure.
+
+⚠️ **La sonde n'envoie JAMAIS de date, mais une ANCIENNETÉ** (`age_secs`), mesurée sur
+l'horloge **monotone** — celle qui ne recule pas, ignore NTP, les changements d'heure et
+les réveils de veille. Le hub la convertit dans sa propre référence.
+
+**Aucune horloge n'est jamais comparée à une autre.** Synchroniser les deux a été envisagé
+et écarté : ça dépend de NTP, ça dérive, et un portable qui sort de veille saute de
+plusieurs minutes.
+
+⚠️ **`age_secs` est bornée à 30 jours, et une valeur négative est refusée.** Hors bornes,
+le changement est daté à la réception. Une valeur aberrante — bug, champ corrompu, sonde
+malveillante — placerait sinon un changement en 1970 ou dans le futur et gagnerait **tous**
+les arbitrages à l'envers.
+
+⚠️ **Limite connue** : l'horloge monotone ne survit pas à l'arrêt du processus. Un retrait
+fait hors ligne repart donc « rajeuni » au redémarrage de l'app, et peut l'emporter sur un
+ajout plus récent dans les faits.
+
+### Au battement
+
+```json
+"monitor_changes": [
+  { "target": "10.0.8.20", "action": "add",    "age_secs": 45 },
+  { "target": "8.8.4.4",   "action": "remove", "age_secs": 11520 }
+]
+```
+
+Le hub répond `monitors` (liste effective, retraits compris) et **`monitor_acks`** (les
+cibles prises en compte). ⚠️ La sonde ne retire un changement de sa file **qu'une fois
+accusé** — même mécanisme que les commandes du §14. Un changement arbitré **perdant** est
+quand même accusé : il a été tranché, le réémettre ne changerait rien.
+
+⚠️ **La sonde ne réactive jamais d'elle-même une cible dont la suppression est plus récente
+que son état.** Sans cette règle, une app qui redémarre ressuscite ce qu'on vient de
+retirer depuis le hub — le défaut d'origine, inversé.
+
+### Routes
+
+- `POST /api/probes/{id}/monitors/revive` — corps `{ "target": "..." }`
+- `POST /api/probes/{id}/monitors/remove` — idem. ⚠️ Écrit la suppression **immédiatement**,
+  sans attendre la sonde : sinon retirer une cible pendant qu'elle est hors ligne perdait
+  la décision jusqu'à son retour.
+
+Les deux sont gardées par la **portée de site**, **404** hors portée, rien d'écrit.
+
+### ⚠️ Deux champs, deux faits — ce n'est pas une redondance
+
+`GET /api/probes` expose les deux :
+
+- **`monitors`** (colonne `probes.monitors`, annoncée par la sonde) dit **COMMENT** chaque
+  cible se porte : `alive`, latence, disponibilité, nombre de relevés. La sonde seule mesure.
+- **`probe_monitors`** (table `probe_monitors`, tenue par le hub) dit **QUI** est surveillé
+  et depuis quand, avec les retraits datés que la sonde ignore encore.
+
+Fusionner les deux ferait perdre l'un ou l'autre.
+
+⚠️ **Une cible annoncée par la sonde mais absente de `probe_monitors` reste ACTIVE.** Une
+sonde antérieure à ce mécanisme n'envoie aucun `monitor_changes` : sa table est vide alors
+qu'elle pingue depuis des mois. Lire cette absence comme un retrait viderait l'onglet d'un
+parc entier — le défaut du chantier, transposé dans l'interface.
+
+**Compatibilité** : sans `monitor_changes`, le hub garde le comportement d'avant. Une sonde
+non mise à jour continue de fonctionner.
