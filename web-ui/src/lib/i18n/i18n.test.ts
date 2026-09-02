@@ -70,6 +70,20 @@ describe('catalogues de traduction', () => {
     'settings.realtime_unit',
     'settings.realtime_hint',
     'settings.invalid_realtime',
+    // Onglet « Temps réel » : les trois réglages se règlent ensemble, la durée
+    // n'est plus seule sur « Général ».
+    'settings.tab_realtime',
+    'settings.realtime_title',
+    'settings.realtime_lead',
+    'settings.realtime_window_label',
+    'settings.realtime_window_hint',
+    'settings.realtime_heartbeat_label',
+    'settings.realtime_heartbeat_hint',
+    'settings.realtime_delay_note',
+    'settings.invalid_realtime_window',
+    // ⚠️ Le plancher de 5 s doit se DIRE, pas seulement se refuser : un champ
+    // qui rejette sans expliquer se relit trois fois avant qu'on comprenne.
+    'settings.invalid_realtime_heartbeat',
   ];
 
   for (const [lang, catalog] of Object.entries(CATALOGS)) {
@@ -115,12 +129,55 @@ describe('catalogues de traduction', () => {
   // mais pas encore assez pour être déclarée hors ligne. Sans ces clés, l'écran
   // retomberait sur le vert « en ligne », qui est exactement l'affirmation
   // fausse que cet état existe pour supprimer.
-  const REQUISES_SILENCE = ['status.silent', 'status.silent_for', 'status.silent_help'];
+  // ⚠️ `fleet.rail_silent` fait partie du lot : le bandeau du parc comptait
+  // encore sur `p.status` sous l'intitulé « sans nouvelles ». Deux mots pour le
+  // même ensemble de sondes, et une sonde affichée « Silencieuse » sur sa ligne
+  // était comptée « En ligne » dans le bandeau.
+  const REQUISES_SILENCE = [
+    'status.silent',
+    'status.silent_for',
+    'status.silent_help',
+    'fleet.rail_silent',
+  ];
 
   for (const [lang, catalog] of Object.entries(CATALOGS)) {
     it(`${lang} porte les clés de l’état silencieux`, () => {
       const keys = new Set(flatten(catalog));
       expect(REQUISES_SILENCE.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
+  // InfluxDB et Sauvegardes ont divorcé : la base de mesures et la politique
+  // d'archivage répondent à deux questions différentes — « mes mesures
+  // arrivent-elles ? » et « que me reste-t-il si cette machine disparaît ? ».
+  // Mêlées, on cherchait la seconde en scrollant la première.
+  const REQUISES_STOCKAGE = ['settings.tab_backups', 'settings.tab_measures'];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des onglets Mesures et Sauvegardes`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_STOCKAGE.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
+  // Sélecteur de fenêtre sur TOUS les onglets, plage de dates comprise.
+  // ⚠️ Les quatre messages de refus sont nommés un à un : un plafond qui
+  // refuse sans dire pourquoi se lit comme une panne de l'interface, ce qui
+  // est exactement ce que le plafond sert à éviter.
+  const REQUISES_FENETRE = [
+    'probe.range_minutes',
+    'probe.window_apply',
+    'probe.window_max_hint',
+    'probe.window_incomplete',
+    'probe.window_reversed',
+    'probe.window_future',
+    'probe.window_too_wide',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés du sélecteur de fenêtre`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_FENETRE.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
 

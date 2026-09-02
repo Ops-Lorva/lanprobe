@@ -6,11 +6,16 @@
     sites: number;
     total: number;
     online: number;
-    stale: number;
+    /**
+     * ⚠️ `silent`, pas `stale` : ce compteur vient de `probeLiveness`, calculé
+     * dans le navigateur, et non du statut du hub. Deux mots pour le même
+     * ensemble de sondes laissaient le bandeau et les lignes se contredire.
+     */
+    silent: number;
     offline: number;
     buffered: number;
   }
-  let { sites, total, online, stale, offline, buffered }: Props = $props();
+  let { sites, total, online, silent, offline, buffered }: Props = $props();
 
   const lang = $derived($locale ?? 'en');
 </script>
@@ -37,8 +42,10 @@
     <div class="val" class:ok={online > 0}>{online}</div>
   </div>
   <div class="tile">
-    <div class="lp-label">{$_('fleet.rail_stale')}</div>
-    <div class="val" class:warn={stale > 0}>{stale}</div>
+    <div class="lp-label">{$_('fleet.rail_silent')}</div>
+    <!-- Neutre et non orange : le silence n'affirme aucune panne, et un
+         compteur orange se lit comme une alerte de plus à traiter. -->
+    <div class="val">{silent}</div>
   </div>
   <div class="tile" class:alert={offline > 0}>
     <div class="lp-label">{$_('fleet.rail_offline')}</div>

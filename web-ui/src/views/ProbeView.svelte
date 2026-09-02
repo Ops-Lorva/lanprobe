@@ -26,16 +26,23 @@
   } from '$lib/api';
   import {
     MEASUREMENT,
-    RANGES,
-    DEFAULT_RANGE,
     MetricsShapeError,
     normalizeCurves,
-    rangeMillis,
     numeric,
     plausibleLatency,
-    type Range,
     type Curve,
   } from '$lib/metrics';
+  // ⚠️ Une seule fenêtre pour toute la fiche, tenue dans un store partagé :
+  // avant, elle n'existait que sur le tableau de bord et les quatre autres
+  // onglets affichaient son choix sans le dire.
+  import {
+    clipToWindow,
+    metricsRange,
+    timeWindow,
+    toMetricsWindow,
+    windowDomain,
+    type WindowChoice,
+  } from '$lib/time-window';
   // ⚠️ Import statique assumé : `sla-report` ne charge exceljs qu'à la
   // demande, à l'intérieur de `downloadSlaReport`. Le tableau par adresse ne
   // tire donc pas le classeur dans le paquet principal.
@@ -71,6 +78,7 @@
   import ValueTable from '$lib/components/ValueTable.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import WindowBar from '$lib/components/WindowBar.svelte';
   import ActionMenu from '$lib/components/ActionMenu.svelte';
   import CodeDisplay from '$lib/components/CodeDisplay.svelte';
   import { enrollments } from '$lib/enroll';
@@ -206,6 +214,39 @@
       realtimeBusy = false;
     }
   }
+
+  /**
+   * Fenêtre que l'écran adopte pendant le mode temps réel, réglée au hub.
+   *
+   * ⚠️ Lue une fois au montage et non à chaque tour : c'est un réglage, pas
+   * une mesure. Le repli à 10 vaut le défaut du hub — un hub antérieur à ce
+   * réglage ne le renvoie pas, et `undefined` ferait une fenêtre `-NaNm`.
+   */
+  let realtimeWindowMin = $state(10);
+
+  onMount(() => {
+    api
+      .settings()
+      .then((s) => {
+        realtimeWindowMin = s.realtime_window_min ?? 10;
+      })
+      .catch(() => {
+        /* le réglage a un défaut : l'écran n'a pas à tomber pour lui */
+      });
+  });
+
+  /**
+   * Bascule automatique : le mode s'allume, la fenêtre suit ; il s'arrête, la
+   * fenêtre revient.
+   *
+   * ⚠️ Les autres fenêtres restent CLIQUABLES pendant le mode. `pick` vide la
+   * mémoire de restauration, donc un clic explicite tient jusqu'au bout — on
+   * propose la bonne fenêtre, on ne l'impose pas. Sans cette mémoire, l'écran
+   * rebasculerait sur 10 min à chaque tour d'horloge, soit toutes les 3 s.
+   */
+  $effect(() => {
+    timeWindow.syncRealtime({ on: realtimeOn, windowMin: realtimeWindowMin });
+  });
 
   // ── Déplacement de site ──────────────────────────────────────────────────
   let moveOpen = $state(false);
@@ -361,7 +402,7 @@
   }
   const blank: ChartState = { tone: 'loading', curves: [] };
 
-  let range = $state<Range>(DEFAULT_RANGE);
+  const win = $derived($timeWindow.choice);
   let ping = $state<ChartState>({ ...blank });
   let inet = $state<ChartState>({ ...blank });
   let speed = $state<ChartState>({ ...blank });
@@ -373,10 +414,23 @@
    */
   let loadedAt = $state(Date.now());
 
-  async function fetchOne(measurement: string, fallbackField: string): Promise<ChartState> {
+  async function fetchOne(
+    measurement: string,
+    fallbackField: string,
+    choice: WindowChoice,
+  ): Promise<ChartState> {
     try {
-      const raw = await api.metrics(id, measurement, range);
-      const curves = normalizeCurves(raw, fallbackField);
+      // 🔴 `GET /metrics` n'accepte QUE `range` : il déclare `start`/`stop`
+      // mais `probe_metrics` ne les lit pas (crates/lanprobe-web/src/web.rs).
+      // Une plage absolue envoyée telle quelle serait ignorée EN SILENCE, et
+      // les courbes montreraient la dernière heure sous une légende « du 20
+      // au 22 ». On remonte donc jusqu'au début de la plage et on coupe la
+      // fin ici.
+      const raw = await api.metrics(id, measurement, metricsRange(choice, Date.now()));
+      const curves = normalizeCurves(raw, fallbackField).map((c) => ({
+        ...c,
+        points: clipToWindow(c.points, choice),
+      }));
       const empty = curves.every((c) => c.points.length === 0);
       return { tone: empty ? 'empty' : 'ready', curves };
     } catch (e) {
@@ -409,10 +463,13 @@
       inet = { ...blank };
       speed = { ...blank };
     }
+    // ⚠️ La fenêtre est figée pour tout le tour : lue trois fois, un clic
+    // pendant le chargement donnerait trois graphiques sur trois périodes.
+    const choice = win;
     const [p, i, s] = await Promise.all([
-      fetchOne(MEASUREMENT.ping, 'latency_ms'),
-      fetchOne(MEASUREMENT.internet, 'state'),
-      fetchOne(MEASUREMENT.speedtest, 'download_mbps'),
+      fetchOne(MEASUREMENT.ping, 'latency_ms', choice),
+      fetchOne(MEASUREMENT.internet, 'state', choice),
+      fetchOne(MEASUREMENT.speedtest, 'download_mbps', choice),
     ]);
     ping = p;
     inet = i;
@@ -422,7 +479,7 @@
     // Même fenêtre que les courbes, lue dans la foulée : le graphe et le
     // tableau par adresse doivent parler de la même période, sinon un repère
     // se pose là où le tableau ne compte rien.
-    await loadPublicIps();
+    await loadPublicIps(choice);
   }
 
   // ── Adresses publiques traversées (contrat § 15) ─────────────────────────
@@ -438,9 +495,10 @@
   let ipIntervals = $state<PublicIpInterval[] | null>(null);
   let ipHistoryError = $state('');
 
-  async function loadPublicIps() {
+  async function loadPublicIps(choice: WindowChoice = win) {
     try {
-      ipIntervals = (await api.publicIps(id, { range })).intervals ?? [];
+      // Celui-ci accepte les bornes absolues : il passe par `flux_range`.
+      ipIntervals = (await api.publicIps(id, toMetricsWindow(choice, Date.now()))).intervals ?? [];
       ipHistoryError = '';
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
@@ -522,7 +580,7 @@
   // s'il doit garder le rendu précédent, et les réécrit ensuite. Sans lui,
   // l'effet se redéclencherait sur sa propre écriture.
   $effect(() => {
-    void range;
+    void win;
     void id;
     untrack(() => void loadMetrics());
   });
@@ -530,7 +588,7 @@
   // La fenêtre demandée borne l'axe, même si les mesures n'en couvrent qu'un
   // coin : « 6 h » doit montrer six heures, sinon trente minutes de relevés
   // occupent toute la largeur et on croit lire six heures de données.
-  const domain = $derived({ from: loadedAt - rangeMillis(range), to: loadedAt });
+  const domain = $derived(windowDomain(win, loadedAt));
 
   // ── Inventaire (contrat § 12) ────────────────────────────────────────────
   //
@@ -647,7 +705,10 @@
     slaError = '';
     try {
       // La fenêtre du rapport est celle affichée : on exporte ce qu'on regarde.
-      const payload = await api.sla(id, { range });
+      // ⚠️ Une plage absolue part en bornes exactes, pas en fenêtre glissante :
+      // « les 7 derniers jours » donnerait un chiffre différent à chaque
+      // ouverture du document remis au client.
+      const payload = await api.sla(id, toMetricsWindow(win, Date.now()));
       const { downloadSlaReport } = await import('$lib/sla-report');
       await downloadSlaReport(payload, (k, v) => $_(k, { values: v }), lang);
     } catch (e) {
@@ -1219,26 +1280,39 @@
     {/each}
   </nav>
 
+  <!--
+    ⚠️ La barre est HORS des blocs d'onglet : elle cadre Surveillance et Débit
+    autant que le tableau de bord. Ces deux-là affichaient la fenêtre choisie
+    ailleurs sans le dire — « aucune cible surveillée sur la fenêtre
+    affichée » se lisait comme un fait, alors que c'était la conséquence d'un
+    réglage invisible.
+
+    🔴 Ports, Découverte et Commandes en sont EXCLUS, et ce n'est pas un oubli.
+    Ces trois-là ne lisent pas la fenêtre : `/api/probes/{id}/inventory` rend
+    le DERNIER scan (`latest_scan`, crates/lanprobe-web/src/web.rs) et les 50
+    derniers tests de débit — `InventoryQuery` ne porte ni `range` ni bornes.
+    Leur poser un sélecteur promettrait un filtre qui n'existe pas : ce serait
+    exactement le défaut que ce chantier corrige, une deuxième affirmation
+    fausse à côté d'une vraie. Ils affichent déjà la date de leur scan, qui
+    est la seule chose honnête qu'on puisse en dire.
+  -->
+  {#if tab === 'dashboard' || tab === 'monitoring' || tab === 'speedtest'}
+    <WindowBar choice={win} onpick={(c) => timeWindow.pick(c)}>
+      {#snippet actions()}
+        {#if tab === 'dashboard'}
+          <!-- Le rapport porte sur la fenêtre affichée : on exporte ce qu'on
+               regarde, et la fenêtre est écrite dans le classeur. Un « 99,2 % »
+               sans période ne veut rien dire pour le client qui le reçoit. -->
+          <button class="lp-btn ghost sm" onclick={exportSla} disabled={slaBusy}>
+            {slaBusy ? $_('sla.exporting') : $_('sla.export')}
+          </button>
+          {#if slaError}<span class="slaerr">{slaError}</span>{/if}
+        {/if}
+      {/snippet}
+    </WindowBar>
+  {/if}
+
   {#if tab === 'dashboard'}
-  <div class="rangebar">
-    <span class="lp-label">{$_('probe.range')}</span>
-    <div class="chips" role="group" aria-label={$_('probe.range')}>
-      {#each RANGES as r (r)}
-        <button class="chip" class:on={range === r} onclick={() => (range = r)}>
-          {$_(`probe.range_${r.replace('-', '')}`)}
-        </button>
-      {/each}
-    </div>
-    <!-- Le rapport porte sur la fenêtre affichée : on exporte ce qu'on
-         regarde, et la fenêtre est écrite dans le classeur. Un « 99,2 % »
-         sans période ne veut rien dire pour le client qui le reçoit. -->
-    <div class="slabox">
-      <button class="lp-btn ghost sm" onclick={exportSla} disabled={slaBusy}>
-        {slaBusy ? $_('sla.exporting') : $_('sla.export')}
-      </button>
-      {#if slaError}<span class="slaerr">{slaError}</span>{/if}
-    </div>
-  </div>
 
   <div class="charts">
     <ChartCard
@@ -2350,13 +2424,9 @@
     max-width: 82ch;
   }
 
-  .rangebar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 12px;
-    flex-wrap: wrap;
-  }
+  /* `.rangebar` et `.slabox` ont suivi la barre de fenêtre dans
+     `WindowBar.svelte` : les styles Svelte sont scopés, les garder ici ne
+     stylerait plus rien. */
   .chips {
     display: flex;
     gap: 4px;
@@ -2698,12 +2768,6 @@
     overflow-wrap: anywhere;
   }
 
-  .slabox {
-    margin-left: auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-  }
   .slaerr {
     font-size: 11px;
     color: var(--ep-danger);

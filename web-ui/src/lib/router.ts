@@ -18,7 +18,15 @@ import { readable } from 'svelte/store';
  * l'interface : un lien collé dans un ticket ne doit pas cesser de fonctionner
  * parce que son destinataire a mis le hub en français.
  */
-export const SETTINGS_TABS = ['account', 'general', 'alerts', 'storage', 'accounts'] as const;
+export const SETTINGS_TABS = [
+  'account',
+  'general',
+  'realtime',
+  'alerts',
+  'storage',
+  'backups',
+  'accounts',
+] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 
 export type Route =
