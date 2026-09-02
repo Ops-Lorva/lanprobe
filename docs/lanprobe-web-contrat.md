@@ -242,10 +242,112 @@ peut pas mentir sur sa propre fraîcheur.
 Les deux champs sont facultatifs. Changer `site_id` déplace la sonde d'un site à
 l'autre ; son historique la suit, puisqu'il est joint sur `probe_id`.
 ### `DELETE /api/probes/{id}` — révoque le jeton. **Ne supprime aucune mesure.**
-### `GET /api/probes/{id}/metrics?measurement=&range=` — requête Flux proxifiée
+### `GET /api/probes/{id}/metrics` — requête Flux proxifiée
 
 Le navigateur ne parle jamais directement à Influx : le jeton de lecture reste
 côté serveur.
+
+| Paramètre | Défaut | Rôle |
+|---|---|---|
+| `measurement` | — | filtre sur `_measurement`. Absent ou vide : tout ce que la sonde écrit. |
+| `range` | `-24h` | fenêtre glissante (`-30m`, `-7d`, `-4w`…) |
+| `start`, `stop` | — | bornes explicites, **en secondes epoch** |
+| `max_points` | `800` | points affichables — en pratique la largeur du graphe en pixels |
+
+**`start`/`stop` priment sur `range`**, et seulement s'ils tiennent debout : les
+deux présents, et `stop > start`. Des bornes incomplètes ou inversées retombent
+sur la fenêtre glissante — une fenêtre vide rendrait un rapport à 0 %, qu'on lit
+comme une panne totale plutôt que comme une saisie fautive.
+
+⚠️ Ces deux bornes ont été **déclarées puis ignorées en silence** : demander « du
+20 au 22 » rendait la dernière heure, sous une légende qui annonçait trois jours,
+et l'interface compensait en sur-tirant tout depuis le début de la plage pour
+découper elle-même. Un paramètre accepté et ignoré est pire qu'un paramètre
+refusé. La même fenêtre sert désormais à la clause Flux, au tableau par adresse
+publique et au calcul du pas d'agrégation : un seul endroit décide de la période,
+deux calculs séparés finiraient par légender une courbe avec la période d'une
+autre.
+
+```json
+{ "range": "-24h",
+  "aggregated_every": "15m",
+  "series": [ { "field": "latency_ms · 1.1.1.1", "measure": "latency_ms",
+                "tags": { "ip": "1.1.1.1" },
+                "points": [ { "t": 1756339200000, "v": 12.4 } ] } ] }
+```
+
+`range` reprend la fenêtre demandée, sous la forme `"<start>..<stop>"` quand elle
+est explicite. `field` est le **libellé** — le champ décoré de ses étiquettes — et
+`measure` le nom **nu** du champ : c'est `measure` qu'on compare, jamais le
+libellé. Chercher `latency_ms` dans `latency_ms · 10.0.30.12` est l'un des trois
+défauts du 29/08 (voir « Ce qui est testé »). Les étiquettes qui ne distinguent
+rien ici (`probe_id`, `site_id`, `probe`, `site`, `host` — la requête porte déjà
+sur une seule sonde) sont retirées : gardées, elles décoreraient identiquement
+toutes les courbes.
+
+#### Quand le hub agrège — et quand il ne le fait pas
+
+⚠️ **On agrège parce que les points ne tiennent pas dans le graphe, jamais parce
+que la plage est longue ou parce qu'elle est ancienne.** Dix minutes prises il y
+a trois mois se rendent **brutes**, sans le moindre `aggregateWindow` : les points
+existent, ils tiennent dans la carte, il n'y a aucune raison de les moyenner.
+Quatre-vingts jours à un ping par seconde font sept millions et demi de points par
+cible, que le navigateur n'affichera jamais.
+
+La règle tient en une comparaison : **durée de la fenêtre en secondes ≤
+`max_points` → points bruts**. Sinon le pas est le quotient, arrondi à l'échelon
+**lisible** supérieur (`1s`, `2s`, `5s`, `10s`, `15s`, `30s`, `1m`… jusqu'à `24h`
+et `7d`). Une fenêtre plus large que le dernier échelon retombe sur lui, jamais
+sur « brut ».
+
+La durée est un **majorant du nombre de points**, pas un compte : à une mesure
+par seconde, une fenêtre de *n* secondes en porte au plus *n*. Le hub ne sait pas
+combien de points existent sans les lire, et sur-agréger un peu vaut mieux que de
+découvrir le débordement une fois la réponse partie. Arrondir vers le haut
+garantit en prime de ne jamais dépasser la largeur demandée — et « moyenné par
+30 min » se lit là où « moyenné par 1 847 s » ne se lit pas.
+
+`max_points` est **borné à 100..5000** : la valeur vient du **navigateur**, `0`
+diviserait par zéro et `10 000 000` rendrait la protection inopérante.
+
+⚠️ **`aggregated_every` est ABSENT de la réponse quand elle est brute** — jamais
+`null`, jamais `"1s"`. C'est ce qui permet à l'interface de n'annoncer une moyenne
+que s'il y en a une : légender des mesures prises à la seconde par « moyenné par
+1 s » serait une affirmation fausse, du même genre que celle qu'on corrige ici.
+
+#### ⚠️ L'extrême qui préserve l'incident n'est pas le même selon la mesure
+
+Quand le hub agrège, chaque série sort en **deux** champs : la moyenne, sous le
+nom nu, et l'extrême, suffixé. Le nom nu reste à la moyenne pour que l'interface
+qui cherchait `latency_ms` continue de le trouver.
+
+| Mesure | Fonction | Champ rendu | Pourquoi celui-là |
+|---|---|---|---|
+| latence, débits… (valeurs continues) | `max` | `latency_ms_max` | un pic à 800 ms noyé dans une moyenne à 12 ms disparaît : la courbe reste crédible et l'incident n'existe plus |
+| disponibilité — `alive`, `icmp_ok`, `dns_ok`… (booléens) | `min` | `alive_min` | `max(alive)` vaut 1 dès qu'**un seul** ping passe : cinquante minutes de coupure sur une heure s'afficheraient « tout va bien » |
+
+**Cette asymétrie est voulue.** C'est exactement le genre de chose qu'un relecteur
+pressé « corrige » par cohérence apparente — les deux fonctions diffèrent, mais
+elles servent la **même** règle : garder ce que la moyenne gomme. C'est la règle
+qui doit être identique des deux côtés, pas la fonction. Un `alive_max` toujours à
+1 est le cas d'école de la valeur plausible et fausse : elle ne fait échouer
+aucune requête, elle rassure à tort.
+
+Le suffixe dit ce qu'il contient : `_min` pour un minimum, **jamais** `_max`.
+Ranger un minimum sous `_max` serait pire que de ne rien suffixer du tout. Le tri
+se fait sur le **type Influx**, donc avant `toFloat()` : après conversion, un
+booléen ne se distingue plus d'un compteur qui vaut 0 ou 1.
+
+⚠️ Les champs **texte** (`state` d'`internet_status`, `server` d'un speedtest) ne
+se moyennent pas et sont rendus **bruts**, dans leur propre `yield` : `mean` sur
+une chaîne fait échouer la requête **entière**, donc les trois graphes de la fiche
+d'un coup.
+
+⚠️ **`createEmpty: false`, sans exception.** Un intervalle où rien n'a été mesuré
+ne produit **aucun point** — ni zéro, ni valeur interpolée. Un trou reste un trou.
+Même règle que le `confirmed_until` du §15 : on ne déduit jamais un fait d'un
+silence. Un zéro inventé se lirait comme une latence nulle sur une courbe et comme
+une coupure sur une autre ; les deux sont faux, et aucun des deux ne se voit.
 
 ## 4. Schéma SQLite
 
@@ -623,6 +725,7 @@ donc aussi ouverte à `admin`.
 | `POST /api/enroll-codes`, `GET /api/enroll-codes/pending` | `operator` | le code y figure **en clair** pendant sa validité |
 | `PATCH`/`DELETE /api/probes/{id}` | `operator` | |
 | `POST /api/probes/{id}/rotate`, `/revoke-token`, `/reenroll-code` | `operator` | |
+| `POST /api/probes/{id}/monitors/remove`, `/monitors/revive` | `operator` | §20 — portée de site, `404` hors portée |
 | `POST /api/settings/influx-advertise/test` | `operator` | émet une requête sortante |
 | `PUT /api/notifications/subscriptions` | `operator` | |
 | `PUT /api/settings`, `PUT /api/settings/influx-advertise` | `admin` | la rétention en fait partie |
@@ -711,7 +814,10 @@ Actions journalisées : `auth.setup`, `auth.login`, `auth.logout`,
 `settings.retention`, `settings.advertise`, `influx.read_token.create`,
 `influx.read_token.revoke`, `notify.webhook`, `notify.smtp`,
 `notify.unconfigure`, `notify.subscription`, `notify.test`, `probe.down`,
-`probe.up`.
+`probe.up`, `probe.command`, `probe.monitor_remove`, `probe.monitor_revive`,
+`probe.public_ip_changed`, `probe.archive`, `probe.unarchive`, `site.archive`,
+`site.unarchive`, `user.scope`, `user.password_reset_cli`, `backup.create`,
+`backup.restore`, `backup.retention`.
 
 **Jamais de secret dans une ligne.** Ni jeton de sonde, ni jeton de lecture, ni
 code d'enrôlement, ni mot de passe, ni URL de webhook. Les réglages, eux, y
@@ -1323,9 +1429,28 @@ le changement est daté à la réception. Une valeur aberrante — bug, champ co
 malveillante — placerait sinon un changement en 1970 ou dans le futur et gagnerait **tous**
 les arbitrages à l'envers.
 
-⚠️ **Limite connue** : l'horloge monotone ne survit pas à l'arrêt du processus. Un retrait
-fait hors ligne repart donc « rajeuni » au redémarrage de l'app, et peut l'emporter sur un
-ajout plus récent dans les faits.
+⚠️ **Limite connue — et elle ne frappe QU'UN des deux chemins.**
+
+La file de la sonde est bien **persistée** (`hub_monitor_changes` dans
+`app_config.json`) : un geste fait pendant que le hub est injoignable survit à un
+redémarrage de l'app. Ce qui ne survit pas, c'est l'horloge **monotone** sur laquelle
+son ancienneté est mesurée — aucune horloge monotone ne survit à l'arrêt d'un
+processus. Au redémarrage, le geste repart donc avec l'ancienneté qu'il avait quand elle
+a été écrite : **la durée pendant laquelle l'app était arrêtée n'est pas comptée.**
+
+Conséquence : un retrait fait **depuis l'app** alors qu'elle est hors ligne revient
+« rajeuni » de la durée de l'arrêt, et peut gagner un arbitrage contre un ajout qui lui
+est postérieur dans les faits.
+
+⚠️ **Le retrait fait depuis le hub n'est pas concerné** : il est daté de l'horloge du
+hub à la seconde du clic, et écrit en base tout de suite. Les deux chemins ne portent
+donc pas le même risque — une raison de plus de passer par la route du hub quand on l'a
+sous la main.
+
+C'est une sous-estimation **assumée**. L'alternative — dater sur l'horloge murale — saute
+au réveil de veille et se fait corriger par NTP : elle ferait gagner des arbitrages au
+hasard, sans que rien ne le signale. Un décalage borné, toujours dans le même sens et
+connu vaut mieux qu'un décalage imprévisible.
 
 ### Au battement
 
@@ -1345,14 +1470,60 @@ quand même accusé : il a été tranché, le réémettre ne changerait rien.
 que son état.** Sans cette règle, une app qui redémarre ressuscite ce qu'on vient de
 retirer depuis le hub — le défaut d'origine, inversé.
 
-### Routes
+### Routes — c'est par elles que l'interface agit
 
-- `POST /api/probes/{id}/monitors/revive` — corps `{ "target": "..." }`
-- `POST /api/probes/{id}/monitors/remove` — idem. ⚠️ Écrit la suppression **immédiatement**,
-  sans attendre la sonde : sinon retirer une cible pendant qu'elle est hors ligne perdait
-  la décision jusqu'à son retour.
+⚠️ **Ces deux routes sont le chemin qui fait autorité, et elles sont nommées ici
+pour cette raison.** Elles ont existé deux jours, écrites et testées, sans **aucun
+appelant** côté interface : le bouton « Retirer » empilait une commande
+`remove_monitor` (§14), qui n'est distribuée qu'au **battement suivant**. Il
+marchait donc sonde allumée et **échouait en silence sonde éteinte** —
+c'est-à-dire précisément dans le cas qui motive toute la fonctionnalité. La cause
+n'était pas un oubli de code : cette section décrivait le principe et l'arbitrage
+**sans nommer une seule des deux routes HTTP** qui les déclenchent. Ce qui n'est
+pas dans le contrat ne se branche pas.
 
-Les deux sont gardées par la **portée de site**, **404** hors portée, rien d'écrit.
+```
+POST /api/probes/{id}/monitors/remove    { "target": "8.8.8.8" }
+POST /api/probes/{id}/monitors/revive    { "target": "8.8.8.8" }
+     → 200 { "ok": true, "applied": true | false }
+     400 cible vide  ·  403 rôle insuffisant  ·  404 sonde hors portée
+```
+
+- **Rôle `operator`**, comme tout ce qui touche une sonde : retirer ou réactiver
+  une surveillance change ce qui pingue sur le réseau d'un client, ce n'est pas
+  une consultation.
+- **Portée de site** : une sonde hors portée rend **404** — pas `403` — et rien
+  n'est écrit. « Ça existe mais pas pour vous » révèle déjà l'existence du site
+  d'un autre client (§17).
+- `target` est rogné de ses espaces ; vide, la route rend `400` sans rien écrire.
+- Chaque appel écrit une ligne d'audit : `probe.monitor_remove`,
+  `probe.monitor_revive`.
+
+⚠️ **`applied: false` n'est pas une erreur, et ne doit pas être tu.** Il dit qu'un
+changement **au moins aussi récent** avait déjà tranché pour cette cible : rien
+n'a été écrit, et un écran qui afficherait quand même « retirée » affirmerait ce
+que le hub vient de refuser. Rejouer le même geste à la même seconde ne réécrit
+rien non plus — sans quoi un battement répété ferait avancer la date d'un état qui
+n'a pas bougé.
+
+⚠️ **Le retrait est écrit immédiatement, daté de l'horloge du hub**, sans attendre
+la sonde. C'est toute la différence avec la commande : la sonde s'y aligne à son
+prochain battement, qu'elle soit là ou non, et l'arbitrage « le plus récent
+gagne » le fait tenir face à la liste que rapportera une machine éteinte —
+antérieure par construction. Une commande, elle, ne fait rien tant que la sonde ne
+revient pas, et se perd si elle ne revient jamais.
+
+La réponse dit **« c'est écrit côté hub »**, pas « la sonde a cessé de pinguer » :
+le hub ne joint jamais la sonde. L'interface doit le formuler ainsi.
+
+⚠️ **Rien n'a été retiré au passage** : le type de commande `remove_monitor`
+existe toujours et la route de commandes le sert encore. C'est le bouton qui a
+changé de chemin, pour le seul qui marche que la sonde soit là ou non.
+
+⚠️ Une sonde **inconnue** n'est pas traitée à part : la clé étrangère refuse
+l'écriture et la route rend `500`, là où on attendrait `404`. Sans conséquence en
+pratique — l'interface ne propose que des sondes existantes — mais c'est écrit ici
+pour que personne ne construise sur un `404` qui n'arrive pas.
 
 ### ⚠️ Deux champs, deux faits — ce n'est pas une redondance
 
