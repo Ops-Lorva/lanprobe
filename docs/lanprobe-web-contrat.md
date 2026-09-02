@@ -284,6 +284,25 @@ publique et au calcul du pas d'agrégation : un seul endroit décide de la péri
 deux calculs séparés finiraient par légender une courbe avec la période d'une
 autre.
 
+⚠️ **Une fenêtre glissante illisible rend `400 { "error": "fenêtre illisible" }`,
+jamais un repli muet.** `range=nawak` ou `range=12x` retombaient en silence sur une
+heure : l'écran affichait une heure sous une légende qui annonçait autre chose, et
+rien ne permettait de s'en apercevoir. Un refus se comprend, un repli muet non.
+
+⚠️ **Le signe est normalisé : `24h` et `-24h` désignent tous les deux le passé.**
+En Flux une durée **positive** part de maintenant vers l'**avant** — `range(start:
+24h)` visait les 24 h à venir, Influx refusait, et le hub rendait **502**, donc
+« InfluxDB est en panne » pour une saisie parfaitement anodine. Même faute
+d'honnêteté que le `500` sur une sonde inconnue : elle envoie chercher une panne
+qui n'existe pas. Unités acceptées : `s`, `m`, `h`, `d`, `w`, et rien d'autre —
+l'alphabet est clos par construction, jamais un fragment de Flux ne sort d'ici.
+
+Cette validation vaut pour `/metrics`, `/sla`, `/sla.csv` et `/uptime`, qui
+passent tous par la même construction de fenêtre. ⚠️ **`/public-ips` fait
+exception** : il ne lit que les bornes en secondes et retombe silencieusement sur
+24 h devant une saisie illisible. Écrit ici parce que c'est vrai, pas parce que
+c'est souhaitable.
+
 ```json
 { "range": "-24h",
   "aggregated_every": "15m",
@@ -331,28 +350,41 @@ diviserait par zéro et `10 000 000` rendrait la protection inopérante.
 que s'il y en a une : légender des mesures prises à la seconde par « moyenné par
 1 s » serait une affirmation fausse, du même genre que celle qu'on corrige ici.
 
-#### ⚠️ L'extrême qui préserve l'incident n'est pas le même selon la mesure
+#### ⚠️ Ce qu'on agrège dépend de ce qu'on mesure
 
-Quand le hub agrège, chaque série sort en **deux** champs : la moyenne, sous le
-nom nu, et l'extrême, suffixé. Le nom nu reste à la moyenne pour que l'interface
-qui cherchait `latency_ms` continue de le trouver.
+Quand le hub agrège, il ne traite pas toutes les séries de la même façon — et
+l'asymétrie est voulue. C'est exactement le genre de chose qu'un relecteur pressé
+« corrige » par cohérence apparente.
 
-| Mesure | Fonction | Champ rendu | Pourquoi celui-là |
-|---|---|---|---|
-| latence, débits… (valeurs continues) | `max` | `latency_ms_max` | un pic à 800 ms noyé dans une moyenne à 12 ms disparaît : la courbe reste crédible et l'incident n'existe plus |
-| disponibilité — `alive`, `icmp_ok`, `dns_ok`… (booléens) | `min` | `alive_min` | `max(alive)` vaut 1 dès qu'**un seul** ping passe : cinquante minutes de coupure sur une heure s'afficheraient « tout va bien » |
+| Type de série | Agrégation | Champs rendus |
+|---|---|---|
+| latence, débits… (valeurs continues) | `mean` **et** `max` | `latency_ms` (la moyenne) et `latency_ms_max` |
+| disponibilité — `alive`, `icmp_ok`, `dns_ok`… (booléens) | `mean` **seule** | `alive`, qui **est** le taux |
+| texte — `state`, `server`, `result_url` | aucune, rendu brut | le champ, tel quel |
 
-**Cette asymétrie est voulue.** C'est exactement le genre de chose qu'un relecteur
-pressé « corrige » par cohérence apparente — les deux fonctions diffèrent, mais
-elles servent la **même** règle : garder ce que la moyenne gomme. C'est la règle
-qui doit être identique des deux côtés, pas la fonction. Un `alive_max` toujours à
-1 est le cas d'école de la valeur plausible et fausse : elle ne fait échouer
-aucune requête, elle rassure à tort.
+Le nom **nu** reste à la moyenne, pour que l'interface qui cherchait `latency_ms`
+continue de le trouver ; seul l'extrême prend un suffixe.
 
-Le suffixe dit ce qu'il contient : `_min` pour un minimum, **jamais** `_max`.
-Ranger un minimum sous `_max` serait pire que de ne rien suffixer du tout. Le tri
-se fait sur le **type Influx**, donc avant `toFloat()` : après conversion, un
-booléen ne se distingue plus d'un compteur qui vaut 0 ou 1.
+⚠️ **Sur une valeur continue, c'est le maximum qui préserve l'incident.** Une
+moyenne sur deux heures noie un pic à 800 ms dans une valeur à 12 ms : la courbe
+reste crédible et l'incident disparaît. Une valeur plausible et fausse est pire
+qu'une valeur absente.
+
+🔴 **Sur une disponibilité, ni minimum ni maximum : un TAUX.** `max(alive)` vaut 1
+dès qu'**un seul** ping passe — cinquante minutes de coupure sur une heure
+s'afficheraient « tout va bien ». Mais `min(alive)` vaut 0 dès qu'un seul ping
+échoue, et un plancher entre 0 et 1 ne se lit pas davantage. La bonne réponse n'est
+aucun des deux : « 95 % sur la période » se lit d'un coup, et c'est exactement ce
+que `mean` sur un booléen converti en 0/1 calcule. Le support visuel d'une coupure
+reste la bande verte et rouge, pas un extrême.
+
+⚠️ **Il n'existe donc aucun champ `alive_min` ni `alive_max`.** `alive_min` a
+existé quelques heures le 02/09 avant d'être retiré (`64612dd`) : ne pas le
+réintroduire au nom de la symétrie avec `latency_ms_max`. La règle commune n'est
+pas « un extrême partout », c'est « la valeur qui ne ment pas sur la période ».
+
+Le tri se fait sur le **type Influx**, donc avant `toFloat()` : après conversion,
+un booléen ne se distingue plus d'un compteur qui vaut 0 ou 1.
 
 ⚠️ Les champs **texte** (`state` d'`internet_status`, `server` d'un speedtest) ne
 se moyennent pas et sont rendus **bruts**, dans leur propre `yield` : `mean` sur
@@ -376,7 +408,11 @@ agrégé, jamais.
   "start": null, "stop": null, "generated_at": 1756418401,
   "targets": [ { "ip": "10.0.8.1",
                  "samples": [ { "timestamp": 1756332001, "alive": true,
-                                "latency_ms": 3.1 } ] } ],
+                                "latency_ms": 3.1 },
+                              { "timestamp": 1756332002, "alive": null,
+                                "latency_ms": 4.0 } ],
+                 "coverage": { "window_secs": 86401, "covered_secs": 75600,
+                               "gap_secs": 10801 } } ],
   "internet": [ … ], "speedtests": [ … ],
   "discovery": { … } | null, "ports": { … } | null,
   "public_ip_history": [ … ] }
@@ -408,35 +444,90 @@ donneraient deux disponibilités différentes pour la même période.
 Le volet `internet` est le seul qui **dégrade** : si sa requête échoue, le rapport
 part sans lui plutôt que d'échouer en entier — l'absence se voit à l'écran.
 
-#### « Disponible » : une seule définition, pour `/sla`, `/sla.csv` et le taux par cible
+#### 🔴 « Disponible » : une seule définition, et elle exclut le silence
 
-C'est **le** mot qu'il ne faut pas laisser diverger : trois calculs, un seul sens.
-Le contrat est l'endroit qui doit l'empêcher, parce qu'une seconde définition ne
-se voit jamais — les deux rendent un pourcentage crédible.
+C'est **le** mot qu'il ne faut pas laisser diverger : trois calculs — les
+échantillons de `/sla`, les taux de `/sla.csv`, la route `/uptime` — et un seul
+sens. Le contrat est l'endroit qui doit l'empêcher, parce qu'une seconde
+définition ne se voit jamais : les deux rendent un pourcentage crédible.
 
-**État dans `HEAD`** : un relevé est compté disponible quand son champ `alive` est
-vrai **et, à défaut de `alive`, dès qu'une latence existe** à cet instant. Ce repli
-est appliqué à l'identique des deux côtés — sur les échantillons rendus par `/sla`
-comme sur les taux agrégés de `/sla.csv` — de sorte qu'ils ne se contredisent pas
-entre eux.
+**Un relevé est disponible quand son champ `alive` vaut vrai, indisponible quand
+il vaut faux, et INDÉTERMINÉ quand la sonde ne l'a pas écrit.** `alive` est donc
+un booléen **ou `null`**, jamais un booléen seul.
 
-⚠️ **Ce repli est un optimisme, et il est en sursis.** Une mesure sans `alive`
-n'est pas « disponible » : elle est **indéterminée**. La compter comme disponible
-parce qu'une latence traîne affiche 100 % sur des mesures anciennes là où la vérité
-est « on ne sait pas » — et un 100 % a l'air normal, donc personne ne le remet en
-cause. C'est le mode de panne que ce projet refuse partout ailleurs, appliqué au
-chiffre qu'on remet au client.
+⚠️ **Ce qui n'a pas été mesuré sort du dénominateur** : il ne le gonfle pas et ne
+le déflate pas. Un indéterminé n'est ni un succès ni un échec — le compter comme
+un échec donnerait 50 % là où la seule mesure existante dit 100 %.
 
-**Décidé le 02/09/2026, pas encore dans le code** : la règle devient « pas de
-`alive` → indéterminé », pour les trois calculs à la fois. Tant que ce paragraphe
-n'aura pas changé, c'est le repli ci-dessus qui tourne.
+⚠️ **Il n'y a plus de repli sur « une latence existe ».** Ce repli faisait d'une
+latence écrite un verdict de disponibilité : toutes les mesures antérieures au
+champ `alive` ressortaient à **100 %**, un chiffre que personne n'avait, dans un
+document remis au client. C'est le silence transformé en fait, la faute que ce
+dépôt refuse partout ailleurs.
 
-⚠️ Ne pas se fier au commentaire qui surmonte `sla_from_flux_csv` : il affirme déjà
-la règle stricte (« jamais sur la présence d'une latence ») que le code n'applique
-pas encore. En cas de doute, c'est le code qui dit ce que fait le hub.
+⚠️ **Les latences, elles, restent comptées même sur un relevé indéterminé.** Une
+latence écrite **est** une mesure vraie : l'écarter perdrait de l'information
+réelle à cause d'un verdict manquant. Moyenne, minimum, maximum et p95 portent
+donc sur tous les relevés qui ont une latence, pas seulement sur les déterminés.
+
+🔴 **Sans un seul relevé déterminé, il n'y a pas de pourcentage** : le taux vaut
+`null`, jamais `0`. Rendre `0` affirmerait une panne **totale** — pire encore que
+le faux 100 % qu'on corrigeait, et sur le même document. Le type l'interdit
+(`Option<f64>` côté Rust, `number | null` côté navigateur) plutôt qu'un drapeau à
+côté : un drapeau finit toujours par ne pas être lu.
+
+Le nombre de relevés **indéterminés** est compté et rendu, jamais tu : « 100 % sur
+trois relevés » et « 100 % sur trois relevés et neuf mille indéterminés » ne se
+lisent pas pareil.
+
+⚠️ Côté navigateur, la même règle impose `alive === false` là où on écrirait
+spontanément `!alive` : la négation est vraie pour `null`, et le détecteur de
+coupures **ouvrait une coupure inventée à chaque indéterminé** — le faux rouge que
+la règle cherche précisément à éviter, réintroduit par une commodité d'écriture.
 
 Une cible qui n'a **aucun** relevé sur la fenêtre n'apparaît pas dans le rapport :
 elle n'y figure pas à 0 %.
+
+#### La couverture : ce que la fenêtre a réellement mesuré
+
+Un taux ne dit rien de sa propre assise. « 100 % » sur trois relevés d'une fenêtre
+de trois mois est vrai et trompeur à la fois. Chaque cible porte donc sa
+**couverture**, calculée par le hub et transportée avec le rapport :
+
+```json
+"coverage": { "window_secs": 86401, "covered_secs": 75600, "gap_secs": 10801 }
+```
+
+🔴 **Le seuil au-delà duquel un espacement devient un trou est l'intervalle
+MÉDIAN observé, multiplié par trois — jamais une cadence supposée.** À 60 s de
+cadence, 70 s d'écart est normal ; à 1 s, c'est un trou. Écrire « au-delà de 3 s »
+supposerait la seconde et redeviendrait faux, en silence, le jour où la cadence
+sera réglable. Seules les données tranchent. Le facteur 3 est celui du parc : deux
+relevés manqués arrivent, trois d'affilée décrivent autre chose.
+
+⚠️ **Les bords de la fenêtre comptent.** Entre le début de la fenêtre et la
+première mesure, puis entre la dernière et la fin, ce sont aussi des trous — et
+comptés **en entier**, puisqu'aucun relevé ne les ouvre. Les oublier ferait passer
+une sonde enrôlée hier pour couvrant « 100 % » d'une fenêtre de 87 jours : le faux
+le plus gros possible, et le plus facile à laisser passer. Un trou intérieur, lui,
+ne compte que son **excédent** : le pas normal est déjà couvert par le relevé qui
+l'ouvre.
+
+⚠️ **Moins de deux relevés ne donne aucun intervalle, donc aucune médiane** : la
+fenêtre est alors intégralement un trou. On n'attribue aucune durée à un point
+isolé — ce serait inventer la cadence que ce calcul refuse justement de supposer.
+
+⚠️ **Rien n'est affiché quand la couverture est complète.** C'est une information
+de **complétude, pas une alerte** : les trous d'aujourd'hui viennent surtout d'une
+période antérieure à la fonctionnalité et doivent tendre vers zéro. Une mention
+permanente serait du bruit qui finit par masquer le cas où elle compte. Et une
+fenêtre **vide** n'est pas complète : sans cette garde, `gap_secs == 0` la
+déclarait « tout va bien » sur une période qui n'existe pas.
+
+La couverture est calculée **une seule fois, dans le hub**, et transportée — jamais
+recalculée dans le navigateur. Le classeur remis au client et l'export CSV doivent
+annoncer la même complétude ; deux calculs finiraient par diverger d'un point, et
+c'est celui du document qu'on ne saurait plus expliquer.
 
 ### `GET /api/probes/{id}/public-ips` — l'historique des adresses, même fenêtre
 
@@ -446,6 +537,9 @@ elle n'y figure pas à 0 %.
                    "confirmed_from": 1756332000, "confirmed_until": 1756418400,
                    "label": "Bureau" } ] }
 ```
+
+⚠️ Seule route de fenêtre à ne **pas** valider `range` : une saisie illisible y
+retombe silencieusement sur 24 h, là où les quatre autres rendent `400`.
 
 Les intervalles qui **chevauchent** la fenêtre, du plus ancien au plus récent, et
 **non rognés** : `confirmed_from` / `confirmed_until` restent les dates réelles de
@@ -468,28 +562,82 @@ le rapport d'un autre.
 
 ### `GET /api/probes/{id}/sla.csv` — le même rapport, aplati
 
-`text/csv; charset=utf-8`, en pièce jointe `sla-<sonde>-<fenêtre>.csv`. Colonnes :
+`text/csv; charset=utf-8`, en pièce jointe `sla-<sonde>-<fenêtre>.csv`. Treize
+colonnes :
 
 ```
 sonde,site,fenetre,cible,disponibilite_pct,latence_moy_ms,latence_min_ms,
-latence_max_ms,latence_p95_ms,releves,echecs
+latence_max_ms,latence_p95_ms,releves,echecs,indetermines,couverture
 ```
 
 `disponibilite_pct` suit **la même** définition de « disponible » que `/sla` — voir
-ci-dessus, y compris le repli en sursis. Les colonnes de latence, elles, ne
-comptent que les relevés qui portent une latence : un hôte muet n'en écrit pas, et
-il ne tire donc ni la moyenne ni le p95 vers le bas.
+ci-dessus. `releves` est le nombre de relevés **déterminés**, c'est-à-dire le
+dénominateur du pourcentage ; `indetermines` compte ceux qui n'ont pas de verdict,
+et il est là pour qu'un « 100 % sur trois relevés » ne se lise pas comme un « 100 %
+sur neuf mille ». Les colonnes de latence comptent tous les relevés qui portent une
+latence, indéterminés compris.
 
-⚠️ **Cette route ne lit que `range`** — `start` et `stop` y sont ignorés, sans rien
-dire. Demander « du 1er au 31 » rend les dernières 24 h. La colonne `fenetre`
-annonce bien `-24h`, donc le fichier ne ment pas sur ce qu'il contient ; il ne
-répond simplement pas à ce qui a été demandé. C'est le défaut corrigé sur
-`/metrics` (`b05b049`), resté ici.
+⚠️ **Deux cellules ne sont JAMAIS numériques, et c'est structurel :**
+
+| Cellule | Valeurs | |
+|---|---|---|
+| `disponibilite_pct` | `99.87` … ou le mot `indetermine` | ni vide, ni `0.00` |
+| `couverture` | `complete`, `87.4 % mesures`, ou `indetermine` | jamais `87.4` seul |
+
+Une cellule **vide** se lit comme un oubli de l'outil ; `0.00` se lit comme une
+panne totale. Et surtout : **un tableur agrège ce qui est numérique**. Un `0` ou un
+`87.4` posé là se retrouve dans une moyenne de colonne et fait renaître, dans le
+document remis au client, le chiffre exact que le hub a refusé de calculer. Le mot
+ferme cette porte de derrière — c'est sa fonction, pas sa présentation.
+
+⚠️ **La couverture ne s'affiche pas quand elle est complète** : la cellule dit
+`complete` plutôt qu'un « 100 % » qu'on finirait par moyenner lui aussi.
+
+La route honore `start`/`stop` comme les autres (`2c59ca1`) : le libellé de la
+fenêtre, le nom du fichier et la requête viennent tous du même calcul, de sorte que
+la période lue et la période annoncée ne peuvent plus diverger. ⚠️ Elle lisait
+`range` seul jusque-là : demander « du 1er au 31 » rendait les dernières 24 h dans
+un fichier qui partait chez un client. **Le bon en-tête sur les mauvaises données
+est le pire des deux mondes** — rien, dans le fichier, ne permet de s'en apercevoir.
 
 ⚠️ **Aucun écran ne l'appelle.** L'export de l'interface est un classeur construit
 dans le navigateur à partir de `/sla`. Cette route est une URL à ouvrir à la main —
 écrite, testée, sans appelant, exactement comme la route de retrait du §20 l'a été.
 Ne pas supposer qu'elle est branchée quelque part.
+
+### `GET /api/probes/{id}/uptime` — le taux par cible, agrégé côté Influx
+
+Mêmes paramètres de fenêtre que `/metrics` et `/sla` ; `404` sur une sonde
+inconnue, `400` sur une fenêtre illisible.
+
+```json
+{ "range": "-24h",
+  "targets": [ { "ip": "10.0.8.1", "uptime_pct": 99.87, "samples": 8640  },
+               { "ip": "10.0.8.20", "uptime_pct": null,  "samples": 0 } ] }
+```
+
+⚠️ **Ce n'est pas un doublon de `/sla`, c'est l'autre bout du même chiffre.**
+`/sla` rend des relevés **bruts** et la fiche se rafraîchit toutes les trois
+secondes : le rejouer pour afficher un pourcentage ferait relire des millions de
+points par tour d'horloge. Ici Influx ne renvoie qu'**une ligne par cible**.
+
+🔴 **Le même chiffre que `compute_sla`, et c'est tenu sous test.** `mean()` d'un
+booléen converti en 0/1 **est** le taux, arithmétiquement identique au calcul brut.
+Un test compare les deux chemins sur les mêmes données et casse si l'un dérive :
+deux pourcentages différents sur le même écran seraient pires que pas de
+pourcentage du tout.
+
+Un relevé indéterminé sort du dénominateur **par construction** et non par
+précaution : le filtre `_field == "alive"` ne sélectionne que les points qui
+portent un verdict, donc `count()` ne les voit pas. `samples` est ce dénominateur.
+
+`uptime_pct` vaut **`null`** — jamais `0` — dès qu'aucun relevé déterminé n'existe
+sur la fenêtre. Même règle que partout : `0 %` se lirait comme une panne totale.
+
+⚠️ **La couverture ne figure PAS dans cette réponse, délibérément.** Un chemin
+agrégé n'a pas les horodatages : la déduire des intervalles vides donnerait une
+résolution plus grossière que celle du rapport, donc deux chiffres contradictoires
+sur la même donnée. Quand la complétude compte, c'est `/sla` qui la porte.
 
 ### `GET /api/probes/{id}/inventory?kind=ports|discovery|speedtest`
 
@@ -879,7 +1027,7 @@ vivent derrière un garde séparé, et une sonde hors portée y rend `404`.
 | `GET /api/probes` | `viewer` | |
 | `GET /api/settings`, `GET /api/settings/influx-advertise`, `GET /api/influx` | `viewer` | aucune de ces réponses ne porte de secret |
 | `GET /api/notifications/subscriptions` | `viewer` | |
-| `GET /api/probes/{id}/metrics`, `/inventory`, `/sla`, `/sla.csv`, `/public-ips` | `viewer` | **portée** |
+| `GET /api/probes/{id}/metrics`, `/uptime`, `/inventory`, `/sla`, `/sla.csv`, `/public-ips` | `viewer` | **portée** |
 | `POST /api/sites`, `PATCH`/`DELETE /api/sites/{id}`, `POST /api/sites/{id}/archive` | `operator` | |
 | `PUT /api/networks/label` | `operator` | nommer un réseau est une conduite de parc : le libellé se retrouve dans tous les rapports. Le `site_id` du corps est vérifié contre la portée — `404` sinon, et `404` aussi si le site n'existe pas |
 | `POST /api/enroll-codes`, `GET /api/enroll-codes/pending` | `operator` | le code y figure **en clair** pendant sa validité |
@@ -1392,6 +1540,109 @@ Ces valeurs ne repassent **jamais** à vide une fois connues, quel que soit le
 statut de la sonde. Un changement d'IP publique produit une ligne d'audit
 `probe.public_ip_changed` avec l'ancienne et la nouvelle valeur.
 
+### Quelle interface la sonde mesure — et comment on la désigne sans écran
+
+Les champs `interface`, `gateway` et `local_ips` ci-dessus n'existent que si une
+interface a été **désignée**. Sans désignation, la sonde suit la route par défaut
+du système et ne rapporte **ni passerelle ni adresses locales** : la colonne
+« Passerelle » du rapport SLA et les libellés de réseau (§15) restent vides à
+jamais. En mode graphique le choix se fait à l'écran ; **sans écran, il n'existait
+aucun moyen de choisir** — ni option, ni commande.
+
+```
+lanprobe-server interfaces          # liste : nom, adresse, passerelle, état
+lanprobe-server run    --interface en0
+lanprobe-server enroll --interface en0 --hub … --code …
+```
+
+⚠️ **La liste n'est pas un confort.** Sans écran, choisir à l'aveugle n'est pas un
+choix : c'est elle qui rend l'option utilisable. Elle imprime l'adresse et la
+passerelle à côté de chaque nom, faute de quoi on ne reconnaît pas le bon lien sur
+une machine qui en expose dix-huit — le cas d'un hôte Docker ordinaire.
+
+L'option n'est déclarée que sur les **deux commandes qui agissent**. Globale, elle
+était acceptée puis ignorée en silence par `status` et `forget` : une option qui a
+l'air prise en compte et ne fait rien est exactement le défaut qu'on corrige. Le
+nom est retenu (`selected_interface` dans `app_config.json`) et relu **avant** tout
+démarrage de tâche — une mesure sortie par la mauvaise interface est pire qu'une
+mesure absente, elle a l'air normale.
+
+⚠️ **Deux règles asymétriques, et l'asymétrie est le sujet :**
+
+| Cas | Comportement |
+|---|---|
+| nom **demandé** en ligne de commande, inconnu | **échec immédiat**, en listant les interfaces qui existent |
+| nom **enregistré** devenu introuvable | **gardé**, et signalé par un avertissement |
+
+Sans écran, une faute de frappe ne se voit pas : retomber en silence sur « aucune
+interface » donnerait une sonde qui **a l'air configurée et ne l'est pas**. À
+l'inverse, un adaptateur USB débranché ou un VPN arrêté revient — l'oublier
+rendrait la sonde muette sur son réseau sans rien dire, et refuser de démarrer
+l'empêcherait de mesurer pour un câble.
+
+### Ce que la liste d'interfaces dit d'un lien
+
+| Champ | Sens |
+|---|---|
+| `is_up` | état **opérationnel** (RFC 2863) : la porteuse est là, le câble est branché |
+| `admin_up` | drapeau **administratif** `UP` : l'interface est activée |
+| `gateway` | passerelle **portée par cette interface**, ou rien |
+
+⚠️ **Les deux états ne se confondent pas, et ne se fondent pas en un seul
+booléen.** Le drapeau `UP` reste vrai sur un lien sans porteuse : un `docker0`
+débranché s'affiche `<NO-CARRIER,…,UP>` avec `state DOWN`. « Activé, sans
+porteuse » envoie vérifier le câble ; « inactif » envoie l'activer. Un booléen
+unique ne distinguait pas les deux gestes — et `is_up` valait `true` **en dur**,
+donc une interface débranchée se présentait comme active, exactement là où on la
+choisit à l'aveugle.
+
+C'est ce que la liste rend lisible en un mot, et l'état est la première chose à
+lire : `actif`, `activé, sans porteuse` (vérifier le câble) ou `inactif`
+(l'activer). Choisir une interface débranchée donne une sonde muette, et le
+diagnostic part alors dans toutes les directions sauf la bonne.
+
+⚠️ `state UNKNOWN` compte comme opérationnel, et c'est une décision : le noyau
+l'emploie pour les liens sans détection de porteuse — tun, tap, WireGuard — le plus
+souvent fonctionnels. Les compter éteints fabriquerait une panne, l'erreur
+symétrique de celle qu'on corrige.
+
+⚠️ **La passerelle n'est rendue qu'à l'interface qui la porte.** `ip route show
+default` décrit la route par défaut de la **machine**, pas celle de l'interface
+interrogée : la recopier sur toutes attribuait la même passerelle aux cinq `veth*`
+et aux douze `br-*` d'un hôte Docker, dont ceux qui n'ont pas d'adresse. Une
+passerelle en face d'un `veth` invite à le choisir, et une sonde posée sur le
+mauvais lien mesure faux sans jamais le dire. Ailleurs : **rien**, pas de valeur
+« neutre » — une absence doit se lire comme une absence.
+
+🔴 **Limite connue, écrite parce qu'elle est connue : `is_up` et `admin_up` sont
+encore codés en dur à `true` sur macOS et sur Windows.** Seul Linux lit l'état réel
+du lien. `networksetup -getinfo` n'expose pas l'état de la porteuse, et la sonde de
+production tourne sur macOS : le rattrapage est un chantier à part. En attendant,
+sur ces deux plateformes, ces deux champs n'apprennent **rien** — les lire comme un
+diagnostic serait se fier à une constante. La passerelle, elle, y est déjà correcte :
+les deux systèmes l'interrogent par interface.
+
+### Ce que la sonde n'écrit pas
+
+⚠️ **Un échec local ne s'écrit jamais comme une panne de la cible.** Trois
+situations font sauter le relevé plutôt que d'inventer une réponse :
+
+- une **bascule de profil réseau** en cours — l'adresse est brièvement absente ;
+- l'**interface choisie n'a pas d'IPv4** — câble débranché, lien tombé, bail DHCP
+  perdu ;
+- les **sockets ICMP sont épuisés**, typiquement par un scan réseau en cours.
+
+Le deuxième cas écrivait `alive: false` pour **chaque cible surveillée, une fois
+par seconde**, jusque dans Influx et donc dans le rapport SLA remis au client.
+C'est un fait sur **notre** machine, pas sur la cible. Un faux rouge invente une
+panne et fait déplacer quelqu'un pour rien : il use la confiance dans l'outil plus
+vite qu'un faux vert. « Ne rien inscrire vaut mieux qu'inscrire une panne qui n'a
+pas eu lieu » — et sauter le relevé évite le mauvais lien tout autant que
+d'inventer un verdict, sans fabriquer d'incident.
+
+Ces trous se lisent ensuite comme ce qu'ils sont : de l'**indéterminé** dans la
+couverture du §3, jamais de l'indisponibilité.
+
 ### État du rattachement, côté app — `cmd_hub_status`
 
 ```json
@@ -1593,6 +1844,30 @@ quand même accusé : il a été tranché, le réémettre ne changerait rien.
 que son état.** Sans cette règle, une app qui redémarre ressuscite ce qu'on vient de
 retirer depuis le hub — le défaut d'origine, inversé.
 
+### 🔴 Un état s'émet même vide ; un acte ne s'émet que s'il a eu lieu
+
+Le battement porte deux choses de nature différente, et la règle d'omission n'est
+pas la même :
+
+| Champ | À vide | Pourquoi |
+|---|---|---|
+| `monitors` — ce qui tourne **maintenant** | **émis**, `[]` | un **état**. `[]` veut dire « je ne surveille plus rien », et le hub l'applique |
+| `monitor_changes` — ce qui a été **décidé** | omis | des **actes**. Zéro acte n'apprend rien |
+| `command_acks` — ce qui a été **exécuté** | omis | idem, et c'est le cas de loin le plus fréquent |
+
+Le hub distingue explicitement le champ **absent** — « je n'en sais rien », une
+sonde antérieure au mécanisme, on garde la liste connue — du tableau **vide**, qui
+efface. ⚠️ Or la sérialisation omettait le tableau vide, rendant ce « rien » tout
+simplement **impossible à dire** : retirer sa dernière cible n'effaçait jamais rien,
+et le parc affichait des surveillances mortes indéfiniment. Une absence redevenait
+une suppression — le défaut même que ce paragraphe existe pour supprimer, revenu par
+le seul cas de la liste vide.
+
+⚠️ **La règle n'est donc pas « tout émettre ».** Un état doit pouvoir dire « rien » ;
+un acte n'a rien à dire quand il n'y en a pas. Émettre `[]` pour les actes à chaque
+battement et pour tout le parc n'apprendrait rien à personne — et le hub n'en déduit
+aucun état, il ne les fusionne nulle part.
+
 ### Routes — c'est par elles que l'interface agit
 
 ⚠️ **Ces deux routes sont le chemin qui fait autorité, et elles sont nommées ici
@@ -1681,6 +1956,42 @@ déployer.
 
 Couvre le hub et la sonde : routes, rôles, sauvegarde/restauration, conversion
 Flux, construction du line protocol. C'est la partie solide.
+
+### La doublure InfluxDB refuse un Flux invalide
+
+Les tests du hub ne parlent pas à un vrai Influx : ils parlent à une doublure HTTP.
+Elle **répondait `200` à n'importe quoi** — donc **aucun test du dépôt ne pouvait
+attraper une requête malformée**. C'est ainsi qu'un `import "experimental/types"`,
+paquet qui n'existe pas, a failli partir au vert : la suite entière était verte, et
+c'est un influxd jetable, lancé à la main, qui l'a arrêté.
+
+Elle lit désormais le Flux avant de répondre, et refuse en `400` :
+
+- un `import` **absent de la liste des paquets constatés valides** sur influxd
+  2.9.1 ;
+- un `aggregateWindow` sans `every`, ou avec un `fn:` inconnu ;
+- un `range(...)` **vide par construction** — bornes inversées, ou durée positive
+  sans `stop`, c'est-à-dire une fenêtre qui vise le futur.
+
+⚠️ **Ce n'est pas un moteur Flux, et ça ne doit jamais le devenir.** Une doublure
+qui simule tout devient un second logiciel à maintenir, qui finit par diverger
+d'Influx et par produire de **faux échecs** — pires que les faux succès qu'on
+corrige, parce qu'ils font perdre confiance dans la suite entière. Elle ne refuse
+donc que ce qu'un vrai influxd refuse de façon **certaine**, constaté en le lui
+soumettant, et laisse passer tout le reste.
+
+⚠️ Conséquence directe : un paquet absent de la liste est refusé **non parce
+qu'Influx le refuserait**, mais parce que **personne ne l'a vérifié**. Pour en
+ajouter un : le soumettre à un influxd réel, constater le `200`, puis l'inscrire.
+
+Deux niveaux de test, et il faut les deux : le **verdict** (la fonction de refus,
+testée seule) et le **câblage** (un appel HTTP réel à la doublure). Sans le second,
+la fonction pourrait être parfaite et n'être appelée nulle part.
+
+Au passage, le hub **remonte la cause** d'un refus d'Influx au lieu de la jeter :
+Influx explique toujours ses refus (« invalid import path… », « cannot query an
+empty range »), et on n'en gardait qu'un « 400 Bad Request » muet. L'opérateur —
+et le test en échec — n'avaient plus rien pour comprendre.
 
 ### Interface — `npm test`
 
