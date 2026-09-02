@@ -297,11 +297,25 @@ d'honnêteté que le `500` sur une sonde inconnue : elle envoie chercher une pan
 qui n'existe pas. Unités acceptées : `s`, `m`, `h`, `d`, `w`, et rien d'autre —
 l'alphabet est clos par construction, jamais un fragment de Flux ne sort d'ici.
 
-Cette validation vaut pour `/metrics`, `/sla`, `/sla.csv` et `/uptime`, qui
-passent tous par la même construction de fenêtre. ⚠️ **`/public-ips` fait
-exception** : il ne lit que les bornes en secondes et retombe silencieusement sur
-24 h devant une saisie illisible. Écrit ici parce que c'est vrai, pas parce que
-c'est souhaitable.
+**Les cinq routes de fenêtre se comportent pareil** — `/metrics`, `/sla`,
+`/sla.csv`, `/uptime` et `/public-ips` : mêmes paramètres, même refus, même
+période. Il n'y a pas d'exception à retenir.
+
+🔴 **Et ce n'est plus une règle à appliquer route par route : la chaîne n'est plus
+lue qu'UNE fois.** Deux lectures cohabitaient — l'une pour écrire la clause Flux,
+l'autre pour obtenir des secondes — et elles ne comprenaient pas la même chose. Le
+refus et la durée pouvaient donc se contredire, et l'ont fait **trois** fois :
+
+1. `24h` visait le **futur** dans la clause Flux (`502`) et le passé en secondes ;
+2. `nawak` était refusé d'un côté et valait 24 h de l'autre — d'où le repli muet
+   resté sur `/public-ips` quand les autres routes avaient été corrigées ;
+3. une valeur numérique **énorme** (`99999999999999999999h`) partait en `502` par
+   un chemin et retombait sur 24 h par l'autre.
+
+Une seule lecture, une seule décision : la clause Flux, le libellé rendu et les
+bornes en secondes viennent maintenant du même objet, construit une fois par
+requête. C'est ce qui ferme la porte, là où corriger chaque route la laissait
+ouverte pour la suivante.
 
 ```json
 { "range": "-24h",
@@ -538,9 +552,6 @@ c'est celui du document qu'on ne saurait plus expliquer.
                    "label": "Bureau" } ] }
 ```
 
-⚠️ Seule route de fenêtre à ne **pas** valider `range` : une saisie illisible y
-retombe silencieusement sur 24 h, là où les quatre autres rendent `400`.
-
 Les intervalles qui **chevauchent** la fenêtre, du plus ancien au plus récent, et
 **non rognés** : `confirmed_from` / `confirmed_until` restent les dates réelles de
 confirmation (§15). Les couper aux bornes demandées confondrait « l'adresse a été
@@ -554,6 +565,15 @@ interpolation. Une fenêtre antérieure à la mise en place de l'historique ne
 contient donc **aucun** intervalle et ressort entièrement en « indéterminé » —
 c'est la vérité, pas une panne, et c'est à l'interface de le dire ainsi. Une sonde
 sans historique rend un tableau vide : l'absence d'intervalle n'est pas une erreur.
+
+⚠️ **Une sonde INEXISTANTE rend elle aussi `200 { "intervals": [] }`**, là où les
+cinq autres routes de la fiche (`/metrics`, `/uptime`, `/inventory`, `/sla`,
+`/sla.csv`) rendent `404 { "error": "sonde inconnue" }` :
+c'est la seule à ne pas vérifier l'existence de la sonde avant de répondre. Rien de
+grave — la portée de site protège déjà les sondes des autres clients, et
+l'interface ne propose que des sondes existantes — mais « aucun intervalle » et
+« cette sonde n'existe pas » ne se distinguent pas ici. Ne pas bâtir de test
+d'existence sur cette route.
 
 Le libellé de réseau (« Maison », « Bureau ») est joint ici, résolu par le **site**
 de la sonde : sous CGNAT deux clients partagent l'adresse publique, et souvent la
