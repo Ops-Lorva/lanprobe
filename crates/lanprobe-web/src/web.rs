@@ -3222,7 +3222,7 @@ async fn probe_sla_samples(
         Ok(probe) => probe,
         Err(e) => return error_response(e),
     };
-    let (window, range) = match flux_range(&query) {
+    let window = match flux_window(&query) {
         Ok(w) => w,
         Err(refus) => return refus,
     };
@@ -3232,7 +3232,7 @@ async fn probe_sla_samples(
          |> filter(fn: (r) => r[\"probe_id\"] == {})\n  \
          |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
         flux_string(&bucket),
-        window,
+        window.clause,
         flux_string(&id),
     );
     let csv = match state.influx.query_flux(&flux).await {
@@ -3249,7 +3249,7 @@ async fn probe_sla_samples(
          |> filter(fn: (r) => r[\"_measurement\"] == \"internet_status\")\n  \
          |> filter(fn: (r) => r[\"_field\"] == \"state\" or r[\"_field\"] == \"icmp_ms\")",
         flux_string(&bucket),
-        window,
+        window.clause,
         flux_string(&id),
     );
     let internet = match state.influx.query_flux(&internet_flux).await {
@@ -3277,17 +3277,19 @@ async fn probe_sla_samples(
     // ⚠️ Une fenêtre antérieure à la migration ne contient aucun intervalle :
     // le volet par adresse ressort alors entièrement en « indéterminé ». C'est
     // la vérité, pas une panne — à l'interface de le dire.
-    let (from, to) = flux_bounds(&query);
-    let public_ip_history = state.db.public_ip_history(&id, from, to).unwrap_or_default();
+    let public_ip_history = state
+        .db
+        .public_ip_history(&id, window.from, window.to)
+        .unwrap_or_default();
 
     ok_json(json!({
         "probe": probe.name,
         "site": probe.site_name,
-        "range": range,
+        "range": window.label,
         "start": query.start,
         "stop": query.stop,
         "generated_at": crate::db::now(),
-        "targets": samples_from_flux_csv(&csv, flux_bounds(&query)),
+        "targets": samples_from_flux_csv(&csv, (window.from, window.to)),
         "internet": internet,
         "speedtests": speedtests,
         "discovery": discovery,
@@ -3309,11 +3311,11 @@ async fn probe_public_ips(
     // bien formé, mais celui d'une période que personne n'avait demandée, sous
     // une légende qui en annonçait une autre. C'est le repli muet corrigé
     // partout ailleurs en cfff27d, resté sur cette route.
-    if let Err(refus) = flux_range(&query) {
-        return refus;
-    }
-    let (from, to) = flux_bounds(&query);
-    match state.db.public_ip_history(&id, from, to) {
+    let window = match flux_window(&query) {
+        Ok(w) => w,
+        Err(refus) => return refus,
+    };
+    match state.db.public_ip_history(&id, window.from, window.to) {
         Ok(intervals) => ok_json(json!({ "intervals": intervals })),
         Err(e) => error_response(e),
     }
@@ -3543,13 +3545,13 @@ async fn probe_sla_csv(
         Ok(probe) => probe,
         Err(e) => return error_response(e),
     };
-    // ⚠️ `flux_range`, comme `/metrics`, `/sla` et `/public-ips`. Cette route
+    // ⚠️ `flux_window`, comme `/metrics`, `/sla` et `/public-ips`. Cette route
     // lisait `query.range` SEUL : demander « du 1er au 31 » rendait les
     // dernières 24 h, dans un classeur dont la colonne `fenetre` annonçait
     // pourtant la période demandée. Un rapport remis à un client avec le bon
     // en-tête et les mauvaises données est le pire des deux mondes — c'est le
     // défaut corrigé en b05b049, resté sur l'export.
-    let (window, range) = match flux_range(&query) {
+    let window = match flux_window(&query) {
         Ok(w) => w,
         Err(refus) => return refus,
     };
@@ -3557,7 +3559,7 @@ async fn probe_sla_csv(
     let flux = format!(
         "from(bucket: {})\n  |> range({})\n           |> filter(fn: (r) => r[\"probe_id\"] == {})\n           |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
         flux_string(&bucket),
-        window,
+        window.clause,
         flux_string(&id),
     );
     let csv = match state.influx.query_flux(&flux).await {
@@ -3565,7 +3567,7 @@ async fn probe_sla_csv(
         Err(e) => return fail(StatusCode::BAD_GATEWAY, &e),
     };
 
-    let report = sla_from_flux_csv(&csv, flux_bounds(&query));
+    let report = sla_from_flux_csv(&csv, (window.from, window.to));
     let mut out = String::from(
         "sonde,site,fenetre,cible,disponibilite_pct,latence_moy_ms,\
          latence_min_ms,latence_max_ms,latence_p95_ms,releves,echecs,indetermines,\
@@ -3577,7 +3579,7 @@ async fn probe_sla_csv(
             "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_cell(&probe.name),
             csv_cell(&probe.site_name),
-            csv_cell(&range),
+            csv_cell(&window.label),
             csv_cell(&row.ip),
             // ⚠️ Ni vide ni `0.00`. Une cellule vide se lit comme un oubli de
             // l'outil, `0.00` comme une panne totale. Le mot se lit comme ce
@@ -3609,7 +3611,7 @@ async fn probe_sla_csv(
                 format!(
                     "attachment; filename=\"sla-{}-{}.csv\"",
                     slug(&probe.name),
-                    range.trim_start_matches('-')
+                    window.label.trim_start_matches('-')
                 ),
             ),
         ],
@@ -3935,89 +3937,108 @@ fn explicit_bounds(query: &MetricsQuery) -> Option<(i64, i64)> {
     }
 }
 
-/// Fenêtre glissante normalisée (`-24h`), ou `None` si la saisie n'en décrit
-/// aucune.
+/// Une fenêtre glissante (`-24h`, `7d`, `30m`…), lue **une seule fois**.
 ///
-/// 🔴 **Le signe est normalisé.** En Flux une durée POSITIVE part de maintenant
-/// vers l'AVANT : `range(start: 24h)` visait les 24 h à VENIR, Influx refusait
-/// en 400, et le hub rendait 502 — « InfluxDB est en panne » pour une saisie
-/// parfaitement anodine. `relative_range_secs`, lui, coupait déjà le signe :
-/// les deux fonctions lisaient la même chaîne différemment.
+/// 🔴 **Deux fonctions lisaient cette chaîne, et pas de la même façon** :
+/// l'une refusait ce qu'elle ne comprenait pas, l'autre retombait en silence
+/// sur 24 h. C'est cette divergence qui a produit le `24h` visant le futur,
+/// puis le repli muet resté sur `/public-ips` : corriger route par route
+/// laissait la porte ouverte. Une seule lecture, une seule décision — le refus
+/// et la durée ne peuvent plus se contredire.
 ///
-/// ⚠️ **Et une saisie illisible rend `None`, au lieu de retomber en silence sur
-/// une heure.** Le repli muet est la même faute que le 502 : l'écran affichait
-/// une heure sous une légende qui annonçait autre chose, et rien ne permettait
-/// de s'en apercevoir. C'est aussi ce qui rend l'alphabet sûr : seuls des
-/// chiffres et une unité connue sortent d'ici, jamais un fragment de Flux.
-fn normalized_range(range: &str) -> Option<String> {
-    let raw = range.trim().trim_start_matches('-');
-    let split = raw.find(|c: char| !c.is_ascii_digit())?;
-    let (count, unit) = raw.split_at(split);
-    if count.is_empty() || !matches!(unit, "s" | "m" | "h" | "d" | "w") {
-        return None;
-    }
-    count.parse::<u64>().ok().map(|n| format!("-{n}{unit}"))
+/// ⚠️ **Une saisie illisible ne donne aucune fenêtre**, pas une fenêtre par
+/// défaut. C'est aussi ce qui garde l'alphabet clos : seuls un entier et une
+/// unité connue sortent d'ici, jamais un fragment de Flux.
+#[derive(Clone, Copy)]
+struct SlidingWindow {
+    count: i64,
+    /// L'unité telle qu'elle se réécrit — `s`, `m`, `h`, `d`, `w`, et rien
+    /// d'autre.
+    unit: &'static str,
+    unit_secs: i64,
 }
 
-/// Construit la clause `range(...)` de Flux et le libellé de la période.
+impl SlidingWindow {
+    /// `None` quand la saisie ne décrit aucune fenêtre.
+    fn parse(range: &str) -> Option<Self> {
+        let raw = range.trim().trim_start_matches('-');
+        let split = raw.find(|c: char| !c.is_ascii_digit())?;
+        let (count, unit) = raw.split_at(split);
+        let (unit, unit_secs) = match unit {
+            "s" => ("s", 1),
+            "m" => ("m", 60),
+            "h" => ("h", 3600),
+            "d" => ("d", 86_400),
+            "w" => ("w", 7 * 86_400),
+            _ => return None,
+        };
+        // ⚠️ Un compte vide ou qui déborde échoue ICI, donc pour les deux
+        // formes à la fois. Il passait la lecture Flux et retombait sur 24 h
+        // dans la lecture en secondes : la requête partait sur une fenêtre que
+        // le tableau par adresse ne couvrait pas.
+        let count = count.parse::<i64>().ok()?;
+        Some(Self { count, unit, unit_secs })
+    }
+
+    /// La durée telle qu'elle s'écrit en Flux.
+    ///
+    /// 🔴 **Le signe est normalisé.** En Flux une durée POSITIVE part de
+    /// maintenant vers l'AVANT : `range(start: 24h)` visait les 24 h à VENIR,
+    /// Influx refusait en 400, et le hub rendait 502 — « InfluxDB est en
+    /// panne » pour une saisie parfaitement anodine.
+    fn flux(&self) -> String {
+        format!("-{}{}", self.count, self.unit)
+    }
+
+    /// La même durée en secondes — l'unité de l'historique des adresses en
+    /// SQLite et du calcul du pas d'agrégation.
+    fn secs(&self) -> i64 {
+        self.count.saturating_mul(self.unit_secs)
+    }
+}
+
+/// La fenêtre demandée, sous les trois formes dont les routes ont besoin.
+///
+/// ⚠️ Un seul objet, construit une fois par requête : la clause Flux, le
+/// libellé rendu à l'appelant et les bornes en secondes décrivent forcément la
+/// même période. Deux calculs séparés finiraient par couvrir deux fenêtres
+/// légèrement différentes, et le tableau par adresse contredirait la courbe
+/// qu'il légende.
+struct Window {
+    /// Le contenu de la clause `range(...)`.
+    clause: String,
+    /// Ce que la réponse annonce : `-24h`, ou `<start>..<stop>` quand les
+    /// bornes sont explicites.
+    label: String,
+    from: i64,
+    to: i64,
+}
+
+/// Lit la fenêtre d'une requête.
 ///
 /// `Err` = la fenêtre demandée est illisible : c'est un **400**, pas un 502.
 /// La saisie du client est en cause, pas l'amont.
-fn flux_range(query: &MetricsQuery) -> Result<(String, String), Response> {
-    if let Some((start, stop)) = explicit_bounds(query) {
-        return Ok((
-            format!("start: {start}, stop: {stop}"),
-            format!("{start}..{stop}"),
-        ));
+fn flux_window(query: &MetricsQuery) -> Result<Window, Response> {
+    if let Some((from, to)) = explicit_bounds(query) {
+        return Ok(Window {
+            clause: format!("start: {from}, stop: {to}"),
+            label: format!("{from}..{to}"),
+            from,
+            to,
+        });
     }
     let asked = query.range.as_deref().unwrap_or("-24h");
-    match normalized_range(asked) {
-        Some(range) => Ok((format!("start: {range}"), range)),
-        None => Err(fail(StatusCode::BAD_REQUEST, "fenêtre illisible")),
-    }
-}
-
-/// La même fenêtre, mais en secondes epoch — c'est l'unité de l'historique des
-/// adresses en SQLite.
-///
-/// ⚠️ Elle passe par `explicit_bounds`, comme `flux_range` : un seul endroit
-/// décide de la période. Deux calculs séparés finiraient par couvrir deux
-/// fenêtres légèrement différentes, et le tableau par adresse contredirait la
-/// courbe qu'il légende.
-fn flux_bounds(query: &MetricsQuery) -> (i64, i64) {
-    match explicit_bounds(query) {
-        Some(bounds) => bounds,
-        None => {
-            let to = crate::db::now();
-            let range = query.range.as_deref().unwrap_or("-24h");
-            (to - relative_range_secs(range), to)
-        }
-    }
-}
-
-/// Durée d'une fenêtre glissante Flux (`-24h`, `7d`, `30m`…), en secondes.
-///
-/// Une valeur illisible vaut 24 h et non zéro : une fenêtre vide ne rendrait
-/// aucun intervalle et ferait ressortir toute la période en « indéterminé »,
-/// ce qui se lit comme une panne du dispositif plutôt que comme une saisie
-/// fautive.
-fn relative_range_secs(range: &str) -> i64 {
-    const DEFAULT: i64 = 24 * 3600;
-    let range = range.trim().trim_start_matches('-');
-    let split = range.find(|c: char| !c.is_ascii_digit()).unwrap_or(range.len());
-    let (count, unit) = range.split_at(split);
-    let Ok(count) = count.parse::<i64>() else {
-        return DEFAULT;
+    let Some(sliding) = SlidingWindow::parse(asked) else {
+        return Err(fail(StatusCode::BAD_REQUEST, "fenêtre illisible"));
     };
-    let unit = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        "w" => 7 * 86_400,
-        _ => return DEFAULT,
-    };
-    count.saturating_mul(unit)
+    let label = sliding.flux();
+    let to = crate::db::now();
+    Ok(Window {
+        clause: format!("start: {label}"),
+        from: to - sliding.secs(),
+        to,
+        label,
+    })
 }
 
 /// Instant avant lequel les intervalles d'adresse ne servent plus à rien : les
@@ -4207,14 +4228,14 @@ async fn probe_uptime(
     if state.db.get_probe(&id).is_err() {
         return fail(StatusCode::NOT_FOUND, "sonde inconnue");
     }
-    let (window, range) = match flux_range(&query) {
+    let window = match flux_window(&query) {
         Ok(w) => w,
         Err(refus) => return refus,
     };
-    let flux = uptime_flux(&state.settings.influx_bucket(), &id, &window);
+    let flux = uptime_flux(&state.settings.influx_bucket(), &id, &window.clause);
     match state.influx.query_flux(&flux).await {
         Ok(csv) => ok_json(serde_json::json!({
-            "range": range,
+            "range": window.label,
             "targets": uptime_from_flux_csv(&csv),
         })),
         Err(e) => fail(StatusCode::BAD_GATEWAY, &e),
@@ -4323,33 +4344,32 @@ async fn probe_metrics(
     if state.db.get_probe(&id).is_err() {
         return fail(StatusCode::NOT_FOUND, "sonde inconnue");
     }
-    // ⚠️ `flux_range`, comme `/sla` et `/public-ips` — et non plus le seul
+    // ⚠️ `flux_window`, comme `/sla` et `/public-ips` — et non plus le seul
     // `range`. Cette route déclarait `start`/`stop` dans sa requête et les
     // IGNORAIT en silence : demander « du 20 au 22 » renvoyait la dernière
     // heure, sous une légende annonçant trois jours. L'interface devait
     // sur-tirer puis découper elle-même, ce qui faisait lire quatre-vingts
     // jours de points pour en afficher un.
-    let (window, range) = match flux_range(&query) {
+    let window = match flux_window(&query) {
         Ok(w) => w,
         Err(refus) => return refus,
     };
-    // ⚠️ La même fenêtre que `flux_range`, en secondes : c'est elle qui décide
-    // du pas. La recalculer à côté ferait diverger le pas annoncé de la période
+    // ⚠️ Le pas se calcule sur LA fenêtre, celle-là même qui part dans la
+    // requête. La recalculer à côté ferait diverger le pas annoncé de la période
     // réellement lue — deux affirmations vraies séparément, fausses ensemble.
-    let (from, to) = flux_bounds(&query);
-    let every = aggregate_every(to - from, clamp_max_points(query.max_points));
+    let every = aggregate_every(window.to - window.from, clamp_max_points(query.max_points));
     let bucket = state.settings.influx_bucket();
     let flux = metrics_flux(
         &bucket,
         &id,
         query.measurement.as_deref().filter(|m| !m.is_empty()),
-        &window,
+        &window.clause,
         every,
     );
     match state.influx.query_flux(&flux).await {
         Ok(csv) => {
             let mut body = serde_json::json!({
-                "range": range,
+                "range": window.label,
                 "series": series_from_flux_csv(&csv),
             });
             // ⚠️ Le champ est ABSENT quand c'est brut, jamais `null` ni `"1s"` :
@@ -4565,7 +4585,7 @@ fn flux_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-// `flux_duration` a été remplacée par `normalized_range`. Elle laissait passer
+// `flux_duration` a été remplacée par `SlidingWindow`. Elle laissait passer
 // `24h` tel quel — donc une fenêtre dans le FUTUR — et repliait toute saisie
 // illisible sur `-1h` en silence. La garder à côté de son remplaçant serait
 // laisser un piège armé : les deux ont la même tête, une seule est sûre.
@@ -6982,71 +7002,71 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
+    /// Une requête de fenêtre, sans le reste.
+    fn window_query(range: &str, bounds: Option<(i64, i64)>) -> MetricsQuery {
+        MetricsQuery {
+            measurement: None,
+            range: Some(range.into()),
+            start: bounds.map(|b| b.0),
+            stop: bounds.map(|b| b.1),
+            max_points: None,
+        }
+    }
+
     #[test]
     fn explicit_bounds_win_over_a_sliding_window() {
         // ⚠️ Un rapport de SLA porte sur une période convenue — « du 1er au
         // 31 » — pas sur « les sept derniers jours ». Une fenêtre glissante
         // donnerait un chiffre différent à chaque ouverture du document.
-        let (window, label) = flux_range(&MetricsQuery {
-            measurement: None,
-            range: Some("-7d".into()),
-            start: Some(1_788_000_000),
-            stop: Some(1_788_600_000),
-            max_points: None,
-        })
-        .expect("des bornes explicites sont toujours lisibles");
-        assert_eq!(window, "start: 1788000000, stop: 1788600000");
-        assert_eq!(label, "1788000000..1788600000");
+        let window = flux_window(&window_query("-7d", Some((1_788_000_000, 1_788_600_000))))
+            .expect("des bornes explicites sont toujours lisibles");
+        assert_eq!(window.clause, "start: 1788000000, stop: 1788600000");
+        assert_eq!(window.label, "1788000000..1788600000");
+        assert_eq!((window.from, window.to), (1_788_000_000, 1_788_600_000));
     }
 
     #[test]
     fn reversed_bounds_fall_back_instead_of_asking_influx_for_nothing() {
         // Des bornes inversées rendraient une fenêtre vide, donc un rapport à
         // 0 % qu'on prendrait pour une panne totale.
-        let (window, _) = flux_range(&MetricsQuery {
-            measurement: None,
-            range: Some("-24h".into()),
-            start: Some(1_788_600_000),
-            stop: Some(1_788_000_000),
-            max_points: None,
-        })
-        .expect("bornes inversées : on retombe sur la fenêtre glissante");
-        assert_eq!(window, "start: -24h");
+        let window = flux_window(&window_query("-24h", Some((1_788_600_000, 1_788_000_000))))
+            .expect("bornes inversées : on retombe sur la fenêtre glissante");
+        assert_eq!(window.clause, "start: -24h");
+        assert_eq!(window.to - window.from, 24 * 3600);
     }
 
     #[test]
-    fn the_window_in_seconds_follows_the_same_rules_as_the_flux_range() {
-        // ⚠️ Un seul endroit décide de la période. Deux calculs séparés
-        // finiraient par couvrir deux fenêtres légèrement différentes, et le
-        // tableau par adresse contredirait la courbe qu'il légende.
-        let explicit = MetricsQuery {
-            measurement: None,
-            range: Some("-7d".into()),
-            start: Some(1_788_000_000),
-            stop: Some(1_788_600_000),
-            max_points: None,
-        };
-        assert_eq!(flux_bounds(&explicit), (1_788_000_000, 1_788_600_000));
+    fn one_reading_of_the_string_decides_the_clause_and_the_seconds() {
+        // 🔴 La clause Flux et la fenêtre en secondes viennent de LA MÊME
+        // lecture. Deux lectures séparées ne disaient déjà pas la même chose :
+        // la lecture Flux refusait ce qu'elle ne comprenait pas quand la
+        // lecture en secondes rendait 24 h en silence, et c'est cette
+        // divergence qui a produit le `24h` visant le futur puis le repli muet
+        // de `/public-ips`.
+        for (range, clause, span) in [
+            ("24h", "start: -24h", 86_400),
+            ("-7d", "start: -7d", 7 * 86_400),
+            ("-30m", "start: -30m", 1_800),
+        ] {
+            let window = flux_window(&window_query(range, None))
+                .unwrap_or_else(|_| panic!("« {range} » est une fenêtre lisible"));
+            assert_eq!(window.clause, clause, "fenêtre {range}");
+            assert_eq!(window.label, &clause["start: ".len()..], "fenêtre {range}");
+            assert_eq!(window.to - window.from, span, "fenêtre {range}");
+        }
+    }
 
-        let reversed = MetricsQuery {
-            measurement: None,
-            range: Some("-24h".into()),
-            start: Some(1_788_600_000),
-            stop: Some(1_788_000_000),
-            max_points: None,
-        };
-        let (from, to) = flux_bounds(&reversed);
-        assert_eq!(to - from, 24 * 3600, "bornes inversées : on retombe sur la fenêtre");
-
-        for (range, span) in [("24h", 86_400), ("-7d", 7 * 86_400), ("-30m", 1_800)] {
-            let (from, to) = flux_bounds(&MetricsQuery {
-                measurement: None,
-                range: Some(range.into()),
-                start: None,
-                stop: None,
-                max_points: None,
-            });
-            assert_eq!(to - from, span, "fenêtre {range}");
+    #[test]
+    fn an_unreadable_range_yields_no_window_at_all() {
+        // ⚠️ Ni clause, ni secondes : une saisie illisible ne produit AUCUNE
+        // fenêtre. C'est ce qui ferme la porte par laquelle le repli muet
+        // revenait route par route — il n'existe plus d'endroit où retomber
+        // sur 24 h sans le dire.
+        for illisible in ["abc", "", "12x", "-", "1h) |> drop(", "99999999999999999999h"] {
+            assert!(
+                flux_window(&window_query(illisible, None)).is_err(),
+                "« {illisible} » ne décrit aucune fenêtre"
+            );
         }
     }
 
@@ -7059,13 +7079,16 @@ mod tests {
         // 24 h à venir, Influx refusait en 400, et le hub rendait 502 — donc
         // « InfluxDB est en panne » pour une saisie parfaitement anodine.
         //
-        // ⚠️ `relative_range_secs`, lui, coupe déjà le signe : les deux
-        // fonctions lisaient la même chaîne différemment. Un seul endroit doit
-        // décider de la fenêtre.
-        assert_eq!(normalized_range("24h").as_deref(), Some("-24h"));
-        assert_eq!(normalized_range("-24h").as_deref(), Some("-24h"));
-        assert_eq!(normalized_range("  7d ").as_deref(), Some("-7d"));
-        assert_eq!(normalized_range("-30m").as_deref(), Some("-30m"));
+        // ⚠️ La lecture en secondes coupait déjà le signe : les deux fonctions
+        // lisaient la même chaîne différemment. Une seule la lit désormais.
+        let flux = |r: &str| SlidingWindow::parse(r).map(|w| w.flux());
+        assert_eq!(flux("24h").as_deref(), Some("-24h"));
+        assert_eq!(flux("-24h").as_deref(), Some("-24h"));
+        assert_eq!(flux("  7d ").as_deref(), Some("-7d"));
+        assert_eq!(flux("-30m").as_deref(), Some("-30m"));
+        // Et la même lecture donne la durée : `24h` vaut 24 h de PASSÉ, pas
+        // une fenêtre vide comme le signe positif le faisait croire à Influx.
+        assert_eq!(SlidingWindow::parse("24h").unwrap().secs(), 86_400);
     }
 
     #[test]
@@ -7073,12 +7096,16 @@ mod tests {
         // ⚠️ Le repli muet sur `-1h` est la même faute que le 502 : l'écran
         // affichait une heure sous une légende annonçant autre chose, et
         // personne ne pouvait s'en apercevoir. Un refus se comprend.
-        assert_eq!(normalized_range("abc"), None);
-        assert_eq!(normalized_range(""), None);
-        assert_eq!(normalized_range("12x"), None);
-        assert_eq!(normalized_range("-"), None);
+        assert!(SlidingWindow::parse("abc").is_none());
+        assert!(SlidingWindow::parse("").is_none());
+        assert!(SlidingWindow::parse("12x").is_none());
+        assert!(SlidingWindow::parse("-").is_none());
         // Une injection Flux ne doit évidemment pas passer non plus.
-        assert_eq!(normalized_range("1h) |> drop("), None);
+        assert!(SlidingWindow::parse("1h) |> drop(").is_none());
+        // ⚠️ Un compte qui déborde non plus : il passait la première lecture
+        // (`-99999999999999999999h` partait dans la requête, qu'Influx
+        // refusait en 502) et retombait sur 24 h dans la seconde.
+        assert!(SlidingWindow::parse("99999999999999999999h").is_none());
     }
 
     #[test]
