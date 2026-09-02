@@ -4018,20 +4018,21 @@ pub fn aggregate_every(span_secs: i64, max_points: i64) -> Option<&'static str> 
 /// 🔴 **Et cet extrême n'est PAS le même selon ce qu'on mesure.** L'asymétrie
 /// est voulue ; un relecteur pressé la « corrigera » par cohérence apparente.
 ///
-/// | Mesure | Extrême | Pourquoi |
+/// | Mesure | Agrégation | Pourquoi |
 /// |---|---|---|
-/// | latence, débit… | `max` → `_max` | un pic à 800 ms noyé dans une moyenne à 12 ms disparaît |
-/// | disponibilité (booléens) | `min` → `_min` | `max(alive)` vaut 1 dès qu'UN SEUL ping passe |
+/// | latence, débit… | `mean` + `max` → `_max` | un pic à 800 ms noyé dans une moyenne à 12 ms disparaît |
+/// | disponibilité (booléens) | `mean` SEUL | la moyenne d'un booléen EST le taux |
 ///
-/// Cinquante minutes de coupure sur une heure, accompagnées d'un `alive_max` à
-/// 1, s'afficheraient « tout va bien ». C'est le même défaut que la moyenne qui
-/// gomme le pic, retourné : une valeur qui ne fait échouer aucune requête et
-/// qui rassure à tort. Le minimum est ce qui garde la coupure.
+/// 🔴 **Une disponibilité ne reçoit ni minimum ni maximum, et c'est délibéré.**
+/// `max(alive)` vaut 1 dès qu'un seul ping passe — cinquante minutes de coupure
+/// s'afficheraient « tout va bien ». `min(alive)` vaut 0 dès qu'un seul ping
+/// échoue, et un plancher entre 0 et 1 ne se lit tout simplement pas. La bonne
+/// réponse n'est aucun des deux : c'est un TAUX, et `mean` sur un booléen
+/// converti en 0/1 est exactement ce taux. « 95 % sur la période » se lit d'un
+/// coup ; c'est la bande verte et rouge qui reste le support visuel.
 ///
-/// Le suffixe dit ce qu'il contient — ranger un minimum sous `_max` serait pire
-/// que de ne rien suffixer du tout. Le tri se fait sur le TYPE Influx, donc
-/// avant `toFloat()` : après conversion, un booléen ne se distingue plus d'un
-/// compteur à 0 ou 1.
+/// Le tri se fait sur le TYPE Influx, donc avant `toFloat()` : après
+/// conversion, un booléen ne se distingue plus d'un compteur à 0 ou 1.
 ///
 /// ⚠️ **`createEmpty: false`, sans exception.** Un intervalle où rien n'a été
 /// mesuré ne produit AUCUN point — ni zéro, ni valeur interpolée. Un trou reste
@@ -4073,9 +4074,9 @@ source = {source}
 texte = source |> filter(fn: (r) => types.isType(v: r._value, type: "string"))
 
 // Les booleens sont des DISPONIBILITES (alive, icmp_ok, dns_ok...). Leur
-// moyenne est un taux, et leur extreme utile est le MINIMUM : max(alive) vaut
-// 1 des qu'un seul ping passe, et cinquante minutes de coupure s'afficheraient
-// alors comme une heure sans incident.
+// moyenne EST le taux de disponibilite de l'intervalle : ni minimum ni
+// maximum, un taux. « 95 % sur la periode » se lit d'un coup d'oeil ; un
+// minimum entre 0 et 1 ne se lit pas.
 dispo = source
   |> filter(fn: (r) => types.isType(v: r._value, type: "bool"))
   |> toFloat()
@@ -4093,10 +4094,6 @@ mesures
   |> map(fn: (r) => ({{r with _field: r._field + "_max"}}))
   |> yield(name: "max")
 dispo |> aggregateWindow(every: {every}, fn: mean, createEmpty: false) |> yield(name: "uptime")
-dispo
-  |> aggregateWindow(every: {every}, fn: min, createEmpty: false)
-  |> map(fn: (r) => ({{r with _field: r._field + "_min"}}))
-  |> yield(name: "min")
 "#
     )
 }
@@ -6917,14 +6914,14 @@ mod tests {
         assert!(flux.contains("fn: mean"), "{flux}");
         assert!(flux.contains("fn: max"), "{flux}");
         assert!(flux.contains("_field + \"_max\""), "{flux}");
-        // Quatre fenêtres : moyenne et maximum des valeurs continues, moyenne
-        // et MINIMUM des disponibilités (voir le test de l'asymétrie).
-        assert_eq!(flux.matches("every: 3h").count(), 4, "{flux}");
+        // Trois fenêtres : moyenne et maximum des valeurs continues, TAUX des
+        // disponibilités (voir le test de l'agrégation en taux).
+        assert_eq!(flux.matches("every: 3h").count(), 3, "{flux}");
 
         // ⚠️ Un intervalle sans mesure ne produit AUCUN point — ni zéro, ni
         // valeur interpolée. Un trou reste un trou : on ne déduit pas un fait
         // d'un silence.
-        assert_eq!(flux.matches("createEmpty: false").count(), 4, "{flux}");
+        assert_eq!(flux.matches("createEmpty: false").count(), 3, "{flux}");
         assert!(!flux.contains("createEmpty: true"), "{flux}");
 
         // Les champs texte (`state` d'`internet_status`) ne se moyennent pas :
@@ -6938,7 +6935,7 @@ mod tests {
     }
 
     #[test]
-    fn availability_is_accompanied_by_its_minimum_not_its_maximum() {
+    fn availability_aggregates_into_a_rate_not_into_an_extreme() {
         // 🔴 L'asymétrie est VOULUE, et un relecteur pressé la « corrigera »
         // par cohérence apparente. Elle tient en deux phrases :
         //
@@ -6952,27 +6949,26 @@ mod tests {
         // et fausse : elle ne fait échouer aucune requête, elle rassure à tort.
         let flux = metrics_flux("lanprobe", "sonde-1", Some("ping_latency"), "start: -87d", Some("3h"));
 
-        assert!(flux.contains("fn: min"), "{flux}");
-        // ⚠️ Le suffixe doit dire ce qu'il contient. Ranger un minimum sous
-        // `_max` serait pire que de ne rien suffixer du tout.
-        assert!(flux.contains("_field + \"_min\""), "{flux}");
+        // 🔴 Et la disponibilité n'a NI l'un NI l'autre. Décision du
+        // propriétaire : la bonne agrégation d'un booléen n'est ni un minimum
+        // ni un maximum, c'est un TAUX — et `mean` sur un booléen converti en
+        // 0/1 est exactement ce taux. « 95 % sur la période » se lit d'un
+        // coup ; un minimum de disponibilité entre 0 et 1 ne se lit pas.
+        assert!(!flux.contains("fn: min"), "{flux}");
+        assert!(!flux.contains("_min"), "{flux}");
         assert!(flux.contains("types.isType(v: r._value, type: \"bool\")"), "{flux}");
 
-        // Les trois familles sont disjointes : texte brut, booléens en
-        // moyenne + minimum, valeurs continues en moyenne + maximum.
+        // Trois familles disjointes : texte brut, booléens en TAUX, valeurs
+        // continues en moyenne + maximum.
         assert_eq!(flux.matches("fn: mean").count(), 2, "{flux}");
-        assert_eq!(flux.matches("every: 3h").count(), 4, "{flux}");
-        assert_eq!(flux.matches("createEmpty: false").count(), 4, "{flux}");
+        assert_eq!(flux.matches("every: 3h").count(), 3, "{flux}");
+        assert_eq!(flux.matches("createEmpty: false").count(), 3, "{flux}");
     }
 
     /// Réponse RÉELLE d'un InfluxDB 2.9.1 sur une fenêtre où la cible ne
     /// répond presque plus : un ping sur dix passe pendant une heure.
     /// Capturée, pas écrite à la main.
     const OUTAGE_CSV: &str = "\
-,result,table,_start,_stop,_time,_value,_field,_measurement,host,ip,probe_id,site_id
-,min,0,2026-09-02T16:55:37Z,2026-09-02T17:55:37Z,2026-09-02T17:00:00Z,0,alive_min,ping_latency,a,1.1.1.1,p9,s1
-,min,0,2026-09-02T16:55:37Z,2026-09-02T17:55:37Z,2026-09-02T17:15:00Z,0,alive_min,ping_latency,a,1.1.1.1,p9,s1
-
 ,result,table,_start,_stop,_time,_value,_field,_measurement,host,ip,probe_id,site_id
 ,max,0,2026-09-02T16:55:37Z,2026-09-02T17:55:37Z,2026-09-02T17:00:00Z,14,latency_ms_max,ping_latency,a,1.1.1.1,p9,s1
 ,max,0,2026-09-02T16:55:37Z,2026-09-02T17:55:37Z,2026-09-02T17:15:00Z,14,latency_ms_max,ping_latency,a,1.1.1.1,p9,s1
@@ -6983,25 +6979,20 @@ mod tests {
 ";
 
     #[test]
-    fn a_mostly_failed_window_reports_zero_not_one() {
-        // Une heure à un ping sur dix : `min(alive)` vaut 0 et le dit. `max`
-        // aurait rendu 1 — « la cible a répondu », ce qui est vrai et n'est
-        // pas la question.
+    fn a_mostly_failed_window_reports_its_rate_and_no_extreme() {
+        // Une heure à un ping sur dix : le taux le dit — 7,7 % puis 10 %.
+        // `max(alive)` aurait rendu 1 (« la cible a répondu »), ce qui est
+        // vrai et n'est pas la question ; `min(alive)` aurait rendu 0, ce qui
+        // est vrai aussi et ne se lit pas davantage.
         let series = series_from_flux_csv(OUTAGE_CSV);
-        let floor = series.iter().find(|s| s["measure"] == "alive_min").expect("alive_min attendu");
+        // ⚠️ Ni minimum ni maximum : une disponibilité s'agrège en TAUX.
         assert!(
-            floor["points"].as_array().unwrap().iter().all(|p| p["v"] == 0.0),
-            "un accompagnement à 1 masquerait la coupure : {floor}"
-        );
-        assert!(
-            series.iter().all(|s| s["measure"] != "alive_max"),
-            "le maximum d'une disponibilité ne doit pas être émis : {series:?}"
+            series.iter().all(|s| s["measure"] != "alive_max" && s["measure"] != "alive_min"),
+            "une disponibilité ne s'accompagne d'aucun extrême : {series:?}"
         );
 
         // La moyenne d'un booléen est un TAUX, et elle dit la vérité : 7,7 %
-        // de pings aboutis sur le premier intervalle. C'est le couple
-        // (taux, minimum) qui décrit la coupure — pas le taux seul, qui ne dit
-        // pas si les échecs étaient groupés.
+        // de pings aboutis sur le premier intervalle. C'est lui qu'on affiche.
         let taux = series.iter().find(|s| s["measure"] == "alive").unwrap();
         assert_eq!(taux["points"][0]["v"], 0.076_923_076_923_076_93);
 
