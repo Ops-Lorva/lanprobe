@@ -221,6 +221,37 @@ fn get_details_macos(name: &str) -> InterfaceDetails {
     d
 }
 
+/// Passerelle par défaut **portée par cette interface**, ou `None`.
+///
+/// 🔴 `ip route show default` décrit la route par défaut de la MACHINE, pas
+/// celle de l'interface interrogée. La recopier sur toutes attribuait
+/// `10.0.30.1` aux cinq `veth*` d'un hôte Docker — une valeur plausible sur
+/// quelque chose qui ne la porte pas.
+///
+/// ⚠️ C'est l'endroit où ça compte le plus : cette liste est le seul repère de
+/// qui choisit son interface sans écran. Une passerelle en face d'un `veth`
+/// invite à le choisir, et une sonde posée sur le mauvais lien mesure faux
+/// sans jamais le dire.
+///
+/// On lit par MOT-CLÉ (`via`, `dev`) et jamais par position : le noyau ajoute
+/// `proto`, `metric`, `onlink`… selon les cas, et une lecture positionnelle
+/// casserait au premier hôte configuré autrement. Une ligne sans `via` — une
+/// route par défaut en `scope link` — ne porte aucune passerelle : `None`, et
+/// surtout pas une valeur de remplacement qui se lirait comme une donnée.
+#[cfg(any(target_os = "linux", test))]
+fn gateway_for_device(route_output: &str, name: &str) -> Option<String> {
+    fn after<'a>(fields: &[&'a str], key: &str) -> Option<&'a str> {
+        fields.iter().position(|f| *f == key).and_then(|i| fields.get(i + 1)).copied()
+    }
+    route_output.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first() != Some(&"default") || after(&fields, "dev") != Some(name) {
+            return None;
+        }
+        after(&fields, "via").map(String::from)
+    })
+}
+
 #[cfg(target_os = "linux")]
 fn get_details_linux(name: &str) -> InterfaceDetails {
     let text = sync_cmd("ip").args(["addr", "show", name]).output()
@@ -244,10 +275,7 @@ fn get_details_linux(name: &str) -> InterfaceDetails {
     let gw_text = sync_cmd("ip").args(["route", "show", "default"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
-    d.gateway = gw_text.lines()
-        .find(|l| l.starts_with("default"))
-        .and_then(|l| l.split_whitespace().nth(2))
-        .map(String::from);
+    d.gateway = gateway_for_device(&gw_text, name);
     if let Ok(resolv) = std::fs::read_to_string("/etc/resolv.conf") {
         for line in resolv.lines() {
             if line.starts_with("nameserver") {
@@ -331,6 +359,50 @@ fn cidr_to_mask(prefix: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_default_gateway_belongs_only_to_the_interface_that_carries_it() {
+        // 🔴 `ip route show default` décrit LA route par défaut de la machine,
+        // pas celle de l'interface qu'on interroge. Elle était recopiée sur
+        // toutes : les cinq `veth*` de cette machine s'affichaient
+        // « adresse — / passerelle 10.0.30.1 ».
+        //
+        // ⚠️ Une valeur plausible attribuée à quelque chose qui ne la porte
+        // pas. Et à l'endroit où ça compte le plus : cette liste est le SEUL
+        // repère de qui choisit son interface sans écran. Une passerelle en
+        // face d'un `veth` invite à le choisir, et une sonde posée sur le
+        // mauvais lien mesure faux sans jamais le dire.
+        //
+        // Sortie réelle de cette machine — noter l'absence de `proto`/`metric`
+        // et la présence d'`onlink` : on lit par mot-clé, jamais par position.
+        let reel = "default via 10.0.30.1 dev ens18 onlink \n";
+        assert_eq!(gateway_for_device(reel, "ens18").as_deref(), Some("10.0.30.1"));
+        assert_eq!(gateway_for_device(reel, "veth912ca4b"), None);
+        assert_eq!(gateway_for_device(reel, "docker0"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn each_link_of_a_multi_wan_keeps_its_own_gateway() {
+        // Deux sorties : chacune rend la sienne, aucune ne rend celle de
+        // l'autre. Prendre la première ligne venue attribuait la passerelle du
+        // lien principal au lien de secours.
+        let deux = "default via 10.0.30.1 dev ens18 proto static metric 100\n                    default via 192.168.8.1 dev wwan0 proto dhcp metric 700\n";
+        assert_eq!(gateway_for_device(deux, "ens18").as_deref(), Some("10.0.30.1"));
+        assert_eq!(gateway_for_device(deux, "wwan0").as_deref(), Some("192.168.8.1"));
+        assert_eq!(gateway_for_device(deux, "eth9"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_default_route_means_no_gateway_not_a_placeholder() {
+        // ⚠️ Rien, et surtout pas une valeur « neutre » : une absence doit se
+        // lire comme une absence, pas comme une donnée.
+        assert_eq!(gateway_for_device("", "ens18"), None);
+        assert_eq!(gateway_for_device("default dev tun0 scope link\n", "tun0"), None);
+        assert_eq!(gateway_for_device("10.0.0.0/8 via 10.0.30.1 dev ens18\n", "ens18"), None);
+    }
 
     #[test]
     fn test_list_interfaces_returns_vec() {
