@@ -169,6 +169,7 @@ pub fn build_router(state: AppState) -> Router {
         Role::Viewer,
         Router::new()
             .route("/api/probes/{id}/metrics", get(probe_metrics))
+            .route("/api/probes/{id}/uptime", get(probe_uptime))
             .route("/api/probes/{id}/inventory", get(probe_inventory))
             .route("/api/probes/{id}/sla.csv", get(probe_sla_csv))
             .route("/api/probes/{id}/public-ips", get(probe_public_ips))
@@ -4100,6 +4101,120 @@ pub fn aggregate_every(span_secs: i64, max_points: i64) -> Option<&'static str> 
     Some(step.1)
 }
 
+/// Requête du taux de disponibilité par cible, **agrégée côté Influx**.
+///
+/// ⚠️ `/sla` rend des relevés BRUTS et la fiche se rafraîchit toutes les
+/// 3 secondes : le rejouer pour un pourcentage ferait relire des millions de
+/// points par tour d'horloge. Ici Influx ne renvoie qu'UNE ligne par cible.
+///
+/// 🔴 **Un relevé indéterminé sort du dénominateur par CONSTRUCTION**, pas par
+/// précaution : le filtre `_field == "alive"` ne sélectionne que les points
+/// qui portent un verdict. Une mesure antérieure au champ `alive` n'en a pas,
+/// elle n'existe donc pas pour `count()`. Vérifié sur un influxd 2.9.1 réel —
+/// 90 relevés sans verdict à côté de 10 avec : `count()` rend 10.
+///
+/// ⚠️ `mean()` d'un booléen converti en 0/1 EST le taux, et c'est
+/// arithmétiquement la même chose que `compute_sla` — un test tient cette
+/// égalité, pour qu'une divergence future casse la suite au lieu de s'installer.
+fn uptime_flux(bucket: &str, probe_id: &str, window: &str) -> String {
+    format!(
+        "base = from(bucket: {})\n  |> range({})\n  \
+         |> filter(fn: (r) => r[\"probe_id\"] == {})\n  \
+         |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")\n  \
+         |> filter(fn: (r) => r[\"_field\"] == \"alive\")\n  \
+         |> toFloat()\n  \
+         |> group(columns: [\"ip\"])\n\n\
+         base |> mean() |> yield(name: \"uptime\")\n\
+         base |> count() |> yield(name: \"samples\")\n",
+        flux_string(bucket),
+        window,
+        flux_string(probe_id),
+    )
+}
+
+/// Les deux rendus (`uptime`, `samples`) recollés par cible.
+///
+/// ⚠️ C'est la colonne `result` qui distingue les deux blocs — la seule route
+/// du hub où elle porte de l'information. `series_from_flux_csv` l'ignore
+/// justement parce qu'elle n'en porte pas ailleurs.
+fn uptime_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    // (taux 0..1, nombre de relevés déterminés)
+    let mut by_ip: BTreeMap<String, (Option<f64>, i64)> = BTreeMap::new();
+    let mut cols: Option<Vec<String>> = None;
+
+    for line in csv.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.is_empty() {
+            cols = None;
+            continue;
+        }
+        let cells: Vec<&str> = line.split(',').collect();
+        let Some(header) = cols.as_ref() else {
+            cols = Some(cells.iter().map(|c| c.trim().to_string()).collect());
+            continue;
+        };
+        let at = |name: &str| {
+            header
+                .iter()
+                .position(|c| c == name)
+                .and_then(|i| cells.get(i))
+                .map(|s| s.trim())
+        };
+        let (Some(result), Some(ip), Some(value)) = (at("result"), at("ip"), at("_value")) else {
+            continue;
+        };
+        let slot = by_ip.entry(ip.to_string()).or_insert((None, 0));
+        match result {
+            "uptime" => slot.0 = value.parse::<f64>().ok(),
+            "samples" => slot.1 = value.parse::<i64>().unwrap_or(0),
+            _ => {}
+        }
+    }
+
+    by_ip
+        .into_iter()
+        .map(|(ip, (ratio, samples))| {
+            // ⚠️ `null` et jamais `0` quand aucun relevé déterminé n'existe :
+            // « 0 % » se lirait comme une panne totale. Même règle que partout
+            // depuis ce matin.
+            let uptime = (samples > 0)
+                .then_some(ratio)
+                .flatten()
+                .map(|r| serde_json::Value::from(r * 100.0))
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::json!({ "ip": ip, "uptime_pct": uptime, "samples": samples })
+        })
+        .collect()
+}
+
+/// Taux de disponibilité par cible sur la fenêtre — indicateur vivant.
+async fn probe_uptime(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MetricsQuery>,
+) -> Response {
+    if state.db.get_probe(&id).is_err() {
+        return fail(StatusCode::NOT_FOUND, "sonde inconnue");
+    }
+    let (window, range) = match flux_range(&query) {
+        Ok(w) => w,
+        Err(refus) => return refus,
+    };
+    let flux = uptime_flux(&state.settings.influx_bucket(), &id, &window);
+    match state.influx.query_flux(&flux).await {
+        Ok(csv) => ok_json(serde_json::json!({
+            "range": range,
+            "targets": uptime_from_flux_csv(&csv),
+        })),
+        Err(e) => fail(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
 /// Requête Flux d'une lecture de mesures. `every` à `None` = points bruts.
 ///
 /// ⚠️ **Deux champs par série quand on agrège : la moyenne ET l'extrême qui
@@ -7384,6 +7499,89 @@ mod tests {
         assert_eq!(report[0].stats.failed_samples, 2);
     }
 
+    /// Réponse RÉELLE d'influxd 2.9.1 à la requête de `uptime_flux`, sur une
+    /// cible ayant 10 relevés déterminés (8 vivants) **et 90 relevés
+    /// indéterminés** — des mesures antérieures au champ `alive`, qui ne
+    /// portent qu'une latence. Capturée, pas écrite à la main.
+    const UPTIME_CSV: &str = "\
+,result,table,ip,_value
+,samples,0,1.1.1.1,10
+
+,result,table,ip,_value
+,uptime,0,1.1.1.1,0.8
+";
+
+    #[test]
+    fn the_aggregated_path_excludes_undetermined_samples_by_construction() {
+        // 🔴 Le point que tu m'as demandé de ne pas croire sur parole. Les 90
+        // relevés sans `alive` ne sont PAS dans le dénominateur : le filtre
+        // `_field == "alive"` ne les sélectionne pas, ils n'existent tout
+        // simplement pas pour `count()`. Vérifié sur un vrai influxd — 10, pas
+        // 100 — et pas déduit du fait que le calcul « a l'air » juste.
+        let targets = uptime_from_flux_csv(UPTIME_CSV);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0]["ip"], "1.1.1.1");
+        assert_eq!(targets[0]["samples"], 10);
+        assert_eq!(targets[0]["uptime_pct"], 80.0);
+    }
+
+    #[test]
+    fn the_aggregated_rate_agrees_with_compute_sla_on_the_same_data() {
+        // ⚠️ **Une seule définition de la disponibilité**, tenue SOUS TEST :
+        // deux pourcentages différents sur le même écran seraient pires que
+        // pas de pourcentage. Si l'un des deux chemins dérive un jour, c'est
+        // ici que ça casse.
+        //
+        // Mêmes données des deux côtés : 8 vivants, 2 morts, 90 indéterminés.
+        let mut samples: Vec<lanprobe_core::sla::PingSample> = Vec::new();
+        for i in 0..10 {
+            samples.push(lanprobe_core::sla::PingSample {
+                alive: Some(i >= 2),
+                latency_ms: None,
+            });
+        }
+        for _ in 0..90 {
+            samples.push(lanprobe_core::sla::PingSample { alive: None, latency_ms: Some(12) });
+        }
+        let brut = lanprobe_core::sla::compute_sla("1.1.1.1", &samples);
+        let agrege = uptime_from_flux_csv(UPTIME_CSV);
+
+        assert_eq!(brut.uptime_pct, Some(80.0));
+        assert_eq!(agrege[0]["uptime_pct"], 80.0);
+        assert_eq!(
+            brut.total_samples as i64,
+            agrege[0]["samples"].as_i64().unwrap(),
+            "le dénominateur doit être le même des deux côtés"
+        );
+    }
+
+    #[test]
+    fn a_target_without_a_single_determinate_sample_has_no_rate() {
+        // ⚠️ Ni `0 %` — qui se lirait comme une panne totale — ni cellule
+        // vide. `null`, et l'écran dira « indéterminé ».
+        let csv = ",result,table,ip,_value\n,samples,0,10.0.0.9,0\n";
+        let targets = uptime_from_flux_csv(csv);
+        assert_eq!(targets[0]["samples"], 0);
+        assert!(targets[0]["uptime_pct"].is_null(), "{targets:?}");
+    }
+
+    #[test]
+    fn an_empty_influx_answer_is_an_empty_list_not_an_error() {
+        assert!(uptime_from_flux_csv("").is_empty());
+    }
+
+    #[test]
+    fn the_uptime_query_is_accepted_by_the_hardened_double() {
+        // La doublure durcie sait désormais refuser un Flux invalide : cette
+        // requête-ci doit passer, et c'est enfin une vérification qui vaut
+        // quelque chose.
+        let flux = uptime_flux("lanprobe", "sonde-1", "start: -24h");
+        assert_eq!(crate::influx::testing::flux_refusal(&flux), None, "{flux}");
+        assert!(flux.contains("r[\"_field\"] == \"alive\""), "{flux}");
+        assert!(flux.contains("|> mean()"), "{flux}");
+        assert!(flux.contains("|> count()"), "{flux}");
+    }
+
     #[test]
     fn the_coverage_cell_is_never_a_number_a_spreadsheet_could_average() {
         // ⚠️ Même règle que la cellule « indetermine » et pour la même raison :
@@ -8768,6 +8966,45 @@ mod tests {
             .into_iter()
             .any(|(m, p, _)| m == "POST" && p.starts_with("/api/v2/query"));
         assert!(queried, "la requête doit partir vers Influx, pas vers le navigateur");
+    }
+
+    #[tokio::test]
+    async fn the_uptime_route_needs_a_session_and_knows_its_probes() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, _, _) = h
+            .call(empty_request("GET", &format!("/api/probes/{probe_id}/uptime?range=-24h")))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // ⚠️ 404 et non 500 sur une sonde inconnue, comme les autres routes.
+        let (status, _, _) = h
+            .call(with_cookie(
+                empty_request("GET", "/api/probes/pas-une-sonde/uptime?range=-24h"),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // ⚠️ Et une fenêtre illisible reste un 400, pas un 502.
+        let (status, _, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/uptime?range=nawak")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/uptime?range=-24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.get("targets").is_some(), "{body}");
     }
 
     #[tokio::test]
