@@ -327,7 +327,10 @@
     "online_help": "Heartbeat received recently.",
     "stale_help": "Silent for more than three intervals, less than two hours.",
     "offline_help": "Silent for more than two hours.",
-    "never_seen": "No heartbeat received since enrolment."
+    "never_seen": "No heartbeat received since enrolment.",
+    "silent": "Silent",
+    "silent_for": "Last heartbeat {ago} ago",
+    "silent_help": "No heartbeat for more than one interval, but not long enough to be offline. The hub cannot know whether the probe is there: it reports when it last heard from it rather than claiming availability."
   },
   "buffer": {
     "empty": "up to date",
@@ -390,6 +393,7 @@
     "not_found_title": "Probe not found",
     "not_found_body": "This probe is no longer in the fleet. It may have been removed from another tab.",
     "range": "Window",
+    "range_10m": "10 min",
     "range_1h": "1 h",
     "range_6h": "6 h",
     "range_24h": "24 h",

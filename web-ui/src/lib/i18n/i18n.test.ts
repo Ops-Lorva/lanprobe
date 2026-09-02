@@ -110,4 +110,25 @@ describe('catalogues de traduction', () => {
       expect(REQUISES_CARTES.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+
+  // État « silencieuse » : la sonde n'a plus battu depuis plus d'une cadence,
+  // mais pas encore assez pour être déclarée hors ligne. Sans ces clés, l'écran
+  // retomberait sur le vert « en ligne », qui est exactement l'affirmation
+  // fausse que cet état existe pour supprimer.
+  const REQUISES_SILENCE = ['status.silent', 'status.silent_for', 'status.silent_help'];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés de l’état silencieux`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_SILENCE.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
+  // Fenêtre de 10 min : en mode temps réel, la plus courte des fenêtres
+  // existantes (1 h) écrase ce qui vient de se passer.
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte le libellé de la fenêtre de 10 min`, () => {
+      expect(new Set(flatten(catalog)).has('probe.range_10m')).toBe(true);
+    });
+  }
 });

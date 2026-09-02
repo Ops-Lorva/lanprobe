@@ -16,6 +16,7 @@
     secondsLeft,
     countdown,
   } from '$lib/time';
+  import { probeLiveness } from '$lib/probe-liveness';
   import {
     api,
     ApiError,
@@ -176,6 +177,17 @@
 
   const realtimeLeft = $derived(secondsLeft(probe?.realtime_until, $now));
   const realtimeOn = $derived(realtimeLeft > 0);
+
+  /**
+   * Fraîcheur recalculée à chaque battement de l'horloge partagée.
+   *
+   * ⚠️ `probe.status` date du dernier chargement du parc et tolère trois
+   * battements manqués : sur une fiche laissée ouverte, il affirmait « en
+   * ligne » longtemps après le dernier signe de vie. Ici on ne garde le vert
+   * que dans la cadence, et on rapporte l'âge du dernier battement le reste
+   * du temps.
+   */
+  const live = $derived(probeLiveness(probe?.last_seen, $now));
 
   async function toggleRealtime() {
     if (!probe) return;
@@ -1026,16 +1038,31 @@
         </div>
       {/if}
 
+      <!-- ⚠️ Sur une sonde silencieuse, la fiche écrit la phrase entière —
+           « dernier battement il y a 12 min » — et non le seul délai relatif :
+           c'est l'écran où l'on vient chercher POURQUOI quelque chose cloche,
+           et « il y a 12 min » posé à côté d'un statut ne dit pas de quoi il
+           est l'âge. La place ne manque pas ici, contrairement à la ligne de
+           parc. -->
       <div class="badges">
-        <StatusMark status={probe.status} />
+        <StatusMark status={live.state} />
         <span class="dot" aria-hidden="true">·</span>
         <span class="site">{probe.site}</span>
         <span class="dot" aria-hidden="true">·</span>
         <span
           class="seen lp-mono"
+          class:silent={live.state === 'silent'}
           title={probe.last_seen ? absoluteTime(probe.last_seen, lang) : $_('status.never_seen')}
         >
-          {probe.last_seen ? relativeTime(probe.last_seen, lang, $now) : $_('status.never_seen')}
+          {#if live.state === 'silent'}
+            {$_('status.silent_for', {
+              values: { ago: countdown(live.silentFor ?? 0, lang) },
+            })}
+          {:else if probe.last_seen}
+            {relativeTime(probe.last_seen, lang, $now)}
+          {:else}
+            {$_('status.never_seen')}
+          {/if}
         </span>
       </div>
 
@@ -1417,16 +1444,18 @@
                 spellcheck="false"
                 autocomplete="off"
               />
-              {#if newTarget.trim()}
-                <CommandButton
-                  probeId={id}
-                  kind="add_monitor"
-                  args={{ ip: newTarget.trim() }}
-                  label={$_('probe.monitoring_add')}
-                  allowed={$canOperate}
-                  onsent={() => { newTarget = ''; afterCommand(); }}
-                />
-              {/if}
+              <!-- ⚠️ Toujours présent, grisé tant que le champ est vide. Sous
+                   `{#if}`, il apparaissait à la première frappe et poussait le
+                   champ au moment précis où l'on écrivait dedans. -->
+              <CommandButton
+                probeId={id}
+                kind="add_monitor"
+                args={{ ip: newTarget.trim() }}
+                label={$_('probe.monitoring_add')}
+                allowed={$canOperate}
+                disabled={!newTarget.trim()}
+                onsent={() => { newTarget = ''; afterCommand(); }}
+              />
             </form>
           {/if}
         </header>
@@ -2233,6 +2262,11 @@
   .seen {
     color: var(--ep-text-muted);
     font-size: 11px;
+  }
+  /* Silencieuse : le délai devient l'information principale de la ligne,
+     puisque le statut, lui, ne conclut rien. */
+  .seen.silent {
+    color: var(--ep-text-secondary);
   }
   .dot {
     color: var(--ep-text-dim);

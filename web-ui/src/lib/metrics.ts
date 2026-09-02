@@ -31,17 +31,31 @@ export const MEASUREMENT = {
   speedtest: 'speedtest',
 } as const;
 
-/** Fenêtres proposées, en durée Flux signée (`range(start: -6h)`). */
-export const RANGES = ['-1h', '-6h', '-24h', '-7d'] as const;
+/**
+ * Fenêtres proposées, en durée Flux signée (`range(start: -6h)`).
+ *
+ * `-10m` est là pour le mode temps réel, où la sonde bat à 5 s et pingue à
+ * 1 s : à l'échelle d'une heure, l'incident qu'on est venu regarder tient
+ * dans un pixel. Elle reste proposée hors temps réel — on regarde souvent
+ * quelque chose se produire pendant qu'on a les mains dans le réseau.
+ */
+export const RANGES = ['-10m', '-1h', '-6h', '-24h', '-7d'] as const;
 export type Range = (typeof RANGES)[number];
 export const DEFAULT_RANGE: Range = '-6h';
 
-/** Durée d'une fenêtre en millisecondes (`-6h` → 21 600 000). */
+/**
+ * Durée d'une fenêtre en millisecondes (`-6h` → 21 600 000).
+ *
+ * ⚠️ La minute compte parmi les unités reconnues : le repli d'une valeur
+ * illisible vaut une heure, et une fenêtre de 10 min bornerait alors son axe
+ * sur 50 min de vide — ce qui se lit comme une sonde qui a cessé de mesurer.
+ */
 export function rangeMillis(range: Range): number {
-  const m = /^-(\d+)([hd])$/.exec(range);
+  const m = /^-(\d+)([mhd])$/.exec(range);
   if (!m) return 3_600_000;
   const n = Number(m[1]);
-  return m[2] === 'd' ? n * 86_400_000 : n * 3_600_000;
+  if (m[2] === 'd') return n * 86_400_000;
+  return m[2] === 'm' ? n * 60_000 : n * 3_600_000;
 }
 
 /**

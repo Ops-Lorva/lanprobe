@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeCurves, normalizeMetrics, numeric, rangeMillis, toMillis } from './metrics';
+import {
+  DEFAULT_RANGE,
+  RANGES,
+  normalizeCurves,
+  normalizeMetrics,
+  numeric,
+  rangeMillis,
+  toMillis,
+} from './metrics';
 
 /**
  * Réponse réelle du hub, relevée sur une sonde qui pingue deux cibles.
@@ -146,6 +154,24 @@ describe('rangeMillis', () => {
     expect(rangeMillis('-6h')).toBe(21_600_000);
     expect(rangeMillis('-24h')).toBe(86_400_000);
     expect(rangeMillis('-7d')).toBe(604_800_000);
+  });
+
+  it('comprend la minute : sans elle, « 10 min » retombait sur 1 h', () => {
+    // Le repli silencieux de `rangeMillis` vaut une heure. Une fenêtre de
+    // 10 min bornerait donc son axe sur 60 min de vide, et le graphique se
+    // lirait comme une sonde qui ne mesure plus.
+    expect(rangeMillis('-10m')).toBe(600_000);
+  });
+});
+
+describe('RANGES', () => {
+  it('propose 10 min en plus court, sans déplacer la fenêtre par défaut', () => {
+    // En temps réel la sonde bat à 5 s et pingue à 1 s : à l'échelle d'une
+    // heure, ce qu'on est venu regarder tient dans un pixel.
+    expect(RANGES[0]).toBe('-10m');
+    expect(RANGES).toContain('-1h');
+    // ⚠️ On ajoute un choix, on n'en retire pas — et le défaut ne bouge pas.
+    expect(DEFAULT_RANGE).toBe('-6h');
   });
 });
 

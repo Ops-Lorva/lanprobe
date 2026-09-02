@@ -1,9 +1,16 @@
 <script lang="ts">
   import { _ } from 'svelte-i18n';
   import type { ProbeStatus } from '$lib/api';
+  import type { LivenessState } from '$lib/probe-liveness';
 
   interface Props {
-    status: ProbeStatus;
+    /**
+     * ⚠️ `silent` n'est pas un statut du hub : c'est l'état calculé dans le
+     * navigateur quand une sonde n'a plus battu depuis plus d'une cadence,
+     * sans avoir atteint le seuil de « hors ligne ». Il se rend en NEUTRE et
+     * non en avertissement — on ne sait pas, on ne prétend pas savoir.
+     */
+    status: ProbeStatus | LivenessState;
     size?: number;
     /** Le libellé est affiché par défaut : la couleur seule ne suffit jamais. */
     withLabel?: boolean;
@@ -29,6 +36,19 @@
       <circle cx="6" cy="6" r="4" fill="currentColor" />
     {:else if status === 'stale'}
       <circle cx="6" cy="6" r="3.7" fill="none" stroke="currentColor" stroke-width="2" />
+    {:else if status === 'silent'}
+      <!-- Anneau fin et pointillé : le disque plein dit « présente », le
+           disque barré dit « absente ». Ici on ne dit ni l'un ni l'autre, et
+           la forme doit se lire comme telle en niveaux de gris. -->
+      <circle
+        cx="6"
+        cy="6"
+        r="3.7"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-dasharray="2.6 2.2"
+      />
     {:else}
       <circle cx="6" cy="6" r="4.4" fill="none" stroke="currentColor" stroke-width="1.4" />
       <line
@@ -66,6 +86,11 @@
   }
   .stale {
     color: var(--ep-warning);
+  }
+  /* Neutre, jamais vert ni orange : le vert affirmerait une disponibilité
+     inconnue, l'orange affirmerait une panne tout aussi inconnue. */
+  .silent {
+    color: var(--ep-text-muted);
   }
   .offline {
     color: var(--ep-danger);
