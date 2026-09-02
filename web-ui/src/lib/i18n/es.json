@@ -881,6 +881,9 @@
     "queued_help": "El hub nunca contacta con la sonda: el comando viaja en la respuesta a su próximo latido, dentro de {n} s."
   },
   "sla": {
+    "coverage_partial": "{pct} % del periodo medido",
+    "coverage_unknown": "periodo indeterminado",
+    "col_coverage": "Cobertura",
     "undetermined": "indeterminado",
     "col_undetermined": "Mediciones indeterminadas",
     "col_avg": "Latencia media (ms)",

@@ -881,6 +881,9 @@
     "queued_help": "The hub never reaches into the probe: the command travels in the reply to its next heartbeat, within {n} s."
   },
   "sla": {
+    "coverage_partial": "{pct}% of the period measured",
+    "coverage_unknown": "period undetermined",
+    "col_coverage": "Coverage",
     "undetermined": "undetermined",
     "col_undetermined": "Undetermined samples",
     "col_avg": "Average latency (ms)",

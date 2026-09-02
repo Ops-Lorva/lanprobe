@@ -33,9 +33,55 @@ export interface Sample {
   state?: string;
 }
 
+/**
+ * Ce qui a réellement été mesuré sur la fenêtre, **calculé par le hub**.
+ *
+ * ⚠️ Transporté, jamais recalculé ici : le CSV du hub et le classeur doivent
+ * annoncer la MÊME complétude. Deux calculs finiraient par diverger d'un point,
+ * et c'est celui du document remis au client qu'on ne saurait plus expliquer.
+ * Le calcul vit dans `lanprobe-core/src/sla.rs` (`compute_coverage`).
+ */
+export interface Coverage {
+  window_secs: number;
+  covered_secs: number;
+  gap_secs: number;
+}
+
 export interface TargetSeries {
   ip: string;
   samples: Sample[];
+  /** Absente d'un hub antérieur à la fonctionnalité — voir `coverageLabel`. */
+  coverage?: Coverage;
+}
+
+/**
+ * Mention de complétude à afficher, ou `null` quand il n'y a rien à dire.
+ *
+ * ⚠️ **`null` quand c'est complet.** Les trous d'aujourd'hui viennent surtout
+ * d'une période antérieure à la fonctionnalité et doivent tendre vers zéro : un
+ * « 0 % indéterminé » permanent est du bruit qui finit par masquer le cas où ça
+ * compte vraiment.
+ *
+ * ⚠️ `null` aussi quand le hub n'envoie rien : absence d'information, on
+ * n'invente pas « complet ».
+ *
+ * ⚠️ Une fenêtre VIDE n'est pas complète — sans cette garde, `gap_secs === 0`
+ * la déclarait « tout va bien » sur une période qui n'existe pas. Le même
+ * défaut a été corrigé côté Rust, trouvé par son test.
+ *
+ * ⚠️ Le rendu est une CHAÎNE et le restera : dans une cellule de tableur, un
+ * nombre se retrouve dans une moyenne de colonne et fait naître un chiffre que
+ * personne n'a calculé.
+ */
+export function coverageLabel(
+  coverage: Coverage | undefined,
+  t: Translate = (k) => k,
+): string | null {
+  if (!coverage) return null;
+  if (coverage.window_secs <= 0) return t('sla.coverage_unknown');
+  if (coverage.gap_secs === 0) return null;
+  const pct = (coverage.covered_secs / coverage.window_secs) * 100;
+  return t('sla.coverage_partial', { pct: pct.toFixed(1) });
 }
 
 export interface SpeedtestRow {
@@ -455,10 +501,16 @@ export async function buildSlaWorkbook(
     probe: string;
     label: string;
     samples: Sample[];
+    coverage?: Coverage;
   }
   const rows: Line[] = payloads.flatMap((p) => [
     ...(p.internet.length ? [{ probe: p.probe, label: t('sla.internet'), samples: p.internet }] : []),
-    ...p.targets.map((tg) => ({ probe: p.probe, label: tg.ip, samples: tg.samples })),
+    ...p.targets.map((tg) => ({
+      probe: p.probe,
+      label: tg.ip,
+      samples: tg.samples,
+      coverage: tg.coverage,
+    })),
   ]);
 
   // ── Synthèse ────────────────────────────────────────────────────────────
@@ -474,6 +526,7 @@ export async function buildSlaWorkbook(
     t('sla.col_p95'),
     t('sla.col_samples'),
     t('sla.col_outages'),
+    t('sla.col_coverage'),
   ]);
 
   for (const r of rows) {
@@ -492,6 +545,10 @@ export async function buildSlaWorkbook(
       s.p95 ?? '—',
       s.total,
       outages(r.samples).length,
+      // ⚠️ Une chaîne, jamais un nombre : un total ou une moyenne de colonne
+      // ne doit pas pouvoir l'aspirer. Vide quand la période est entièrement
+      // mesurée — c'est le cas normal, et le dire serait du bruit.
+      coverageLabel(r.coverage, t) ?? '',
     ]);
   }
   autoFit(sum);
@@ -524,6 +581,8 @@ export async function buildSlaWorkbook(
     // relevés » et « 100 % sur trois relevés et neuf mille indéterminés » ne
     // se lisent pas pareil.
     ws.addRow([t('sla.col_undetermined'), s.undetermined]);
+    const couverture = coverageLabel(r.coverage, t);
+    if (couverture) ws.addRow([t('sla.col_coverage'), couverture]);
     ws.addRow([]);
 
     ws.addRow([t('sla.sheet_outages')]);

@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import {
   buildSlaWorkbook,
   byPublicIp,
+  coverageLabel,
   outages,
   stats,
   windowLabel,
@@ -292,5 +293,36 @@ describe('indéterminé — arbitrage du 02/09', () => {
     ]);
     expect(coupures).toHaveLength(1);
     expect(coupures[0].samples_lost).toBe(1);
+  });
+});
+
+describe('couverture — arbitrage B du 02/09', () => {
+  it('ne dit rien quand la fenêtre est entièrement mesurée', () => {
+    // ⚠️ Un « 0 % indéterminé » permanent est du bruit qui finit par masquer
+    // le cas où ça compte. Complet = pas de mention.
+    expect(coverageLabel({ window_secs: 600, covered_secs: 600, gap_secs: 0 })).toBeNull();
+  });
+
+  it('annonce la part mesurée quand il manque quelque chose', () => {
+    // Le traducteur est passé comme en production : c'est lui qui interpole.
+    const t = (k: string, v?: Record<string, string | number>) =>
+      k === 'sla.coverage_partial' ? `${v?.pct} % de la période mesurée` : k;
+    const l = coverageLabel({ window_secs: 1000, covered_secs: 874, gap_secs: 126 }, t);
+    expect(l).not.toBeNull();
+    // ⚠️ Ni vide ni numérique : la cellule ne doit pas pouvoir être moyennée.
+    expect(Number.isNaN(Number(l))).toBe(true);
+    expect(l).toContain('87');
+  });
+
+  it('ne déclare pas « complète » une fenêtre vide', () => {
+    // Sans garde, `gap_secs === 0` rendait « tout va bien » sur une période
+    // qui n'existe pas. Le même défaut a été corrigé côté Rust.
+    expect(coverageLabel({ window_secs: 0, covered_secs: 0, gap_secs: 0 })).not.toBeNull();
+  });
+
+  it('ne prétend rien quand le hub n’a pas envoyé de couverture', () => {
+    // Un hub antérieur à la fonctionnalité n'envoie pas le champ. Absence
+    // d'information : on n'affiche rien, on n'invente pas « complet ».
+    expect(coverageLabel(undefined)).toBeNull();
   });
 });
