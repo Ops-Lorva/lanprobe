@@ -3519,12 +3519,18 @@ async fn probe_sla_csv(
         Ok(probe) => probe,
         Err(e) => return error_response(e),
     };
-    let range = query.range.unwrap_or_else(|| "-24h".into());
+    // ⚠️ `flux_range`, comme `/metrics`, `/sla` et `/public-ips`. Cette route
+    // lisait `query.range` SEUL : demander « du 1er au 31 » rendait les
+    // dernières 24 h, dans un classeur dont la colonne `fenetre` annonçait
+    // pourtant la période demandée. Un rapport remis à un client avec le bon
+    // en-tête et les mauvaises données est le pire des deux mondes — c'est le
+    // défaut corrigé en b05b049, resté sur l'export.
+    let (window, range) = flux_range(&query);
     let bucket = state.settings.influx_bucket();
     let flux = format!(
-        "from(bucket: {})\n  |> range(start: {})\n           |> filter(fn: (r) => r[\"probe_id\"] == {})\n           |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
+        "from(bucket: {})\n  |> range({})\n           |> filter(fn: (r) => r[\"probe_id\"] == {})\n           |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
         flux_string(&bucket),
-        flux_duration(&range),
+        window,
         flux_string(&id),
     );
     let csv = match state.influx.query_flux(&flux).await {
@@ -7317,6 +7323,41 @@ mod tests {
         // L'en-tête doit être là même sans mesure : un fichier vide se lit
         // comme un export raté.
         assert!(text.starts_with("sonde,site,fenetre,cible,"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_sla_export_honours_explicit_dates_like_every_other_window() {
+        // 🔴 Le défaut corrigé en b05b049 sur `/metrics`, resté sur l'export :
+        // `probe_sla_csv` lisait `query.range` SEUL. Demander « du 1er au 31 »
+        // rendait les dernières 24 h, sous un fichier qui annonce la période
+        // demandée dans sa colonne `fenetre` — un classeur remis à un client
+        // avec la mauvaise période et le bon en-tête.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                empty_request(
+                    "GET",
+                    &format!(
+                        "/api/probes/{probe_id}/sla.csv?range=-24h\
+                         &start=1788000000&stop=1788600000"
+                    ),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, _, flux) = h
+            ._fake
+            .calls()
+            .into_iter()
+            .find(|(m, p, _)| m == "POST" && p.starts_with("/api/v2/query"))
+            .expect("la requête Flux doit partir");
+        // ⚠️ Les bornes explicites priment sur `range`, comme partout ailleurs.
+        assert!(flux.contains("start: 1788000000, stop: 1788600000"), "{flux}");
     }
 
     #[tokio::test]
