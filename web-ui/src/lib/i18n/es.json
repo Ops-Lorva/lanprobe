@@ -289,7 +289,7 @@
     "rail_sites": "sitios",
     "rail_total": "sondas",
     "rail_online": "en línea",
-    "rail_stale": "sin noticias",
+    "rail_silent": "silenciosas",
     "rail_offline": "fuera de línea",
     "rail_buffered": "puntos en búfer",
     "loading": "Leyendo el parque…",

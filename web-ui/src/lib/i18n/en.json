@@ -289,7 +289,7 @@
     "rail_sites": "sites",
     "rail_total": "probes",
     "rail_online": "online",
-    "rail_stale": "no news",
+    "rail_silent": "silent",
     "rail_offline": "offline",
     "rail_buffered": "buffered points",
     "loading": "Reading the fleet…",

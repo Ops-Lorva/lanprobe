@@ -2,10 +2,16 @@
   import { _ } from 'svelte-i18n';
   import { canOperate } from '$lib/session';
   import StatusMark from './StatusMark.svelte';
-  import type { ProbeStatus } from '$lib/api';
+  import { LIVENESS_ORDER } from '$lib/fleet-filter';
+  import type { LivenessState } from '$lib/probe-liveness';
 
   interface Props {
-    counts: Record<ProbeStatus, number>;
+    /**
+     * ⚠️ Comptés sur `probeLiveness`, pas sur le statut du hub. L'en-tête d'un
+     * site replié est ce qu'on lit en premier : il ne peut pas annoncer « en
+     * ligne » des sondes que ses propres lignes montrent silencieuses.
+     */
+    counts: Record<LivenessState, number>;
     siteName: string;
     /** Somme des points en tampon du site — un site peut être « tout vert » et bourré. */
     buffered?: number;
@@ -15,14 +21,14 @@
   }
   let { counts, siteName, buffered = 0, onadd, addBusy = false }: Props = $props();
 
-  const total = $derived(counts.online + counts.stale + counts.offline);
+  const total = $derived(counts.online + counts.silent + counts.offline);
 
   /**
    * Ordre de lecture : ce qui va mal d'abord. Sur dix sites repliés, l'œil
    * balaie une colonne de compteurs — le rouge doit toujours occuper la même
    * position, la première, sinon il faut lire pour le trouver.
    */
-  const order: ProbeStatus[] = ['offline', 'stale', 'online'];
+  const order = LIVENESS_ORDER;
 
   const label = $derived(
     order
@@ -53,7 +59,7 @@
 
   <div class="counters">
     {#if total > 0}
-      {#if counts.offline === 0 && counts.stale === 0}
+      {#if counts.offline === 0 && counts.silent === 0}
         <span class="ok"><StatusMark status="online" size={10} withLabel={false} /></span>
         <span class="ok-txt">{$_('fleet.site_healthy')}</span>
       {:else}
@@ -140,8 +146,10 @@
   .seg.online {
     background: var(--ep-success);
   }
-  .seg.stale {
-    background: var(--ep-warning);
+  /* Neutre, comme la pastille : l'orange affirmerait une panne que
+     personne ne peut constater — la sonde s'est juste tue. */
+  .seg.silent {
+    background: var(--ep-text-muted);
   }
   .seg.offline {
     background: var(--ep-danger);

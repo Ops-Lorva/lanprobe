@@ -5,8 +5,8 @@
   import SiteHealth from './SiteHealth.svelte';
   import StateBlock from './StateBlock.svelte';
   import PendingEnrollRow from './PendingEnrollRow.svelte';
-  import { probeLiveness } from '$lib/probe-liveness';
-  import type { Probe, ProbeStatus } from '$lib/api';
+  import { livenessCounts } from '$lib/fleet-filter';
+  import type { Probe } from '$lib/api';
   import type { PendingRow } from '$lib/enroll';
 
   interface Props {
@@ -64,22 +64,15 @@
   }: Props = $props();
 
   /**
-   * Compteurs de l'en-tête, calculés comme les lignes.
+   * Compteurs de l'en-tête, calculés comme les lignes et par le même module.
    *
    * ⚠️ Pas `p.status` : l'en-tête compterait « en ligne » des sondes que ses
    * propres lignes montrent silencieuses, et c'est le compteur replié qu'on
-   * lit en premier. Les silencieuses tombent dans le seau `stale`, qui est le
-   * vocabulaire de l'agrégat pour « sans nouvelles » — même ensemble de
-   * sondes, un seul nom.
+   * lit en premier. Le seau s'appelle `silent`, comme la ligne — le repli vers
+   * `stale` qui existait ici donnait deux mots au même ensemble de sondes, et
+   * c'est ce qui laisse deux implémentations diverger sans qu'on le voie.
    */
-  const counts = $derived.by(() => {
-    const c: Record<ProbeStatus, number> = { online: 0, stale: 0, offline: 0 };
-    for (const p of probes) {
-      const { state } = probeLiveness(p.last_seen, now);
-      c[state === 'silent' ? 'stale' : state]++;
-    }
-    return c;
-  });
+  const counts = $derived(livenessCounts(probes, now));
   const buffered = $derived(probes.reduce((sum, p) => sum + (p.buffered_points || 0), 0));
   const degraded = $derived(counts.offline > 0);
   const bodyId = $derived(`site-body-${siteId}`);

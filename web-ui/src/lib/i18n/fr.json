@@ -289,7 +289,7 @@
     "rail_sites": "sites",
     "rail_total": "sondes",
     "rail_online": "en ligne",
-    "rail_stale": "sans nouvelles",
+    "rail_silent": "silencieuses",
     "rail_offline": "hors ligne",
     "rail_buffered": "points en tampon",
     "loading": "Lecture du parc…",

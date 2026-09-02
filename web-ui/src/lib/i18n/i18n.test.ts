@@ -115,7 +115,16 @@ describe('catalogues de traduction', () => {
   // mais pas encore assez pour être déclarée hors ligne. Sans ces clés, l'écran
   // retomberait sur le vert « en ligne », qui est exactement l'affirmation
   // fausse que cet état existe pour supprimer.
-  const REQUISES_SILENCE = ['status.silent', 'status.silent_for', 'status.silent_help'];
+  // ⚠️ `fleet.rail_silent` fait partie du lot : le bandeau du parc comptait
+  // encore sur `p.status` sous l'intitulé « sans nouvelles ». Deux mots pour le
+  // même ensemble de sondes, et une sonde affichée « Silencieuse » sur sa ligne
+  // était comptée « En ligne » dans le bandeau.
+  const REQUISES_SILENCE = [
+    'status.silent',
+    'status.silent_for',
+    'status.silent_help',
+    'fleet.rail_silent',
+  ];
 
   for (const [lang, catalog] of Object.entries(CATALOGS)) {
     it(`${lang} porte les clés de l’état silencieux`, () => {

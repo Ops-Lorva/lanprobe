@@ -7,7 +7,22 @@
   import { fleet } from '$lib/fleet';
   import { flash } from '$lib/flash';
   import { now, relativeTime } from '$lib/time';
-  import { api, ApiError, type Probe, type ProbeStatus } from '$lib/api';
+  import { api, ApiError, type Probe } from '$lib/api';
+  import type { LivenessState } from '$lib/probe-liveness';
+  // ⚠️ Filtres, compteurs et tris passent TOUS par ce module, jamais par
+  // `p.status` : le hub tolère trois battements manqués, et une sonde affichée
+  // « Silencieuse » sur sa ligne se retrouvait comptée « En ligne » dans le
+  // bandeau et retenue par le filtre « En ligne ».
+  import {
+    LIVENESS_ORDER,
+    fleetTotals,
+    livenessOf,
+    matchesFleetFilter,
+    needsAttention,
+    siteSeverity,
+    sortKey,
+    type FleetFilter,
+  } from '$lib/fleet-filter';
   import { enrollments, pendingRows, pendingKey, type PendingRow } from '$lib/enroll';
   import FleetRail from '$lib/components/FleetRail.svelte';
   import SiteSection from '$lib/components/SiteSection.svelte';
@@ -22,17 +37,13 @@
 
   // ── Filtres (une seule barre, au-dessus de tout ce qu'elle cadre) ─────────
   let search = $state('');
-  let statusFilter = $state<ProbeStatus | 'all' | 'buffering'>('all');
+  let statusFilter = $state<FleetFilter>('all');
   let sort = $state<'status' | 'name' | 'last_seen'>('status');
-
-  const STATUS_ORDER: Record<ProbeStatus, number> = { offline: 0, stale: 1, online: 2 };
 
   const filtered = $derived.by(() => {
     const q = search.trim().toLowerCase();
     return $fleet.probes.filter((p) => {
-      if (statusFilter === 'buffering' && p.buffered_points <= 0) return false;
-      if (statusFilter !== 'all' && statusFilter !== 'buffering' && p.status !== statusFilter)
-        return false;
+      if (!matchesFleetFilter(p, statusFilter, $now)) return false;
       if (!q) return true;
       return [p.name, p.site, p.platform, p.version]
         .filter(Boolean)
@@ -47,7 +58,7 @@
     else
       copy.sort(
         (a, b) =>
-          STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
+          sortKey(a, $now) - sortKey(b, $now) ||
           b.buffered_points - a.buffered_points ||
           a.name.localeCompare(b.name, lang),
       );
@@ -83,31 +94,20 @@
       }
     }
 
-    const severity = (probes: Probe[]) =>
-      probes.some((p) => p.status === 'offline')
-        ? 0
-        : probes.some((p) => p.status === 'stale')
-          ? 1
-          : probes.some((p) => p.buffered_points > 0)
-            ? 2
-            : 3;
-
     out.sort((a, b) =>
       sort === 'status'
-        ? severity(a.probes) - severity(b.probes) || a.site.name.localeCompare(b.site.name, lang)
+        ? siteSeverity(a.probes, $now) - siteSeverity(b.probes, $now) ||
+          a.site.name.localeCompare(b.site.name, lang)
         : a.site.name.localeCompare(b.site.name, lang),
     );
     return out;
   });
 
-  const totals = $derived.by(() => {
-    const t = { online: 0, stale: 0, offline: 0, buffered: 0 };
-    for (const p of $fleet.probes) {
-      t[p.status]++;
-      t.buffered += p.buffered_points || 0;
-    }
-    return t;
-  });
+  // ⚠️ `$now` et non `$fleet.loadedAt` : l'horloge partagée vieillit l'écran
+  // toutes les 15 s, et c'est elle qui fait glisser une sonde d'« en ligne »
+  // vers « silencieuse » entre deux chargements du parc. Sans elle, le bandeau
+  // resterait figé sur le verdict du dernier rafraîchissement.
+  const totals = $derived(fleetTotals($fleet.probes, $now));
 
   const bufferingCount = $derived($fleet.probes.filter((p) => p.buffered_points > 0).length);
   const hasFilter = $derived(search.trim() !== '' || statusFilter !== 'all');
@@ -135,7 +135,7 @@
     // Beaucoup de sites : seuls ceux qui demandent une action s'ouvrent, les
     // autres restent pliés — mais leur en-tête dit déjà comment ils vont.
     if (siteCount <= 3) return true;
-    return probes.some((p) => p.status !== 'online' || p.buffered_points > 0);
+    return needsAttention(probes, $now);
   }
 
   // ── Enrôlement : le « + » du site crée le code, sur place ────────────────
@@ -470,7 +470,7 @@
     sites={$fleet.sites.length}
     total={$fleet.probes.length}
     online={totals.online}
-    stale={totals.stale}
+    silent={totals.silent}
     offline={totals.offline}
     buffered={totals.buffered}
   />
@@ -508,13 +508,13 @@
     <button class="chip" class:on={statusFilter === 'all'} onclick={() => (statusFilter = 'all')}>
       {$_('fleet.filter_all')}
     </button>
-    {#each ['offline', 'stale', 'online'] as s (s)}
+    {#each LIVENESS_ORDER as s (s)}
       <button
         class="chip {s}"
         class:on={statusFilter === s}
-        onclick={() => (statusFilter = s as ProbeStatus)}
+        onclick={() => (statusFilter = s as LivenessState)}
       >
-        <StatusMark status={s as ProbeStatus} size={9} withLabel={false} />
+        <StatusMark status={s} size={9} withLabel={false} />
         {$_(`status.${s}`)}
       </button>
     {/each}
@@ -668,7 +668,10 @@
             onchange={() => togglePicked(p.probe_id)}
           />
           <span>{p.name}</span>
-          <span class="slastat">{$_(`status.${p.status}`)}</span>
+          <!-- Même verdict que la ligne du parc : voir « En ligne » ici sur
+               une sonde affichée « Silencieuse » deux clics plus tôt ferait
+               douter du rapport avant même de l'ouvrir. -->
+          <span class="slastat">{$_(`status.${livenessOf(p, $now)}`)}</span>
         </label>
       </li>
     {/each}
