@@ -73,6 +73,8 @@ pub mod keys {
     /// le parc finit par battre toutes les 5 s sans que personne sache
     /// pourquoi — ça marche, et la charge a été multipliée pour rien.
     pub const REALTIME_DURATION_MIN: &str = "realtime_duration_min";
+    pub const REALTIME_WINDOW_MIN: &str = "realtime_window_min";
+    pub const REALTIME_HEARTBEAT_SECS: &str = "realtime_heartbeat_secs";
 
     pub const ALL: &[&str] = &[
         INFLUX_URL,
@@ -91,6 +93,8 @@ pub mod keys {
         TLS_ENABLED,
         TRUSTED_PROXIES,
         REALTIME_DURATION_MIN,
+        REALTIME_WINDOW_MIN,
+        REALTIME_HEARTBEAT_SECS,
     ];
 }
 
@@ -112,6 +116,14 @@ pub const MIN_HEARTBEAT_INTERVAL_SECS: i64 = 5;
 pub const DEFAULT_INVENTORY_DAYS: i64 = 0;
 /// Une demi-heure : le temps de monter, brancher, vérifier et redescendre.
 pub const DEFAULT_REALTIME_DURATION_MIN: i64 = 30;
+/// Fenêtre affichée quand le mode temps réel est actif, en minutes.
+///
+/// ⚠️ Une heure écrase l'instant : à 1 ping par seconde, ce qui vient de se
+/// produire tient dans quelques pixels. L'historique, lui, est le travail du
+/// rapport SLA — pas de l'écran qu'on regarde en intervenant.
+pub const DEFAULT_REALTIME_WINDOW_MIN: i64 = 10;
+/// Cadence du battement en mode temps réel, en secondes.
+pub const DEFAULT_REALTIME_HEARTBEAT_SECS: i64 = 5;
 
 /// Une rétention passe-t-elle de `current` à `new` en effaçant quelque chose ?
 /// `0` vaut « illimitée » : y aller n'efface rien, en partir efface tout ce
@@ -271,6 +283,31 @@ impl Settings {
         .unwrap_or(DEFAULT_REALTIME_DURATION_MIN)
     }
 
+    /// Fenêtre affichée quand le mode temps réel est actif, en minutes.
+    pub fn realtime_window_min(&self) -> i64 {
+        self.get_or(
+            keys::REALTIME_WINDOW_MIN,
+            &DEFAULT_REALTIME_WINDOW_MIN.to_string(),
+        )
+        .parse()
+        .unwrap_or(DEFAULT_REALTIME_WINDOW_MIN)
+    }
+
+    /// Cadence du battement en mode temps réel, en secondes.
+    ///
+    /// ⚠️ Plancher à `MIN_HEARTBEAT_INTERVAL_SECS` : la sonde applique
+    /// `max(5)` de son côté. Accepter moins afficherait un réglage qu'elle
+    /// n'honore pas — une valeur plausible et fausse de plus.
+    pub fn realtime_heartbeat_secs(&self) -> i64 {
+        self.get_or(
+            keys::REALTIME_HEARTBEAT_SECS,
+            &DEFAULT_REALTIME_HEARTBEAT_SECS.to_string(),
+        )
+        .parse()
+        .unwrap_or(DEFAULT_REALTIME_HEARTBEAT_SECS)
+        .max(MIN_HEARTBEAT_INTERVAL_SECS)
+    }
+
     /// Tous les réglages, valeurs effectives (défaut compris). Aucun secret
     /// n'y figure : la table `settings` n'en contient aucun, par construction.
     ///
@@ -298,6 +335,8 @@ impl Settings {
             keys::TLS_ENABLED: self.tls_enabled(),
             keys::TRUSTED_PROXIES: self.stored_trusted_proxies(),
             keys::REALTIME_DURATION_MIN: self.realtime_duration_min(),
+            keys::REALTIME_WINDOW_MIN: self.realtime_window_min(),
+            keys::REALTIME_HEARTBEAT_SECS: self.realtime_heartbeat_secs(),
         })
     }
 
@@ -390,12 +429,27 @@ impl Settings {
             }
             keys::NOTIFY_DELAY_SECS
             | keys::BACKUP_INTERVAL_HOURS
-            | keys::REALTIME_DURATION_MIN => {
+            | keys::REALTIME_DURATION_MIN
+            | keys::REALTIME_WINDOW_MIN => {
                 let parsed: i64 = value
                     .parse()
                     .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
                 if parsed <= 0 {
                     return Err(DbError::Conflict(format!("{key} doit être supérieur à 0")));
+                }
+            }
+            keys::REALTIME_HEARTBEAT_SECS => {
+                let parsed: i64 = value
+                    .parse()
+                    .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
+                // ⚠️ Même plancher que la cadence normale, et pour la même
+                // raison : la sonde applique `max(5)`. En dessous, l'écran
+                // annoncerait une cadence que la sonde n'applique pas.
+                if parsed < MIN_HEARTBEAT_INTERVAL_SECS {
+                    return Err(DbError::Conflict(format!(
+                        "{key} ne peut pas descendre sous {MIN_HEARTBEAT_INTERVAL_SECS} s : \
+                         c'est le plancher appliqué par la sonde."
+                    )));
                 }
             }
             keys::HEARTBEAT_INTERVAL_SECS => {

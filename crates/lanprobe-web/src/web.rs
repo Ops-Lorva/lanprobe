@@ -2791,7 +2791,9 @@ async fn heartbeat(
     // La comparaison se fait ICI, à chaque battement : c'est ce qui rend
     // l'extinction automatique et increvable — pas de tâche de fond à rater.
     let heartbeat_interval_secs = match state.db.realtime_until(&id) {
-        Ok(Some(until)) if until > crate::db::now() => crate::db::REALTIME_HEARTBEAT_SECS,
+        // La cadence du mode temps réel est désormais réglable ; la
+        // constante ne sert plus que de défaut, dans `Settings`.
+        Ok(Some(until)) if until > crate::db::now() => state.settings.realtime_heartbeat_secs(),
         _ => state.settings.heartbeat_interval_secs(),
     };
 
