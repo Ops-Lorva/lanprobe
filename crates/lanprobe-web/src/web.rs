@@ -3305,6 +3305,17 @@ async fn probe_public_ips(
     Path(id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
+    // ⚠️ 404 et non un tableau vide. `{"intervals": []}` AFFIRME que la sonde
+    // existe et n'a jamais changé d'adresse : sur un identifiant mal saisi,
+    // c'est une réponse plausible et fausse, et elle se lit exactement à
+    // l'envers de la vérité. La garde de portée ne couvre pas ce cas — elle
+    // court-circuite pour un compte `Scope::All`, donc un admin arrivait ici.
+    //
+    // ⚠️ Même code et même message que la garde de portée : une sonde qui
+    // existe hors portée doit rester indiscernable d'une sonde inexistante.
+    if state.db.get_probe(&id).is_err() {
+        return fail(StatusCode::NOT_FOUND, "sonde inconnue");
+    }
     // ⚠️ La fenêtre est VALIDÉE ici comme sur `/metrics`, `/sla`, `/sla.csv` et
     // `/uptime`. Cette route ne lisait que les bornes en secondes, et
     // `range=nawak` y retombait EN SILENCE sur 24 h : elle rendait un tableau
@@ -7373,6 +7384,92 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["intervals"][0]["public_ip"], "88.120.0.1", "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_probe_gets_a_404_not_an_empty_address_history() {
+        // 🔴 `{"intervals": []}` AFFIRME que la sonde existe et n'a jamais
+        // changé d'adresse. Sur un identifiant mal saisi, c'est une réponse
+        // plausible et fausse — la faute que ce dépôt refuse partout ailleurs,
+        // et la conclusion exactement inverse de la vérité.
+        //
+        // ⚠️ La garde de portée ne couvre PAS ce cas : elle court-circuite pour
+        // un compte `Scope::All`, donc un admin atteint le handler.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", "/api/probes/sonde-qui-nexiste-pas/public-ips?range=24h"),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "sonde inconnue", "{body}");
+        assert!(
+            body.get("intervals").is_none(),
+            "une sonde inconnue ne rend aucun tableau : {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_never_changed_address_still_gets_an_empty_table() {
+        // ⚠️ L'autre moitié du correctif, sans quoi il se perdrait : une sonde
+        // qui EXISTE et n'a pas d'historique rend 200 avec un tableau vide.
+        // L'absence d'intervalle n'est pas une erreur — une fenêtre antérieure
+        // à la mise en place de l'historique en est le cas courant.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["intervals"].as_array().map(|a| a.len()),
+            Some(0),
+            "une sonde sans historique rend un tableau vide : {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_address_history_hides_an_out_of_scope_probe_behind_the_same_404() {
+        // 🔴 Le piège du correctif ci-dessus. Une sonde qui existe mais qu'on
+        // n'a pas le droit de voir doit rester INDISCERNABLE d'une sonde
+        // inexistante — même code ET même message. Les distinguer révélerait
+        // l'existence du parc d'un autre client, ce que la portée protège.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let autre = h.state.db.create_site("Martin").unwrap();
+        h.user("olivier", Role::Viewer).await;
+        h.state.db.set_user_sites("olivier", &[autre.site_id.clone()]).unwrap();
+        let restreint = h.login_as("olivier").await;
+
+        let (hors_portee, corps_hors_portee, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=24h")),
+                &restreint,
+            ))
+            .await;
+        let (inexistante, corps_inexistante, _) = h
+            .call(with_cookie(
+                empty_request("GET", "/api/probes/sonde-qui-nexiste-pas/public-ips?range=24h"),
+                &restreint,
+            ))
+            .await;
+
+        assert_eq!(hors_portee, StatusCode::NOT_FOUND, "{corps_hors_portee}");
+        assert_eq!(hors_portee, inexistante, "les deux refus doivent être le même");
+        assert_eq!(
+            corps_hors_portee, corps_inexistante,
+            "et dire exactement la même chose"
+        );
     }
 
     #[tokio::test]
