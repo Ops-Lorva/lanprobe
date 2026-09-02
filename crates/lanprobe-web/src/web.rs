@@ -3509,9 +3509,6 @@ fn samples_from_flux_csv(csv: &str, window: (i64, i64)) -> Vec<serde_json::Value
                 .map(|(ts, (alive, latency_ms))| {
                     json!({
                         "timestamp": ts,
-                        // Pas de relevé `alive` : on retombe sur la présence
-                        // d'une latence, faute de mieux, plutôt que d'écarter
-                        // le point.
                         // ⚠️ `null` quand la sonde n'a pas écrit `alive` :
                         // INDÉTERMINÉ, ni disponible ni en panne. On le
                         // déduisait de la présence d'une latence, ce qui
