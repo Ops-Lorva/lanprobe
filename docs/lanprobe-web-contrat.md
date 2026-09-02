@@ -1733,28 +1733,98 @@ lever sa propre restriction en trois clics. Une limite qu'on peut retirer
 soi-même n'est pas une limite, et prétendre le contraire serait pire que ne rien
 promettre.
 
-### 🔴 Le garde de portée ne vérifie pas qu'une sonde EXISTE
+### Ce que la garde garantit — « inconnu » veut dire inconnu
 
-Il vérifie qu'elle est **visible**, et il **court-circuite** pour un compte qui
-voit tout : sur `Scope::All`, la requête traverse sans qu'aucune vérification ait
-eu lieu. Un handler qui compte sur lui pour écarter un identifiant inconnu n'est
-donc protégé que pour les comptes **restreints** — et pas pour l'administrateur,
-c'est-à-dire précisément l'utilisateur le plus susceptible de taper un identifiant
-à la main.
+C'est une **propriété du hub**, pas une consigne à répéter route par route :
 
-C'est constaté deux fois, et corrigé deux fois par une garde explicite **dans le
-handler** :
+> Toute route dont le `{id}` désigne une **sonde** ou un **site** rend
+> `404 { "error": "sonde inconnue" }` — ou `« site inconnu »` — aussi bien sur un
+> objet **inexistant** que sur un objet **hors portée**, **quel que soit le rôle
+> de l'appelant, administrateur compris**.
 
-| Route | Symptôme | Correctif |
+Les deux cas sont **indiscernables**, et c'est le but : distinguer « ça n'existe
+pas » de « ça existe mais pas pour vous » apprend déjà l'existence du parc d'un
+autre client. Une seule vérification répond donc aux deux questions — l'objet
+existe, et l'appelant a le droit de le voir — et rend la même réponse quand l'une
+des deux manque.
+
+Deux mécanismes symétriques la portent : un **intergiciel** pour les quinze routes
+dont le `{id}` du chemin est un `probe_id`, et une **vérification de site** appelée
+par les handlers qui reçoivent un site — `PATCH`/`DELETE`/`archive` d'un site, la
+création d'un code d'enrôlement, le libellé de réseau, l'abonnement d'alerte, et la
+**destination** d'un déplacement de sonde.
+
+⚠️ **Un handler gardé n'a donc plus à vérifier l'existence pour son propre
+compte** : il peut supposer que la sonde du chemin existe. Ce qu'il doit encore
+vérifier, c'est ce qui n'est **pas** dans l'URL — l'intergiciel ne lit que le `{id}`
+du chemin, et un site nommé dans un corps de requête lui est invisible. C'est
+exactement ce que faisait déjà `PATCH /api/probes/{id}` pour sa destination : sans
+ce contrôle, un opérateur restreint déplaçait une sonde chez un autre client, et la
+perdait de vue au passage.
+
+⚠️ Sur `PUT /api/notifications/subscriptions`, la cible n'est pas dans l'URL et
+peut être un site **ou** une sonde : le refus y prend la forme
+`404 { "error": "cible inconnue" }`. Même code, même indiscernabilité, message
+adapté à ce qu'on ne dit pas.
+
+⚠️ **Effet de bord à connaître : sur un objet inconnu, un corps invalide rend
+`404` et non `400`.** La garde est une couche, elle parle **avant** que le corps
+de la requête soit lu. C'est le bon ordre — « cette sonde n'existe pas » est la
+plus vraie des deux réponses, et corriger son JSON n'aurait rien changé.
+
+### ⚠️ L'exception assumée : les routes à jeton de sonde rendent `401`
+
+`POST /api/probes/{id}/write`, `/heartbeat`, `/scans` et `/config` ne sont **pas**
+derrière cette garde et ne doivent pas y passer. Une sonde inconnue, une sonde
+révoquée et un mauvais jeton y rendent tous les trois le **même**
+`401 { "error": "jeton de sonde invalide" }`.
+
+**Ce n'est pas une incohérence, c'est la même règle appliquée à un autre
+interlocuteur.** Ici l'appelant n'a pas de session : il présente un jeton. Lui
+répondre `404` sur une sonde inexistante lui apprendrait, par différence, **quelles
+sondes existent** — avec un jeton quelconque, on énumère le parc. Le `401`
+indiscernable est ce qui l'en empêche. Ne pas « harmoniser » ces quatre routes sur
+le `404` des autres.
+
+### 🔴 La règle de test : ces gardes se testent avec un compte `Scope::All`
+
+C'est le cœur du sujet, et ça n'a rien d'un détail d'implémentation.
+
+La garde court-circuitait pour les comptes qui voient tout : l'existence n'était
+alors vérifiée que par **effet de bord**, dans le `get_probe` que la vérification
+de portée fait pour les comptes **restreints**. Une route qui ne contrôlait rien
+elle-même **paraissait** gardée, l'était pour un opérateur, et ne l'était pas pour
+l'administrateur — l'utilisateur le plus susceptible de taper un identifiant à la
+main dans une URL.
+
+⚠️ **Un test écrit avec un compte restreint reste vert quoi qu'on casse sur ce
+chemin.** C'est un angle mort de la suite de tests, pas trois oublis de codage : il
+a laissé le **même** défaut revenir trois fois. Tout test de cette garantie doit
+donc être écrit avec un compte `Scope::All` — sinon il ne teste rien de ce qui a
+cassé, et il redevient rouge le jour où le court-circuit revient.
+
+Même leçon côté site : la vérification de portée d'un site tenait, elle aussi, par
+effet de bord — un `UPDATE` qui ne touche aucune ligne finit par se voir. ⚠️ Elle a
+donc lâché **exactement là où l'effet de bord n'avait pas lieu** :
+`notify_subscriptions.scope_id` ne porte **aucune clé étrangère**, et un
+administrateur écrivait en `200` un abonnement d'alerte sur un site inexistant, qui
+s'affichait ensuite comme un réglage actif sur un parc imaginaire. Une garantie qui
+tient par effet de bord n'est pas une garantie : c'est une coïncidence qui dure.
+
+#### Historique — trois occurrences du même défaut
+
+| Route | Réponse plausible et fausse | Corrigée par |
 |---|---|---|
 | `POST /api/probes/{id}/monitors/{remove,revive}` | `500 FOREIGN KEY constraint failed` | `f8629b6` |
 | `GET /api/probes/{id}/public-ips` | `200 { "intervals": [] }` | `c89ddf2` |
+| `GET /api/probes/{id}/commands` | `200 { "commands": [] }` | `9f95a12` |
+| `PUT /api/notifications/subscriptions` | `200`, abonnement écrit sur un site inexistant | `9f95a12` |
 
-⚠️ **Une route peut donc paraître gardée sans l'être** pour le cas de la sonde
-inconnue. Le garde et la vérification d'existence répondent à deux questions
-différentes ; seule la seconde dit qu'une sonde existe, et elle appartient au
-handler. Les deux doivent rendre le **même** `404 { "error": "sonde inconnue" }`,
-sans quoi la différence entre les deux réponses trahit ce que la portée cache.
+Les trois premières ont d'abord été corrigées **route par route**, et le défaut est
+revenu à chaque fois ailleurs. `9f95a12` l'a repris **au niveau de la garde** : la
+quatrième occurrence serait arrivée la semaine suivante. Le coût est d'un
+`get_probe` par requête, que quatorze des quinze routes gardées faisaient déjà pour
+leur propre compte.
 
 ## 18. Ce qu'un rôle ne peut pas faire ne s'affiche pas
 
