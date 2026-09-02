@@ -21,7 +21,13 @@
 
 export interface Sample {
   timestamp: number;
-  alive: boolean;
+  /**
+   * `null` = **indéterminé** : la sonde n'a pas écrit de verdict.
+   *
+   * ⚠️ Ni disponible, ni en panne. Le hub le déduisait de la présence d'une
+   * latence — un silence transformé en fait.
+   */
+  alive: boolean | null;
   latency_ms?: number | null;
   /** Présent pour l'accès internet : `online` / `limited` / `offline`. */
   state?: string;
@@ -102,7 +108,10 @@ export function outages(samples: Sample[]): Outage[] {
   const out: Outage[] = [];
   let current: Outage | null = null;
   for (const s of samples) {
-    if (!s.alive) {
+    // ⚠️ `=== false`, PAS `!s.alive` : la négation est vraie pour `null`, et
+    // chaque mesure indéterminée aurait ouvert une coupure. Le faux 0 % serait
+    // revenu par la porte de derrière, sous forme de pannes inventées.
+    if (s.alive === false) {
       if (current) current.samples_lost += 1;
       else current = { start: s.timestamp, end: null, samples_lost: 1 };
     } else if (current) {
@@ -116,13 +125,23 @@ export function outages(samples: Sample[]): Outage[] {
 }
 
 export interface Stats {
-  uptime_pct: number;
+  /**
+   * 🔴 `null` = aucun relevé DÉTERMINÉ sur la période : on ne sait pas.
+   *
+   * ⚠️ Le type interdit d'imprimer un pourcentage qu'on n'a pas. `0` affirmait
+   * une panne totale, dans un classeur remis au client — pire que le faux
+   * 100 % qu'on corrigeait.
+   */
+  uptime_pct: number | null;
   avg: number | null;
   min: number | null;
   max: number | null;
   p95: number | null;
+  /** Relevés DÉTERMINÉS — le dénominateur de `uptime_pct`. */
   total: number;
   failed: number;
+  /** Relevés sans verdict. Comptés et affichés, jamais tus. */
+  undetermined: number;
 }
 
 /**
@@ -146,10 +165,10 @@ export const PING_TIMEOUT_MS = 1000;
  * 100 % sur un hôte mort.
  */
 export function stats(samples: Sample[]): Stats {
-  if (samples.length === 0) {
-    return { uptime_pct: 0, avg: null, min: null, max: null, p95: null, total: 0, failed: 0 };
-  }
-  const alive = samples.filter((s) => s.alive);
+  // ⚠️ Ce qui n'a pas été mesuré SORT du dénominateur : ni disponible, ni en
+  // panne. Une fenêtre sans le moindre verdict n'a pas de pourcentage.
+  const determines = samples.filter((s) => s.alive != null);
+  const alive = determines.filter((s) => s.alive);
   const lat = samples
     .map((s) => s.latency_ms)
     .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
@@ -160,13 +179,14 @@ export function stats(samples: Sample[]): Stats {
     .sort((a, b) => a - b);
   const p95 = lat.length ? lat[Math.min(lat.length - 1, Math.floor(lat.length * 0.95))] : null;
   return {
-    uptime_pct: (alive.length / samples.length) * 100,
+    uptime_pct: determines.length ? (alive.length / determines.length) * 100 : null,
     avg: lat.length ? lat.reduce((a, b) => a + b, 0) / lat.length : null,
     min: lat.length ? lat[0] : null,
     max: lat.length ? lat[lat.length - 1] : null,
     p95,
-    total: samples.length,
-    failed: samples.length - alive.length,
+    total: determines.length,
+    failed: determines.length - alive.length,
+    undetermined: samples.length - determines.length,
   };
 }
 
@@ -461,7 +481,11 @@ export async function buildSlaWorkbook(
     sum.addRow([
       r.probe,
       r.label,
-      +s.uptime_pct.toFixed(2),
+      // ⚠️ Le mot, pas une cellule vide (qui se lit comme un oubli de l'outil)
+      // ni `0` (qui se lit comme une panne). ⚠️ Et une CHAÎNE, pas un nombre :
+      // une moyenne de colonne dans le tableur ne doit pas l'agréger comme un
+      // zéro — c'est exactement là que le faux 0 % reviendrait.
+      s.uptime_pct != null ? +s.uptime_pct.toFixed(2) : t('sla.undetermined'),
       s.avg != null ? +s.avg.toFixed(1) : '—',
       s.min ?? '—',
       s.max ?? '—',
@@ -490,9 +514,16 @@ export async function buildSlaWorkbook(
     header(ws, r.probe);
 
     const s = stats(r.samples);
-    ws.addRow([t('sla.col_uptime'), +s.uptime_pct.toFixed(2) + ' %']);
+    ws.addRow([
+      t('sla.col_uptime'),
+      s.uptime_pct != null ? +s.uptime_pct.toFixed(2) + ' %' : t('sla.undetermined'),
+    ]);
     ws.addRow([t('sla.col_samples'), s.total]);
     ws.addRow([t('sla.col_failed'), s.failed]);
+    // Le compte des indéterminés voyage avec le chiffre : « 100 % sur trois
+    // relevés » et « 100 % sur trois relevés et neuf mille indéterminés » ne
+    // se lisent pas pareil.
+    ws.addRow([t('sla.col_undetermined'), s.undetermined]);
     ws.addRow([]);
 
     ws.addRow([t('sla.sheet_outages')]);
@@ -656,7 +687,7 @@ export async function buildSlaWorkbook(
         r.from ? dt(r.from, locale) : '',
         r.to ? dt(r.to, locale) : '',
         r.samples,
-        `${r.uptime_pct.toFixed(2)} %`,
+        r.uptime_pct != null ? `${r.uptime_pct.toFixed(2)} %` : t('sla.undetermined'),
       ]);
     }
     autoFit(ws);
@@ -683,7 +714,8 @@ export interface IpSlaRow {
   from: number | null;
   to: number | null;
   samples: number;
-  uptime_pct: number;
+  /** `null` = aucun relevé déterminé sur cette tranche. */
+  uptime_pct: number | null;
 }
 
 /**

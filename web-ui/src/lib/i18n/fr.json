@@ -881,6 +881,8 @@
     "queued_help": "Le hub ne joint jamais la sonde : la commande part dans la réponse à son prochain battement de cœur, d'ici {n} s."
   },
   "sla": {
+    "undetermined": "indéterminé",
+    "col_undetermined": "Relevés indéterminés",
     "col_avg": "Latence moyenne (ms)",
     "col_down": "Descendant (Mbit/s)",
     "col_duration": "Durée",

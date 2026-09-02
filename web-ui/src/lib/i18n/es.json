@@ -881,6 +881,8 @@
     "queued_help": "El hub nunca contacta con la sonda: el comando viaja en la respuesta a su próximo latido, dentro de {n} s."
   },
   "sla": {
+    "undetermined": "indeterminado",
+    "col_undetermined": "Mediciones indeterminadas",
     "col_avg": "Latencia media (ms)",
     "col_down": "Bajada (Mbit/s)",
     "col_duration": "Duración",

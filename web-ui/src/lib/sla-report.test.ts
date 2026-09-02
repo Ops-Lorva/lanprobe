@@ -242,3 +242,55 @@ describe('stats — latences impossibles', () => {
     expect(s.max).toBe(1000);
   });
 });
+
+describe('indéterminé — arbitrage du 02/09', () => {
+  it('ne compte pas un relevé sans verdict dans le dénominateur', () => {
+    // ⚠️ Une mesure sans `alive` n'est PAS une indisponibilité : la sonde n'a
+    // rien dit. La compter comme un échec donnerait 50 % là où la seule mesure
+    // existante dit 100 %.
+    const s = stats([
+      { timestamp: 10, alive: true, latency_ms: 10 },
+      { timestamp: 20, alive: null, latency_ms: null },
+    ]);
+    expect(s.uptime_pct).toBe(100);
+    expect(s.total).toBe(1);
+    expect(s.undetermined).toBe(1);
+  });
+
+  it('ne rend AUCUN pourcentage quand rien n’a été mesuré', () => {
+    // 🔴 Le cœur de l'arbitrage : `0` affirmait une panne totale, dans un
+    // classeur remis au client. `null` ne s'imprime pas par accident.
+    expect(stats([]).uptime_pct).toBeNull();
+    expect(
+      stats([{ timestamp: 10, alive: null, latency_ms: 12 }]).uptime_pct,
+    ).toBeNull();
+  });
+
+  it('garde la latence d’un relevé indéterminé : c’est une mesure vraie', () => {
+    const s = stats([{ timestamp: 10, alive: null, latency_ms: 12 }]);
+    expect(s.min).toBe(12);
+    expect(s.uptime_pct).toBeNull();
+  });
+
+  it('n’ouvre pas une coupure sur un relevé indéterminé', () => {
+    // ⚠️ `!s.alive` est vrai pour `null` : sans garde explicite, chaque mesure
+    // indéterminée serait comptée comme une panne — le faux 0 % revenu par la
+    // porte de derrière, cette fois sous forme de coupures inventées.
+    const coupures = outages([
+      { timestamp: 10, alive: true, latency_ms: 10 },
+      { timestamp: 20, alive: null, latency_ms: null },
+      { timestamp: 30, alive: true, latency_ms: 11 },
+    ]);
+    expect(coupures).toEqual([]);
+  });
+
+  it('détecte toujours une vraie coupure', () => {
+    const coupures = outages([
+      { timestamp: 10, alive: true, latency_ms: 10 },
+      { timestamp: 20, alive: false, latency_ms: null },
+      { timestamp: 30, alive: true, latency_ms: 11 },
+    ]);
+    expect(coupures).toHaveLength(1);
+    expect(coupures[0].samples_lost).toBe(1);
+  });
+});

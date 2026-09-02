@@ -1531,7 +1531,14 @@
                   <td class="num lp-mono">
                     {r.from != null && r.to != null ? humanDuration(r.to - r.from) : '—'}
                   </td>
-                  <td class="num lp-mono">{r.uptime_pct.toFixed(1)} %</td>
+                  <!-- ⚠️ Le mot, pas un tiret ni un « 0,0 % » : cette
+                       tranche n'a aucun relevé déterminé, et « 0 % » se
+                       lirait comme une coupure totale sur la période. -->
+                  <td class="num lp-mono">
+                    {r.uptime_pct != null
+                      ? `${r.uptime_pct.toFixed(1)} %`
+                      : $_('sla.undetermined')}
+                  </td>
                 </tr>
               {/each}
             </tbody>
