@@ -278,7 +278,7 @@ npm test                 # svelte-check + Vitest, hub interface
 cargo test --workspace   # Rust
 ```
 
-⚠️ **There is no test CI.** The only workflow is triggered by a tag and merely builds. `cargo test` and `npm test` are **manual** steps, to run before deploying. What each suite covers, and why the interface tests exist at all, is written up in § 20 of the [contract](docs/lanprobe-web-contrat.md).
+⚠️ **There is no test CI.** The only workflow is triggered by a tag and merely builds. `cargo test` and `npm test` are **manual** steps, to run before deploying. What each suite covers, and why the interface tests exist at all, is written up in § 21 of the [contract](docs/lanprobe-web-contrat.md).
 
 ---
 

@@ -406,9 +406,37 @@ intervalles. Deux sources séparées finiraient par diverger d'une minute et
 donneraient deux disponibilités différentes pour la même période.
 
 Le volet `internet` est le seul qui **dégrade** : si sa requête échoue, le rapport
-part sans lui plutôt que d'échouer en entier — l'absence se voit à l'écran. Un
-relevé de cible sans champ `alive` retombe sur « une latence existe », faute de
-mieux, plutôt que d'être écarté.
+part sans lui plutôt que d'échouer en entier — l'absence se voit à l'écran.
+
+#### « Disponible » : une seule définition, pour `/sla`, `/sla.csv` et le taux par cible
+
+C'est **le** mot qu'il ne faut pas laisser diverger : trois calculs, un seul sens.
+Le contrat est l'endroit qui doit l'empêcher, parce qu'une seconde définition ne
+se voit jamais — les deux rendent un pourcentage crédible.
+
+**État dans `HEAD`** : un relevé est compté disponible quand son champ `alive` est
+vrai **et, à défaut de `alive`, dès qu'une latence existe** à cet instant. Ce repli
+est appliqué à l'identique des deux côtés — sur les échantillons rendus par `/sla`
+comme sur les taux agrégés de `/sla.csv` — de sorte qu'ils ne se contredisent pas
+entre eux.
+
+⚠️ **Ce repli est un optimisme, et il est en sursis.** Une mesure sans `alive`
+n'est pas « disponible » : elle est **indéterminée**. La compter comme disponible
+parce qu'une latence traîne affiche 100 % sur des mesures anciennes là où la vérité
+est « on ne sait pas » — et un 100 % a l'air normal, donc personne ne le remet en
+cause. C'est le mode de panne que ce projet refuse partout ailleurs, appliqué au
+chiffre qu'on remet au client.
+
+**Décidé le 02/09/2026, pas encore dans le code** : la règle devient « pas de
+`alive` → indéterminé », pour les trois calculs à la fois. Tant que ce paragraphe
+n'aura pas changé, c'est le repli ci-dessus qui tourne.
+
+⚠️ Ne pas se fier au commentaire qui surmonte `sla_from_flux_csv` : il affirme déjà
+la règle stricte (« jamais sur la présence d'une latence ») que le code n'applique
+pas encore. En cas de doute, c'est le code qui dit ce que fait le hub.
+
+Une cible qui n'a **aucun** relevé sur la fenêtre n'apparaît pas dans le rapport :
+elle n'y figure pas à 0 %.
 
 ### `GET /api/probes/{id}/public-ips` — l'historique des adresses, même fenêtre
 
@@ -447,9 +475,10 @@ sonde,site,fenetre,cible,disponibilite_pct,latence_moy_ms,latence_min_ms,
 latence_max_ms,latence_p95_ms,releves,echecs
 ```
 
-⚠️ **Ici la disponibilité se calcule sur le champ `alive`, jamais sur la présence
-d'une latence** : un hôte qui ne répond pas n'écrit pas de latence, et compter les
-latences donnerait un uptime de 100 % sur une machine morte.
+`disponibilite_pct` suit **la même** définition de « disponible » que `/sla` — voir
+ci-dessus, y compris le repli en sursis. Les colonnes de latence, elles, ne
+comptent que les relevés qui portent une latence : un hôte muet n'en écrit pas, et
+il ne tire donc ni la moyenne ni le p95 vers le bas.
 
 ⚠️ **Cette route ne lit que `range`** — `start` et `stop` y sont ignorés, sans rien
 dire. Demander « du 1er au 31 » rend les dernières 24 h. La colonne `fenetre`
@@ -1480,46 +1509,6 @@ Confirmé par le propriétaire : on cache les boutons **et** on vérifie côté
 serveur. Le masquage évite la tentation ; la vérification évite l'accès. Sans la
 seconde, il suffit d'appeler la route à la main.
 
-## 20. Ce qui est testé, et ce qui ne l'est pas
-
-⚠️ **Il n'y a pas de CI de test.** `.github/workflows/release.yml` est déclenché
-par un tag et construit des binaires ; rien ne s'exécute sur un push. `cargo
-test` comme `npm test` sont donc des gestes **manuels**, à faire avant de
-déployer.
-
-### Rust — `cargo test`
-
-Couvre le hub et la sonde : routes, rôles, sauvegarde/restauration, conversion
-Flux, construction du line protocol. C'est la partie solide.
-
-### Interface — `npm test`
-
-`svelte-check` puis Vitest (`web-ui/vitest.config.ts`), sur les fonctions pures
-de `web-ui/src/lib` : `metrics.ts`, `charts.ts`, `format.ts`.
-
-Ces tests existent pour une raison datée. Le 29/08/2026, **trois défauts
-d'affichage** ont atteint la production alors que le backend rendait la bonne
-réponse et que tous les tests Rust passaient :
-
-1. Les en-têtes de colonnes de la vue de parc avaient disparu — en déplaçant
-   les règles `.cols`, leurs enveloppes `@media` avaient été perdues, et
-   l'en-tête affichait cinq colonnes quand les lignes en avaient sept.
-2. Les trois graphiques d'une sonde restaient vides malgré des milliers de
-   points en base : le hub décore le libellé d'une courbe de ses étiquettes
-   (`latency_ms · 10.0.30.12`) et l'interface cherchait `latency_ms`.
-3. Le second moteur de speedtest n'était jamais tracé — un `.find` là où il
-   fallait un `.filter`.
-
-Aucun n'était visible côté Rust. **Ce qui casse à cette frontière, c'est la
-lecture de la réponse, pas sa production** — d'où des tests sur des fonctions
-pures plutôt que sur des composants montés : un test de fonction pure ne dérive
-pas avec le rendu, et ces trois défauts y étaient tous attrapables.
-
-Le CSS, lui, reste hors de portée d'un test unitaire. Le défaut n°1 se serait
-vu à l'œil, pas dans une assertion : une capture avant/après reste nécessaire
-pour toute modification de mise en page.
-
-
 ## 20. Surveillances partagées entre l'app et le hub ✅ implémenté
 
 Avant : **la sonde était seule maîtresse de sa liste**. Elle l'annonçait à chaque
@@ -1654,10 +1643,13 @@ le hub ne joint jamais la sonde. L'interface doit le formuler ainsi.
 existe toujours et la route de commandes le sert encore. C'est le bouton qui a
 changé de chemin, pour le seul qui marche que la sonde soit là ou non.
 
-⚠️ Une sonde **inconnue** n'est pas traitée à part : la clé étrangère refuse
-l'écriture et la route rend `500`, là où on attendrait `404`. Sans conséquence en
-pratique — l'interface ne propose que des sondes existantes — mais c'est écrit ici
-pour que personne ne construise sur un `404` qui n'arrive pas.
+⚠️ Une sonde **inconnue** rend `404 { "error": "sonde inconnue" }` — **la même
+réponse, au mot près, qu'une sonde hors portée**. C'est voulu : une sonde d'un
+autre client doit rester indiscernable d'une sonde qui n'existe pas. Avant
+`f8629b6`, l'absence de garde laissait la clé étrangère refuser l'écriture et la
+route rendait `500 { "error": "FOREIGN KEY constraint failed" }` — un code qui
+**affirme que le hub est en panne** quand la vérité est « cette sonde n'existe
+pas », et qui livrait au passage le nom d'une contrainte SQL au navigateur.
 
 ### ⚠️ Deux champs, deux faits — ce n'est pas une redondance
 
@@ -1677,3 +1669,42 @@ parc entier — le défaut du chantier, transposé dans l'interface.
 
 **Compatibilité** : sans `monitor_changes`, le hub garde le comportement d'avant. Une sonde
 non mise à jour continue de fonctionner.
+
+## 21. Ce qui est testé, et ce qui ne l'est pas
+
+⚠️ **Il n'y a pas de CI de test.** `.github/workflows/release.yml` est déclenché
+par un tag et construit des binaires ; rien ne s'exécute sur un push. `cargo
+test` comme `npm test` sont donc des gestes **manuels**, à faire avant de
+déployer.
+
+### Rust — `cargo test`
+
+Couvre le hub et la sonde : routes, rôles, sauvegarde/restauration, conversion
+Flux, construction du line protocol. C'est la partie solide.
+
+### Interface — `npm test`
+
+`svelte-check` puis Vitest (`web-ui/vitest.config.ts`), sur les fonctions pures
+de `web-ui/src/lib` : `metrics.ts`, `charts.ts`, `format.ts`.
+
+Ces tests existent pour une raison datée. Le 29/08/2026, **trois défauts
+d'affichage** ont atteint la production alors que le backend rendait la bonne
+réponse et que tous les tests Rust passaient :
+
+1. Les en-têtes de colonnes de la vue de parc avaient disparu — en déplaçant
+   les règles `.cols`, leurs enveloppes `@media` avaient été perdues, et
+   l'en-tête affichait cinq colonnes quand les lignes en avaient sept.
+2. Les trois graphiques d'une sonde restaient vides malgré des milliers de
+   points en base : le hub décore le libellé d'une courbe de ses étiquettes
+   (`latency_ms · 10.0.30.12`) et l'interface cherchait `latency_ms`.
+3. Le second moteur de speedtest n'était jamais tracé — un `.find` là où il
+   fallait un `.filter`.
+
+Aucun n'était visible côté Rust. **Ce qui casse à cette frontière, c'est la
+lecture de la réponse, pas sa production** — d'où des tests sur des fonctions
+pures plutôt que sur des composants montés : un test de fonction pure ne dérive
+pas avec le rendu, et ces trois défauts y étaient tous attrapables.
+
+Le CSS, lui, reste hors de portée d'un test unitaire. Le défaut n°1 se serait
+vu à l'œil, pas dans une assertion : une capture avant/après reste nécessaire
+pour toute modification de mise en page.

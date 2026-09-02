@@ -279,7 +279,7 @@ npm test                 # svelte-check + Vitest, interface du hub
 cargo test --workspace   # Rust
 ```
 
-⚠️ **Il n'y a pas de CI de test.** Le seul workflow est déclenché par un tag et ne fait que construire. `cargo test` et `npm test` sont des gestes **manuels**, à faire avant de déployer. Ce que couvre chaque suite, et pourquoi les tests de l'interface existent, est décrit au § 20 du [contrat](docs/lanprobe-web-contrat.md).
+⚠️ **Il n'y a pas de CI de test.** Le seul workflow est déclenché par un tag et ne fait que construire. `cargo test` et `npm test` sont des gestes **manuels**, à faire avant de déployer. Ce que couvre chaque suite, et pourquoi les tests de l'interface existent, est décrit au § 21 du [contrat](docs/lanprobe-web-contrat.md).
 
 ---
 
