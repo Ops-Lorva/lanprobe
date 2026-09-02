@@ -169,6 +169,26 @@ async fn cmd_get_interface_details(name: String) -> InterfaceDetails {
 #[tauri::command]
 fn cmd_set_selected_interface(name: Option<String>, state: tauri::State<'_, SharedState>) -> Result<(), String> {
     *state.selected_interface.lock().unwrap_or_else(|p| p.into_inner()) = name.clone();
+    // ⚠️ Persisté côté BACKEND, et pas seulement dans le navigateur.
+    //
+    // Le choix d'interface n'était restauré que par la webview, au montage du
+    // Dashboard. Or le battement de cœur démarre AVANT que la webview soit
+    // prête : pendant cette fenêtre, `selected_interface` valait `None` et le
+    // battement sortait par la route par défaut — c'est-à-dire par un lien que
+    // l'utilisateur n'a pas choisi. Le hub enregistrait alors « sonde vue à
+    // l'instant » sur la foi d'un battement venu du mauvais réseau, puis plus
+    // rien. Techniquement vrai, et trompeur.
+    let mut data = state.config.get();
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert(
+            "selected_interface".into(),
+            match &name {
+                Some(n) => serde_json::Value::String(n.clone()),
+                None => serde_json::Value::Null,
+            },
+        );
+        let _ = state.config.put(data);
+    }
     // Diffuse aux clients (web + desktop) pour que leur Dashboard
     // reflète le changement en live — sinon le dropdown côté web reste
     // sur l'ancienne valeur jusqu'à rechargement.
@@ -850,6 +870,23 @@ pub fn run() {
         lanprobe_server::config::default_config_path(&config_dir),
     ));
     let shared: SharedState = Arc::new(AppState::new(config));
+    // ⚠️ AVANT tout démarrage de tâche : le battement, les mesures et le relevé
+    // d'IP publique se lient à cette interface. Attendre que la webview la
+    // restaure laisserait partir les premiers d'entre eux par la route par
+    // défaut, et une mesure sortie par la mauvaise interface est pire qu'une
+    // mesure absente — elle a l'air normale.
+    if let Some(name) = shared
+        .config
+        .get()
+        .get("selected_interface")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        *shared
+            .selected_interface
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(name);
+    }
     let shared_for_setup = shared.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
