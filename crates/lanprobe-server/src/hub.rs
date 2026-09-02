@@ -709,7 +709,15 @@ struct HeartbeatRequest<'a> {
     /// anciens points restaient dans la fenêtre — le parc affirmait une
     /// surveillance qui n'existait plus. Seule la sonde sait ce qui tourne à
     /// l'instant ; elle le dit.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// 🔴 **Émis même vide, et c'est tout l'intérêt.** Le hub distingue le
+    /// champ ABSENT — « je n'en sais rien », une sonde antérieure au champ,
+    /// on garde la liste connue — du tableau VIDE, « je ne surveille plus
+    /// rien », qui efface (`record_heartbeat`, `COALESCE(?11, monitors)`).
+    /// Avec `skip_serializing_if`, ce tableau vide était IMPOSSIBLE à émettre :
+    /// retirer sa dernière cible n'effaçait rien et le parc affichait des
+    /// surveillances mortes indéfiniment. Une absence redevenait une
+    /// suppression — le défaut même que le §20 supprime.
     monitors: Vec<MonitorState>,
     /// Gestes de surveillance non encore accusés, avec leur **ancienneté**.
     ///
@@ -1464,6 +1472,64 @@ fn http_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Battement minimal, tous champs facultatifs au repos.
+    fn heartbeat_sans_surveillance() -> HeartbeatRequest<'static> {
+        HeartbeatRequest {
+            version: "2.3.0",
+            platform: "linux",
+            buffered_points: 0,
+            last_write_ok: true,
+            influx_token_version: 1,
+            command_acks: Vec::new(),
+            public_ip: None,
+            interface: None,
+            local_ips: Vec::new(),
+            gateway: None,
+            internet_state: None,
+            monitors: Vec::new(),
+            monitor_changes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_probe_that_monitors_nothing_says_so_instead_of_staying_silent() {
+        // 🔴 Les deux côtés avaient été écrits sur des conventions opposées.
+        //
+        // Le hub (`web.rs`, `record_heartbeat` → `COALESCE(?11, monitors)`)
+        // distingue explicitement :
+        //   • champ ABSENT  → « je n'en sais rien », on garde la liste connue,
+        //     parce qu'une sonde antérieure au champ n'en envoie pas ;
+        //   • tableau VIDE  → « je ne surveille plus rien », on efface.
+        // Son commentaire le dit mot pour mot : « une sonde qui a cessé de
+        // surveiller doit pouvoir le dire ».
+        //
+        // ⚠️ Or `skip_serializing_if = "Vec::is_empty"` rendait ce tableau vide
+        // IMPOSSIBLE à émettre : la sonde omettait le champ. Retirer sa
+        // dernière cible n'effaçait donc jamais rien, et le parc continuait
+        // d'afficher des surveillances mortes indéfiniment — exactement le
+        // défaut que le §20 du contrat a été écrit pour supprimer, réintroduit
+        // par le seul cas de la liste vide.
+        let json = serde_json::to_value(heartbeat_sans_surveillance()).unwrap();
+
+        assert!(
+            json.get("monitors").is_some(),
+            "le champ doit être ÉMIS pour dire « rien » : {json}"
+        );
+        assert_eq!(json["monitors"], serde_json::json!([]), "{json}");
+    }
+
+    #[test]
+    fn an_empty_ack_list_stays_omitted_because_silence_costs_nothing_there() {
+        // ⚠️ La règle n'est pas « tout émettre ». `command_acks` et
+        // `monitor_changes` sont des ACTES, pas un état : rien à accuser veut
+        // dire rien à accuser, le hub n'en déduit aucun état et ne les
+        // COALESCE nulle part. Les émettre à vide à chaque battement, pour
+        // toutes les sondes du parc, n'apprendrait rien à personne.
+        let json = serde_json::to_value(heartbeat_sans_surveillance()).unwrap();
+        assert!(json.get("command_acks").is_none(), "{json}");
+        assert!(json.get("monitor_changes").is_none(), "{json}");
+    }
 
     #[test]
     fn a_half_written_config_is_not_an_enrolment() {
