@@ -441,7 +441,16 @@ impl Influx {
         let status = response.status();
         let text = response.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
-            return Err(format!("InfluxDB a répondu {status}"));
+            // ⚠️ Le CORPS, pas seulement le code. Influx explique toujours son
+            // refus (« invalid import path… », « cannot query an empty
+            // range ») et on jetait l'explication : l'opérateur — et le test
+            // en échec — n'avaient plus qu'un « 400 Bad Request » muet.
+            let detail = text.trim();
+            return Err(if detail.is_empty() {
+                format!("InfluxDB a répondu {status}")
+            } else {
+                format!("InfluxDB a répondu {status} : {detail}")
+            });
         }
         Ok(text)
     }
@@ -837,6 +846,153 @@ pub(crate) mod testing {
     /// la résolution de l'URL annoncée deviendrait un tirage au sort.
     pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // ── Validation Flux de la doublure ─────────────────────────────────────
+    //
+    // ⚠️ **Ce n'est PAS un moteur Flux, et ça ne doit jamais le devenir.** Une
+    // doublure qui simule tout devient un second logiciel à maintenir, qui
+    // finit par diverger d'Influx et produit de FAUX ÉCHECS — pires que les
+    // faux succès qu'on corrige, parce qu'ils font perdre confiance dans la
+    // suite entière. On ne refuse donc que ce qu'un vrai influxd 2.9.1 refuse
+    // de façon CERTAINE, constaté en le lui soumettant, et on laisse passer
+    // tout le reste.
+
+    /// Paquets Flux **constatés valides** sur influxd 2.9.1.
+    ///
+    /// ⚠️ Un import absent de cette liste est refusé, non parce qu'Influx le
+    /// refuserait forcément, mais parce que personne ne l'a vérifié — et c'est
+    /// exactement l'erreur qui a failli partir ce matin. Pour en ajouter un :
+    /// le soumettre à un vrai influxd, constater le 200, puis l'inscrire ici.
+    const KNOWN_IMPORTS: &[&str] = &[
+        "types",
+        "math",
+        "strings",
+        "date",
+        "experimental",
+        "array",
+        "influxdata/influxdb/schema",
+    ];
+
+    /// Fonctions acceptées comme `fn:` d'un `aggregateWindow`.
+    const KNOWN_AGGREGATES: &[&str] = &[
+        "mean", "max", "min", "sum", "count", "first", "last", "median", "mode", "spread",
+        "stddev", "quantile", "distinct", "integral", "increase", "skew",
+    ];
+
+    /// Durée Flux signée en secondes (`-24h` → −86 400). `None` si ce n'est pas
+    /// une durée simple — on s'abstient alors de juger.
+    fn duration_secs(token: &str) -> Option<i64> {
+        let (sign, rest) = match token.strip_prefix('-') {
+            Some(r) => (-1, r),
+            None => (1, token),
+        };
+        let split = rest.find(|c: char| !c.is_ascii_digit())?;
+        let (count, unit) = rest.split_at(split);
+        let mult = match unit {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3_600,
+            "d" => 86_400,
+            "w" => 604_800,
+            _ => return None,
+        };
+        Some(sign * count.parse::<i64>().ok()? * mult)
+    }
+
+    /// Instant d'une borne `range`, en secondes. `now` vaut 0 : une durée
+    /// relative est négative, un epoch absolu est très grand — les deux ne se
+    /// comparent donc jamais entre eux, et c'est voulu.
+    fn bound_secs(token: &str) -> Option<(bool, i64)> {
+        if let Ok(epoch) = token.parse::<i64>() {
+            return Some((true, epoch));
+        }
+        duration_secs(token).map(|d| (false, d))
+    }
+
+    /// Contenu des parenthèses de chaque appel `name(...)`.
+    fn calls<'a>(flux: &'a str, name: &str) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        let needle = format!("{name}(");
+        let mut from = 0;
+        while let Some(i) = flux[from..].find(&needle) {
+            let open = from + i + needle.len();
+            let mut depth = 1;
+            let mut end = open;
+            for (j, c) in flux[open..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + j;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.push(&flux[open..end]);
+            from = open;
+        }
+        out
+    }
+
+    /// Valeur d'un argument nommé, brute.
+    fn named_arg<'a>(args: &'a str, name: &str) -> Option<&'a str> {
+        let needle = format!("{name}:");
+        let start = args.find(&needle)? + needle.len();
+        let rest = &args[start..];
+        let end = rest.find([',', ')']).unwrap_or(rest.len());
+        Some(rest[..end].trim())
+    }
+
+    /// Ce qu'un vrai InfluxDB refuserait, ou `None` si la doublure laisse
+    /// passer. Le message NOMME la cause : un test qui échoue sans dire
+    /// pourquoi coûte plus cher qu'un test absent.
+    pub(crate) fn flux_refusal(flux: &str) -> Option<String> {
+        for line in flux.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("import ") {
+                let path = rest.trim().trim_matches('"');
+                if !KNOWN_IMPORTS.contains(&path) {
+                    return Some(format!(
+                        "invalid import path « {path} » — inconnu de la doublure. \
+                         Si ce paquet existe vraiment, constatez-le sur un influxd \
+                         réel puis ajoutez-le à KNOWN_IMPORTS."
+                    ));
+                }
+            }
+        }
+
+        for args in calls(flux, "aggregateWindow") {
+            if named_arg(args, "every").is_none() {
+                return Some("missing required argument every (aggregateWindow)".into());
+            }
+            if let Some(f) = named_arg(args, "fn") {
+                if !KNOWN_AGGREGATES.contains(&f) {
+                    return Some(format!("undefined identifier {f} (aggregateWindow fn:)"));
+                }
+            }
+        }
+
+        for args in calls(flux, "range") {
+            let start = named_arg(args, "start").and_then(bound_secs);
+            let stop = named_arg(args, "stop").and_then(bound_secs);
+            let empty = match (start, stop) {
+                // Même nature de borne : elles se comparent.
+                (Some((a_abs, a)), Some((b_abs, b))) if a_abs == b_abs => b <= a,
+                // `stop` absent vaut « maintenant » : une durée POSITIVE vise
+                // donc le futur, et la fenêtre est vide. C'est `?range=24h`.
+                (Some((false, a)), None) => a > 0,
+                // Bornes de natures différentes, ou illisibles : on s'abstient.
+                _ => false,
+            };
+            if empty {
+                return Some(format!("cannot query an empty range — range({args})"));
+            }
+        }
+        None
+    }
+
     /// Ce qu'un faux Influx a vu passer. Les tests assertent sur les requêtes
     /// réellement émises — pas sur un mock qui se contenterait de dire oui.
     #[derive(Default)]
@@ -892,7 +1048,7 @@ pub(crate) mod testing {
                     .to_string();
 
                 let mut guard = seen.lock().unwrap();
-                guard.calls.push((method.to_string(), path_and_query.clone(), body));
+                guard.calls.push((method.to_string(), path_and_query.clone(), body.clone()));
 
                 if guard.fail_next > 0 {
                     guard.fail_next -= 1;
@@ -950,12 +1106,25 @@ pub(crate) mod testing {
                     ("POST", "/api/v2/authorizations") => {
                         json(r#"{"id":"auth-1","token":"jeton-de-sonde-frappe"}"#)
                     }
-                    ("POST", "/api/v2/query") => (
-                        axum::http::StatusCode::OK,
-                        [(axum::http::header::CONTENT_TYPE, "text/csv")],
-                        "result,table,_time,_value\n,0,2026-01-01T00:00:00Z,42\n".to_string(),
-                    )
-                        .into_response(),
+                    // ⚠️ La doublure LIT le Flux avant de répondre. Elle
+                    // répondait 200 à n'importe quoi : aucun test du dépôt ne
+                    // pouvait donc attraper une requête malformée, et c'est
+                    // ainsi qu'un import inexistant a failli partir au vert.
+                    ("POST", "/api/v2/query") => match flux_refusal(&body) {
+                        Some(cause) => (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            serde_json::json!({ "code": "invalid", "message": cause })
+                                .to_string(),
+                        )
+                            .into_response(),
+                        None => (
+                            axum::http::StatusCode::OK,
+                            [(axum::http::header::CONTENT_TYPE, "text/csv")],
+                            "result,table,_time,_value\n,0,2026-01-01T00:00:00Z,42\n".to_string(),
+                        )
+                            .into_response(),
+                    },
                     _ => (axum::http::StatusCode::NOT_FOUND, "").into_response(),
                 }
             }
@@ -1390,6 +1559,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_double_really_refuses_over_http_not_just_in_its_unit_tests() {
+        // ⚠️ Les tests de `flux_refusal` valident le VERDICT ; celui-ci valide
+        // le CÂBLAGE. Sans lui, la fonction pourrait être parfaite et n'être
+        // appelée nulle part — la doublure continuerait de répondre 200 à
+        // tout, et rien ne le dirait.
+        let fake = FakeInflux::start(true, true).await;
+        let influx = influx_for(&fake.base_url);
+        influx.ensure_provisioned().await.unwrap();
+
+        // La requête exacte qui serait partie en production ce matin.
+        let err = influx
+            .query_flux("import \"experimental/types\"\nfrom(bucket:\"lanprobe\")")
+            .await
+            .expect_err("la doublure doit refuser l'import inconnu");
+        assert!(err.contains("400"), "{err}");
+        // ⚠️ Et la CAUSE doit remonter : le hub jetait le corps de la réponse
+        // d'Influx et ne rendait qu'un « 400 Bad Request » muet.
+        assert!(err.contains("experimental/types"), "la cause doit remonter : {err}");
+
+        // La même requête avec le paquet qui existe vraiment passe.
+        influx
+            .query_flux("import \"types\"\nfrom(bucket:\"lanprobe\")")
+            .await
+            .expect("`types` existe et doit passer");
+    }
+
+    #[tokio::test]
     async fn flux_queries_are_proxied_and_their_result_returned() {
         let fake = FakeInflux::start(true, true).await;
         let influx = influx_for(&fake.base_url);
@@ -1405,5 +1601,90 @@ mod tests {
             .expect("la requête Flux doit être relayée");
         assert!(path.contains("org=lanprobe"), "{path}");
         assert!(body.contains("from(bucket:"), "{body}");
+    }
+}
+
+#[cfg(test)]
+mod flux_refusal_tests {
+    use super::testing::flux_refusal;
+
+    /// ⚠️ Chacune de ces requêtes a été soumise à un **vrai influxd 2.9.1**,
+    /// la version que le conteneur embarque, et refusée en 400. Le message
+    /// exact d'Influx est cité en commentaire : la doublure ne devine pas ce
+    /// qu'Influx refuserait, elle rejoue ce qu'il refuse.
+    #[test]
+    fn the_import_that_almost_shipped_this_morning_is_refused() {
+        // « error @1:1-1:28: invalid import path experimental/types »
+        //
+        // 🔴 C'est LA requête qui serait partie en production au vert ce
+        // matin : le test unitaire passait, la doublure répondait 200, et
+        // l'import n'existe pas. Elle aurait fait tomber les trois graphes de
+        // la fiche d'un coup.
+        let refus = flux_refusal("import \"experimental/types\"\nfrom(bucket:\"b\")")
+            .expect("l'import inconnu doit être refusé");
+        assert!(refus.contains("experimental/types"), "{refus}");
+        assert!(refus.contains("import"), "la cause doit être nommée : {refus}");
+    }
+
+    #[test]
+    fn the_import_that_actually_exists_passes() {
+        // Vérifié en 200 sur influxd 2.9.1, comme `math`, `strings`, `date`,
+        // `experimental`, `array` et `influxdata/influxdb/schema`.
+        assert_eq!(flux_refusal("import \"types\"\nfrom(bucket:\"b\")"), None);
+        assert_eq!(flux_refusal("import \"math\"\nfrom(bucket:\"b\")"), None);
+    }
+
+    #[test]
+    fn the_bare_duration_that_returned_502_is_refused() {
+        // « cannot query an empty range »
+        //
+        // 🔴 `?range=24h` : une durée POSITIVE part vers l'avant, la fenêtre
+        // vise le futur. Ce test-là existait et passait au vert, alors que la
+        // requête échoue en réel — c'est l'exemple qui a révélé le défaut.
+        let refus = flux_refusal("from(bucket:\"b\") |> range(start: 24h)")
+            .expect("une fenêtre dans le futur doit être refusée");
+        assert!(refus.contains("range"), "{refus}");
+    }
+
+    #[test]
+    fn a_stop_before_the_start_is_refused() {
+        // « cannot query an empty range », vérifié sous les deux formes.
+        assert!(flux_refusal("from(b) |> range(start: -1h, stop: -2h)").is_some());
+        assert!(flux_refusal("from(b) |> range(start: 1788600000, stop: 1788000000)").is_some());
+    }
+
+    #[test]
+    fn an_unknown_aggregate_function_is_refused() {
+        // « error @1:80-1:85: undefined identifier nawak »
+        let refus = flux_refusal("from(b) |> aggregateWindow(every: 1h, fn: nawak)")
+            .expect("une fonction inconnue doit être refusée");
+        assert!(refus.contains("nawak"), "la cause doit être nommée : {refus}");
+    }
+
+    #[test]
+    fn an_aggregate_window_without_a_step_is_refused() {
+        // « error @1:49-1:74: missing required argument every »
+        let refus = flux_refusal("from(b) |> aggregateWindow(fn: mean)")
+            .expect("`every` est obligatoire");
+        assert!(refus.contains("every"), "{refus}");
+    }
+
+    #[test]
+    fn everything_the_hub_actually_sends_still_passes() {
+        // ⚠️ Le vrai critère de cette doublure. Une doublure qui refuse à tort
+        // est PIRE qu'une doublure permissive : elle fait perdre confiance
+        // dans la suite entière. Ces quatre requêtes ont été vérifiées en 200
+        // sur influxd 2.9.1.
+        for flux in [
+            "from(bucket: \"lanprobe\")\n  |> range(start: -24h)",
+            "from(bucket: \"lanprobe\")\n  |> range(start: 1788000000, stop: 1788600000)",
+            "from(bucket: \"lanprobe\")\n  |> range(start: -24h, stop: -1h)",
+            "import \"types\"\nsource = from(bucket: \"lanprobe\")\n  |> range(start: -87d)\n\
+             mesures |> aggregateWindow(every: 3h, fn: mean, createEmpty: false) |> yield(name: \"mean\")\n\
+             mesures |> aggregateWindow(every: 3h, fn: max, createEmpty: false) |> yield(name: \"max\")",
+            "from(bucket: \"lanprobe\")\n  |> range(start: -24h)\n  |> toFloat()\n  |> mean()",
+        ] {
+            assert_eq!(flux_refusal(flux), None, "refus à tort de : {flux}");
+        }
     }
 }
