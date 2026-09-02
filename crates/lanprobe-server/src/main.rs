@@ -290,7 +290,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let d = lanprobe_core::interfaces::get_interface_details(nom);
                 let ip = lanprobe_core::interfaces::local_cidr(&d).unwrap_or_else(|| "—".into());
                 let gw = d.gateway.clone().filter(|g| !g.is_empty()).unwrap_or_else(|| "—".into());
-                println!("{nom}\tadresse {ip}\tpasserelle {gw}");
+                // ⚠️ L'état du lien est la première chose à lire ici : choisir
+                // une interface débranchée donne une sonde muette, et le
+                // diagnostic part alors dans toutes les directions sauf la
+                // bonne. « activée, sans porteuse » dit quoi faire — vérifier
+                // le câble — là où « inactive » enverrait l'activer.
+                let etat = match (d.admin_up, d.is_up) {
+                    (_, true) => "actif",
+                    (true, false) => "activé, sans porteuse",
+                    (false, false) => "inactif",
+                };
+                println!("{nom}\tadresse {ip}\tpasserelle {gw}\t{etat}");
             }
         }
         Command::Enroll {

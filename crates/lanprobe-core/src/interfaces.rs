@@ -9,7 +9,19 @@ pub struct InterfaceDetails {
     pub gateway: Option<String>,
     pub dns: Vec<String>,
     pub dhcp_enabled: bool,
+    /// Lien **opérationnel** : la porteuse est présente (RFC 2863).
+    ///
+    /// ⚠️ C'est la question qu'on pose vraiment — « ce câble est-il branché ? »
+    /// — et non le drapeau administratif, qui reste vrai sur un lien
+    /// débranché. Voir `admin_up`, qui porte l'autre notion : les deux mènent
+    /// à des gestes différents (rebrancher, ou activer).
     pub is_up: bool,
+    /// Drapeau **administratif** `UP` : l'interface est activée.
+    ///
+    /// Vraie sur un lien débranché — `admin_up` sans `is_up` se lit « activée
+    /// mais sans porteuse », c'est-à-dire « vérifiez le câble ».
+    #[serde(default)]
+    pub admin_up: bool,
     /// Nom BSD réel de l'interface (en0, en1…). Populé sur macOS, où `name`
     /// est le service networksetup ("Wi-Fi", "Ethernet") — les CLI comme
     /// `speedtest -I` attendent l'ifname BSD et pas le service.
@@ -143,7 +155,13 @@ $dhcp = (Get-NetIPInterface -InterfaceAlias '{name}' -AddressFamily IPv4 -ErrorA
 Write-Output "$($a.IPAddress)|$($a.PrefixLength)|$g|$dns|$dhcp""#,
         name = name.replace('\'', "''")
     );
-    let mut d = InterfaceDetails { name: name.to_string(), is_up: true, ..Default::default() };
+    // ⚠️ En dur, comme avant — voir la remarque dans `get_details_macos`.
+    let mut d = InterfaceDetails {
+        name: name.to_string(),
+        is_up: true,
+        admin_up: true,
+        ..Default::default()
+    };
     let out = sync_cmd("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
         .output();
@@ -187,7 +205,22 @@ fn get_details_macos(name: &str) -> InterfaceDetails {
     let text = sync_cmd("networksetup").args(["-getinfo", name]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
-    let mut d = InterfaceDetails { name: name.to_string(), ip: None, subnet: None, gateway: None, dns: vec![], dhcp_enabled: false, is_up: true, bsd_name: bsd_name_for_service(name) };
+    // ⚠️ `is_up` et `admin_up` restent EN DUR ici, exactement comme avant :
+    // `networksetup -getinfo` n'expose pas l'état du lien, et changer le
+    // comportement de macOS sans arbitrage n'est pas au programme — la sonde
+    // de production y tourne. Seul Linux lit désormais l'état réel ; le
+    // rattrapage macOS et Windows est à traiter pour lui-même.
+    //
+    // ⚠️ `..Default::default()` et non plus une énumération exhaustive : le
+    // littéral complet faisait échouer la compilation macOS au premier champ
+    // ajouté à la structure — sur une plateforme qui ne se compile pas ici.
+    let mut d = InterfaceDetails {
+        name: name.to_string(),
+        is_up: true,
+        admin_up: true,
+        bsd_name: bsd_name_for_service(name),
+        ..Default::default()
+    };
     for line in text.lines() {
         if line.starts_with("IP address:") {
             d.ip = line.splitn(2, ':').nth(1).map(|s| s.trim().to_string());
@@ -219,6 +252,45 @@ fn get_details_macos(name: &str) -> InterfaceDetails {
         }
     }
     d
+}
+
+/// État d'un lien : `(administratif, opérationnel)`.
+///
+/// 🔴 `is_up` valait `true` EN DUR : une interface débranchée se présentait
+/// comme active. Sans écran, on la choisit, et la sonde reste muette — ou
+/// écrit `alive: false` pour toutes ses cibles.
+///
+/// ⚠️ Le drapeau `UP` ne répond PAS à la question : il est administratif et
+/// reste vrai sans porteuse. Sur cette machine, `docker0` est
+/// `<NO-CARRIER,...,UP>` avec `state DOWN`. On rend donc les deux séparément
+/// plutôt que d'en fondre une en l'autre.
+///
+/// ⚠️ Lecture par MOT-CLÉ, jamais par position : le noyau intercale `qdisc`,
+/// `master`, `qlen` selon les cas, et suffixe les veth (`veth912ca4b@if2`).
+/// Les drapeaux sont comparés un à un — « LOWER_UP » porte « UP » en
+/// sous-chaîne, et un `contains` rendrait actif un lien qui ne l'est pas.
+///
+/// ⚠️ `UNKNOWN` compte comme opérationnel, et c'est une décision écrite : le
+/// noyau l'emploie pour les liens sans détection de porteuse — tun, tap,
+/// WireGuard — le plus souvent fonctionnels. Les compter éteints fabriquerait
+/// une panne, l'erreur symétrique de celle qu'on corrige.
+#[cfg(any(target_os = "linux", test))]
+fn link_states(ip_link_output: &str) -> (bool, bool) {
+    let Some(line) = ip_link_output.lines().find(|l| l.contains('<')) else {
+        // Interface inexistante : `ip` n'écrit rien. « Active » serait ici
+        // exactement le défaut d'origine.
+        return (false, false);
+    };
+    let admin = line
+        .split_once('<')
+        .and_then(|(_, rest)| rest.split_once('>'))
+        .is_some_and(|(flags, _)| flags.split(',').any(|f| f.trim() == "UP"));
+    let operational = line
+        .split_whitespace()
+        .skip_while(|f| *f != "state")
+        .nth(1)
+        .is_some_and(|s| s == "UP" || s == "UNKNOWN");
+    (admin, operational)
 }
 
 /// Passerelle par défaut **portée par cette interface**, ou `None`.
@@ -258,7 +330,16 @@ fn get_details_linux(name: &str) -> InterfaceDetails {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     let text = text.as_str();
-    let mut d = InterfaceDetails { name: name.to_string(), is_up: true, ..Default::default() };
+    let link = sync_cmd("ip").args(["link", "show", name]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let (admin_up, is_up) = link_states(&link);
+    let mut d = InterfaceDetails {
+        name: name.to_string(),
+        is_up,
+        admin_up,
+        ..Default::default()
+    };
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with("inet ") && !line.starts_with("inet6") {
@@ -359,6 +440,63 @@ fn cidr_to_mask(prefix: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_up_without_a_carrier_is_not_operational() {
+        // 🔴 `is_up` valait `true` EN DUR : une interface débranchée se
+        // présentait comme active. Sans écran, on la choisit, et la sonde
+        // reste muette — ou écrit `alive: false` pour toutes ses cibles.
+        //
+        // ⚠️ Le drapeau `UP` ne suffit pas : il est ADMINISTRATIF. `docker0`
+        // ci-dessous est `UP` et n'a aucune porteuse. Les deux notions sont
+        // distinctes, elles restent distinctes.
+        //
+        // Lignes RÉELLES de cette machine, capturées.
+        let ens18 = "2: ens18: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000";
+        let docker0 = "6: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default ";
+
+        assert_eq!(link_states(ens18), (true, true), "lien réellement actif");
+        assert_eq!(link_states(docker0), (true, false), "UP administratif, sans porteuse");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn LOWER_UP_is_not_the_UP_flag() {
+        // ⚠️ Le piège du `contains` : « LOWER_UP » porte « UP » en sous-chaîne.
+        // On compare drapeau par drapeau, jamais par inclusion de texte.
+        let sans_up = "9: eth1: <BROADCAST,MULTICAST,LOWER_UP> mtu 1500 qdisc noop state DOWN mode DEFAULT";
+        assert_eq!(link_states(sans_up), (false, false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_peer_suffixed_veth_is_read_like_any_other() {
+        // `veth912ca4b@if2` — le noyau suffixe le nom du pair. La lecture par
+        // mot-clé s'en moque ; une lecture positionnelle sur le nom, non.
+        let veth = "15: veth912ca4b@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-08f04c3fdb2e state UP mode DEFAULT group default ";
+        assert_eq!(link_states(veth), (true, true));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unknown_operational_state_counts_as_up_and_here_is_why() {
+        // ⚠️ Décision écrite, pas un oubli. Le noyau rend `UNKNOWN` pour les
+        // liens qui n'implémentent PAS la détection de porteuse — tun, tap,
+        // WireGuard — et qui sont le plus souvent parfaitement fonctionnels.
+        // Les compter comme éteints fabriquerait une panne : l'erreur
+        // symétrique de celle qu'on corrige, et sur un VPN elle serait pire.
+        let tun = "12: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000";
+        assert_eq!(link_states(tun), (true, true));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_answer_from_the_kernel_is_not_an_active_link() {
+        // Interface inexistante : `ip` n'écrit rien. Rendre « active » ici
+        // serait exactement le défaut d'origine.
+        assert_eq!(link_states(""), (false, false));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

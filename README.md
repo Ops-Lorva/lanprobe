@@ -115,7 +115,7 @@ lanprobe-server forget      # detach — the hub keeps the measurements
 one, so `--interface` does it, on `run` and on `enroll`:
 
 ```bash
-lanprobe-server interfaces              # en0  address 10.0.8.235/24  gateway 10.0.8.1
+lanprobe-server interfaces              # en0  address 10.0.8.235/24  gateway 10.0.8.1  actif
 lanprobe-server run --interface en0     # remembered — no need to repeat it
 ```
 
@@ -126,6 +126,11 @@ tells you nothing about where it sits. An unknown name fails immediately and
 lists the ones that exist; a name that is remembered but currently missing (an
 unplugged adapter, a stopped VPN) is kept and warned about, never dropped in
 silence.
+
+The listing states each link: `actif`, `activé, sans porteuse` (enabled but the
+cable is out — check the cable, not the config), or `inactif`. ⚠️ On Linux this
+is read from the kernel; on macOS and Windows it is still reported as active
+regardless, so trust it only on Linux for now.
 
 `--config-dir` applies to every command. Default: `~/.config/lanprobe`, and `/var/lib/lanprobe` for the systemd service.
 
