@@ -98,6 +98,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/login/passkey/finish", post(passkey_login_finish))
         .route("/api/logout", post(logout))
         .route("/api/probes/enroll", post(enroll))
+        // ⚠️ **Ces quatre routes portent un `{id}` de sonde et ne passent PAS
+        // par la garde de portée** : elles s'authentifient au jeton de la sonde
+        // elle-même. `authenticate_probe` fait le `get_probe`, mais transforme
+        // l'absence en **401**, volontairement indiscernable d'un mauvais
+        // jeton.
+        //
+        // 🔴 **Ne pas les « aligner » sur le 404 des routes de session par
+        // cohérence apparente.** Un 404 ici apprendrait à qui présente un jeton
+        // quelconque quelles sondes existent — c'est-à-dire exactement ce que
+        // le 404 protège ailleurs, retourné contre lui-même. La règle commune
+        // n'est pas « le même code partout », c'est « ne rien révéler à qui n'a
+        // pas déjà le droit de le savoir ».
         .route("/api/probes/{id}/write", post(write_metrics))
         .route("/api/probes/{id}/heartbeat", post(heartbeat))
         .route("/api/probes/{id}/scans", post(publish_scan))
@@ -284,12 +296,32 @@ fn guarded_probe_scope(
         .layer(middleware::from_fn_with_state(state.clone(), session_guard))
 }
 
-/// Rend 404 quand la sonde visée sort de la portée de l'appelant.
+/// Rend 404 quand la sonde visée n'existe pas **ou** sort de la portée de
+/// l'appelant.
 ///
 /// ⚠️ **404 et non 403.** « Ça existe mais pas pour vous » révèle déjà
 /// l'existence du site d'un autre client — précisément ce que la portée
 /// protège. Une sonde hors portée doit être indistinguable d'une sonde qui
 /// n'existe pas.
+///
+/// 🔴 **Elle vérifie l'existence pour TOUS les comptes, y compris `Scope::All`.**
+/// Elle court-circuitait pour eux : l'existence n'était alors vérifiée que par
+/// EFFET DE BORD, dans le `get_probe` que fait `probe_in_scope` pour les comptes
+/// restreints. Une route qui ne contrôlait rien elle-même paraissait donc
+/// gardée, l'était pour un opérateur, et ne l'était pas pour l'administrateur —
+/// c'est-à-dire pour l'utilisateur le plus susceptible de taper un identifiant
+/// à la main dans une URL.
+///
+/// ⚠️ **Et c'est un angle mort de la SUITE DE TESTS, pas seulement du code** :
+/// un test écrit avec un compte restreint reste vert quoi qu'on casse sur ce
+/// chemin. C'est ce qui a laissé le même défaut revenir trois fois — routes de
+/// moniteurs, `/public-ips`, `GET /commands` — chacune rendant une réponse
+/// plausible et fausse (« aucun relevé », « aucune commande ») là où la vérité
+/// était « cette sonde n'existe pas ». Tout test de cette garde doit être écrit
+/// avec un compte `Scope::All`.
+///
+/// Le coût est d'un `get_probe` par requête, que quatorze des quinze routes
+/// gardées faisaient déjà pour leur propre compte.
 async fn probe_scope_guard(
     State(state): State<AppState>,
     mut req: axum::extract::Request,
@@ -304,9 +336,6 @@ async fn probe_scope_guard(
     let Some(actor) = req.extensions().get::<Identity>().cloned() else {
         return next.run(req).await;
     };
-    if matches!(actor.scope, crate::db::Scope::All) {
-        return next.run(req).await;
-    }
 
     let probe_id = match req.extract_parts::<RawPathParams>().await {
         Ok(params) => params
@@ -1197,18 +1226,29 @@ fn identity_of(state: &AppState, username: &str) -> Option<Identity> {
     })
 }
 
-/// Refuse une sonde hors portée, en **404**.
+/// Refuse un site inexistant **ou** hors portée, en **404**.
 ///
 /// ⚠️ Pas 403 : « ça existe mais pas pour vous » révèle déjà l'existence du
 /// site d'un autre client, ce qui est exactement ce que la portée protège.
-/// Une sonde hors portée doit être indistinguable d'une sonde inexistante.
-fn site_in_scope(actor: &Identity, site_id: &str) -> Result<(), Response> {
-    if actor.scope.allows(site_id) {
-        return Ok(());
+/// Un site hors portée doit être indistinguable d'un site inexistant.
+///
+/// 🔴 **L'existence est vérifiée ICI, pour tous les comptes.** La portée d'un
+/// compte `Scope::All` autorise tout : sans ce `get_site`, la garde ne
+/// contrôlait rien pour un administrateur, et l'existence n'était rattrapée
+/// qu'en aval, par accident — un `UPDATE` qui ne touche aucune ligne. Là où
+/// personne ne rattrapait (`notify_subscriptions` ne porte aucune clé
+/// étrangère), un réglage d'alerte partait en base pour un parc imaginaire.
+/// Une garde qui tient par effet de bord finit par lâcher là où l'effet de
+/// bord n'existe pas.
+fn site_in_scope(state: &AppState, actor: &Identity, site_id: &str) -> Result<(), Response> {
+    match state.db.get_site(site_id) {
+        Ok(_) if actor.scope.allows(site_id) => Ok(()),
+        _ => Err(fail(StatusCode::NOT_FOUND, "site inconnu")),
     }
-    Err(fail(StatusCode::NOT_FOUND, "site inconnu"))
 }
 
+/// Même règle pour une sonde : inexistante et hors portée se répondent à
+/// l'identique, et l'existence est vérifiée pour tous les comptes.
 fn probe_in_scope(state: &AppState, actor: &Identity, probe_id: &str) -> Result<(), Response> {
     match state.db.get_probe(probe_id) {
         Ok(p) if actor.scope.allows(&p.site_id) => Ok(()),
@@ -1903,7 +1943,7 @@ async fn put_subscription(
     // prend la forme d'un 404 comme partout ailleurs : « inconnu », pas
     // « interdit ».
     let in_scope = match body.scope.as_str() {
-        "site" => actor.scope.allows(&body.scope_id),
+        "site" => site_in_scope(&state, &actor, &body.scope_id).is_ok(),
         "probe" => probe_in_scope(&state, &actor, &body.scope_id).is_ok(),
         _ => true,
     };
@@ -2023,7 +2063,7 @@ async fn archive_site(
     Path(id): Path<String>,
     Json(body): Json<ArchiveBody>,
 ) -> Response {
-    if let Err(refusal) = site_in_scope(&actor, &id) {
+    if let Err(refusal) = site_in_scope(&state, &actor, &id) {
         return refusal;
     }
     let action = if body.archived { "site.archive" } else { "site.unarchive" };
@@ -2064,7 +2104,7 @@ async fn rename_site(
     Path(id): Path<String>,
     Json(body): Json<SiteBody>,
 ) -> Response {
-    if let Err(refusal) = site_in_scope(&actor, &id) {
+    if let Err(refusal) = site_in_scope(&state, &actor, &id) {
         return refusal;
     }
     match audited(
@@ -2084,7 +2124,7 @@ async fn delete_site(
     Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(refusal) = site_in_scope(&actor, &id) {
+    if let Err(refusal) = site_in_scope(&state, &actor, &id) {
         return refusal;
     }
     match audited(
@@ -2114,7 +2154,7 @@ async fn create_enroll_code(
     // ⚠️ Un opérateur restreint ne doit pas pouvoir poser une sonde chez un
     // autre client. Le refus est un 404 : nommer un site qu'on n'a pas le
     // droit de voir ne doit pas apprendre qu'il existe.
-    if let Err(refusal) = site_in_scope(&actor, &body.site_id) {
+    if let Err(refusal) = site_in_scope(&state, &actor, body.site_id.trim()) {
         return refusal;
     }
     let site = match state.db.get_site(&body.site_id) {
@@ -3062,12 +3102,19 @@ async fn update_probe(
     Path(id): Path<String>,
     Json(body): Json<ProbePatch>,
 ) -> Response {
-    // La sonde d'origine est déjà validée par l'intergiciel de portée. Ce qui
-    // ne l'est pas, c'est la DESTINATION : sans ce contrôle, un opérateur
-    // restreint pourrait déplacer une sonde chez un autre client — et la
-    // perdre de vue au passage, puisqu'elle sortirait de sa propre portée.
+    // La sonde d'origine est validée par l'intergiciel de portée — qui vérifie
+    // son EXISTENCE et sa portée, pour tous les comptes. ⚠️ Ce commentaire
+    // affirmait cette garantie à une époque où l'intergiciel court-circuitait
+    // pour un compte `Scope::All` : la sonde n'était alors validée que par le
+    // `get_probe` de `db.update_probe`, plus bas. Un commentaire faux sur une
+    // garde est ce qui fait sauter la vérification au refactor suivant.
+    //
+    // Ce qui n'est pas couvert par l'intergiciel, c'est la DESTINATION : sans
+    // le contrôle ci-dessous, un opérateur restreint déplacerait une sonde chez
+    // un autre client — et la perdrait de vue au passage, puisqu'elle sortirait
+    // de sa propre portée.
     if let Some(target) = body.site_id.as_deref() {
-        if let Err(refusal) = site_in_scope(&actor, target) {
+        if let Err(refusal) = site_in_scope(&state, &actor, target) {
             return refusal;
         }
     }
@@ -3368,7 +3415,7 @@ async fn set_network_label(
     // le libellé d'un autre client, et ce texte remonte dans le rapport SLA
     // qu'on lui remet. Refus en 404 comme partout ailleurs — nommer un site
     // qu'on n'a pas le droit de voir ne doit pas apprendre qu'il existe.
-    if let Err(refusal) = site_in_scope(&actor, &body.site_id) {
+    if let Err(refusal) = site_in_scope(&state, &actor, body.site_id.trim()) {
         return refusal;
     }
     // Un site inexistant se solderait sinon par une violation de clé
@@ -7469,6 +7516,142 @@ mod tests {
         assert_eq!(
             corps_hors_portee, corps_inexistante,
             "et dire exactement la même chose"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_scope_guard_checks_existence_for_an_admin_too() {
+        // 🔴 **Ce test est écrit avec un compte `Scope::All`, et c'est tout son
+        // intérêt.** La garde de portée court-circuitait pour ces comptes-là :
+        // elle vérifiait l'existence de la sonde par effet de bord, pour les
+        // seuls comptes restreints. Un test écrit avec un compte restreint
+        // reste donc vert quoi qu'on casse sur ce chemin — c'est l'angle mort
+        // qui a laissé le même défaut revenir trois fois (moniteurs,
+        // `/public-ips`, puis `/commands`).
+        //
+        // ⚠️ Il redeviendrait rouge si quelqu'un remettait le court-circuit.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", "/api/probes/sonde-qui-nexiste-pas/commands"),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "sonde inconnue", "{body}");
+        assert!(
+            body.get("commands").is_none(),
+            "une sonde inconnue ne rend aucune file : {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn both_verbs_of_the_command_route_answer_the_same_on_an_unknown_probe() {
+        // ⚠️ `POST` vérifiait l'existence, `GET` non : la MÊME URL affirmait
+        // « cette sonde n'existe pas » d'un côté et « elle n'a jamais reçu de
+        // commande » de l'autre. Deux verbes qui ne racontent pas la même
+        // histoire sur le même objet, c'est déjà la preuve qu'un des deux ment.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (lecture, corps_lecture, _) = h
+            .call(with_cookie(
+                empty_request("GET", "/api/probes/sonde-qui-nexiste-pas/commands"),
+                &session,
+            ))
+            .await;
+        let (ecriture, corps_ecriture, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    "/api/probes/sonde-qui-nexiste-pas/commands",
+                    json!({ "kind": "discovery", "args": {} }),
+                ),
+                &session,
+            ))
+            .await;
+
+        assert_eq!(lecture, StatusCode::NOT_FOUND, "{corps_lecture}");
+        assert_eq!(lecture, ecriture, "les deux verbes doivent répondre pareil");
+        assert_eq!(corps_lecture, corps_ecriture, "et dire la même chose");
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_exists_still_lists_its_empty_command_queue() {
+        // ⚠️ L'autre moitié : une sonde qui EXISTE et n'a jamais reçu de
+        // commande rend 200 avec une file vide. Sans ce test, un correctif
+        // trop large transformerait « rien à faire » en « sonde inconnue ».
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/commands")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["commands"].as_array().map(|c| c.len()), Some(0), "{body}");
+    }
+
+    #[tokio::test]
+    async fn subscribing_to_a_site_that_does_not_exist_writes_nothing() {
+        // 🔴 Le même angle mort, côté SITE, et lui aussi visible d'un compte
+        // `Scope::All` seulement : la portée d'un admin autorise tout, aucune
+        // existence n'était vérifiée, et l'abonnement partait en base pour un
+        // site qui n'existe pas. La ligne s'affiche ensuite comme un réglage
+        // d'alerte actif sur un parc imaginaire.
+        //
+        // ⚠️ `notify_subscriptions.scope_id` ne porte AUCUNE clé étrangère :
+        // rien en aval ne rattrape la faute, contrairement aux routes de site
+        // où le `UPDATE` ne touchant aucune ligne finissait par la révéler.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/subscriptions",
+                    json!({ "scope": "site", "scope_id": "site-qui-nexiste-pas", "enabled": true }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "cible inconnue", "{body}");
+        assert!(
+            h.state.db.list_notify_subscriptions().unwrap().is_empty(),
+            "rien ne doit avoir été écrit"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribing_to_a_site_that_exists_still_works() {
+        // ⚠️ La moitié qui prouve que le refus ci-dessus vise l'inexistence et
+        // non la route : le même appel sur un site réel doit écrire.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let site = h.state.db.create_site("Durand").unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PUT",
+                    "/api/notifications/subscriptions",
+                    json!({ "scope": "site", "scope_id": site.site_id, "enabled": true }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            h.state.db.list_notify_subscriptions().unwrap().len(),
+            1,
+            "l'abonnement doit être écrit"
         );
     }
 
