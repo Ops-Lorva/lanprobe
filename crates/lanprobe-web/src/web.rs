@@ -3221,7 +3221,10 @@ async fn probe_sla_samples(
         Ok(probe) => probe,
         Err(e) => return error_response(e),
     };
-    let (window, range) = flux_range(&query);
+    let (window, range) = match flux_range(&query) {
+        Ok(w) => w,
+        Err(refus) => return refus,
+    };
     let bucket = state.settings.influx_bucket();
     let flux = format!(
         "from(bucket: {})\n  |> range({})\n  \
@@ -3525,7 +3528,10 @@ async fn probe_sla_csv(
     // pourtant la période demandée. Un rapport remis à un client avec le bon
     // en-tête et les mauvaises données est le pire des deux mondes — c'est le
     // défaut corrigé en b05b049, resté sur l'export.
-    let (window, range) = flux_range(&query);
+    let (window, range) = match flux_range(&query) {
+        Ok(w) => w,
+        Err(refus) => return refus,
+    };
     let bucket = state.settings.influx_bucket();
     let flux = format!(
         "from(bucket: {})\n  |> range({})\n           |> filter(fn: (r) => r[\"probe_id\"] == {})\n           |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
@@ -3862,17 +3868,45 @@ fn explicit_bounds(query: &MetricsQuery) -> Option<(i64, i64)> {
     }
 }
 
+/// Fenêtre glissante normalisée (`-24h`), ou `None` si la saisie n'en décrit
+/// aucune.
+///
+/// 🔴 **Le signe est normalisé.** En Flux une durée POSITIVE part de maintenant
+/// vers l'AVANT : `range(start: 24h)` visait les 24 h à VENIR, Influx refusait
+/// en 400, et le hub rendait 502 — « InfluxDB est en panne » pour une saisie
+/// parfaitement anodine. `relative_range_secs`, lui, coupait déjà le signe :
+/// les deux fonctions lisaient la même chaîne différemment.
+///
+/// ⚠️ **Et une saisie illisible rend `None`, au lieu de retomber en silence sur
+/// une heure.** Le repli muet est la même faute que le 502 : l'écran affichait
+/// une heure sous une légende qui annonçait autre chose, et rien ne permettait
+/// de s'en apercevoir. C'est aussi ce qui rend l'alphabet sûr : seuls des
+/// chiffres et une unité connue sortent d'ici, jamais un fragment de Flux.
+fn normalized_range(range: &str) -> Option<String> {
+    let raw = range.trim().trim_start_matches('-');
+    let split = raw.find(|c: char| !c.is_ascii_digit())?;
+    let (count, unit) = raw.split_at(split);
+    if count.is_empty() || !matches!(unit, "s" | "m" | "h" | "d" | "w") {
+        return None;
+    }
+    count.parse::<u64>().ok().map(|n| format!("-{n}{unit}"))
+}
+
 /// Construit la clause `range(...)` de Flux et le libellé de la période.
-fn flux_range(query: &MetricsQuery) -> (String, String) {
-    match explicit_bounds(query) {
-        Some((start, stop)) => (
+///
+/// `Err` = la fenêtre demandée est illisible : c'est un **400**, pas un 502.
+/// La saisie du client est en cause, pas l'amont.
+fn flux_range(query: &MetricsQuery) -> Result<(String, String), Response> {
+    if let Some((start, stop)) = explicit_bounds(query) {
+        return Ok((
             format!("start: {start}, stop: {stop}"),
             format!("{start}..{stop}"),
-        ),
-        None => {
-            let range = query.range.clone().unwrap_or_else(|| "-24h".into());
-            (format!("start: {}", flux_duration(&range)), range)
-        }
+        ));
+    }
+    let asked = query.range.as_deref().unwrap_or("-24h");
+    match normalized_range(asked) {
+        Some(range) => Ok((format!("start: {range}"), range)),
+        None => Err(fail(StatusCode::BAD_REQUEST, "fenêtre illisible")),
     }
 }
 
@@ -4114,7 +4148,10 @@ async fn probe_metrics(
     // heure, sous une légende annonçant trois jours. L'interface devait
     // sur-tirer puis découper elle-même, ce qui faisait lire quatre-vingts
     // jours de points pour en afficher un.
-    let (window, range) = flux_range(&query);
+    let (window, range) = match flux_range(&query) {
+        Ok(w) => w,
+        Err(refus) => return refus,
+    };
     // ⚠️ La même fenêtre que `flux_range`, en secondes : c'est elle qui décide
     // du pas. La recalculer à côté ferait diverger le pas annoncé de la période
     // réellement lue — deux affirmations vraies séparément, fausses ensemble.
@@ -4347,15 +4384,10 @@ fn flux_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Une durée Flux n'est pas une chaîne : elle ne peut pas être mise entre
-/// guillemets, donc on la restreint à un alphabet sûr au lieu de l'échapper.
-fn flux_duration(value: &str) -> String {
-    let safe: String = value
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
-        .collect();
-    if safe.is_empty() { "-1h".into() } else { safe }
-}
+// `flux_duration` a été remplacée par `normalized_range`. Elle laissait passer
+// `24h` tel quel — donc une fenêtre dans le FUTUR — et repliait toute saisie
+// illisible sur `-1h` en silence. La garder à côté de son remplaçant serait
+// laisser un piège armé : les deux ont la même tête, une seule est sûre.
 
 // ── Sauvegarde et restauration ─────────────────────────────────────────────
 
@@ -6780,7 +6812,8 @@ mod tests {
             start: Some(1_788_000_000),
             stop: Some(1_788_600_000),
             max_points: None,
-        });
+        })
+        .expect("des bornes explicites sont toujours lisibles");
         assert_eq!(window, "start: 1788000000, stop: 1788600000");
         assert_eq!(label, "1788000000..1788600000");
     }
@@ -6795,7 +6828,8 @@ mod tests {
             start: Some(1_788_600_000),
             stop: Some(1_788_000_000),
             max_points: None,
-        });
+        })
+        .expect("bornes inversées : on retombe sur la fenêtre glissante");
         assert_eq!(window, "start: -24h");
     }
 
@@ -6836,6 +6870,35 @@ mod tests {
     }
 
     // ── Agrégation : nombre de points, jamais ancienneté ───────────────────
+
+    #[test]
+    fn a_bare_duration_means_the_LAST_24h_not_the_next_ones() {
+        // 🔴 `range=24h` produisait `range(start: 24h)`. En Flux une durée
+        // POSITIVE part de maintenant vers l'AVANT : la fenêtre visait les
+        // 24 h à venir, Influx refusait en 400, et le hub rendait 502 — donc
+        // « InfluxDB est en panne » pour une saisie parfaitement anodine.
+        //
+        // ⚠️ `relative_range_secs`, lui, coupe déjà le signe : les deux
+        // fonctions lisaient la même chaîne différemment. Un seul endroit doit
+        // décider de la fenêtre.
+        assert_eq!(normalized_range("24h").as_deref(), Some("-24h"));
+        assert_eq!(normalized_range("-24h").as_deref(), Some("-24h"));
+        assert_eq!(normalized_range("  7d ").as_deref(), Some("-7d"));
+        assert_eq!(normalized_range("-30m").as_deref(), Some("-30m"));
+    }
+
+    #[test]
+    fn an_unreadable_range_is_refused_instead_of_silently_becoming_an_hour() {
+        // ⚠️ Le repli muet sur `-1h` est la même faute que le 502 : l'écran
+        // affichait une heure sous une légende annonçant autre chose, et
+        // personne ne pouvait s'en apercevoir. Un refus se comprend.
+        assert_eq!(normalized_range("abc"), None);
+        assert_eq!(normalized_range(""), None);
+        assert_eq!(normalized_range("12x"), None);
+        assert_eq!(normalized_range("-"), None);
+        // Une injection Flux ne doit évidemment pas passer non plus.
+        assert_eq!(normalized_range("1h) |> drop("), None);
+    }
 
     #[test]
     fn a_window_that_fits_the_graph_stays_raw_however_old_it_is() {
@@ -8632,6 +8695,41 @@ mod tests {
             .expect("la requête Flux doit partir");
         assert!(flux.contains("aggregateWindow(every: 15m, fn: mean"), "{flux}");
         assert!(flux.contains("createEmpty: false"), "{flux}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_range_is_400_not_502() {
+        // ⚠️ 502 AFFIRME qu'InfluxDB est en panne. La vérité est « votre
+        // fenêtre est illisible » : c'est la saisie du client qui est en
+        // cause, pas l'amont. Même faute d'honnêteté que le 500 sur une sonde
+        // inconnue — elle envoie chercher une panne qui n'existe pas.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/metrics?range=nawak")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Et la saisie anodine, elle, passe — en visant bien le PASSÉ.
+        let (status, _, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/metrics?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, _, flux) = h
+            ._fake
+            .calls()
+            .into_iter()
+            .find(|(m, p, _)| m == "POST" && p.starts_with("/api/v2/query"))
+            .expect("la requête Flux doit partir");
+        assert!(flux.contains("start: -24h"), "{flux}");
     }
 
     #[tokio::test]
