@@ -49,8 +49,12 @@ export const DEFAULT_RANGE: Range = '-6h';
  * ⚠️ La minute compte parmi les unités reconnues : le repli d'une valeur
  * illisible vaut une heure, et une fenêtre de 10 min bornerait alors son axe
  * sur 50 min de vide — ce qui se lit comme une sonde qui a cessé de mesurer.
+ *
+ * ⚠️ Le paramètre est une chaîne et non `Range` : le mode temps réel impose la
+ * fenêtre réglée au hub (`realtime_window_min`), qui n'est pas forcément l'une
+ * des cinq proposées. Une plage absolue passe, elle, par `-Ns`.
  */
-export function rangeMillis(range: Range): number {
+export function rangeMillis(range: string): number {
   const m = /^-(\d+)([mhd])$/.exec(range);
   if (!m) return 3_600_000;
   const n = Number(m[1]);

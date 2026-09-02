@@ -160,6 +160,27 @@ describe('catalogues de traduction', () => {
     });
   }
 
+  // Sélecteur de fenêtre sur TOUS les onglets, plage de dates comprise.
+  // ⚠️ Les quatre messages de refus sont nommés un à un : un plafond qui
+  // refuse sans dire pourquoi se lit comme une panne de l'interface, ce qui
+  // est exactement ce que le plafond sert à éviter.
+  const REQUISES_FENETRE = [
+    'probe.range_minutes',
+    'probe.window_apply',
+    'probe.window_max_hint',
+    'probe.window_incomplete',
+    'probe.window_reversed',
+    'probe.window_future',
+    'probe.window_too_wide',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés du sélecteur de fenêtre`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_FENETRE.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
   // Fenêtre de 10 min : en mode temps réel, la plus courte des fenêtres
   // existantes (1 h) écrase ce qui vient de se passer.
   for (const [lang, catalog] of Object.entries(CATALOGS)) {
