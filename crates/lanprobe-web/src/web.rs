@@ -3820,6 +3820,10 @@ struct MetricsQuery {
     start: Option<i64>,
     #[serde(default)]
     stop: Option<i64>,
+    /// Nombre de points que le demandeur peut afficher — en pratique la
+    /// largeur du graphe, en pixels. Facultatif : voir `clamp_max_points`.
+    #[serde(default)]
+    max_points: Option<i64>,
 }
 
 /// Bornes explicites, si elles tiennent debout. Des bornes inversées rendraient
@@ -3900,6 +3904,144 @@ pub fn public_ip_history_cutoff(retention_days: i64, now: i64) -> Option<i64> {
     (retention_days > 0).then(|| now - retention_days * 86_400)
 }
 
+// ── Agrégation des mesures ─────────────────────────────────────────────────
+//
+// ⚠️ **L'agrégation ne dépend ni de l'ancienneté de la plage, ni de sa durée —
+// seulement du nombre de points rapporté à la largeur du graphe.** Dix minutes
+// prises il y a trois mois se rendent brutes : les points existent, ils
+// tiennent dans la carte, il n'y a aucune raison de les moyenner. Quatre-vingts
+// jours à un ping par seconde font sept millions et demi de points par cible,
+// que le navigateur n'affichera jamais.
+
+/// Points affichables quand le demandeur ne dit rien. C'est une largeur de
+/// graphe usuelle, en pixels : au-delà, on moyenne des mesures dans un pixel
+/// qu'on ne saurait de toute façon pas dessiner.
+const DEFAULT_MAX_POINTS: i64 = 800;
+/// Bornes du plafond. La valeur vient du NAVIGATEUR : `0` diviserait par zéro
+/// et `10_000_000` rendrait la protection inopérante.
+const MIN_MAX_POINTS: i64 = 100;
+const MAX_MAX_POINTS: i64 = 5_000;
+
+pub fn clamp_max_points(asked: Option<i64>) -> i64 {
+    asked.unwrap_or(DEFAULT_MAX_POINTS).clamp(MIN_MAX_POINTS, MAX_MAX_POINTS)
+}
+
+/// Échelle des pas d'agrégation, **lisibles par un humain**.
+///
+/// ⚠️ Un axe qui annonce « moyenné par 30 min » se lit ; « moyenné par 1 847 s »
+/// ne se lit pas. On arrondit donc au pas supérieur de cette échelle plutôt que
+/// de rendre le quotient exact — arrondir vers le haut garantit en prime de ne
+/// jamais dépasser le nombre de points demandé.
+///
+/// Le premier échelon est la seconde : c'est la cadence du ping, un pas plus
+/// fin ne ferait que fabriquer des intervalles vides.
+const AGGREGATE_STEPS: &[(i64, &str)] = &[
+    (1, "1s"),
+    (2, "2s"),
+    (5, "5s"),
+    (10, "10s"),
+    (15, "15s"),
+    (30, "30s"),
+    (60, "1m"),
+    (120, "2m"),
+    (300, "5m"),
+    (600, "10m"),
+    (900, "15m"),
+    (1_800, "30m"),
+    (3_600, "1h"),
+    (7_200, "2h"),
+    (10_800, "3h"),
+    (21_600, "6h"),
+    (43_200, "12h"),
+    (86_400, "24h"),
+    (604_800, "7d"),
+];
+
+/// Pas d'agrégation d'une fenêtre, ou `None` quand elle se rend brute.
+///
+/// `None` dès que la plage ne PEUT PAS dépasser `max_points` : à une mesure par
+/// seconde, une fenêtre de `n` secondes porte au plus `n` points. C'est un
+/// majorant, pas un compte — le hub ne sait pas combien de points existent
+/// vraiment sans les lire, et sur-agréger un peu vaut mieux que de découvrir le
+/// débordement une fois la réponse partie.
+pub fn aggregate_every(span_secs: i64, max_points: i64) -> Option<&'static str> {
+    if max_points <= 0 || span_secs <= max_points {
+        return None;
+    }
+    // `div_ceil` reste instable sur les entiers signés : arrondi à la main.
+    let needed = (span_secs + max_points - 1) / max_points;
+    let step = AGGREGATE_STEPS
+        .iter()
+        .find(|(secs, _)| *secs >= needed)
+        // Une fenêtre plus large que le dernier échelon retombe sur lui, jamais
+        // sur `None` : rendre les points bruts serait précisément l'inverse de
+        // ce que le plafond protège.
+        .unwrap_or_else(|| AGGREGATE_STEPS.last().expect("échelle non vide"));
+    Some(step.1)
+}
+
+/// Requête Flux d'une lecture de mesures. `every` à `None` = points bruts.
+///
+/// ⚠️ **Deux champs par série quand on agrège : la moyenne ET le maximum.**
+/// Une moyenne sur deux heures noie un pic à 800 ms dans une valeur à 12 ms :
+/// la courbe reste crédible et l'incident disparaît. Une valeur plausible et
+/// fausse est pire qu'une valeur absente — le maximum de l'intervalle est ce
+/// qui préserve l'incident. Le champ du maximum prend le suffixe `_max`, ce qui
+/// laisse le nom nu à la moyenne : l'interface qui cherchait `latency_ms`
+/// continue de le trouver.
+///
+/// ⚠️ **`createEmpty: false`, sans exception.** Un intervalle où rien n'a été
+/// mesuré ne produit AUCUN point — ni zéro, ni valeur interpolée. Un trou reste
+/// un trou : on ne déduit pas un fait d'un silence.
+///
+/// ⚠️ Les champs TEXTE (`state` d'`internet_status`, `server` d'un speedtest) ne
+/// se moyennent pas : `mean` sur une chaîne fait échouer la requête entière,
+/// donc les trois graphes de la fiche d'un coup. Ils sont isolés par leur type
+/// et rendus bruts, dans un `yield` séparé — une union les rejetterait de toute
+/// façon, leur `_value` n'ayant pas le type des autres.
+fn metrics_flux(
+    bucket: &str,
+    probe_id: &str,
+    measurement: Option<&str>,
+    window: &str,
+    every: Option<&str>,
+) -> String {
+    let mut source = format!(
+        "from(bucket: {})\n  |> range({})\n  |> filter(fn: (r) => r[\"probe_id\"] == {})",
+        flux_string(bucket),
+        window,
+        flux_string(probe_id)
+    );
+    if let Some(measurement) = measurement {
+        source.push_str(&format!(
+            "\n  |> filter(fn: (r) => r[\"_measurement\"] == {})",
+            flux_string(measurement)
+        ));
+    }
+    let Some(every) = every else {
+        return source;
+    };
+    format!(
+        r#"import "types"
+
+source = {source}
+
+// Le texte ne se moyenne pas : il passe brut, dans son propre rendu.
+texte = source |> filter(fn: (r) => types.isType(v: r._value, type: "string"))
+nombres = source
+  |> filter(fn: (r) => not types.isType(v: r._value, type: "string"))
+  |> toFloat()
+
+texte |> yield(name: "raw")
+nombres |> aggregateWindow(every: {every}, fn: mean, createEmpty: false) |> yield(name: "mean")
+nombres
+  |> aggregateWindow(every: {every}, fn: max, createEmpty: false)
+  |> map(fn: (r) => ({{r with _field: r._field + "_max"}}))
+  |> yield(name: "max")
+"#
+    )
+}
+
 /// Requête Flux proxifiée. Le navigateur ne parle jamais directement à
 /// Influx : le jeton de lecture reste côté serveur.
 async fn probe_metrics(
@@ -3917,24 +4059,34 @@ async fn probe_metrics(
     // sur-tirer puis découper elle-même, ce qui faisait lire quatre-vingts
     // jours de points pour en afficher un.
     let (window, range) = flux_range(&query);
+    // ⚠️ La même fenêtre que `flux_range`, en secondes : c'est elle qui décide
+    // du pas. La recalculer à côté ferait diverger le pas annoncé de la période
+    // réellement lue — deux affirmations vraies séparément, fausses ensemble.
+    let (from, to) = flux_bounds(&query);
+    let every = aggregate_every(to - from, clamp_max_points(query.max_points));
     let bucket = state.settings.influx_bucket();
-    let mut flux = format!(
-        "from(bucket: {})\n  |> range({})\n  |> filter(fn: (r) => r[\"probe_id\"] == {})",
-        flux_string(&bucket),
-        window,
-        flux_string(&id)
+    let flux = metrics_flux(
+        &bucket,
+        &id,
+        query.measurement.as_deref().filter(|m| !m.is_empty()),
+        &window,
+        every,
     );
-    if let Some(measurement) = query.measurement.filter(|m| !m.is_empty()) {
-        flux.push_str(&format!(
-            "\n  |> filter(fn: (r) => r[\"_measurement\"] == {})",
-            flux_string(&measurement)
-        ));
-    }
     match state.influx.query_flux(&flux).await {
-        Ok(csv) => ok_json(serde_json::json!({
-            "range": range,
-            "series": series_from_flux_csv(&csv),
-        })),
+        Ok(csv) => {
+            let mut body = serde_json::json!({
+                "range": range,
+                "series": series_from_flux_csv(&csv),
+            });
+            // ⚠️ Le champ est ABSENT quand c'est brut, jamais `null` ni `"1s"` :
+            // l'interface n'annonce une moyenne que s'il y en a une, sans quoi
+            // elle tracerait la mesure à la seconde sous une légende qui promet
+            // une moyenne — ou l'inverse.
+            if let Some(every) = every {
+                body["aggregated_every"] = serde_json::Value::from(every);
+            }
+            ok_json(body)
+        }
         Err(e) => fail(StatusCode::BAD_GATEWAY, &e),
     }
 }
@@ -4892,6 +5044,56 @@ mod tests {
         let series = series_from_flux_csv(csv);
         assert_eq!(series[0]["measure"], "latency_ms");
         assert_eq!(series[0]["field"], "latency_ms · 10.0.30.12");
+    }
+
+    /// Réponse RÉELLE d'un InfluxDB 2.9.1 — la version que le conteneur
+    /// embarque — à la requête agrégée de `metrics_flux`. Trois rendus
+    /// (`raw`, `mean`, `max`), donc trois blocs d'en-tête aux colonnes
+    /// ordonnées différemment, ce qui casse un parseur qui suppose des
+    /// positions fixes. Capturée, pas écrite à la main.
+    const AGGREGATED_CSV: &str = "\
+,result,table,_start,_stop,_time,_value,_field,_measurement,host,probe_id,site_id
+,raw,0,2026-09-02T16:40:00Z,2026-09-02T17:40:00Z,2026-09-02T16:41:19Z,online,state,internet_status,a,p1,s1
+,raw,0,2026-09-02T16:40:00Z,2026-09-02T17:40:00Z,2026-09-02T17:00:19Z,offline,state,internet_status,a,p1,s1
+
+,result,table,_time,_start,_stop,_field,_measurement,host,ip,probe_id,site_id,_value
+,mean,4,2026-09-02T16:45:00Z,2026-09-02T16:40:00Z,2026-09-02T17:40:00Z,latency_ms,ping_latency,a,1.1.1.1,p1,s1,12
+,mean,4,2026-09-02T17:00:00Z,2026-09-02T16:40:00Z,2026-09-02T17:40:00Z,latency_ms,ping_latency,a,1.1.1.1,p1,s1,12.4
+,mean,4,2026-09-02T17:20:00Z,2026-09-02T16:40:00Z,2026-09-02T17:40:00Z,latency_ms,ping_latency,a,1.1.1.1,p1,s1,12
+
+,result,table,_start,_stop,_time,_value,_field,_measurement,host,ip,probe_id,site_id
+,max,6,2026-09-02T16:40:00Z,2026-09-02T17:40:00Z,2026-09-02T16:45:00Z,12,latency_ms_max,ping_latency,a,1.1.1.1,p1,s1
+,max,6,2026-09-02T16:40:00Z,2026-09-02T17:40:00Z,2026-09-02T17:00:00Z,800,latency_ms_max,ping_latency,a,1.1.1.1,p1,s1
+,max,6,2026-09-02T16:40:00Z,2026-09-02T17:40:00Z,2026-09-02T17:20:00Z,12,latency_ms_max,ping_latency,a,1.1.1.1,p1,s1
+";
+
+    #[test]
+    fn an_aggregated_response_carries_the_peak_beside_the_average() {
+        // ⚠️ C'est tout l'enjeu : la moyenne de l'intervalle de 17 h reste à
+        // 12,4 ms — une courbe parfaitement crédible — alors qu'un pic à
+        // 800 ms s'y est produit. Sans la série `_max`, l'incident disparaît
+        // sous une valeur plausible et fausse.
+        let series = series_from_flux_csv(AGGREGATED_CSV);
+
+        let avg = series.iter().find(|s| s["measure"] == "latency_ms").unwrap();
+        let peak = series.iter().find(|s| s["measure"] == "latency_ms_max").unwrap();
+        assert_eq!(avg["points"][1]["v"], 12.4);
+        assert_eq!(peak["points"][1]["v"], 800.0);
+
+        // Le maximum garde l'étiquette de sa cible : deux IP surveillées en
+        // parallèle ont chacune leur pic, les confondre en dessinerait un
+        // troisième qui n'a jamais eu lieu.
+        assert_eq!(peak["tags"]["ip"], "1.1.1.1");
+
+        // ⚠️ Vingt minutes sans mesure entre 17 h et 17 h 20 : `createEmpty:
+        // false` ne rend aucun point, et le parseur n'en invente pas. Un trou
+        // reste un trou.
+        assert_eq!(avg["points"].as_array().unwrap().len(), 3);
+
+        // Le rendu `raw` des champs texte survit au découpage en blocs, malgré
+        // un ordre de colonnes différent de celui des deux autres.
+        let state = series.iter().find(|s| s["measure"] == "state").unwrap();
+        assert_eq!(state["points"][1]["v"], "offline");
     }
 
     #[test]
@@ -6448,6 +6650,7 @@ mod tests {
             range: Some("-7d".into()),
             start: Some(1_788_000_000),
             stop: Some(1_788_600_000),
+            max_points: None,
         });
         assert_eq!(window, "start: 1788000000, stop: 1788600000");
         assert_eq!(label, "1788000000..1788600000");
@@ -6462,6 +6665,7 @@ mod tests {
             range: Some("-24h".into()),
             start: Some(1_788_600_000),
             stop: Some(1_788_000_000),
+            max_points: None,
         });
         assert_eq!(window, "start: -24h");
     }
@@ -6476,6 +6680,7 @@ mod tests {
             range: Some("-7d".into()),
             start: Some(1_788_000_000),
             stop: Some(1_788_600_000),
+            max_points: None,
         };
         assert_eq!(flux_bounds(&explicit), (1_788_000_000, 1_788_600_000));
 
@@ -6484,6 +6689,7 @@ mod tests {
             range: Some("-24h".into()),
             start: Some(1_788_600_000),
             stop: Some(1_788_000_000),
+            max_points: None,
         };
         let (from, to) = flux_bounds(&reversed);
         assert_eq!(to - from, 24 * 3600, "bornes inversées : on retombe sur la fenêtre");
@@ -6494,9 +6700,107 @@ mod tests {
                 range: Some(range.into()),
                 start: None,
                 stop: None,
+                max_points: None,
             });
             assert_eq!(to - from, span, "fenêtre {range}");
         }
+    }
+
+    // ── Agrégation : nombre de points, jamais ancienneté ───────────────────
+
+    #[test]
+    fn a_window_that_fits_the_graph_stays_raw_however_old_it_is() {
+        // ⚠️ La règle est le NOMBRE de points rapporté à la largeur du graphe,
+        // pas l'âge de la plage ni sa durée. Dix minutes prises il y a trois
+        // mois tiennent dans huit cents pixels : on les rend brutes. Agréger
+        // sur l'ancienneté effacerait le détail qu'on est justement venu voir.
+        assert_eq!(aggregate_every(600, 800), None);
+        assert_eq!(aggregate_every(800, 800), None);
+        // Un pas ne descend jamais sous la seconde : la cadence de mesure est
+        // d'une seconde, un pas plus fin fabriquerait des intervalles vides.
+        assert_eq!(aggregate_every(801, 800), Some("2s"));
+    }
+
+    #[test]
+    fn a_long_window_gets_a_step_a_human_can_read() {
+        // « moyenné par 1 847 s » ne se lit pas ; « moyenné par 30 min » si.
+        assert_eq!(aggregate_every(86_400, 800), Some("2m"));
+        assert_eq!(aggregate_every(7 * 86_400, 800), Some("15m"));
+        // Les 87 jours du rapport : ~7,5 millions de points bruts par cible.
+        assert_eq!(aggregate_every(87 * 86_400, 800), Some("3h"));
+
+        // Chaque pas rendu appartient à l'échelle lisible, et tient la
+        // promesse : jamais plus de points que la largeur demandée.
+        for span in [900i64, 3_600, 86_400, 30 * 86_400, 400 * 86_400] {
+            for max in [100i64, 800, 5_000] {
+                let Some(label) = aggregate_every(span, max) else {
+                    continue;
+                };
+                let (secs, _) = AGGREGATE_STEPS
+                    .iter()
+                    .find(|(_, l)| *l == label)
+                    .unwrap_or_else(|| panic!("pas illisible : {label}"));
+                assert!(*secs >= 1, "plancher d'une seconde : {label}");
+                assert!(span / secs <= max, "{span} s par {label} déborde de {max} points");
+            }
+        }
+    }
+
+    #[test]
+    fn an_absurd_window_falls_back_on_the_coarsest_step_not_on_raw_points() {
+        // Rendre `None` ici enverrait des millions de points au navigateur —
+        // l'inverse de ce que le plafond protège.
+        assert_eq!(aggregate_every(4_000 * 86_400, 100), Some("7d"));
+    }
+
+    #[test]
+    fn max_points_is_bounded_because_it_comes_from_the_browser() {
+        // C'est une largeur en pixels envoyée par l'interface : `0` ferait une
+        // division par zéro, et `10_000_000` rendrait le plafond inopérant.
+        assert_eq!(clamp_max_points(None), 800);
+        assert_eq!(clamp_max_points(Some(0)), 100);
+        assert_eq!(clamp_max_points(Some(-5)), 100);
+        assert_eq!(clamp_max_points(Some(1_200)), 1_200);
+        assert_eq!(clamp_max_points(Some(9_999_999)), 5_000);
+    }
+
+    #[test]
+    fn a_raw_query_carries_no_aggregate_window_at_all() {
+        // Brut veut dire brut : pas d'`aggregateWindow`, pas d'import, pas de
+        // conversion. La requête d'hier doit rester mot pour mot celle-ci.
+        let flux = metrics_flux("lanprobe", "sonde-1", Some("ping_latency"), "start: -10m", None);
+        assert!(!flux.contains("aggregateWindow"), "{flux}");
+        assert!(!flux.contains("import"), "{flux}");
+        assert!(flux.starts_with("from(bucket: \"lanprobe\")"), "{flux}");
+        assert!(flux.contains("r[\"_measurement\"] == \"ping_latency\""), "{flux}");
+    }
+
+    #[test]
+    fn an_aggregated_query_keeps_the_peak_and_never_fills_a_hole() {
+        let flux = metrics_flux("lanprobe", "sonde-1", Some("ping_latency"), "start: -87d", Some("3h"));
+
+        // ⚠️ Deux champs par série. Une moyenne sur trois heures noie un pic à
+        // 800 ms dans une valeur à 12 ms : la courbe reste crédible et
+        // l'incident disparaît. Le maximum de l'intervalle est ce qui le garde.
+        assert!(flux.contains("fn: mean"), "{flux}");
+        assert!(flux.contains("fn: max"), "{flux}");
+        assert!(flux.contains("_field + \"_max\""), "{flux}");
+        assert_eq!(flux.matches("every: 3h").count(), 2, "{flux}");
+
+        // ⚠️ Un intervalle sans mesure ne produit AUCUN point — ni zéro, ni
+        // valeur interpolée. Un trou reste un trou : on ne déduit pas un fait
+        // d'un silence.
+        assert_eq!(flux.matches("createEmpty: false").count(), 2, "{flux}");
+        assert!(!flux.contains("createEmpty: true"), "{flux}");
+
+        // Les champs texte (`state` d'`internet_status`) ne se moyennent pas :
+        // `mean` sur une chaîne fait échouer la requête ENTIÈRE, donc les trois
+        // graphes de la fiche. Ils passent par un rendu séparé, bruts.
+        assert!(flux.contains("types.isType"), "{flux}");
+        // ⚠️ `types`, PAS `experimental/types` : ce dernier n'existe pas, et
+        // InfluxDB 2.9.1 refuse la requête ENTIÈRE sur un import inconnu —
+        // « invalid import path ». Vérifié contre un vrai influxd 2.9.1.
+        assert!(flux.contains("import \"types\""), "{flux}");
     }
 
     #[test]
@@ -8064,6 +8368,96 @@ mod tests {
             .into_iter()
             .any(|(m, p, _)| m == "POST" && p.starts_with("/api/v2/query"));
         assert!(queried, "la requête doit partir vers Influx, pas vers le navigateur");
+    }
+
+    #[tokio::test]
+    async fn a_window_wider_than_the_graph_is_aggregated_and_says_so() {
+        // ⚠️ Sans `aggregated_every` dans la réponse, l'interface ne peut pas
+        // être honnête : elle tracerait une moyenne de trois heures sous une
+        // légende qui promet la mesure à la seconde.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request(
+                    "GET",
+                    &format!("/api/probes/{probe_id}/metrics?measurement=ping_latency&range=-7d"),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["aggregated_every"], "15m", "{body}");
+
+        let (_, _, flux) = h
+            ._fake
+            .calls()
+            .into_iter()
+            .find(|(m, p, _)| m == "POST" && p.starts_with("/api/v2/query"))
+            .expect("la requête Flux doit partir");
+        assert!(flux.contains("aggregateWindow(every: 15m, fn: mean"), "{flux}");
+        assert!(flux.contains("createEmpty: false"), "{flux}");
+    }
+
+    #[tokio::test]
+    async fn a_short_window_stays_raw_and_announces_no_step() {
+        // Dix minutes prises il y a trois mois : les points existent, ils
+        // tiennent dans le graphe, on les rend tels quels.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request(
+                    "GET",
+                    &format!(
+                        "/api/probes/{probe_id}/metrics?measurement=ping_latency\
+                         &start=1780000000&stop=1780000600"
+                    ),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.get("aggregated_every").is_none(), "{body}");
+
+        let (_, _, flux) = h
+            ._fake
+            .calls()
+            .into_iter()
+            .find(|(m, p, _)| m == "POST" && p.starts_with("/api/v2/query"))
+            .expect("la requête Flux doit partir");
+        assert!(!flux.contains("aggregateWindow"), "{flux}");
+        assert!(flux.contains("start: 1780000000, stop: 1780000600"), "{flux}");
+    }
+
+    #[tokio::test]
+    async fn the_browser_decides_the_width_of_its_own_graph() {
+        // `max_points` = largeur du graphe en pixels. Un écran étroit demande
+        // moins de points, un mur d'écrans davantage — et le hub borne, parce
+        // que la valeur vient du navigateur.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request(
+                    "GET",
+                    &format!(
+                        "/api/probes/{probe_id}/metrics?measurement=ping_latency\
+                         &range=-1h&max_points=120"
+                    ),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        // 3 600 s pour 120 points : 30 s par point.
+        assert_eq!(body["aggregated_every"], "30s", "{body}");
     }
 
     // ── Rôles : l'application se fait côté serveur, route par route ────────
