@@ -327,7 +327,10 @@
     "online_help": "Latido recibido recientemente.",
     "stale_help": "En silencio desde hace más de tres intervalos, menos de dos horas.",
     "offline_help": "En silencio desde hace más de dos horas.",
-    "never_seen": "Ningún latido recibido desde el alta."
+    "never_seen": "Ningún latido recibido desde el alta.",
+    "silent": "En silencio",
+    "silent_for": "Último latido hace {ago}",
+    "silent_help": "Sin latido desde hace más de una cadencia, sin alcanzar el umbral de «fuera de línea». El hub no puede saber si la sonda está ahí: indica cuándo fue el último latido en lugar de afirmar una disponibilidad."
   },
   "buffer": {
     "empty": "al día",
@@ -390,6 +393,7 @@
     "not_found_title": "Sonda no encontrada",
     "not_found_body": "Esta sonda ya no está en el parque. Puede que se haya eliminado desde otra pestaña.",
     "range": "Ventana",
+    "range_10m": "10 min",
     "range_1h": "1 h",
     "range_6h": "6 h",
     "range_24h": "24 h",

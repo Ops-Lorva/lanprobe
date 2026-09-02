@@ -9,9 +9,18 @@
     label: string;
     /** Masqué quand le rôle ne permet pas de lancer une commande. */
     allowed?: boolean;
+    /**
+     * Grisé quand la commande n'a pas encore de quoi partir — un champ vide,
+     * typiquement.
+     *
+     * ⚠️ Grisé, pas masqué : un bouton qui apparaît à la première frappe
+     * décale le champ sous les doigts de celui qui écrit dedans. La largeur
+     * ne doit pas dépendre de la saisie.
+     */
+    disabled?: boolean;
     onsent?: () => void;
   }
-  let { probeId, kind, args = {}, label, allowed = true, onsent }: Props = $props();
+  let { probeId, kind, args = {}, label, allowed = true, disabled = false, onsent }: Props = $props();
 
   let busy = $state(false);
   let queued = $state<number | null>(null);
@@ -43,7 +52,7 @@
     répété sous chaque bouton, il devient du bruit.
   -->
   <span class="wrap">
-    <button class="lp-btn primary sm" onclick={run} disabled={busy}>
+    <button class="lp-btn primary sm" onclick={run} disabled={busy || disabled}>
       {busy ? $_('commands.sending') : label}
     </button>
     {#if error}

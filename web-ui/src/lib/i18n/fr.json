@@ -327,7 +327,10 @@
     "online_help": "Battement reçu récemment.",
     "stale_help": "Silencieuse depuis plus de trois intervalles, moins de deux heures.",
     "offline_help": "Silencieuse depuis plus de deux heures.",
-    "never_seen": "Aucun battement reçu depuis l'enrôlement."
+    "never_seen": "Aucun battement reçu depuis l'enrôlement.",
+    "silent": "Silencieuse",
+    "silent_for": "Dernier battement il y a {ago}",
+    "silent_help": "Plus de battement depuis plus d'une cadence, sans atteindre le seuil de « hors ligne ». Le hub ne peut pas savoir si la sonde est là : il donne la date du dernier battement plutôt que d'affirmer une disponibilité."
   },
   "buffer": {
     "empty": "à jour",
@@ -390,6 +393,7 @@
     "not_found_title": "Sonde introuvable",
     "not_found_body": "Cette sonde n'est plus dans le parc. Elle a peut-être été retirée depuis un autre onglet.",
     "range": "Fenêtre",
+    "range_10m": "10 min",
     "range_1h": "1 h",
     "range_6h": "6 h",
     "range_24h": "24 h",

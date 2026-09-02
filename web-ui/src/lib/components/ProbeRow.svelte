@@ -4,6 +4,7 @@
   import StatusMark from './StatusMark.svelte';
   import BufferBadge from './BufferBadge.svelte';
   import { relativeTime, absoluteTime, secondsLeft, countdown } from '$lib/time';
+  import { probeLiveness } from '$lib/probe-liveness';
   import type { Probe } from '$lib/api';
 
   interface Props {
@@ -17,6 +18,16 @@
 
   const lang = $derived($locale ?? 'en');
   const seen = $derived(relativeTime(probe.last_seen, lang, now));
+
+  /**
+   * Fraîcheur recalculée ici, à chaque battement de l'horloge partagée.
+   *
+   * ⚠️ On n'affiche PAS `probe.status` : il est daté du dernier chargement, et
+   * son « en ligne » couvre trois battements manqués. Une sonde qui a battu
+   * une fois au démarrage puis s'est tue restait verte — le parc affirmait
+   * une disponibilité que personne n'avait vérifiée.
+   */
+  const live = $derived(probeLiveness(probe.last_seen, now));
 
   /**
    * Temps restant de mode temps réel, `0` quand il ne tourne pas.
@@ -41,7 +52,7 @@
   de repérer la sonde restée en 1.1.5 sans lire les autres.
 -->
 <a
-  class="row {probe.status}"
+  class="row {live.state}"
   class:buffering={probe.buffered_points > 0}
   href="#/probes/{encodeURIComponent(probe.probe_id)}"
   aria-label={$_('fleet.open', { values: { name: probe.name } })}
@@ -61,8 +72,8 @@
        sonde EN LIGNE : sur une sonde muette, l'état internet est une valeur
        figée qui n'apprend rien de plus que le statut. -->
   <span class="status">
-    <StatusMark status={probe.status} />
-    {#if probe.status === 'online' && probe.internet_state && probe.internet_state !== 'online'}
+    <StatusMark status={live.state} />
+    {#if live.state === 'online' && probe.internet_state && probe.internet_state !== 'online'}
       <span
         class="netflag"
         class:limited={probe.internet_state === 'limited'}
@@ -90,7 +101,7 @@
   <span class="pubip lp-mono" title={probe.public_ip ?? ''}>{probe.public_ip || '—'}</span>
   <span class="platform lp-mono">{platformLabel(probe.platform, $_('common.none'))}</span>
   <span class="version lp-mono">{probe.version || $_('common.none')}</span>
-  <span class="buffer"><BufferBadge points={probe.buffered_points} live={probe.status === 'online'} /></span>
+  <span class="buffer"><BufferBadge points={probe.buffered_points} live={live.state === 'online'} /></span>
 
   <span class="chev" aria-hidden="true">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -126,8 +137,11 @@
   .row.online {
     border-left-color: color-mix(in srgb, var(--ep-success) 55%, transparent);
   }
-  .row.stale {
-    border-left-color: var(--ep-warning);
+  /* Silencieuse : le rail reste gris. Une teinte d'alerte ferait sortir la
+     ligne de la trame au même titre qu'un hors ligne, alors qu'on n'a
+     justement rien à annoncer — seulement une date à donner. */
+  .row.silent {
+    border-left-color: var(--ep-text-muted);
   }
   .row.offline {
     border-left-color: var(--ep-danger);
