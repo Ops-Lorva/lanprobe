@@ -104,11 +104,28 @@ The code lasts 15 minutes and works once. The probe shows up in the fleet on its
 **Commands:**
 
 ```bash
-lanprobe-server run       # measure and send, until Ctrl-C (default action)
-lanprobe-server enroll    # attach to a hub
-lanprobe-server status    # show the attachment
-lanprobe-server forget    # detach — the hub keeps the measurements
+lanprobe-server run         # measure and send, until Ctrl-C (default action)
+lanprobe-server enroll      # attach to a hub
+lanprobe-server interfaces  # list the network interfaces this machine exposes
+lanprobe-server status      # show the attachment
+lanprobe-server forget      # detach — the hub keeps the measurements
 ```
+
+**Pick the interface to measure.** With no screen there is nowhere to choose
+one, so `--interface` does it, on `run` and on `enroll`:
+
+```bash
+lanprobe-server interfaces              # en0  address 10.0.8.235/24  gateway 10.0.8.1
+lanprobe-server run --interface en0     # remembered — no need to repeat it
+```
+
+⚠️ **Without it the probe follows the system's default route and reports
+neither gateway nor local addresses.** The SLA report's *Gateway* column and
+the network labels then stay empty for good — the probe looks healthy and
+tells you nothing about where it sits. An unknown name fails immediately and
+lists the ones that exist; a name that is remembered but currently missing (an
+unplugged adapter, a stopped VPN) is kept and warned about, never dropped in
+silence.
 
 `--config-dir` applies to every command. Default: `~/.config/lanprobe`, and `/var/lib/lanprobe` for the systemd service.
 

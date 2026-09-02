@@ -37,7 +37,20 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Mesure et envoie au hub, jusqu'à Ctrl-C. C'est l'action par défaut.
-    Run,
+    Run {
+        /// Interface réseau à mesurer, par exemple `en0` ou `eth0`.
+        ///
+        /// ⚠️ Sans elle, la sonde suit la route par défaut du système et ne
+        /// rapporte NI passerelle NI adresses locales : la colonne
+        /// « Passerelle » du rapport SLA et les libellés réseau restent vides
+        /// à jamais. En mode graphique le choix se fait à l'écran ; sans
+        /// écran, c'est ici.
+        ///
+        /// Le nom est retenu : on ne la repasse pas à chaque lancement.
+        /// `lanprobe-server interfaces` liste celles que la machine expose.
+        #[arg(long)]
+        interface: Option<String>,
+    },
 
     /// Rattache cette sonde à un hub.
     Enroll {
@@ -66,6 +79,18 @@ enum Command {
         /// vous la montrer.
         #[arg(long)]
         allow_self_signed: bool,
+        /// Interface réseau à mesurer, par exemple `en0` ou `eth0`.
+        ///
+        /// ⚠️ Sans elle, la sonde suit la route par défaut du système et ne
+        /// rapporte NI passerelle NI adresses locales : la colonne
+        /// « Passerelle » du rapport SLA et les libellés réseau restent vides
+        /// à jamais. En mode graphique le choix se fait à l'écran ; sans
+        /// écran, c'est ici.
+        ///
+        /// Le nom est retenu : on ne la repasse pas à chaque lancement.
+        /// `lanprobe-server interfaces` liste celles que la machine expose.
+        #[arg(long)]
+        interface: Option<String>,
         /// Empreinte SHA-256 attendue du certificat du hub. Seul ce
         /// certificat-là sera accepté, maintenant et ensuite.
         ///
@@ -75,6 +100,12 @@ enum Command {
         #[arg(long)]
         pin: Option<String>,
     },
+
+    /// Liste les interfaces réseau que cette machine expose.
+    ///
+    /// ⚠️ Sans écran, choisir à l'aveugle n'est pas un choix : c'est cette
+    /// commande qui rend `--interface` utilisable en pratique.
+    Interfaces,
 
     /// Affiche l'état du rattachement.
     Status,
@@ -118,6 +149,113 @@ fn split_https_authority(url: &str) -> Option<(String, u16)> {
     }
 }
 
+/// Ce que la sonde retient de la désignation d'interface.
+#[derive(Debug, PartialEq, Eq)]
+enum InterfaceChoice {
+    /// Aucune interface désignée : on suit la route par défaut du système.
+    /// C'est le comportement d'avant — assumé et journalisé, plus subi.
+    SystemRoute,
+    /// Interface désignée et présente sur la machine.
+    Selected(String),
+    /// Désignée, mais absente en ce moment.
+    ///
+    /// ⚠️ On la GARDE. Un adaptateur USB débranché ou un VPN arrêté revient ;
+    /// l'oublier en silence rendrait la sonde muette sur son réseau sans que
+    /// rien ne le dise, et refuser de démarrer l'empêcherait de mesurer pour
+    /// un câble. On garde le choix et on le signale.
+    Missing(String),
+}
+
+/// Résout l'interface à utiliser : ligne de commande, puis config, puis rien.
+///
+/// ⚠️ **Un nom demandé et inconnu est une ERREUR, pas un repli.** Sans écran,
+/// une faute de frappe ne se voit pas : retomber en silence sur « aucune »
+/// donnerait une sonde qui a l'air configurée et ne l'est pas — passerelle et
+/// adresses locales vides à jamais, et rien pour l'expliquer. Le message nomme
+/// donc la saisie ET les interfaces qui existent.
+///
+/// Un nom *enregistré* devenu introuvable ne suit pas la même règle : voir
+/// `InterfaceChoice::Missing`.
+fn resolve_interface(
+    demandee: Option<&str>,
+    enregistree: Option<&str>,
+    disponibles: &[String],
+) -> Result<InterfaceChoice, String> {
+    if let Some(name) = demandee {
+        if disponibles.iter().any(|d| d == name) {
+            return Ok(InterfaceChoice::Selected(name.to_string()));
+        }
+        let liste = if disponibles.is_empty() {
+            "aucune interface détectée sur cette machine".to_string()
+        } else {
+            format!("interfaces disponibles : {}", disponibles.join(", "))
+        };
+        return Err(format!("interface « {name} » inconnue — {liste}"));
+    }
+    match enregistree {
+        Some(name) if disponibles.iter().any(|d| d == name) => {
+            Ok(InterfaceChoice::Selected(name.to_string()))
+        }
+        Some(name) => Ok(InterfaceChoice::Missing(name.to_string())),
+        None => Ok(InterfaceChoice::SystemRoute),
+    }
+}
+
+/// Applique la désignation d'interface à l'état, et la retient si elle vient
+/// d'être demandée.
+///
+/// ⚠️ **Avant tout démarrage de tâche.** Le battement, les mesures et le relevé
+/// d'IP publique se lient à cette interface : les laisser partir d'abord ferait
+/// sortir les premiers par la route par défaut, et une mesure prise par la
+/// mauvaise interface est pire qu'une mesure absente — elle a l'air normale.
+/// Même raison que côté graphique (f05b025), et le même emplacement en config.
+fn select_interface(state: &state::AppState, demandee: Option<&str>) -> Result<(), String> {
+    let enregistree = state
+        .config
+        .get()
+        .get("selected_interface")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let disponibles = lanprobe_core::interfaces::list_interfaces();
+
+    let name = match resolve_interface(demandee, enregistree.as_deref(), &disponibles)? {
+        InterfaceChoice::SystemRoute => {
+            info!(
+                "aucune interface désignée — route par défaut du système. Ni passerelle ni adresses locales ne seront rapportées ; `lanprobe-server interfaces` liste les choix possibles."
+            );
+            return Ok(());
+        }
+        InterfaceChoice::Selected(name) => {
+            info!("interface mesurée : {name}");
+            name
+        }
+        InterfaceChoice::Missing(name) => {
+            warn!(
+                "interface « {name} » retenue mais absente pour l'instant                  (disponibles : {}). On la garde : un lien débranché revient.",
+                if disponibles.is_empty() { "aucune".into() } else { disponibles.join(", ") }
+            );
+            name
+        }
+    };
+
+    *state
+        .selected_interface
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some(name.clone());
+
+    // Retenue seulement quand elle vient d'être DEMANDÉE : un simple
+    // lancement ne doit pas réécrire la config, et surtout pas y figer une
+    // interface absente que l'on vient seulement de signaler.
+    if demandee.is_some() {
+        let mut data = state.config.get();
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("selected_interface".into(), serde_json::Value::String(name));
+            let _ = state.config.put(data);
+        }
+    }
+    Ok(())
+}
+
 /// État minimal, sans ordonnanceur : suffisant pour lire et écrire la config.
 fn bare_state(config_dir: &PathBuf) -> Result<state::AppState, String> {
     std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
@@ -137,8 +275,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config_dir = cli.config_dir.unwrap_or_else(default_config_dir);
 
-    match cli.command.unwrap_or(Command::Run) {
-        Command::Run => run(config_dir).await?,
+    match cli.command.unwrap_or(Command::Run { interface: None }) {
+        Command::Run { interface } => run(config_dir, interface.as_deref()).await?,
+
+        // ⚠️ Sans écran, choisir à l'aveugle n'est pas un choix. On imprime la
+        // passerelle et les adresses avec chaque nom : c'est ce qui permet de
+        // reconnaître le bon lien sur une machine qui en expose six.
+        Command::Interfaces => {
+            let noms = lanprobe_core::interfaces::list_interfaces();
+            if noms.is_empty() {
+                println!("Aucune interface détectée sur cette machine.");
+            }
+            for nom in &noms {
+                let d = lanprobe_core::interfaces::get_interface_details(nom);
+                let ip = lanprobe_core::interfaces::local_cidr(&d).unwrap_or_else(|| "—".into());
+                let gw = d.gateway.clone().filter(|g| !g.is_empty()).unwrap_or_else(|| "—".into());
+                println!("{nom}\tadresse {ip}\tpasserelle {gw}");
+            }
+        }
         Command::Enroll {
             hub: hub_url,
             code,
@@ -148,8 +302,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             site,
             allow_self_signed,
             pin,
+            interface,
         } => {
             let state = bare_state(&config_dir)?;
+            // ⚠️ AVANT l'enrôlement : la requête sort par cette interface, et
+            // c'est aussi le moment où l'opérateur est devant sa machine. Une
+            // faute de frappe doit se voir là, pas six heures plus tard dans
+            // une colonne vide du rapport.
+            select_interface(&state, interface.as_deref())?;
             let key = secrets::load_or_create_key(&config_dir)?;
             let credentials = match (&username, &password, &site) {
                 (Some(u), Some(p), Some(s)) => Some((u.as_str(), p.as_str(), s.as_str())),
@@ -227,9 +387,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Boucle de mesure : ordonnanceur, moniteur internet, battement de cœur et
 /// envoi au hub. Rend la main sur Ctrl-C.
-async fn run(config_dir: PathBuf) -> Result<(), String> {
+async fn run(config_dir: PathBuf, interface: Option<&str>) -> Result<(), String> {
     let state = bare_state(&config_dir)?;
     info!("dossier de configuration : {}", config_dir.display());
+    // ⚠️ Ici, et pas plus bas : les tâches lancées ensuite se lient à cette
+    // interface. C'est le pendant headless de f05b025 — sans ça le premier
+    // battement sort par la route par défaut, et le hub note « sonde vue à
+    // l'instant » sur la foi d'une mesure venue du mauvais réseau.
+    select_interface(&state, interface)?;
 
     let cfg = hub::load(&state);
     if cfg.url.is_empty() {
@@ -269,4 +434,64 @@ async fn run(config_dir: PathBuf) -> Result<(), String> {
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
     info!("arrêt demandé");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dispo() -> Vec<String> {
+        vec!["en0".to_string(), "en1".to_string(), "utun3".to_string()]
+    }
+
+    #[test]
+    fn an_unknown_interface_fails_loudly_and_names_those_that_exist() {
+        // ⚠️ Sans écran, une faute de frappe ne se voit pas. Retomber en
+        // silence sur « aucune » donnerait une sonde qui A L'AIR configurée et
+        // ne l'est pas — exactement le défaut qu'on corrige : passerelle et
+        // adresses locales vides à jamais, colonne « Passerelle » du rapport
+        // SLA définitivement absente, et rien pour l'expliquer.
+        let err = resolve_interface(Some("en5"), None, &dispo()).unwrap_err();
+        assert!(err.contains("en5"), "l'erreur doit citer la saisie : {err}");
+        assert!(err.contains("en0") && err.contains("utun3"), "et lister les vraies : {err}");
+    }
+
+    #[test]
+    fn the_command_line_wins_over_what_was_stored() {
+        let choice = resolve_interface(Some("en1"), Some("en0"), &dispo()).unwrap();
+        assert_eq!(choice, InterfaceChoice::Selected("en1".into()));
+    }
+
+    #[test]
+    fn a_stored_interface_is_reused_without_repeating_the_option() {
+        // Le pendant headless de f05b025 : l'interface est relue au démarrage,
+        // avant qu'une seule tâche parte. Sans ça le premier battement sort par
+        // la route par défaut, et le hub note « sonde vue à l'instant » sur la
+        // foi d'une mesure venue du mauvais réseau.
+        let choice = resolve_interface(None, Some("utun3"), &dispo()).unwrap();
+        assert_eq!(choice, InterfaceChoice::Selected("utun3".into()));
+    }
+
+    #[test]
+    fn a_stored_interface_that_vanished_is_kept_and_signalled_never_dropped() {
+        // 🔴 Un adaptateur USB débranché, un VPN arrêté : l'interface revient.
+        // L'oublier en silence rendrait la sonde muette sur son réseau sans
+        // que rien ne le dise ; refuser de démarrer l'empêcherait de mesurer
+        // pour un câble. On garde le choix ET on le signale.
+        let choice = resolve_interface(None, Some("en9"), &dispo()).unwrap();
+        assert_eq!(choice, InterfaceChoice::Missing("en9".into()));
+    }
+
+    #[test]
+    fn asking_for_nothing_follows_the_system_route() {
+        // Le défaut d'avant, mais ASSUMÉ et journalisé, pas subi.
+        assert_eq!(resolve_interface(None, None, &dispo()).unwrap(), InterfaceChoice::SystemRoute);
+    }
+
+    #[test]
+    fn a_machine_without_any_interface_still_names_the_problem() {
+        // Liste vide : le message ne doit pas se réduire à « choisissez parmi : ».
+        let err = resolve_interface(Some("en0"), None, &[]).unwrap_err();
+        assert!(err.contains("aucune"), "{err}");
+    }
 }
