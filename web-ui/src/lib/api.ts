@@ -1113,11 +1113,21 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ kind, args }) },
     ),
 
-  metrics: (id: string, measurement: string, range: string) =>
-    request<unknown>(
-      `/api/probes/${encodeURIComponent(id)}/metrics` +
-        `?measurement=${encodeURIComponent(measurement)}&range=${encodeURIComponent(range)}`,
-    ),
+  /**
+   * Mesures d'une fenêtre — même construction de bornes que `/sla`.
+   *
+   * `maxPoints` est la **largeur du graphe en pixels**. C'est elle, et elle
+   * seule, qui décide si le hub agrège et à quel pas : ⚠️ ni l'ancienneté de la
+   * plage ni sa durée n'entrent en compte. Dix minutes prises il y a trois mois
+   * reviennent brutes ; quatre-vingts jours reviennent moyennés, avec le
+   * maximum de chaque intervalle à côté et `aggregated_every` dans la réponse.
+   */
+  metrics: (id: string, measurement: string, window: MetricsWindow, maxPoints: number) => {
+    const q = windowQuery(window);
+    q.set('measurement', measurement);
+    q.set('max_points', String(Math.max(1, Math.round(maxPoints))));
+    return request<unknown>(`/api/probes/${encodeURIComponent(id)}/metrics?${q}`);
+  },
 
   // ── Comptes ──────────────────────────────────────────────────────────────
   //

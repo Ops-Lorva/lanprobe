@@ -525,6 +525,8 @@
     }
   },
   "charts": {
+    "aggregated": "Averaged over {every} — each interval's maximum is drawn behind, so a spike does not vanish into its own average.",
+    "peak_label": "{label} (max)",
     "latency_title": "Latency of monitored hosts",
     "latency_sub": "ICMP round-trip time, in milliseconds.",
     "internet_title": "Internet access",

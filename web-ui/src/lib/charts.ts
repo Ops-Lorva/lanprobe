@@ -6,6 +6,17 @@ export interface Serie {
   /** Variable CSS, jamais une valeur en dur : le thème clair a ses propres pas. */
   color: string;
   points: { t: number; v: number }[];
+  /**
+   * Maximum de chaque intervalle, quand `points` est une moyenne agrégée.
+   *
+   * ⚠️ Ce n'est pas une décoration. Une moyenne sur deux heures noie un pic à
+   * 800 ms dans une valeur à 12 ms : la courbe reste crédible et l'incident
+   * disparaît. Le tracer en fond est ce qui empêche une valeur plausible et
+   * fausse de remplacer une valeur vraie.
+   *
+   * Absent sur des points bruts — il n'y aurait rien à distinguer.
+   */
+  peak?: { t: number; v: number }[];
 }
 
 /**

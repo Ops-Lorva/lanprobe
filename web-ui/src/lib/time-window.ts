@@ -81,17 +81,18 @@ export function toMetricsWindow(choice: WindowChoice, nowMs: number): MetricsWin
 }
 
 /**
- * Durée glissante à passer à `GET /api/probes/{id}/metrics`.
+ * Une plage absolue exprimée en durée glissante, depuis son début.
  *
- * 🔴 **Cette route n'accepte QUE `range`.** Elle déclare bien `start`/`stop`
- * dans `MetricsQuery`, mais `probe_metrics` (crates/lanprobe-web/src/web.rs)
- * ne les lit pas : seuls `/sla` et `/public-ips` passent par `flux_range`. Une
- * plage absolue envoyée telle quelle serait donc ignorée EN SILENCE, et les
- * courbes montreraient la dernière heure sous une légende « du 20 au 22 ».
+ * ⚠️ **N'est plus le chemin des mesures.** `probe_metrics` honore désormais
+ * `start`/`stop` (crates/lanprobe-web/src/web.rs), et l'écran passe par
+ * `toMetricsWindow` comme `/sla` et `/public-ips`. Le sur-tirage que cette
+ * fonction organisait — tout demander depuis le début de la plage, puis couper
+ * la fin côté navigateur — faisait lire quatre-vingts jours de points pour en
+ * afficher un, et surtout : le hub agrège sur la fenêtre DEMANDÉE. Réclamer
+ * 87 jours pour en afficher 10 minutes ferait moyenner par trois heures ce qui
+ * tient très bien à la seconde.
  *
- * On demande donc tout depuis le début de la plage, et `clipToWindow` coupe la
- * fin côté navigateur. Le prix est un sur-tirage borné par le plafond de 90
- * jours ; le corriger proprement demande une modification du hub.
+ * Conservée pour qui a besoin d'une durée relative à partir d'une plage.
  */
 export function metricsRange(choice: WindowChoice, nowMs: number): string {
   if (choice.kind === 'relative') return choice.range;

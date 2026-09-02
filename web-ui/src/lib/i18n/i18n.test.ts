@@ -188,4 +188,16 @@ describe('catalogues de traduction', () => {
       expect(new Set(flatten(catalog)).has('probe.range_10m')).toBe(true);
     });
   }
+
+  // Agrégation : le pas et le maximum de l'intervalle.
+  // ⚠️ Sans ces deux libellés, l'écran trace une moyenne de trois heures sans
+  // le dire — une courbe crédible dont personne ne sait qu'elle est moyennée.
+  const REQUISES_AGREGATION = ['charts.aggregated', 'charts.peak_label'];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés de l'agrégation`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_AGREGATION.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });

@@ -525,6 +525,8 @@
     }
   },
   "charts": {
+    "aggregated": "Promediado cada {every} — el máximo de cada intervalo se dibuja de fondo, para que un pico no desaparezca en su media.",
+    "peak_label": "{label} (máx)",
     "latency_title": "Latencia de los hosts vigilados",
     "latency_sub": "Tiempo de respuesta ICMP, en milisegundos.",
     "internet_title": "Acceso a internet",

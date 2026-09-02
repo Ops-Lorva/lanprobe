@@ -278,6 +278,75 @@ export function normalizeCurves(payload: unknown, fallbackField = 'value'): Curv
   }));
 }
 
+// ── Agrégation (contrat § 3, `GET /api/probes/{id}/metrics`) ───────────────
+//
+// ⚠️ Le hub n'agrège que si la fenêtre ne tient pas dans la largeur du graphe —
+// jamais sur l'ancienneté ni sur la durée seule. Dix minutes prises il y a
+// trois mois arrivent BRUTES, sans aucun des champs ci-dessous.
+
+/**
+ * Suffixe du champ qui porte le maximum de l'intervalle.
+ *
+ * ⚠️ Le maximum n'est pas une décoration. Une moyenne sur deux heures noie un
+ * pic à 800 ms dans une valeur à 12 ms : la courbe reste crédible et
+ * l'incident disparaît. Une valeur plausible et fausse est pire qu'une valeur
+ * absente — c'est le maximum de l'intervalle qui préserve l'incident.
+ */
+export const PEAK_SUFFIX = '_max';
+
+/**
+ * Pas d'agrégation annoncé par le hub (`"15m"`), ou `null` si les points sont
+ * bruts.
+ *
+ * ⚠️ Le champ est ABSENT d'une réponse brute, jamais à `"1s"` : l'interface
+ * n'annonce une moyenne que s'il y en a une, sans quoi elle légenderait la
+ * mesure à la seconde comme une moyenne — ou l'inverse.
+ */
+export function aggregatedEvery(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const raw = (payload as Record<string, unknown>).aggregated_every;
+  return typeof raw === 'string' && raw !== '' ? raw : null;
+}
+
+/** Une courbe, et le maximum de chaque intervalle quand la réponse est agrégée. */
+export interface PairedCurve extends Curve {
+  peak?: Point[];
+}
+
+/** Deux courbes portent-elles les mêmes étiquettes ? */
+function sameTags(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
+}
+
+/**
+ * Rattache chaque série `_max` à la moyenne dont elle est le maximum.
+ *
+ * ⚠️ L'appariement porte sur les étiquettes AUTANT que sur le champ : deux
+ * cibles pinguées en parallèle ont chacune leur pic, et croiser les deux
+ * dessinerait un maximum qu'aucune machine n'a jamais mesuré.
+ *
+ * Un `_max` sans moyenne — qui ne devrait pas arriver, les deux sortent du même
+ * flux Flux — est GARDÉ comme courbe à part entière. Escamoter une série reçue
+ * serait le silence que ce dépôt refuse.
+ */
+export function pairPeaks(curves: Curve[]): PairedCurve[] {
+  const peaks = curves.filter((c) => c.field.endsWith(PEAK_SUFFIX));
+  const used = new Set<Curve>();
+  const out: PairedCurve[] = [];
+
+  for (const curve of curves) {
+    if (curve.field.endsWith(PEAK_SUFFIX)) continue;
+    const peak = peaks.find(
+      (p) => p.field === curve.field + PEAK_SUFFIX && sameTags(p.tags, curve.tags),
+    );
+    if (peak) used.add(peak);
+    out.push(peak ? { ...curve, peak: peak.points } : { ...curve });
+  }
+  for (const peak of peaks) if (!used.has(peak)) out.push({ ...peak });
+  return out;
+}
+
 function sortSeries(map: SeriesMap): SeriesMap {
   for (const key of Object.keys(map)) map[key].sort((a, b) => a.t - b.t);
   return map;

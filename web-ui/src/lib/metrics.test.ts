@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_RANGE,
   RANGES,
+  aggregatedEvery,
   normalizeCurves,
+  pairPeaks,
   normalizeMetrics,
   numeric,
   rangeMillis,
@@ -192,5 +194,103 @@ describe('numeric', () => {
   it('écarte le texte sans écarter le point suivant', () => {
     expect(numeric([{ t: 1, v: 'online' }, { t: 2, v: 3 }])).toEqual([{ t: 2, v: 3 }]);
     expect(numeric(undefined)).toEqual([]);
+  });
+});
+
+/**
+ * Réponse agrégée du hub : le pas est annoncé, et chaque champ arrive en
+ * DEUX séries — la moyenne sous son nom nu, le maximum de l'intervalle sous
+ * le suffixe `_max`.
+ */
+const HUB_AGGREGE = {
+  range: '-87d',
+  aggregated_every: '3h',
+  series: [
+    {
+      field: 'latency_ms · 10.0.30.12',
+      measure: 'latency_ms',
+      tags: { ip: '10.0.30.12' },
+      points: [
+        { t: 1_788_000_000_000, v: 12 },
+        { t: 1_788_010_800_000, v: 12.4 },
+      ],
+    },
+    {
+      field: 'latency_ms_max · 10.0.30.12',
+      measure: 'latency_ms_max',
+      tags: { ip: '10.0.30.12' },
+      points: [
+        { t: 1_788_000_000_000, v: 12 },
+        { t: 1_788_010_800_000, v: 800 },
+      ],
+    },
+    {
+      field: 'latency_ms · 8.8.8.8',
+      measure: 'latency_ms',
+      tags: { ip: '8.8.8.8' },
+      points: [{ t: 1_788_000_000_000, v: 22 }],
+    },
+    {
+      field: 'latency_ms_max · 8.8.8.8',
+      measure: 'latency_ms_max',
+      tags: { ip: '8.8.8.8' },
+      points: [{ t: 1_788_000_000_000, v: 24 }],
+    },
+  ],
+};
+
+describe('aggregatedEvery', () => {
+  it('rend le pas annoncé, et null quand la réponse est brute', () => {
+    // ⚠️ Le champ est ABSENT sur une réponse brute, jamais à « 1s ». Le lire
+    // comme un pas ferait annoncer une moyenne là où il n'y en a aucune.
+    expect(aggregatedEvery(HUB_AGGREGE)).toBe('3h');
+    expect(aggregatedEvery(HUB_PING)).toBeNull();
+    expect(aggregatedEvery(null)).toBeNull();
+    expect(aggregatedEvery([])).toBeNull();
+  });
+});
+
+describe('pairPeaks', () => {
+  it('rattache chaque maximum à SA moyenne, jamais à celle d’à côté', () => {
+    // ⚠️ L'appariement se fait sur les étiquettes autant que sur le champ :
+    // deux cibles pinguées en parallèle ont chacune leur pic, et croiser les
+    // deux dessinerait un maximum qu'aucune machine n'a mesuré.
+    const paired = pairPeaks(normalizeCurves(HUB_AGGREGE, 'latency_ms'));
+    expect(paired).toHaveLength(2);
+
+    const local = paired.find((c) => c.tags.ip === '10.0.30.12')!;
+    expect(local.field).toBe('latency_ms');
+    // La moyenne de l'intervalle reste à 12,4 ms : parfaitement crédible,
+    // alors qu'un pic à 800 ms s'y est produit. C'est le maximum qui le garde.
+    expect(local.points.at(-1)!.v).toBe(12.4);
+    expect(local.peak?.at(-1)!.v).toBe(800);
+
+    const google = paired.find((c) => c.tags.ip === '8.8.8.8')!;
+    expect(google.peak?.[0].v).toBe(24);
+  });
+
+  it('laisse les courbes brutes intactes, sans maximum', () => {
+    const paired = pairPeaks(normalizeCurves(HUB_PING, 'latency_ms'));
+    expect(paired.every((c) => c.peak === undefined)).toBe(true);
+    expect(paired).toHaveLength(normalizeCurves(HUB_PING, 'latency_ms').length);
+  });
+
+  it('garde un maximum orphelin plutôt que de le faire disparaître', () => {
+    // Ne devrait pas arriver — les deux séries sortent du même flux — mais
+    // escamoter une série reçue est le genre de silence que ce dépôt refuse.
+    const orphan = normalizeCurves(
+      {
+        series: [
+          {
+            field: 'latency_ms_max',
+            measure: 'latency_ms_max',
+            tags: {},
+            points: [{ t: 1, v: 9 }],
+          },
+        ],
+      },
+      'latency_ms',
+    );
+    expect(pairPeaks(orphan)).toHaveLength(1);
   });
 });

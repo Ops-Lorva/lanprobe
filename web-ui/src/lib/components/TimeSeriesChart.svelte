@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { locale } from 'svelte-i18n';
+  import { _, locale } from 'svelte-i18n';
   import { axisTime, tooltipTime } from '$lib/time';
   import { segments, type Serie } from '$lib/charts';
 
@@ -87,7 +87,16 @@
   }
 
   const drawn = $derived(
-    series.map((s) => ({ ...s, points: decimate(s.points, Math.max(60, Math.floor(plotW / 2))) })),
+    series.map((s) => {
+      const target = Math.max(60, Math.floor(plotW / 2));
+      return {
+        ...s,
+        points: decimate(s.points, target),
+        // Le maximum se décime comme la moyenne — LTTB garde les pics, c'est
+        // précisément ce qu'on lui demande ici.
+        peak: s.peak ? decimate(s.peak, target) : undefined,
+      };
+    }),
   );
 
   const bounds = $derived.by(() => {
@@ -95,7 +104,10 @@
     let tMax = -Infinity;
     let vMax = 0;
     for (const s of series) {
-      for (const p of s.points) {
+      // ⚠️ Le maximum entre dans l'échelle. Sans lui, la bande de fond sort du
+      // cadre par le haut : le pic est bien là, tracé hors du graphe, donc
+      // invisible — le défaut que cette bande vient corriger.
+      for (const p of [...s.points, ...(s.peak ?? [])]) {
         if (p.t < tMin) tMin = p.t;
         if (p.t > tMax) tMax = p.t;
         if (p.v > vMax) vMax = p.v;
@@ -205,8 +217,19 @@
   const hover = $derived.by(() => {
     if (cursorT == null) return null;
     const rows = drawn
-      .map((s) => ({ serie: s, point: nearest(s.points, cursorT!) }))
-      .filter((r) => r.point) as { serie: Serie; point: { t: number; v: number } }[];
+      .map((s) => ({
+        serie: s,
+        point: nearest(s.points, cursorT!),
+        // ⚠️ Le maximum est lisible au survol, pas seulement devinable à la
+        // forme de la bande : un chiffre qu'on ne peut pas lire ne sert à rien
+        // dans un rapport d'incident.
+        peak: s.peak ? nearest(s.peak, cursorT!) : null,
+      }))
+      .filter((r) => r.point) as {
+      serie: Serie;
+      point: { t: number; v: number };
+      peak: { t: number; v: number } | null;
+    }[];
     if (rows.length === 0) return null;
     const anchor = rows.reduce((a, b) =>
       Math.abs(a.point.t - cursorT!) <= Math.abs(b.point.t - cursorT!) ? a : b,
@@ -266,8 +289,32 @@
       </text>
     {/each}
 
+    <!--
+      Le maximum de l'intervalle, EN FOND et sous toutes les moyennes : une
+      aire claire jusqu'à zéro, surmontée d'un filet fin. Il est dessiné dans
+      sa propre boucle pour passer sous TOUTES les courbes — dans la boucle
+      commune, le maximum d'une série recouvrirait la moyenne de la
+      précédente.
+    -->
     {#each drawn as s (s.key)}
-      {#if drawn.length === 1}
+      {#if s.peak}
+        <path d={areaPath(s.peak)} fill={s.color} fill-opacity="0.12" />
+        <path
+          d={path(s.peak)}
+          fill="none"
+          stroke={s.color}
+          stroke-width="1"
+          stroke-opacity="0.5"
+          stroke-linejoin="round"
+        />
+      {/if}
+    {/each}
+
+    {#each drawn as s (s.key)}
+      <!-- L'aire de confort d'une courbe seule tombe dès qu'il y a un
+           maximum : deux aires superposées se lisent comme un dégradé, et on
+           ne distingue plus la moyenne de son enveloppe. -->
+      {#if drawn.length === 1 && !s.peak}
         <path d={areaPath(s.points)} fill={s.color} fill-opacity="0.1" />
       {/if}
       <path
@@ -316,6 +363,15 @@
           <span class="tip-lbl">{r.serie.label}</span>
           <span class="tip-val lp-mono">{fmt(r.point.v)} {unit}</span>
         </div>
+        {#if r.peak}
+          <div class="tip-row">
+            <span class="swatch faint" style:background={r.serie.color}></span>
+            <span class="tip-lbl"
+              >{$_('charts.peak_label', { values: { label: r.serie.label } })}</span
+            >
+            <span class="tip-val lp-mono">{fmt(r.peak.v)} {unit}</span>
+          </div>
+        {/if}
       {/each}
     </div>
   {/if}
@@ -336,6 +392,9 @@
   svg:focus-visible {
     outline: 2px solid var(--ep-accent-bright);
     outline-offset: 2px;
+  }
+  .swatch.faint {
+    opacity: 0.5;
   }
   .grid {
     stroke: var(--lp-grid);

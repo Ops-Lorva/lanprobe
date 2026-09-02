@@ -525,6 +525,8 @@
     }
   },
   "charts": {
+    "aggregated": "Moyenné par {every} — le maximum de chaque intervalle est tracé en fond, pour qu'un pic ne disparaisse pas dans sa moyenne.",
+    "peak_label": "{label} (max)",
     "latency_title": "Latence des hôtes suivis",
     "latency_sub": "Temps de réponse ICMP, en millisecondes.",
     "internet_title": "Accès internet",

@@ -30,14 +30,16 @@
     normalizeCurves,
     numeric,
     plausibleLatency,
+    aggregatedEvery,
+    pairPeaks,
     type Curve,
+    type PairedCurve,
   } from '$lib/metrics';
   // ⚠️ Une seule fenêtre pour toute la fiche, tenue dans un store partagé :
   // avant, elle n'existait que sur le tableau de bord et les quatre autres
   // onglets affichaient son choix sans le dire.
   import {
     clipToWindow,
-    metricsRange,
     timeWindow,
     toMetricsWindow,
     windowDomain,
@@ -398,9 +400,22 @@
   interface ChartState {
     tone: 'loading' | 'error' | 'empty' | 'ready';
     error?: string;
-    curves: Curve[];
+    curves: PairedCurve[];
+    /** Pas d'agrégation annoncé par le hub, `null` quand les points sont bruts. */
+    every: string | null;
   }
-  const blank: ChartState = { tone: 'loading', curves: [] };
+  const blank: ChartState = { tone: 'loading', curves: [], every: null };
+
+  /**
+   * Largeur du graphe, en pixels — c'est elle qu'on envoie au hub sous
+   * `max_points`.
+   *
+   * ⚠️ **C'est le SEUL critère d'agrégation.** Ni l'ancienneté de la plage ni
+   * sa durée n'entrent en compte : dix minutes prises il y a trois mois
+   * tiennent dans la carte et reviennent brutes. 800 est le repli avant la
+   * première mesure du conteneur, pas une constante de réglage.
+   */
+  let chartsWidth = $state(800);
 
   const win = $derived($timeWindow.choice);
   let ping = $state<ChartState>({ ...blank });
@@ -420,23 +435,24 @@
     choice: WindowChoice,
   ): Promise<ChartState> {
     try {
-      // 🔴 `GET /metrics` n'accepte QUE `range` : il déclare `start`/`stop`
-      // mais `probe_metrics` ne les lit pas (crates/lanprobe-web/src/web.rs).
-      // Une plage absolue envoyée telle quelle serait ignorée EN SILENCE, et
-      // les courbes montreraient la dernière heure sous une légende « du 20
-      // au 22 ». On remonte donc jusqu'au début de la plage et on coupe la
-      // fin ici.
-      const raw = await api.metrics(id, measurement, metricsRange(choice, Date.now()));
-      const curves = normalizeCurves(raw, fallbackField).map((c) => ({
+      // Les bornes exactes, comme `/sla` et `/public-ips` — `probe_metrics`
+      // les honore depuis qu'il passe par `flux_range`. ⚠️ Sur-tirer depuis le
+      // début de la plage, comme on le faisait, ferait aussi mentir
+      // l'agrégation : le hub la calcule sur la fenêtre DEMANDÉE, et dix
+      // minutes réclamées sous la forme « les 87 derniers jours » seraient
+      // moyennées par trois heures.
+      const raw = await api.metrics(id, measurement, toMetricsWindow(choice, Date.now()), chartsWidth);
+      const curves = pairPeaks(normalizeCurves(raw, fallbackField)).map((c) => ({
         ...c,
         points: clipToWindow(c.points, choice),
+        peak: c.peak ? clipToWindow(c.peak, choice) : undefined,
       }));
       const empty = curves.every((c) => c.points.length === 0);
-      return { tone: empty ? 'empty' : 'ready', curves };
+      return { tone: empty ? 'empty' : 'ready', curves, every: aggregatedEvery(raw) };
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) {
         onExpired();
-        return { tone: 'error', curves: [], error: $_('auth.expired') };
+        return { tone: 'error', curves: [], every: null, error: $_('auth.expired') };
       }
       if (e instanceof MetricsShapeError) {
         // On nomme les clés reçues : le message doit permettre de corriger le
@@ -444,12 +460,14 @@
         return {
           tone: 'error',
           curves: [],
+          every: null,
           error: $_('charts.error_shape', { values: { keys: e.observed } }),
         };
       }
       return {
         tone: 'error',
         curves: [],
+        every: null,
         error: e instanceof ApiError ? e.message : String(e),
       };
     }
@@ -662,6 +680,10 @@
       // plus, mais celles déjà en base écraseraient l'échelle jusqu'à la fin
       // de la rétention.
       points: plausibleLatency(numeric(c.points)),
+      // ⚠️ Le même filtre s'applique au maximum, et pour la même raison : une
+      // sonde suspendue a déjà écrit des « latences » de dix-sept minutes, et
+      // c'est justement le MAXIMUM qui les ramasserait toutes.
+      peak: c.peak ? plausibleLatency(numeric(c.peak)) : undefined,
     }));
   });
   const pingPoints = $derived(pingCurves.flatMap((c) => c.points));
@@ -870,6 +892,7 @@
       /** Sens seul : dans une carte titrée du moteur, `label` le répéterait. */
       direction: string;
       points: { t: number; v: number }[];
+      peak?: { t: number; v: number }[];
     }[] = [];
     for (const [field, direction] of wanted) {
       for (const c of speed.curves.filter((c) => c.field === field && c.points.length > 0)) {
@@ -884,6 +907,7 @@
           field,
           direction,
           points: numeric(c.points),
+          peak: c.peak ? numeric(c.peak) : undefined,
         });
       }
     }
@@ -978,6 +1002,19 @@
     if (hidden.has(key)) hidden.delete(key);
     else hidden.add(key);
   }
+
+  /**
+   * Pas d'agrégation à annoncer près du graphe.
+   *
+   * ⚠️ `null` = points bruts, et l'écran n'affiche alors RIEN. Écrire
+   * « moyenné par 1 s » sur des mesures prises à la seconde serait une
+   * affirmation fausse de plus, exactement du même genre que celle qu'on
+   * corrige : une légende qui décrit autre chose que la courbe.
+   *
+   * Les trois graphes partagent la fenêtre, donc le pas : le premier renseigné
+   * suffit.
+   */
+  const aggregatedStep = $derived(ping.every ?? speed.every ?? inet.every);
 
   const shownPing = $derived(pingCurves.filter((c) => !hidden.has(c.key)));
   const shownSpeed = $derived(speedCurves.filter((c) => !hidden.has(c.key)));
@@ -1297,19 +1334,32 @@
     est la seule chose honnête qu'on puisse en dire.
   -->
   {#if tab === 'dashboard' || tab === 'monitoring' || tab === 'speedtest'}
-    <WindowBar choice={win} onpick={(c) => timeWindow.pick(c)}>
-      {#snippet actions()}
-        {#if tab === 'dashboard'}
-          <!-- Le rapport porte sur la fenêtre affichée : on exporte ce qu'on
-               regarde, et la fenêtre est écrite dans le classeur. Un « 99,2 % »
-               sans période ne veut rien dire pour le client qui le reçoit. -->
-          <button class="lp-btn ghost sm" onclick={exportSla} disabled={slaBusy}>
-            {slaBusy ? $_('sla.exporting') : $_('sla.export')}
-          </button>
-          {#if slaError}<span class="slaerr">{slaError}</span>{/if}
-        {/if}
-      {/snippet}
-    </WindowBar>
+    <!--
+      ⚠️ `bind:clientWidth` n'est pas cosmétique : cette largeur part au hub
+      sous `max_points` et décide, seule, s'il agrège. Elle majore celle des
+      cartes — demander un peu plus de points que de pixels ne coûte rien, en
+      demander moins raboterait la courbe.
+    -->
+    <div class="winbar" bind:clientWidth={chartsWidth}>
+      <WindowBar choice={win} onpick={(c) => timeWindow.pick(c)}>
+        {#snippet actions()}
+          {#if tab === 'dashboard'}
+            <!-- Le rapport porte sur la fenêtre affichée : on exporte ce qu'on
+                 regarde, et la fenêtre est écrite dans le classeur. Un « 99,2 % »
+                 sans période ne veut rien dire pour le client qui le reçoit. -->
+            <button class="lp-btn ghost sm" onclick={exportSla} disabled={slaBusy}>
+              {slaBusy ? $_('sla.exporting') : $_('sla.export')}
+            </button>
+            {#if slaError}<span class="slaerr">{slaError}</span>{/if}
+          {/if}
+        {/snippet}
+      </WindowBar>
+      <!-- Le pas d'agrégation, à côté de ce qu'il décrit. Rien quand c'est
+           brut : l'absence de mention EST l'information « à la mesure près ». -->
+      {#if aggregatedStep}
+        <p class="agg">{$_('charts.aggregated', { values: { every: aggregatedStep } })}</p>
+      {/if}
+    </div>
   {/if}
 
   {#if tab === 'dashboard'}
@@ -2771,6 +2821,15 @@
   .slaerr {
     font-size: 11px;
     color: var(--ep-danger);
+  }
+
+  /* Le pas d'agrégation : une note, pas une alerte — la courbe est juste,
+     elle est simplement moyennée, et l'écran le dit. */
+  .agg {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--ep-text-muted);
   }
 
   /* ── Disponibilité par IP publique ─────────────────────────────────── */
