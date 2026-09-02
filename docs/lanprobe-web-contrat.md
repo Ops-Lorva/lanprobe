@@ -727,31 +727,51 @@ Supprimer un site n'est pas prévu tant qu'il porte des sondes — le hub répon
 Le jeton de sonde est haché comme un mot de passe. Une base volée ne donne pas
 le droit d'écrire au nom des sondes.
 
-## 5. Tampon hors ligne (côté sonde)
+## 5. Tampon hors ligne (côté sonde) ✅ implémenté
 
-**Défaut à corriger d'abord** — `influxdb.rs` vide le tampon *avant* l'écriture :
+Le tampon (`export_buffer.rs`) est la mémoire courte de la sonde entre deux
+écritures réussies. **Il ne se vide qu'après confirmation de la destination** :
+perdre les points parce qu'elle ne répond pas, c'est perdre la trace de
+l'incident qu'on voudrait analyser — et la 1.1.5 le faisait, `buffer.clear()`
+étant appelé *avant* l'écriture.
 
-```rust
-let body = buffer.join("\n");
-buffer.clear();                  // ← perte définitive si l'écriture échoue
-if let Err(e) = client.write(body).await { tracing::warn!(…) }
-```
+Cinq propriétés le tiennent, et elles sont **acquises** :
 
-Comportement attendu :
-
-1. **Ne pas vider avant confirmation.** En cas d'échec, les points retournent en
-   tête de file et le prochain tick réessaie.
+1. **Rien ne quitte le tampon avant confirmation.** L'écriture emporte tout le
+   lot ; seuls les `n` points confirmés sont retirés, **par la tête**. Les points
+   nés pendant l'écriture restent en attente — les retirer par un décompte global
+   les emporterait sans qu'ils aient jamais été envoyés. Un échec ne retire rien
+   du tout et allonge le repli.
 2. **Persistance disque** — `buffer.ndjson` dans le répertoire de config, relu au
-   démarrage. Une coupure de courant pendant l'incident ne doit pas effacer la
-   trace de l'incident.
-3. **Borné explicitement** — `MAX_BUFFER = 100_000` points *et* 24 h d'âge. Au
-   débordement, on jette **les plus anciens** et on **journalise le nombre exact**.
-   Un tampon qui déborde en silence ment sur la complétude des données.
-4. **Horodatage préservé** — les points sont déjà datés à la mesure dans
-   `event_to_points`. Ne pas re-dater à l'envoi : le rejeu doit retomber au bon
-   endroit dans le graphe.
-5. **Repli exponentiel** plafonné à 60 s entre deux tentatives, pour ne pas
-   marteler un Influx qui redémarre.
+   démarrage : une coupure de courant pendant l'incident n'efface pas la trace de
+   l'incident. L'écriture est **atomique** (fichier temporaire puis renommage),
+   sans quoi un arrêt brutal laisserait un tampon tronqué. Elle a lieu toutes les
+   dix secondes, et **forcée à l'arrêt propre** — réécrire cent mille lignes
+   chaque seconde coûterait plus cher que le service lui-même. Le prix de ce délai
+   est un éventuel rejeu de quelques secondes déjà écrites : sans conséquence,
+   Influx écrasant un point de mêmes mesure, étiquettes et horodatage.
+   ⚠️ Une ligne illisible du fichier est **ignorée**, pas fatale : mieux vaut
+   rejouer ce qui reste lisible que refuser de démarrer.
+3. **Borné explicitement** — `MAX_POINTS = 100 000` points **et** `MAX_AGE = 24 h`.
+   Au débordement on jette **les plus anciens**, et le nombre exact est à la fois
+   rendu à l'appelant et journalisé, en distinguant les deux causes (trop vieux /
+   trop nombreux). Un tampon qui déborde en silence ment sur la complétude des
+   données.
+4. **Horodatage préservé** — l'horodatage est lu dans la ligne Line Protocol au
+   moment où elle entre dans le tampon, et conservé tel quel. L'instant courant ne
+   sert qu'à mesurer l'âge : un point rejoué retombe au bon endroit dans le
+   graphe, jamais à l'heure de l'envoi.
+5. **Repli exponentiel** — 1 s, doublé à chaque échec, **plafonné à 60 s**, remis à
+   zéro par la première écriture réussie. On ne martèle pas un Influx qui
+   redémarre.
+
+⚠️ **Une seule chose vide le tampon sans avoir écrit** : l'utilisateur qui coupe
+lui-même l'export. C'est explicite, journalisé avec le nombre de points
+abandonnés, et réservé à ce cas — **une panne, elle, ne fait jamais oublier**.
+
+La profondeur du tampon remonte au hub à chaque battement (`buffered_points`,
+§3) : une sonde qui accumule sans livrer se voit **avant** qu'on découvre le trou
+dans les graphes.
 
 ## 6. Ce que la sonde stocke
 
