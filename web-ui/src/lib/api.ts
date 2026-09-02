@@ -965,6 +965,30 @@ export const api = {
     ),
 
   /**
+   * Retire une surveillance **depuis le hub**. Le retrait est un fait daté,
+   * écrit IMMÉDIATEMENT — pas une commande qui dort dans la file.
+   *
+   * ⚠️ C'est toute la différence, et c'est le scénario métier : retirer une
+   * cible pendant que la sonde est **éteinte**. Une commande n'agit qu'au
+   * retour de la sonde, et se perd si elle ne revient pas. La route écrit la
+   * suppression tout de suite, et l'arbitrage du contrat §20 — le plus récent
+   * gagne — la fait tenir face à la liste que la sonde rapportera : celle
+   * d'une machine éteinte est par construction antérieure.
+   *
+   * ⚠️ Même remarque que `reviveMonitor` : le hub ne joint jamais la sonde. La
+   * réponse dit « la suppression est écrite côté hub », pas « la sonde a cessé
+   * de pinguer » — elle recevra la liste effective à son prochain battement.
+   *
+   * `applied` à faux = un changement plus récent avait déjà tranché ; rien n'a
+   * été écrit, et l'écran doit le dire plutôt qu'annoncer un retrait.
+   */
+  removeMonitor: (id: string, target: string) =>
+    request<{ ok: boolean; applied: boolean }>(
+      `/api/probes/${encodeURIComponent(id)}/monitors/remove`,
+      { method: 'POST', body: JSON.stringify({ target }) },
+    ),
+
+  /**
    * Réactive une surveillance retirée. **Réactiver, c'est effacer la
    * suppression** — il n'y a pas d'autre mécanisme.
    *

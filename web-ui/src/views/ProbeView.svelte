@@ -854,6 +854,58 @@
       reviveBusy = '';
     }
   }
+
+  // ── Retrait d'une surveillance, DEPUIS LE HUB ────────────────────────────
+  //
+  // ⚠️ Le bouton empilait une commande `remove_monitor`. Une commande n'agit
+  // qu'au retour de la sonde : retirer une cible pendant qu'elle est éteinte —
+  // le cas même que l'arbitrage du contrat §20 sait traiter — était perdu
+  // jusqu'à son redémarrage, voire pour toujours. La route du hub écrit la
+  // suppression tout de suite, et la sonde reçoit la liste effective à son
+  // prochain battement. La commande n'est retirée de nulle part : c'est ce
+  // bouton-ci qui change de chemin, pour le seul qui marche dans les deux cas.
+  //
+  // ⚠️ Et il demande confirmation. Du point de vue de l'utilisateur, retirer
+  // ARRÊTE la surveillance d'une machine : un clic malheureux ne doit pas
+  // couper en silence. La confirmation nomme la cible — sans son nom, on
+  // confirme le geste sans savoir sur quoi il porte — et dit qu'il est
+  // réversible, parce qu'il l'est : une confirmation qui laisse planer un
+  // doute fait renoncer à un geste sans danger.
+
+  /** Cible dont le retrait attend confirmation. `''` = aucune fenêtre ouverte. */
+  let removeTarget = $state('');
+  let removeBusy = $state(false);
+  let removeNote = $state('');
+  let removeError = $state('');
+
+  async function confirmRemoveMonitor() {
+    const target = removeTarget;
+    if (!target) return;
+    removeBusy = true;
+    removeError = '';
+    removeNote = '';
+    try {
+      const r = await api.removeMonitor(id, target);
+      removeTarget = '';
+      // `applied` faux : un changement plus récent avait déjà tranché. Annoncer
+      // « retirée » ici affirmerait un fait que le hub vient de refuser.
+      removeNote = $_(
+        r?.applied === false ? 'probe.monitoring_remove_moot' : 'probe.monitoring_remove_done',
+        { values: { target } },
+      );
+      // On relit le parc plutôt que de retirer la carte localement : c'est le
+      // hub qui tranche, et un refus silencieux laisserait l'écran affirmer un
+      // retrait qu'il n'a pas obtenu.
+      await fleet.load(onExpired, { quiet: true });
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      removeError = e instanceof ApiError ? e.message : String(e);
+      removeTarget = '';
+    } finally {
+      removeBusy = false;
+    }
+  }
+
   const inetPoints = $derived(inet.curves.find((c) => c.field === 'state')?.points ?? []);
 
   // ⚠️ La conversion millisecondes → secondes vit dans `internetSamples`
@@ -1667,6 +1719,13 @@
           d'attente. Les reconstruire depuis `ping.curves` contournerait ce
           filtre, et un portable endormi rendrait l'échelle inutilisable.
         -->
+        <!-- Le retour du dernier retrait. ⚠️ Il vit dans le sous-onglet
+             « Actives », là où le bouton a été cliqué : l'afficher dans
+             « Retirées » obligerait à changer d'onglet pour savoir si le geste
+             a abouti. -->
+        {#if removeNote}<p class="rnote" role="status">{removeNote}</p>{/if}
+        {#if removeError}<p class="err" role="alert">{removeError}</p>{/if}
+
         {#if monitorGrid.length === 0}
           {#if pingTone === 'loading' || pingTone === 'error'}
             <!-- Une lecture en cours ou en échec doit se voir : sans ça,
@@ -1711,15 +1770,22 @@
                     </span>
                   {:else if card.monitor && $canOperate}
                     <!-- Le retrait se joue là où l'on regarde la cible : c'est
-                         le bouton que portait la ligne du tableau de tête. -->
-                    <CommandButton
-                      probeId={id}
-                      kind="remove_monitor"
-                      args={{ ip: card.monitor.ip }}
-                      label={$_('probe.monitoring_remove')}
-                      allowed={$canOperate}
-                      onsent={afterCommand}
-                    />
+                         le bouton que portait la ligne du tableau de tête.
+                         ⚠️ Il passe par la ROUTE du hub, pas par la file de
+                         commandes : une commande dort jusqu'au retour de la
+                         sonde, et retirer une cible pendant qu'elle est
+                         éteinte est justement le cas qu'on veut couvrir. -->
+                    <button
+                      class="lp-btn ghost sm"
+                      disabled={removeBusy}
+                      onclick={() => {
+                        removeNote = '';
+                        removeError = '';
+                        removeTarget = card.monitor!.ip;
+                      }}
+                    >
+                      {$_('probe.monitoring_remove')}
+                    </button>
                   {/if}
                 {/snippet}
 
@@ -2244,6 +2310,31 @@
       <button class="lp-btn" onclick={() => (killOpen = false)}>{$_('common.cancel')}</button>
       <button class="lp-btn danger" onclick={killToken} disabled={killBusy}>
         {killBusy ? $_('probe.revoke_now_working') : $_('probe.revoke_now_confirm')}
+      </button>
+    {/snippet}
+  </Modal>
+
+  <!--
+    ⚠️ Retirer ARRÊTE la surveillance d'une machine : c'est destructeur du point
+    de vue de celui qui clique, même si aucune mesure n'est effacée. La fenêtre
+    NOMME la cible — confirmer « êtes-vous sûr ? » sans savoir sur quoi porte le
+    geste ne protège de rien — et dit qu'il est réversible, parce qu'il l'est.
+  -->
+  <Modal
+    open={removeTarget !== ''}
+    title={$_('probe.monitoring_remove_title', { values: { target: removeTarget } })}
+    onclose={() => (removeTarget = '')}
+  >
+    <p>{$_('probe.monitoring_remove_body')}</p>
+    <p class="keep"><strong>{$_('probe.monitoring_remove_reversible')}</strong></p>
+    {#snippet footer()}
+      <button class="lp-btn" onclick={() => (removeTarget = '')} disabled={removeBusy}>
+        {$_('common.cancel')}
+      </button>
+      <button class="lp-btn danger" onclick={confirmRemoveMonitor} disabled={removeBusy}>
+        {removeBusy
+          ? $_('probe.monitoring_remove_working')
+          : $_('probe.monitoring_remove_confirm')}
       </button>
     {/snippet}
   </Modal>

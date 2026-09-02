@@ -189,6 +189,27 @@ describe('catalogues de traduction', () => {
     });
   }
 
+  // Retrait d'une surveillance DEPUIS LE HUB.
+  // ⚠️ Le retrait arrête la surveillance d'une machine : la confirmation doit
+  // nommer la cible et dire qu'elle est réversible. Une confirmation muette
+  // sur la réversibilité fait renoncer à un geste sans danger.
+  const REQUISES_RETRAIT = [
+    'probe.monitoring_remove_title',
+    'probe.monitoring_remove_body',
+    'probe.monitoring_remove_reversible',
+    'probe.monitoring_remove_confirm',
+    'probe.monitoring_remove_working',
+    'probe.monitoring_remove_done',
+    'probe.monitoring_remove_moot',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés du retrait de surveillance`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_RETRAIT.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
   // Agrégation : le pas et le maximum de l'intervalle.
   // ⚠️ Sans ces deux libellés, l'écran trace une moyenne de trois heures sans
   // le dire — une courbe crédible dont personne ne sait qu'elle est moyennée.
