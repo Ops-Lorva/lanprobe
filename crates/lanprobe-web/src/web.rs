@@ -3303,6 +3303,15 @@ async fn probe_public_ips(
     Path(id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
+    // ⚠️ La fenêtre est VALIDÉE ici comme sur `/metrics`, `/sla`, `/sla.csv` et
+    // `/uptime`. Cette route ne lisait que les bornes en secondes, et
+    // `range=nawak` y retombait EN SILENCE sur 24 h : elle rendait un tableau
+    // bien formé, mais celui d'une période que personne n'avait demandée, sous
+    // une légende qui en annonçait une autre. C'est le repli muet corrigé
+    // partout ailleurs en cfff27d, resté sur cette route.
+    if let Err(refus) = flux_range(&query) {
+        return refus;
+    }
     let (from, to) = flux_bounds(&query);
     match state.db.public_ip_history(&id, from, to) {
         Ok(intervals) => ok_json(json!({ "intervals": intervals })),
@@ -7291,6 +7300,55 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["intervals"][0]["public_ip"], "88.120.0.1");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_window_is_refused_by_the_address_history_too() {
+        // ⚠️ `/public-ips` était la dernière route de fenêtre à retomber EN
+        // SILENCE sur 24 h : `range=nawak` rendait un tableau bien formé, mais
+        // celui d'une période que personne n'avait demandée, sous une légende
+        // qui en annonçait une autre. `/metrics`, `/sla`, `/sla.csv` et
+        // `/uptime` refusent depuis cfff27d ; un refus se comprend, un repli
+        // muet non.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        heartbeat_from(
+            &h,
+            &probe_id,
+            &token,
+            "203.0.113.10",
+            serde_json::json!({ "public_ip": "88.120.0.1", "gateway": "10.6.8.1" }),
+        )
+        .await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=nawak")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "fenêtre illisible", "{body}");
+        // 🔴 Le code seul ne suffit pas : c'est l'ABSENCE d'effet qu'on vérifie.
+        // Un 400 qui rendrait quand même les intervalles des dernières 24 h
+        // laisserait l'interface les afficher.
+        assert!(
+            body.get("intervals").is_none(),
+            "une fenêtre refusée ne rend aucun intervalle : {body}"
+        );
+
+        // Et la preuve que le refus ne vient pas d'un historique vide : la même
+        // requête avec une fenêtre lisible rend bien l'intervalle que le repli
+        // muet aurait servi.
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/public-ips?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["intervals"][0]["public_ip"], "88.120.0.1", "{body}");
     }
 
     #[tokio::test]
