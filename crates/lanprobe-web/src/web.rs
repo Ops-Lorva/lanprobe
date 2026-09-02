@@ -3497,7 +3497,11 @@ fn samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
                         // Pas de relevé `alive` : on retombe sur la présence
                         // d'une latence, faute de mieux, plutôt que d'écarter
                         // le point.
-                        "alive": alive.unwrap_or(latency_ms.is_some()),
+                        // ⚠️ `null` quand la sonde n'a pas écrit `alive` :
+                        // INDÉTERMINÉ, ni disponible ni en panne. On le
+                        // déduisait de la présence d'une latence, ce qui
+                        // faisait d'un silence un fait.
+                        "alive": alive,
                         "latency_ms": latency_ms,
                     })
                 })
@@ -3547,22 +3551,29 @@ async fn probe_sla_csv(
     let report = sla_from_flux_csv(&csv);
     let mut out = String::from(
         "sonde,site,fenetre,cible,disponibilite_pct,latence_moy_ms,\
-         latence_min_ms,latence_max_ms,latence_p95_ms,releves,echecs\n",
+         latence_min_ms,latence_max_ms,latence_p95_ms,releves,echecs,indetermines\n",
     );
     for row in &report {
         out.push_str(&format!(
-            "{},{},{},{},{:.2},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_cell(&probe.name),
             csv_cell(&probe.site_name),
             csv_cell(&range),
             csv_cell(&row.ip),
-            row.uptime_pct,
+            // ⚠️ Ni vide ni `0.00`. Une cellule vide se lit comme un oubli de
+            // l'outil, `0.00` comme une panne totale. Le mot se lit comme ce
+            // qu'il est. ⚠️ Et il n'est PAS numérique : un tableur ne
+            // l'agrégera pas comme un zéro dans une moyenne de colonne.
+            row.uptime_pct
+                .map(|p| format!("{p:.2}"))
+                .unwrap_or_else(|| "indetermine".into()),
             row.avg_latency_ms.map(|v| format!("{v:.1}")).unwrap_or_default(),
             row.min_latency_ms.map(|v| v.to_string()).unwrap_or_default(),
             row.max_latency_ms.map(|v| v.to_string()).unwrap_or_default(),
             row.p95_latency_ms.map(|v| v.to_string()).unwrap_or_default(),
             row.total_samples,
             row.failed_samples,
+            row.undetermined_samples,
         ));
     }
 
@@ -3662,7 +3673,11 @@ fn sla_from_flux_csv(csv: &str) -> Vec<lanprobe_core::sla::SlaStats> {
             let samples: Vec<lanprobe_core::sla::PingSample> = points
                 .into_values()
                 .map(|(alive, latency_ms)| lanprobe_core::sla::PingSample {
-                    alive: alive.unwrap_or(latency_ms.is_some()),
+                    // ⚠️ Voir `samples_from_flux_csv` : pas de repli. Le
+                    // commentaire en tête de cette fonction affirmait déjà que
+                    // la disponibilité se calcule « sur `alive`, jamais sur la
+                    // présence d'une latence » — le code disait le contraire.
+                    alive,
                     latency_ms,
                 })
                 .collect();
@@ -7320,8 +7335,30 @@ mod tests {
                    ,,0,2026-08-29T09:00:01Z,false,alive,10.0.0.9\n";
         let report = sla_from_flux_csv(csv);
         assert_eq!(report.len(), 1);
-        assert_eq!(report[0].uptime_pct, 0.0);
+        assert_eq!(report[0].uptime_pct, Some(0.0));
         assert_eq!(report[0].failed_samples, 2);
+    }
+
+    #[test]
+    fn a_latency_without_a_verdict_is_undetermined_not_available() {
+        // 🔴 Le repli `alive.unwrap_or(latency_ms.is_some())` faisait d'une
+        // latence écrite un verdict de disponibilité. Une mesure ancienne,
+        // antérieure au champ `alive`, ressortait donc à 100 % — un chiffre
+        // qu'on n'avait pas, dans un document remis au client.
+        //
+        // ⚠️ Et l'inverse est tout aussi faux : rendre 0 % affirmerait une
+        // panne totale. Il n'y a pas de pourcentage à donner, et le type le
+        // dit.
+        let csv = ",result,table,_time,_value,_field,ip\n\
+                   ,,0,2026-08-29T09:00:00Z,12,latency_ms,10.0.0.7\n\
+                   ,,0,2026-08-29T09:00:01Z,14,latency_ms,10.0.0.7\n";
+        let report = sla_from_flux_csv(csv);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].uptime_pct, None, "aucun verdict : aucun pourcentage");
+        assert_eq!(report[0].total_samples, 0);
+        assert_eq!(report[0].undetermined_samples, 2);
+        // Les latences, elles, sont de vraies mesures : elles restent.
+        assert_eq!(report[0].min_latency_ms, Some(12));
     }
 
     #[test]
@@ -7335,9 +7372,9 @@ mod tests {
         let report = sla_from_flux_csv(csv);
         assert_eq!(report.len(), 2);
         assert_eq!(report[0].ip, "10.0.0.1");
-        assert_eq!(report[0].uptime_pct, 100.0);
+        assert_eq!(report[0].uptime_pct, Some(100.0));
         assert_eq!(report[1].ip, "8.8.8.8");
-        assert_eq!(report[1].uptime_pct, 0.0);
+        assert_eq!(report[1].uptime_pct, Some(0.0));
     }
 
     #[test]
