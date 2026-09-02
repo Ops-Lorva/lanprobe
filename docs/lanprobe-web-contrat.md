@@ -109,9 +109,25 @@ Toutes les réponses d'erreur : `{ "error": "<message lisible>" }` avec le code 
 
 ### `GET /api/status` — public
 ```json
-{ "needs_setup": true, "version": "1.2.0" }
+{ "needs_setup": true, "version": "1.2.0", "restart_required": false }
 ```
 Seule route accessible sans authentification quand `needs_setup` est vrai.
+
+⚠️ **`restart_required` dit que le hub sert encore l'état d'AVANT.** C'est un
+drapeau du **processus** : rien ne le baisse, c'est le redémarrage qu'il réclame
+qui le fait disparaître. Deux causes, vérifiées toutes les deux :
+
+- **après une restauration de sauvegarde** — le processus tient encore l'ancienne
+  base **ouverte** et continue de la servir. Sans ce drapeau, le hub refuse
+  d'écrire (« readonly database ») et rien à l'écran ne l'explique : on conclut
+  que la restauration n'a rien fait, et on la rejoue ;
+- **après un changement de `tls_enabled`** — le mode de service (clair ou TLS) est
+  lu au **démarrage**. Sans ce drapeau, on enregistre, on recharge en `https://`,
+  on tombe sur rien, et on croit avoir cassé son hub.
+
+Il est porté par `/api/status` pour que l'avertissement **survive au rechargement
+de la page** : un message affiché une fois après l'action disparaîtrait au premier
+rafraîchissement, alors que la condition, elle, dure jusqu'au redémarrage.
 
 ### `POST /api/setup` — création de l'admin initial
 ```json
@@ -348,6 +364,113 @@ ne produit **aucun point** — ni zéro, ni valeur interpolée. Un trou reste un
 Même règle que le `confirmed_until` du §15 : on ne déduit jamais un fait d'un
 silence. Un zéro inventé se lirait comme une latence nulle sur une courbe et comme
 une coupure sur une autre ; les deux sont faux, et aucun des deux ne se voit.
+
+### `GET /api/probes/{id}/sla` — les relevés bruts d'un rapport
+
+Même construction de fenêtre que les métriques : `range`, ou `start`/`stop` qui
+priment (voir ci-dessus). ⚠️ `max_points` n'a **aucun effet** ici : rien n'est
+agrégé, jamais.
+
+```json
+{ "probe": "Paris", "site": "Durand", "range": "-24h",
+  "start": null, "stop": null, "generated_at": 1756418401,
+  "targets": [ { "ip": "10.0.8.1",
+                 "samples": [ { "timestamp": 1756332001, "alive": true,
+                                "latency_ms": 3.1 } ] } ],
+  "internet": [ … ], "speedtests": [ … ],
+  "discovery": { … } | null, "ports": { … } | null,
+  "public_ip_history": [ … ] }
+```
+
+`start` et `stop` sont **renvoyés tels qu'ils ont été demandés** — `null` sur une
+fenêtre glissante. `timestamp` est en **secondes**, pas en millisecondes comme les
+points des métriques : c'est l'unité des relevés de l'application, et le rapport
+doit pouvoir mélanger les deux origines.
+
+⚠️ **Rendus bruts, jamais agrégés**, et c'est délibéré : le rapport ne se contente
+pas de moyennes, il liste les coupures avec leur durée. Un résumé calculé par le
+hub l'obligerait à refaire ce que l'application sait déjà faire, et les deux
+finiraient par diverger sur la définition d'une coupure.
+
+⚠️ **Ce que ce rapport ne prétend pas savoir.** Il ne rend que ce qui a été
+**mesuré** : une période sans relevé n'y produit aucun échantillon, et n'est donc
+ni « en panne » ni « disponible » — elle est **indéterminée**. Les pourcentages
+calculés par-dessus ne totalisent volontairement pas 100 % ; le reste est la part
+assumée d'inconnu (§15). Une coupure imputée à la mauvaise période, ou une période
+muette comptée comme disponible, a l'air normale et personne ne la remet en cause :
+c'est le mode de panne que ce projet refuse partout ailleurs.
+
+L'historique des adresses voyage **avec** le rapport plutôt qu'à côté : le tableau
+de l'écran et l'onglet du classeur découpent alors les mêmes relevés avec les mêmes
+intervalles. Deux sources séparées finiraient par diverger d'une minute et
+donneraient deux disponibilités différentes pour la même période.
+
+Le volet `internet` est le seul qui **dégrade** : si sa requête échoue, le rapport
+part sans lui plutôt que d'échouer en entier — l'absence se voit à l'écran. Un
+relevé de cible sans champ `alive` retombe sur « une latence existe », faute de
+mieux, plutôt que d'être écarté.
+
+### `GET /api/probes/{id}/public-ips` — l'historique des adresses, même fenêtre
+
+```json
+{ "intervals": [ { "public_ip": "88.120.0.1", "interface": "en0",
+                   "gateway": "10.6.8.1", "local_subnet": "10.6.8.0/24",
+                   "confirmed_from": 1756332000, "confirmed_until": 1756418400,
+                   "label": "Bureau" } ] }
+```
+
+Les intervalles qui **chevauchent** la fenêtre, du plus ancien au plus récent, et
+**non rognés** : `confirmed_from` / `confirmed_until` restent les dates réelles de
+confirmation (§15). Les couper aux bornes demandées confondrait « l'adresse a été
+confirmée jusqu'ici » avec « ma fenêtre s'arrête ici » — c'est à l'affichage de
+rogner, pas à la source.
+
+⚠️ **Ce que cette route ne prétend pas savoir.** Le **trou** entre le
+`confirmed_until` d'un intervalle et le `confirmed_from` du suivant **est** la zone
+indéterminée, et rien ne le comble : ni prolongation jusqu'au suivant, ni
+interpolation. Une fenêtre antérieure à la mise en place de l'historique ne
+contient donc **aucun** intervalle et ressort entièrement en « indéterminé » —
+c'est la vérité, pas une panne, et c'est à l'interface de le dire ainsi. Une sonde
+sans historique rend un tableau vide : l'absence d'intervalle n'est pas une erreur.
+
+Le libellé de réseau (« Maison », « Bureau ») est joint ici, résolu par le **site**
+de la sonde : sous CGNAT deux clients partagent l'adresse publique, et souvent la
+même `192.168.1.1` de box — la jointure par site évite qu'un libellé remonte dans
+le rapport d'un autre.
+
+### `GET /api/probes/{id}/sla.csv` — le même rapport, aplati
+
+`text/csv; charset=utf-8`, en pièce jointe `sla-<sonde>-<fenêtre>.csv`. Colonnes :
+
+```
+sonde,site,fenetre,cible,disponibilite_pct,latence_moy_ms,latence_min_ms,
+latence_max_ms,latence_p95_ms,releves,echecs
+```
+
+⚠️ **Ici la disponibilité se calcule sur le champ `alive`, jamais sur la présence
+d'une latence** : un hôte qui ne répond pas n'écrit pas de latence, et compter les
+latences donnerait un uptime de 100 % sur une machine morte.
+
+⚠️ **Cette route ne lit que `range`** — `start` et `stop` y sont ignorés, sans rien
+dire. Demander « du 1er au 31 » rend les dernières 24 h. La colonne `fenetre`
+annonce bien `-24h`, donc le fichier ne ment pas sur ce qu'il contient ; il ne
+répond simplement pas à ce qui a été demandé. C'est le défaut corrigé sur
+`/metrics` (`b05b049`), resté ici.
+
+⚠️ **Aucun écran ne l'appelle.** L'export de l'interface est un classeur construit
+dans le navigateur à partir de `/sla`. Cette route est une URL à ouvrir à la main —
+écrite, testée, sans appelant, exactement comme la route de retrait du §20 l'a été.
+Ne pas supposer qu'elle est branchée quelque part.
+
+### `GET /api/probes/{id}/inventory?kind=ports|discovery|speedtest`
+
+Le détail des scans vient de **SQLite**, pas d'Influx (§12).
+
+- `kind=ports` ou `discovery` → `{ "scan": … | null }`, le **dernier** scan connu.
+  ⚠️ `null`, et non un scan vide : « jamais lancé » et « lancé, rien trouvé »
+  appellent deux phrases différentes à l'écran.
+- `kind=speedtest` → `{ "speedtests": [ … ] }`, les 50 derniers tests.
+- `kind` absent ou inconnu → `400`. Une sonde inconnue → `404`.
 
 ## 4. Schéma SQLite
 
@@ -709,23 +832,33 @@ qui se contente de masquer les boutons ne protège rien.
 
 ### Rôle exigé par chaque route
 
-Trois groupes, appliqués par middleware après authentification. Les rôles sont
-ordonnés : `viewer < operator < admin`, et une route ouverte à `operator` est
-donc aussi ouverte à `admin`.
+Le rôle minimum est appliqué par middleware après authentification. Les rôles
+sont ordonnés : `viewer < operator < admin`, et une route ouverte à `operator`
+est donc aussi ouverte à `admin`.
+
+⚠️ **La portée de site (§17) s'AJOUTE au rôle, elle ne le remplace pas** : un
+lecteur restreint à un site reste un lecteur sur ce site. Les routes marquées
+« portée » ci-dessous sont celles dont le `{id}` désigne **une sonde** ; elles
+vivent derrière un garde séparé, et une sonde hors portée y rend `404`.
 
 | Route | Rôle | Note |
 |---|---|---|
-| `GET /api/status`, `POST /api/setup`, `POST /api/login`, `POST /api/logout` | — | authentification propre |
-| `POST /api/probes/enroll`, `.../write`, `.../heartbeat` | — | code d'enrôlement ou jeton de sonde |
+| `GET /api/status`, `POST /api/setup`, `POST /api/login`, `POST /api/login/passkey/{start,finish}`, `POST /api/logout` | — | authentification propre |
+| `POST /api/probes/enroll`, `.../write`, `.../heartbeat`, `.../scans`, `.../config` | — | code d'enrôlement, ou jeton de sonde en `Authorization: Bearer` (§12, §16) |
 | `GET /api/sites` | `viewer` | accepte aussi les identifiants du compte (Basic) |
-| `GET /api/probes`, `GET /api/probes/{id}/metrics` | `viewer` | |
+| `GET /api/me`, et les routes `/api/me/*` — mot de passe, TOTP, clés d'accès | `viewer` | chacun agit sur **son** compte, quel que soit son rôle (§19) |
+| `GET /api/probes` | `viewer` | |
 | `GET /api/settings`, `GET /api/settings/influx-advertise`, `GET /api/influx` | `viewer` | aucune de ces réponses ne porte de secret |
 | `GET /api/notifications/subscriptions` | `viewer` | |
-| `POST /api/sites`, `PATCH`/`DELETE /api/sites/{id}` | `operator` | |
+| `GET /api/probes/{id}/metrics`, `/inventory`, `/sla`, `/sla.csv`, `/public-ips` | `viewer` | **portée** |
+| `POST /api/sites`, `PATCH`/`DELETE /api/sites/{id}`, `POST /api/sites/{id}/archive` | `operator` | |
+| `PUT /api/networks/label` | `operator` | nommer un réseau est une conduite de parc : le libellé se retrouve dans tous les rapports. Le `site_id` du corps est vérifié contre la portée — `404` sinon, et `404` aussi si le site n'existe pas |
 | `POST /api/enroll-codes`, `GET /api/enroll-codes/pending` | `operator` | le code y figure **en clair** pendant sa validité |
-| `PATCH`/`DELETE /api/probes/{id}` | `operator` | |
-| `POST /api/probes/{id}/rotate`, `/revoke-token`, `/reenroll-code` | `operator` | |
-| `POST /api/probes/{id}/monitors/remove`, `/monitors/revive` | `operator` | §20 — portée de site, `404` hors portée |
+| `PATCH`/`DELETE /api/probes/{id}`, `POST .../archive` | `operator` | **portée** |
+| `POST /api/probes/{id}/rotate`, `/revoke-token`, `/reenroll-code` | `operator` | **portée** |
+| `POST /api/probes/{id}/realtime` | `operator` | **portée** — arme le mode temps réel, minuterie comprise |
+| `POST /api/probes/{id}/monitors/remove`, `/monitors/revive` | `operator` | **portée** — §20 |
+| `GET`/`POST /api/probes/{id}/commands` | `operator` | **portée** — la lecture aussi : la file nomme ce qu'on a déclenché sur le réseau d'un client (§14) |
 | `POST /api/settings/influx-advertise/test` | `operator` | émet une requête sortante |
 | `PUT /api/notifications/subscriptions` | `operator` | |
 | `PUT /api/settings`, `PUT /api/settings/influx-advertise` | `admin` | la rétention en fait partie |
@@ -733,6 +866,7 @@ donc aussi ouverte à `admin`.
 | `GET`/`POST /api/users`, `PATCH /api/users/{username}`, `POST /api/users/{username}/password` | `admin` | |
 | `GET /api/audit` | `admin` | |
 | `GET /api/notifications`, `PUT`/`DELETE /api/notifications/{smtp,webhook}`, `POST /api/notifications/test` | `admin` | |
+| `POST /api/backup`, `GET /api/backups`, `POST /api/backup/restore`, `POST /api/backup/restore/{file}` | `admin` | une archive porte **toute** la base, portée comprise : la remettre revient à donner le parc entier |
 
 Un refus rend `403` avec `{ "error": "rôle insuffisant pour cette action" }`
 — et **écrit une ligne d'audit** `access.denied`. Un `401` renverrait à l'écran
