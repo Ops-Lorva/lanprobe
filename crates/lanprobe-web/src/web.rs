@@ -3286,7 +3286,7 @@ async fn probe_sla_samples(
         "start": query.start,
         "stop": query.stop,
         "generated_at": crate::db::now(),
-        "targets": samples_from_flux_csv(&csv),
+        "targets": samples_from_flux_csv(&csv, flux_bounds(&query)),
         "internet": internet,
         "speedtests": speedtests,
         "discovery": discovery,
@@ -3441,7 +3441,7 @@ fn internet_samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
 /// d'Influx. Les traiter séparément donnerait deux fois plus de relevés que
 /// la sonde n'en a pris, et une disponibilité calculée sur cette base serait
 /// fausse.
-fn samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
+fn samples_from_flux_csv(csv: &str, window: (i64, i64)) -> Vec<serde_json::Value> {
     use std::collections::BTreeMap;
 
     let mut by_ip: BTreeMap<String, BTreeMap<i64, (Option<bool>, Option<f64>)>> = BTreeMap::new();
@@ -3489,6 +3489,11 @@ fn samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
     by_ip
         .into_iter()
         .map(|(ip, points)| {
+            let coverage = lanprobe_core::sla::compute_coverage(
+                &points.keys().copied().collect::<Vec<i64>>(),
+                window.0,
+                window.1,
+            );
             let samples: Vec<serde_json::Value> = points
                 .into_iter()
                 .map(|(ts, (alive, latency_ms))| {
@@ -3506,7 +3511,12 @@ fn samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
                     })
                 })
                 .collect();
-            json!({ "ip": ip, "samples": samples })
+            // ⚠️ Calculée ICI et transportée, pas recalculée dans le
+            // navigateur : le classeur remis au client et l'export CSV du hub
+            // doivent annoncer la MÊME complétude. Deux calculs finiraient par
+            // diverger d'un point de pourcentage, et c'est celui du document
+            // qu'on ne pourrait plus expliquer.
+            json!({ "ip": ip, "samples": samples, "coverage": coverage })
         })
         .collect()
 }
@@ -3548,14 +3558,16 @@ async fn probe_sla_csv(
         Err(e) => return fail(StatusCode::BAD_GATEWAY, &e),
     };
 
-    let report = sla_from_flux_csv(&csv);
+    let report = sla_from_flux_csv(&csv, flux_bounds(&query));
     let mut out = String::from(
         "sonde,site,fenetre,cible,disponibilite_pct,latence_moy_ms,\
-         latence_min_ms,latence_max_ms,latence_p95_ms,releves,echecs,indetermines\n",
+         latence_min_ms,latence_max_ms,latence_p95_ms,releves,echecs,indetermines,\
+         couverture\n",
     );
-    for row in &report {
+    for r in &report {
+        let row = &r.stats;
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_cell(&probe.name),
             csv_cell(&probe.site_name),
             csv_cell(&range),
@@ -3574,6 +3586,10 @@ async fn probe_sla_csv(
             row.total_samples,
             row.failed_samples,
             row.undetermined_samples,
+            // ⚠️ Même règle que `indetermine` : jamais un nombre. « complete »
+            // et « 87.4 % mesures » ne s'agrègent pas dans une moyenne de
+            // colonne — c'est par là que le faux chiffre reviendrait.
+            csv_cell(&coverage_cell(&r.coverage)),
         ));
     }
 
@@ -3593,6 +3609,20 @@ async fn probe_sla_csv(
         out,
     )
         .into_response()
+}
+
+/// Cellule de couverture, en toutes lettres.
+///
+/// ⚠️ **Jamais un nombre.** Un tableur agrégerait « 87,4 » dans une moyenne de
+/// colonne et referait naître un chiffre que personne n'a calculé — la même
+/// porte de derrière que la cellule « indetermine ». Et rien à dire quand
+/// c'est complet : la mention n'existe que lorsqu'elle apprend quelque chose.
+fn coverage_cell(c: &lanprobe_core::sla::Coverage) -> String {
+    match (c.is_complete(), c.pct()) {
+        (true, _) => "complete".into(),
+        (false, Some(p)) => format!("{p:.1} % mesures"),
+        (false, None) => "indetermine".into(),
+    }
 }
 
 /// Échappe une cellule CSV. Un nom de sonde peut contenir une virgule ; sans
@@ -3620,13 +3650,15 @@ fn slug(value: &str) -> String {
 /// ⚠️ La disponibilité se calcule sur le champ `alive`, jamais sur la présence
 /// d'une latence : un hôte qui ne répond pas n'écrit pas de latence, et
 /// compter les latences ferait un uptime de 100 % sur un hôte mort.
-fn sla_from_flux_csv(csv: &str) -> Vec<lanprobe_core::sla::SlaStats> {
+fn sla_from_flux_csv(csv: &str, window: (i64, i64)) -> Vec<SlaRow> {
     use std::collections::BTreeMap;
 
     // Par cible, puis par instant : `alive` et `latency_ms` sont deux lignes
     // distinctes du CSV et doivent être recollées avant d'être comptées.
-    let mut by_ip: BTreeMap<String, BTreeMap<String, (Option<bool>, Option<u64>)>> =
-        BTreeMap::new();
+    // ⚠️ Clé en SECONDES et non en chaîne RFC3339, comme `samples_from_flux_csv`
+    // juste au-dessus : c'est la même donnée découpée pareil, et c'est ce qui
+    // donne les horodatages numériques dont la couverture a besoin.
+    let mut by_ip: BTreeMap<String, BTreeMap<i64, (Option<bool>, Option<u64>)>> = BTreeMap::new();
     let mut cols: Option<Vec<String>> = None;
 
     for line in csv.lines() {
@@ -3655,11 +3687,10 @@ fn sla_from_flux_csv(csv: &str) -> Vec<lanprobe_core::sla::SlaStats> {
         else {
             continue;
         };
-        let slot = by_ip
-            .entry(ip.to_string())
-            .or_default()
-            .entry(time.to_string())
-            .or_default();
+        let Some(ts) = rfc3339_to_millis(time) else {
+            continue;
+        };
+        let slot = by_ip.entry(ip.to_string()).or_default().entry(ts / 1000).or_default();
         match field {
             "alive" => slot.0 = Some(value == "true" || value == "1"),
             "latency_ms" => slot.1 = value.parse::<f64>().ok().map(|v| v.round() as u64),
@@ -3670,6 +3701,7 @@ fn sla_from_flux_csv(csv: &str) -> Vec<lanprobe_core::sla::SlaStats> {
     by_ip
         .into_iter()
         .map(|(ip, points)| {
+            let times: Vec<i64> = points.keys().copied().collect();
             let samples: Vec<lanprobe_core::sla::PingSample> = points
                 .into_values()
                 .map(|(alive, latency_ms)| lanprobe_core::sla::PingSample {
@@ -3681,9 +3713,22 @@ fn sla_from_flux_csv(csv: &str) -> Vec<lanprobe_core::sla::SlaStats> {
                     latency_ms,
                 })
                 .collect();
-            lanprobe_core::sla::compute_sla(&ip, &samples)
+            SlaRow {
+                stats: lanprobe_core::sla::compute_sla(&ip, &samples),
+                // ⚠️ Une SEULE implémentation de la couverture, dans
+                // `lanprobe-core` : l'export CSV, le rapport `/sla` et le
+                // classeur lisent tous ce calcul-ci. Deux calculs qui
+                // divergeraient seraient pires qu'un seul imparfait.
+                coverage: lanprobe_core::sla::compute_coverage(&times, window.0, window.1),
+            }
         })
         .collect()
+}
+
+/// Le SLA d'une cible, et ce qui a réellement été mesuré pour l'obtenir.
+struct SlaRow {
+    stats: lanprobe_core::sla::SlaStats,
+    coverage: lanprobe_core::sla::Coverage,
 }
 
 /// Commandes que le hub accepte de faire exécuter à une sonde.
@@ -7317,7 +7362,7 @@ mod tests {
         let csv = ",result,table,_time,_value,_field,ip\n\
                    ,,0,2026-08-29T09:00:00Z,true,alive,10.0.0.1\n\
                    ,,0,2026-08-29T09:00:00Z,12.5,latency_ms,10.0.0.1\n";
-        let targets = samples_from_flux_csv(csv);
+        let targets = samples_from_flux_csv(csv, (0, 3_600));
         assert_eq!(targets.len(), 1);
         let samples = targets[0]["samples"].as_array().unwrap();
         assert_eq!(samples.len(), 1, "un instant = un relevé : {samples:?}");
@@ -7333,10 +7378,32 @@ mod tests {
         let csv = ",result,table,_time,_value,_field,ip\n\
                    ,,0,2026-08-29T09:00:00Z,false,alive,10.0.0.9\n\
                    ,,0,2026-08-29T09:00:01Z,false,alive,10.0.0.9\n";
-        let report = sla_from_flux_csv(csv);
+        let report = sla_from_flux_csv(csv, (0, 3_600));
         assert_eq!(report.len(), 1);
-        assert_eq!(report[0].uptime_pct, Some(0.0));
-        assert_eq!(report[0].failed_samples, 2);
+        assert_eq!(report[0].stats.uptime_pct, Some(0.0));
+        assert_eq!(report[0].stats.failed_samples, 2);
+    }
+
+    #[test]
+    fn the_coverage_cell_is_never_a_number_a_spreadsheet_could_average() {
+        // ⚠️ Même règle que la cellule « indetermine » et pour la même raison :
+        // « 87.4 » dans une colonne se retrouverait dans une moyenne, et ferait
+        // naître un chiffre que personne n'a calculé. Le mot, jamais le nombre.
+        use lanprobe_core::sla::compute_coverage;
+
+        let complete = compute_coverage(&(0..600).collect::<Vec<i64>>(), 0, 599);
+        assert_eq!(coverage_cell(&complete), "complete");
+
+        // Sonde enrôlée en cours de fenêtre : le bord compte.
+        let partielle = compute_coverage(&(500..600).collect::<Vec<i64>>(), 0, 599);
+        let cellule = coverage_cell(&partielle);
+        assert!(cellule.contains('%'), "{cellule}");
+        assert!(
+            cellule.parse::<f64>().is_err(),
+            "la cellule ne doit PAS être un nombre : {cellule}"
+        );
+
+        assert_eq!(coverage_cell(&compute_coverage(&[], 200, 100)), "indetermine");
     }
 
     #[test]
@@ -7352,13 +7419,13 @@ mod tests {
         let csv = ",result,table,_time,_value,_field,ip\n\
                    ,,0,2026-08-29T09:00:00Z,12,latency_ms,10.0.0.7\n\
                    ,,0,2026-08-29T09:00:01Z,14,latency_ms,10.0.0.7\n";
-        let report = sla_from_flux_csv(csv);
+        let report = sla_from_flux_csv(csv, (0, 3_600));
         assert_eq!(report.len(), 1);
-        assert_eq!(report[0].uptime_pct, None, "aucun verdict : aucun pourcentage");
-        assert_eq!(report[0].total_samples, 0);
-        assert_eq!(report[0].undetermined_samples, 2);
+        assert_eq!(report[0].stats.uptime_pct, None, "aucun verdict : aucun pourcentage");
+        assert_eq!(report[0].stats.total_samples, 0);
+        assert_eq!(report[0].stats.undetermined_samples, 2);
         // Les latences, elles, sont de vraies mesures : elles restent.
-        assert_eq!(report[0].min_latency_ms, Some(12));
+        assert_eq!(report[0].stats.min_latency_ms, Some(12));
     }
 
     #[test]
@@ -7369,12 +7436,12 @@ mod tests {
                    ,,0,2026-08-29T09:00:00Z,true,alive,10.0.0.1\n\
                    ,,0,2026-08-29T09:00:00Z,12,latency_ms,10.0.0.1\n\
                    ,,0,2026-08-29T09:00:00Z,false,alive,8.8.8.8\n";
-        let report = sla_from_flux_csv(csv);
+        let report = sla_from_flux_csv(csv, (0, 3_600));
         assert_eq!(report.len(), 2);
-        assert_eq!(report[0].ip, "10.0.0.1");
-        assert_eq!(report[0].uptime_pct, Some(100.0));
-        assert_eq!(report[1].ip, "8.8.8.8");
-        assert_eq!(report[1].uptime_pct, Some(0.0));
+        assert_eq!(report[0].stats.ip, "10.0.0.1");
+        assert_eq!(report[0].stats.uptime_pct, Some(100.0));
+        assert_eq!(report[1].stats.ip, "8.8.8.8");
+        assert_eq!(report[1].stats.uptime_pct, Some(0.0));
     }
 
     #[test]
