@@ -2905,6 +2905,17 @@ async fn list_probes(
                         // retraits datés que la sonde ignore encore.
                         // Fusionner les deux ferait perdre l'un ou l'autre.
                         "probe_monitors": state.db.monitors(&p.probe_id).unwrap_or_default(),
+                        // ⚠️ La cadence EFFECTIVE de cette sonde, pas le réglage
+                        // global. Sans elle, l'interface juge le silence à
+                        // l'aune de 60 s alors qu'une sonde en temps réel bat
+                        // toutes les 5 s : elle resterait verte douze fois trop
+                        // longtemps, et afficherait « en ligne » une sonde
+                        // muette depuis cinquante secondes.
+                        "heartbeat_interval_secs": if p.realtime_until.unwrap_or(0) > crate::db::now() {
+                            state.settings.realtime_heartbeat_secs()
+                        } else {
+                            state.settings.heartbeat_interval_secs()
+                        },
                         // Échéance du mode temps réel, pour que l'interface
                         // affiche le compte à rebours sans un appel de plus
                         // par sonde — et que ce qui tourne se voie.
