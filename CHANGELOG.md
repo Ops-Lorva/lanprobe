@@ -6,6 +6,44 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.3.0] - 2026-09-02
+
+### English
+
+- **The watch list is shared with the hub.** What you add or remove on one
+  side reaches the other, and a removal is explicit and dated rather than
+  an absence.
+- The interface you pick is remembered by the probe itself, not only by
+  the screen that set it.
+
+### Français
+
+- **La liste des surveillances est partagée avec le hub.** Ce que vous
+  ajoutez ou retirez d'un côté parvient à l'autre, et un retrait est
+  explicite et daté au lieu d'être une absence.
+- L'interface choisie est mémorisée par la sonde elle-même, et plus
+  seulement par l'écran qui l'a réglée.
+
+## [2.2.1] - 2026-09-01
+
+### English
+
+- **Fixed: a network scan no longer made the monitors lie.** A scan in
+  progress was enough to make targets look down.
+- **Fixed: a host past its timeout is down, not slow.**
+- The window no longer freezes at startup.
+- The public IP is read again when the gateway changes, when the internet
+  comes back, or when the hub asks for it.
+
+### Français
+
+- **Corrigé : un scan réseau ne fait plus mentir les surveillances.** Un
+  scan en cours suffisait à faire passer des cibles pour en panne.
+- **Corrigé : au-delà de son délai d'attente, un hôte est mort, pas lent.**
+- La fenêtre ne gèle plus au démarrage.
+- L'IP publique est relevée à nouveau sur changement de passerelle, au
+  retour d'internet, ou sur demande du hub.
+
 ## [2.2.0] - 2026-08-30
 
 ### English
