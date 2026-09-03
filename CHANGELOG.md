@@ -6,6 +6,33 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.2] - 2026-09-02
+
+### English
+
+- **Fixed: a hub that refuses the probe now says so.** When the hub
+  answered "403", the app reported a network failure — you went looking
+  for a cable while the hub was replying perfectly well. It now separates
+  "hub unreachable", which retries on its own, from "token refused by the
+  hub", which means the probe was most likely revoked and has to be
+  enrolled again.
+- ⚠️ Unchanged since 2.4.1: the link state is read for real on Linux only
+  — it stays hardcoded on macOS and Windows — and the desktop monitoring
+  screen still computes its own rate, without knowing "undetermined".
+
+### Français
+
+- **Corrigé : un hub qui refuse la sonde le dit enfin.** Quand le hub
+  répondait « 403 », l'application annonçait une panne réseau — on partait
+  chercher un câble alors que le hub répondait très bien. Elle distingue
+  désormais « hub injoignable », qui se réessaie tout seul, de « jeton
+  refusé par le hub », qui signifie que la sonde a probablement été
+  révoquée et qu'il faut la rattacher à nouveau.
+- ⚠️ Inchangé depuis la 2.4.1 : l'état du lien n'est lu pour de vrai que
+  sur Linux — il reste codé en dur sur macOS et Windows — et l'écran de
+  surveillance de l'application de bureau recalcule encore son propre
+  taux, sans connaître l'indéterminé.
+
 ## [2.4.1] - 2026-09-02
 
 ### English
