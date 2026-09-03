@@ -365,7 +365,7 @@ impl Db {
     /// ⚠️ Sans horodatage : la table n'a pas de colonne pour la date d'échec, et
     /// écrire l'instant du redémarrage dans `ready_at` ferait passer un échec
     /// pour un classeur produit.
-    pub(crate) fn fail_reports_interrupted_by_restart(&self) -> DbResult<usize> {
+    pub fn fail_reports_interrupted_by_restart(&self) -> DbResult<usize> {
         let conn = self.conn().lock().map_err(|_| poisoned())?;
         let closes = conn.execute(
             "UPDATE reports
@@ -820,6 +820,39 @@ async fn download_report(
 const EMPREINTE: axum::http::HeaderName =
     axum::http::HeaderName::from_static("x-lanprobe-sha256");
 
+// ── La purge ───────────────────────────────────────────────────────────────
+
+/// Date les entrées échues, puis retire leurs classeurs du volume. Rend le
+/// nombre d'entrées touchées.
+///
+/// 🔴 **L'ordre compte.** L'entrée est datée d'abord, dans une transaction ; le
+/// fichier part ensuite. Un hub arrêté entre les deux laisse une entrée purgée
+/// et un fichier orphelin — un octet de trop sur le volume. L'ordre inverse
+/// aurait laissé une entrée qui annonce « disponible » et un fichier absent,
+/// c'est-à-dire un rapport qu'on propose de télécharger et qui rend une erreur.
+///
+/// ⚠️ Un fichier déjà absent n'arrête pas le balayage : un volume restauré
+/// depuis une archive antérieure aux classeurs n'en a aucun, et les entrées
+/// doivent quand même être datées.
+pub async fn purge_report_files(db: &Db, config_dir: &std::path::Path, now: i64) -> usize {
+    let purgés = match db.purge_expired_reports(now) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("purge des rapports : {e}");
+            return 0;
+        }
+    };
+    for record in &purgés {
+        let chemin = report_path(config_dir, &record.report_id);
+        match tokio::fs::remove_file(&chemin).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("classeur {} non retiré du volume : {e}", record.report_id),
+        }
+    }
+    purgés.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1007,47 @@ mod tests {
     fn an_unknown_report_is_not_found() {
         let (db, _) = db_with_site();
         assert!(db.get_report("rapport-qui-nexiste-pas").is_err());
+    }
+
+    #[tokio::test]
+    async fn the_sweep_takes_the_file_off_the_volume_and_leaves_the_line() {
+        // Les deux durées de vie, vues depuis la boucle des six heures.
+        let (db, site_id) = db_with_site();
+        let volume = std::env::temp_dir().join(format!(
+            "lanprobe-purge-{}-{}",
+            std::process::id(),
+            crate::db::now()
+        ));
+        let id = db.create_report(&demande(&site_id)).unwrap();
+        let chemin = report_path(&volume, &id);
+        std::fs::create_dir_all(chemin.parent().unwrap()).unwrap();
+        std::fs::write(&chemin, b"un classeur").unwrap();
+        db.set_report_ready(&id, "f.xlsx", 11, "abc", 5_000, 6_000).unwrap();
+
+        assert_eq!(purge_report_files(&db, &volume, 6_001).await, 1);
+
+        assert!(!chemin.exists(), "le fichier est resté sur le volume");
+        let gardé = db.get_report(&id).unwrap();
+        assert_eq!(gardé.state, "purged");
+        assert_eq!(gardé.requested_by, "admin");
+
+        // Un second passage ne trouve plus rien à faire — et surtout ne
+        // redemande pas l'effacement d'un fichier déjà parti.
+        assert_eq!(purge_report_files(&db, &volume, 9_999).await, 0);
+        let _ = std::fs::remove_dir_all(&volume);
+    }
+
+    #[tokio::test]
+    async fn a_file_already_gone_does_not_stop_the_sweep() {
+        // Un volume restauré depuis une archive antérieure n'a pas les
+        // classeurs : la purge doit quand même dater les entrées.
+        let (db, site_id) = db_with_site();
+        let volume = std::env::temp_dir().join("lanprobe-purge-volume-absent");
+        let id = db.create_report(&demande(&site_id)).unwrap();
+        db.set_report_ready(&id, "f.xlsx", 11, "abc", 5_000, 6_000).unwrap();
+
+        assert_eq!(purge_report_files(&db, &volume, 6_001).await, 1);
+        assert_eq!(db.get_report(&id).unwrap().purged_at, Some(6_001));
     }
 
     #[test]

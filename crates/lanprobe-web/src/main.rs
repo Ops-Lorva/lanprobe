@@ -128,6 +128,17 @@ async fn main() -> Result<(), String> {
         tracing::warn!("amorçage des réglages depuis l'environnement : {e}");
     }
 
+    // 🔴 Un rapport « en préparation » qu'un redémarrage a tué doit devenir
+    // ÉCHOUÉ, et non rester en attente pour toujours : l'app afficherait une
+    // progression qui n'avance plus, c'est-à-dire une valeur plausible et
+    // fausse. Rien ne reprend tout seul — une préparation reprise à moitié
+    // produirait un classeur partiel (contrat § 23).
+    match db.fail_reports_interrupted_by_restart() {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!("{n} rapport(s) interrompus par un redémarrage, clos en échec"),
+        Err(e) => tracing::error!("rapports interrompus non clos : {e}"),
+    }
+
     let auth = Arc::new(Auth::new(db.clone()));
     let token_path = lanprobe_web::auth::default_setup_token_path(&args.config_dir);
     match auth.init_setup_token(&token_path) {
@@ -223,6 +234,7 @@ async fn main() -> Result<(), String> {
     {
         let db = db.clone();
         let settings = settings.clone();
+        let config_dir = args.config_dir.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
             loop {
@@ -241,6 +253,24 @@ async fn main() -> Result<(), String> {
                         Ok(n) => tracing::info!("historique des adresses : {n} intervalle(s) retirés"),
                         Err(e) => tracing::warn!("purge de l'historique des adresses : {e}"),
                     }
+                }
+
+                // Fichiers de rapport échus. ⚠️ **Avant** le `continue` de
+                // l'inventaire : `inventory_days` vaut 0 — illimité — par
+                // défaut, et la purge des classeurs ne serait alors jamais
+                // atteinte sur l'installation la plus courante qui soit.
+                //
+                // 🔴 Les entrées, elles, ne sont pas purgées : elles sont
+                // datées. Le fichier s'en va, la trace de l'extraction reste.
+                match lanprobe_web::reports::purge_report_files(
+                    &db,
+                    &config_dir,
+                    lanprobe_web::db::now(),
+                )
+                .await
+                {
+                    0 => {}
+                    n => tracing::info!("rapports : {n} classeur(s) échus retirés du volume"),
                 }
 
                 let days = settings.inventory_days();
