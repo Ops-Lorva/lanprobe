@@ -10,24 +10,32 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 
 ### English
 
-- **Fixed: a hub that refuses the probe now says so.** When the hub
-  answered "403", the app reported a network failure — you went looking
-  for a cable while the hub was replying perfectly well. It now separates
-  "hub unreachable", which retries on its own, from "token refused by the
-  hub", which means the probe was most likely revoked and has to be
-  enrolled again.
+- **Fixed: "nobody answered" and "something answered, and refused" are no
+  longer the same thing.** A proxy returning "403" in front of a perfectly
+  healthy hub used to show as "Hub unreachable", and you went looking for
+  a network fault that did not exist. The screen now reads "Hub reached —
+  refused (403)", and an unreachable hub stays "Hub unreachable".
+  ⚠️ A refusal costs you nothing and asks nothing of you: the measurements
+  stay buffered and resume on their own, with the same exponential backoff
+  as any outage. Only a **revoked** probe — code `401` — goes to the broken
+  state and has to be enrolled again, and that distinction already existed.
 - ⚠️ Unchanged since 2.4.1: the link state is read for real on Linux only
   — it stays hardcoded on macOS and Windows — and the desktop monitoring
   screen still computes its own rate, without knowing "undetermined".
 
 ### Français
 
-- **Corrigé : un hub qui refuse la sonde le dit enfin.** Quand le hub
-  répondait « 403 », l'application annonçait une panne réseau — on partait
-  chercher un câble alors que le hub répondait très bien. Elle distingue
-  désormais « hub injoignable », qui se réessaie tout seul, de « jeton
-  refusé par le hub », qui signifie que la sonde a probablement été
-  révoquée et qu'il faut la rattacher à nouveau.
+- **Corrigé : « personne n'a répondu » et « on m'a répondu non » ne sont
+  plus la même chose.** Un proxy qui renvoyait « 403 » devant un hub
+  parfaitement sain s'affichait « Hub injoignable », et on partait chercher
+  une panne réseau qui n'existait pas. L'écran affiche désormais « Hub
+  atteint — refusé (403) », et un hub réellement injoignable reste
+  « Hub injoignable ».
+  ⚠️ Un refus ne fait rien perdre et ne demande aucune action : les mesures
+  restent en tampon et repartent seules, avec le même repli exponentiel
+  qu'une coupure. Seule une sonde **révoquée** — code `401` — passe en état
+  cassé et doit être rattachée à nouveau, et cette distinction existait
+  déjà.
 - ⚠️ Inchangé depuis la 2.4.1 : l'état du lien n'est lu pour de vrai que
   sur Linux — il reste codé en dur sur macOS et Windows — et l'écran de
   surveillance de l'application de bureau recalcule encore son propre
