@@ -4,8 +4,17 @@
  * ⚠️ **Ce générateur n'est plus le seul, et il n'est plus la référence.** Le
  * hub produit désormais le même classeur (`crates/lanprobe-web/src/
  * report_xlsx.rs`, contrat § 23) parce qu'une app native n'a ni `exceljs` ni
- * `<canvas>`. Ce fichier doit basculer sur la route du hub : sans cela on ne
- * passe pas de deux générateurs à un, on passe à trois.
+ * `<canvas>`. Les deux écrans lui demandent le fichier (`reports.ts`) : sans
+ * cela on ne passait pas de deux générateurs à un, on passait à trois.
+ *
+ * ⚠️ **Ce fichier n'est pas mort pour autant, et il ne se supprime pas.** Il
+ * garde deux rôles :
+ *
+ * 1. **Le repli** quand le hub est plus ancien que la route — on ajoute un
+ *    chemin, on n'en enlève pas.
+ * 2. **Les calculs affichés à l'écran** : `byPublicIp`, `outages`, `stats` et
+ *    `coverageLabel` alimentent les tableaux de la fiche d'une sonde, qui n'ont
+ *    rien à voir avec la production du fichier.
  *
  * ⚠️ L'argument qui tenait ici — « une dépendance de plus dans un binaire
  * qu'on veut petit » — vaut pour la SONDE, qu'on installe chez le client, pas
