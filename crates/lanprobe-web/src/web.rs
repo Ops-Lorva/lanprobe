@@ -1411,12 +1411,18 @@ async fn session_guard(
         // Puis le porteur : un appareil appairé présente un jeton d'accès de
         // quinze minutes, jamais un cookie (contrat § 22).
         //
-        // ⚠️ Le refus reste « session absente ou expirée » ICI, et c'est
-        // assumé : le motif d'un refus d'appareil — révoqué, inconnu, compte
-        // désactivé — se rend sur `POST /api/devices/token`, la route que
-        // l'app appelle pour renouveler. Le dire sur chaque route protégée
-        // apprendrait à qui présente un jeton quelconque quels appareils
-        // existent.
+        // ⚠️ Le refus ne nomme PAS le motif ici, et c'est assumé : le motif
+        // d'un refus d'appareil — révoqué, inconnu, compte désactivé — se rend
+        // sur `POST /api/devices/token`, la route que l'app appelle pour
+        // renouveler. Le dire sur chaque route protégée apprendrait à qui
+        // présente un jeton quelconque quels appareils existent.
+        //
+        // 🔴 **L'asymétrie avec les `401` de `pairing.rs` est VOULUE, ne
+        // l'uniformisez pas.** Là-bas le motif est explicite parce que l'app
+        // doit distinguer trois conduites — appeler celui qui a révoqué,
+        // réappairer, ou s'arrêter. Ici il n'y a rien à distinguer : l'app
+        // renouvelle son jeton, et c'est le renouvellement qui lui dira quoi
+        // faire. Un motif ici ne servirait que celui qui n'a pas d'appareil.
         .or_else(|| {
             bearer_token(&headers)
                 .and_then(|token| crate::pairing::identity_from_access_token(&state, &token))
@@ -1426,7 +1432,13 @@ async fn session_guard(
             req.extensions_mut().insert(identity);
             next.run(req).await
         }
-        None => fail(StatusCode::UNAUTHORIZED, "session absente ou expirée"),
+        // 🔴 **Pas « session expirée ».** Le mot serait faux sur le chemin du
+        // porteur : dans ce modèle, l'identité d'un appareil appairé ne meurt
+        // que d'une révocation, rien n'y expire (contrat § 22). Il ferait
+        // attendre au technicien une reconnexion qui n'arrivera pas.
+        // « Authentification requise » est vrai des deux chemins — cookie
+        // absent comme porteur invalide — et n'en dit pas un mot de plus.
+        None => fail(StatusCode::UNAUTHORIZED, "authentification requise"),
     }
 }
 
@@ -1439,7 +1451,9 @@ async fn role_guard(
     next: Next,
 ) -> Response {
     let Some(identity) = req.extensions().get::<Identity>().cloned() else {
-        return fail(StatusCode::UNAUTHORIZED, "session absente ou expirée");
+        // Même formulation qu'en amont, et pour la même raison : ce garde
+        // s'applique aux deux chemins d'authentification.
+        return fail(StatusCode::UNAUTHORIZED, "authentification requise");
     };
     if identity.role >= minimum {
         return next.run(req).await;
@@ -8105,9 +8119,8 @@ mod tests {
     #[tokio::test]
     async fn a_bearer_on_a_session_route_is_judged_and_never_panics() {
         // Le crochet d'authentification par porteur est posé dans
-        // `session_guard` ; sa souche ne reconnaît encore aucun jeton. Ce que
-        // ce test fige, c'est que le crochet EXISTE et qu'il refuse
-        // proprement — pas qu'il accepte.
+        // `session_guard`. Ce que ce test fige, c'est qu'un porteur que le hub
+        // ne reconnaît pas est refusé proprement — pas qu'il soit accepté.
         //
         // ⚠️ Il fige aussi l'ordre : le cookie d'abord, le porteur ensuite. Un
         // navigateur n'envoie jamais d'en-tête `Authorization` et l'app
@@ -8118,7 +8131,7 @@ mod tests {
 
         assert!(
             crate::pairing::identity_from_access_token(&h.state, "jeton-inconnu").is_none(),
-            "aucun jeton d'accès n'est encore reconnu"
+            "un jeton qui n'a pas été scellé par ce hub n'ouvre rien"
         );
 
         let mut req = empty_request("GET", "/api/probes");
@@ -8128,7 +8141,16 @@ mod tests {
         );
         let (status, body, _) = h.call(req).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-        assert_eq!(body["error"], "session absente ou expirée", "{body}");
+        // 🔴 **Le refus ne parle pas d'expiration.** Il n'en dit pas plus
+        // qu'avant — il ne nomme toujours pas le motif, et n'apprend donc
+        // toujours pas quels appareils existent — mais il cesse d'affirmer une
+        // expiration qui n'existe pas : l'identité d'un appareil appairé ne
+        // meurt que d'une révocation (contrat § 22). Le mot « expirée » était
+        // faux sur ce chemin, et c'est le mot que l'app aurait affiché.
+        assert_eq!(body["error"], "authentification requise", "{body}");
+        let rendu = body.to_string().to_lowercase();
+        assert!(!rendu.contains("session"), "{rendu}");
+        assert!(!rendu.contains("expir"), "{rendu}");
 
         // Le cookie continue de passer, porteur ou non.
         let session = h.login().await;

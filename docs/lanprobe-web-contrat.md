@@ -2566,6 +2566,19 @@ appellent trois conduites différentes :
 | `unknown` | « Ce hub ne connaît pas cet appareil — il a peut-être été restauré depuis une sauvegarde antérieure à l'appairage. » | elle réappaire, légitimement |
 | `account_disabled` | « Le compte `benjamin` a été désactivé. » | rien de ce qu'elle fera sur ce téléphone n'y changera quelque chose |
 
+⚠️ **Les routes protégées, elles, ne nomment aucun motif** : elles répondent
+`401 { error: "authentification requise" }`, et l'app renouvelle son jeton — c'est
+`POST /api/devices/token` qui lui dira quoi faire. Le dire sur chaque route
+apprendrait à qui présente un jeton quelconque quels appareils existent.
+
+🔴 **Cette asymétrie est voulue, et il ne faut pas l'uniformiser.** Le motif est
+explicite là où il change la conduite de la personne, muet là où il n'y a rien à
+distinguer. Mais le refus générique ne dit pas non plus « session expirée » : le
+mot serait faux — rien n'expire dans ce modèle — et il ferait attendre au
+technicien une reconnexion qui n'arrivera pas. « Authentification requise » est
+vrai du cookie absent comme du porteur invalide, et n'en révèle pas un mot de
+plus.
+
 ⚠️ **Un refus définitif arrête l'app** : elle va à l'écran d'appairage et s'y
 tient. Une erreur **réseau**, elle, se réessaie avec un délai croissant — c'est
 l'inverse. Sans cette distinction, un téléphone révoqué inonderait le journal
