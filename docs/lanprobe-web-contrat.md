@@ -723,6 +723,26 @@ Le détail des scans vient de **SQLite**, pas d'Influx (§12).
 - `kind=speedtest` → `{ "speedtests": [ … ] }`, les 50 derniers tests.
 - `kind` absent ou inconnu → `400`. Une sonde inconnue → `404`.
 
+### Les routes de l'app mobile — décrites ailleurs, listées ici
+
+Elles ne sont pas dépliées dans cette section parce qu'elles portent chacune une
+règle qui déborde de la forme de la réponse. Elles restent néanmoins des routes
+du hub, et un lecteur qui parcourt le §3 doit savoir qu'elles existent.
+
+| Route | Détaillée en |
+|---|---|
+| `POST /api/me/pair-codes`, `POST /api/pair`, `POST /api/devices/token` | §22 |
+| `GET`/`PATCH /api/me/devices[/{id}]`, `POST /api/me/devices/{id}/revoke` | §22 |
+| `GET /api/devices[?user=]`, `POST /api/devices/{id}/revoke` | §22 |
+| `POST`/`GET /api/sites/{id}/reports`, `GET /api/reports/{id}`, `GET /api/reports/{id}/file` | §23 |
+
+⚠️ **`POST /api/pair` et `POST /api/devices/token` ne sont pas authentifiées par
+session** — c'est le code, puis le secret d'appareil, qui authentifient. Elles
+rejoignent donc `POST /api/probes/enroll` et les quatre routes à jeton de sonde
+dans le groupe « ouvert », et **pas** le groupe `/api/me/*` : y ranger
+`/api/devices/token` l'aurait mise derrière la garde de session, c'est-à-dire
+derrière ce qu'elle existe pour remplacer.
+
 ## 4. Schéma SQLite
 
 ```sql
@@ -878,11 +898,36 @@ qu'un réglage est écrit en base, la base gagne.
 | `influx_advertise_url` | déduit | URL remise **aux sondes** (voir plus bas) |
 | `retention_days` | `0` (illimité) | rétention du bucket, appliquée via l'API Influx |
 | `heartbeat_interval_secs` | `60` | cadence demandée aux sondes |
+| `report_days` | `7` | durée de conservation des **fichiers** de rapport (§23) |
 
 Changer `retention_days` applique la nouvelle rétention au bucket. **Réduire la
 rétention supprime des données** : l'interface doit le dire explicitement et
 demander confirmation, en nommant la durée qui sera perdue. Un réglage qui efface
 sans le dire est un piège.
+
+### ⚠️ `report_days` est le seul réglage de rétention dont le défaut n'est pas « illimité »
+
+`retention_days` et `inventory_days` valent `0` = illimité, et leur réduction
+exige une confirmation nommant la durée perdue : y toucher efface des **mesures
+qu'on ne peut pas refaire**.
+
+Un rapport, lui, se **régénère** — les relevés restent en base, seul le classeur
+disparaît. Le défaut sûr s'inverse donc. Et il y a une raison de plus : un volume
+qui accumule les classeurs SLA de tous les clients pendant deux ans est le tas le
+plus sensible que le hub sache produire, et le seul qui reste sur disque.
+
+Deux conséquences, et elles vont dans des sens opposés :
+
+- **Réduire `report_days` ne demande aucune confirmation.** L'écran dit combien
+  de fichiers seront purgés ; il ne fait pas signer. Une confirmation qui ne
+  protège rien apprend à cliquer sans lire.
+- 🔴 **`0` n'est pas « illimité » ici : la valeur est refusée**, en `400`, avec un
+  message qui dit pourquoi. Quelqu'un la mettra par analogie avec les deux autres
+  réglages et obtiendra le seul réglage du produit qui laisse s'accumuler
+  indéfiniment des données de clients sur le disque. Minimum `1`.
+
+⚠️ La purge ne touche **que le fichier**. L'entrée d'historique, elle, n'est
+jamais purgée — c'est tout l'objet du §23.
 
 ### L'URL annoncée n'est pas l'URL interne
 
@@ -1109,20 +1154,26 @@ est donc aussi ouverte à `admin`.
 
 ⚠️ **La portée de site (§17) s'AJOUTE au rôle, elle ne le remplace pas** : un
 lecteur restreint à un site reste un lecteur sur ce site. Les routes marquées
-« portée » ci-dessous sont celles dont le `{id}` désigne **une sonde** ; elles
-vivent derrière un garde séparé, et une sonde hors portée y rend `404`.
+« portée » ci-dessous sont celles dont le `{id}` du chemin désigne **une sonde**
+ou **un site** ; elles vivent derrière **deux** gardes séparés — un par nature
+d'objet, parce que le paramètre porte le même nom et ne désigne pas la même chose
+— et un objet hors portée y rend `404`.
 
 | Route | Rôle | Note |
 |---|---|---|
 | `GET /api/status`, `POST /api/setup`, `POST /api/login`, `POST /api/login/passkey/{start,finish}`, `POST /api/logout` | — | authentification propre |
 | `POST /api/probes/enroll`, `.../write`, `.../heartbeat`, `.../scans`, `.../config` | — | code d'enrôlement, ou jeton de sonde en `Authorization: Bearer` (§12, §16) |
+| `POST /api/pair`, `POST /api/devices/token` | — | code d'appairage, ou secret d'appareil en `Authorization: Bearer` (§22) |
 | `GET /api/sites` | `viewer` | accepte aussi les identifiants du compte (Basic) |
-| `GET /api/me`, et les routes `/api/me/*` — mot de passe, TOTP, clés d'accès | `viewer` | chacun agit sur **son** compte, quel que soit son rôle (§19) |
+| `GET /api/me`, et les routes `/api/me/*` — mot de passe, TOTP, clés d'accès, **codes d'appairage et appareils** | `viewer` | chacun agit sur **son** compte, quel que soit son rôle (§19, §22) |
 | `GET /api/probes` | `viewer` | |
 | `GET /api/settings`, `GET /api/settings/influx-advertise`, `GET /api/influx` | `viewer` | aucune de ces réponses ne porte de secret |
 | `GET /api/notifications/subscriptions` | `viewer` | |
 | `GET /api/probes/{id}/metrics`, `/uptime`, `/inventory`, `/sla`, `/sla.csv`, `/public-ips` | `viewer` | **portée** |
-| `POST /api/sites`, `PATCH`/`DELETE /api/sites/{id}`, `POST /api/sites/{id}/archive` | `operator` | |
+| `POST /api/sites` | `operator` | |
+| `PATCH`/`DELETE /api/sites/{id}`, `POST /api/sites/{id}/archive` | `operator` | **portée** |
+| `POST`/`GET /api/sites/{id}/reports` | `viewer` | **portée** — §23 |
+| `GET /api/reports/{id}`, `GET /api/reports/{id}/file` | `viewer` | **portée**, par le site du rapport — §23 |
 | `PUT /api/networks/label` | `operator` | nommer un réseau est une conduite de parc : le libellé se retrouve dans tous les rapports. Le `site_id` du corps est vérifié contre la portée — `404` sinon, et `404` aussi si le site n'existe pas |
 | `POST /api/enroll-codes`, `GET /api/enroll-codes/pending` | `operator` | le code y figure **en clair** pendant sa validité |
 | `PATCH`/`DELETE /api/probes/{id}`, `POST .../archive` | `operator` | **portée** |
@@ -1222,7 +1273,21 @@ Actions journalisées : `auth.setup`, `auth.login`, `auth.logout`,
 `probe.up`, `probe.command`, `probe.monitor_remove`, `probe.monitor_revive`,
 `probe.public_ip_changed`, `probe.archive`, `probe.unarchive`, `site.archive`,
 `site.unarchive`, `user.scope`, `user.password_reset_cli`, `backup.create`,
-`backup.restore`, `backup.retention`.
+`backup.restore`, `backup.retention`, `device.pair_code`, `device.pair`,
+`device.rename`, `device.revoke`, `device.rotate`, `device.refused`,
+`report.request`, `report.download`, `report.purge`.
+
+⚠️ **Deux actions volontairement ABSENTES de cette liste.**
+
+- **Le renouvellement du jeton d'accès d'un appareil** (`POST /api/devices/token`,
+  §22) ne s'écrit pas. Quatre-vingt-seize lignes par jour et par téléphone, dans
+  un journal en ajout seul et **sans purge par ancienneté**, noieraient les lignes
+  qui comptent. On journalise l'appairage, le renommage, la rotation, la
+  révocation et les **refus** — des événements rares, dont chacun signifie
+  quelque chose. Un refus, lui, s'écrit : c'est `device.refused`, avec son motif
+  dans `detail`.
+- **La suppression d'une entrée de rapport** n'existe pas, donc n'a pas d'action.
+  `report.purge` nomme la disparition du **fichier**, pas de l'entrée (§23).
 
 **Jamais de secret dans une ligne.** Ni jeton de sonde, ni jeton de lecture, ni
 code d'enrôlement, ni mot de passe, ni URL de webhook. Les réglages, eux, y
@@ -1815,11 +1880,25 @@ autre client. Une seule vérification répond donc aux deux questions — l'obje
 existe, et l'appelant a le droit de le voir — et rend la même réponse quand l'une
 des deux manque.
 
-Deux mécanismes symétriques la portent : un **intergiciel** pour les quinze routes
-dont le `{id}` du chemin est un `probe_id`, et une **vérification de site** appelée
-par les handlers qui reçoivent un site — `PATCH`/`DELETE`/`archive` d'un site, la
-création d'un code d'enrôlement, le libellé de réseau, l'abonnement d'alerte, et la
-**destination** d'un déplacement de sonde.
+Deux mécanismes symétriques la portent, et ce sont **deux intergiciels** : un pour
+les routes dont le `{id}` du chemin est un `probe_id`, un pour celles dont le
+`{id}` est un `site_id`. Un seul intergiciel pour les deux était impossible — le
+paramètre porte le même nom et ne désigne pas le même objet, une garde posée sur
+tout le routeur aurait cherché une sonde là où passe un site.
+
+⚠️ **La vérification de site était, elle, un appel à la main dans chaque handler**
+— `rename_site`, `delete_site`, `archive_site` — et c'est exactement la forme dont
+le §17.3 dit qu'elle revient. Une garde qu'il faut penser à écrire finit par être
+oubliée : les trois occurrences historiques ci-dessous sont trois handlers où
+quelqu'un a oublié d'écrire l'appel. Elle est donc devenue une **couche**, comme
+celle des sondes, et par la même raison : un handler ajouté demain en hérite sans
+que personne y pense.
+
+⚠️ Il reste des sites qui **ne sont pas dans le chemin** : la création d'un code
+d'enrôlement, le libellé de réseau, l'abonnement d'alerte et la **destination**
+d'un déplacement de sonde nomment leur site dans le **corps** de la requête. Un
+intergiciel ne lit que l'URL — ces quatre-là gardent donc leur appel explicite, et
+c'est le seul motif légitime d'en écrire un.
 
 ⚠️ **Un handler gardé n'a donc plus à vérifier l'existence pour son propre
 compte** : il peut supposer que la sonde du chemin existe. Ce qu'il doit encore
@@ -2285,3 +2364,376 @@ on le lance.
 déclenche une construction, qui est le premier moment où le crate de bureau est
 compilé. Sans ce geste manuel, la première machine à découvrir qu'un crate ne
 compile plus est celle qui produit les binaires livrés.
+
+## 22. Appairage d'un appareil
+
+Demandé pour l'app iOS. L'exigence est une phrase, et elle commande tout le
+reste : « je ne veux pas devoir taper mon mot de passe ou me ré-enrôler en haut
+d'une échelle, donc tant que l'app n'est pas révoquée côté hub, elle doit
+toujours arriver à se reconnecter ».
+
+🔴 **Lue littéralement, cette phrase interdit la session.** Une session est un
+objet qui expire — c'est sa définition. Tant que l'app s'authentifie par une
+session, il existe un instant où elle redemande le mot de passe, et cet instant
+tombe un jour en haut d'une échelle, parce que c'est là qu'on ouvre l'app.
+
+### Trois objets, trois durées de vie
+
+| Objet | Vit où | Durée | Ce qui le tue |
+|---|---|---|---|
+| **Identité d'appareil** — `device_id` + secret | trousseau du téléphone · ligne `paired_devices` en SQLite | illimitée | une révocation explicite, et rien d'autre |
+| **Jeton d'accès** | mémoire vive de l'app, jamais écrit sur le disque du téléphone | 15 min | le temps — sans conséquence : il se renouvelle en silence |
+| **Session web** (cookie) | navigateur | inchangée | ne concerne pas l'app : les deux chemins coexistent |
+
+Pourquoi deux jetons plutôt qu'un secret durable présenté à chaque requête : un
+secret durable qui accompagne chaque requête finit dans le journal d'un reverse
+proxy mal configuré, mille fois par jour. Avec le renouvellement, il ne quitte le
+trousseau qu'une fois par quart d'heure. C'est le seul argument, et il suffit.
+
+### Le code d'appairage
+
+8 caractères, 15 minutes, **usage unique** — mêmes règles que le code
+d'enrôlement d'une sonde (§3), et pour les mêmes raisons. Le hub web l'affiche en
+QR **et** en clair, avec son compte à rebours : un code dont on ne voit pas
+l'expiration se réessaie trois fois avant qu'on comprenne, et la saisie manuelle
+est le chemin de secours obligatoire — la caméra échoue, et le hub web est
+parfois ouvert sur le téléphone lui-même, auquel cas il n'y a aucun second écran
+à photographier.
+
+🔴 **Quatre raccourcis à refuser**, tous déjà tranchés pour les sondes :
+
+1. mettre le **mot de passe du compte** dans le QR — un mot de passe affiché à
+   l'écran, photographiable, qui ne se révoque pas appareil par appareil ;
+2. y mettre un **jeton de longue durée** — une image devient un identifiant
+   permanent ;
+3. rendre le code **réutilisable** « pour appairer la tablette aussi » : on en
+   émet un second, c'est gratuit ;
+4. le faire durer **24 h** « pour être tranquille ». Le confort d'une fois par
+   appareil ne paie pas une fenêtre d'attaque d'une journée.
+
+⚠️ **Un code est émis depuis une session authentifiée, pour son propre compte.**
+Il ne crée aucun compte et n'élève aucun droit : l'appareil hérite du rôle et de
+la portée de site de celui qui l'a émis, **jamais plus**. Un code volé chez un
+`viewer` ne donne qu'un `viewer`.
+
+### Table `paired_devices` — calquée sur `probes`, délibérément
+
+```sql
+CREATE TABLE paired_devices (
+  device_id    TEXT PRIMARY KEY,               -- UUIDv4
+  username     TEXT NOT NULL REFERENCES users(username),
+  name         TEXT NOT NULL,                  -- « iPhone 15 — Benjamin »
+  secret_hash  TEXT NOT NULL,                  -- argon2id : jamais le secret en clair
+  platform     TEXT,                           -- « iOS 18.2 · iPhone 15 »
+  app_version  TEXT,
+  created_at   INTEGER NOT NULL,
+  last_seen    INTEGER,
+  last_ip      TEXT,
+  revoked_at   INTEGER
+);
+```
+
+La même forme que `probes` : condensat argon2id du secret, `last_seen`,
+`revoked_at`, **aucune suppression**. Un appareil est à un compte ce qu'une sonde
+est à un site — le hub n'a donc aucun motif nouveau à inventer.
+
+⚠️ **La clé du propriétaire est `username`, pas `id`.** C'est la colonne que
+`user_sites` référence déjà (§17), celle que le journal d'audit inscrit, et celle
+que `identity_of` relit à chaque requête. Passer par l'entier aurait donné deux
+manières de désigner le même compte dans le même schéma, et une jointure de plus
+à chaque renouvellement de jeton.
+
+### Routes
+
+| Route | Auth | Rôle | Note |
+|---|---|---|---|
+| `POST /api/me/pair-codes` | session | `viewer` | calque de `/api/enroll-codes`. Chacun agit sur **son** compte (§19) |
+| `POST /api/pair` — `{ code, name, platform, app_version }` | le **code** | — | → `201 { device_id, device_secret, user, role, scope }`. Le secret n'est rendu **qu'ici, une fois** |
+| `POST /api/devices/token` | `Bearer <device_secret>` | — | → `200 { access_token, expires_in: 900 }` |
+| `GET /api/me/devices` · `PATCH /api/me/devices/{id}` · `POST /api/me/devices/{id}/revoke` | session | `viewer` | **les siens**. Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir le révoquer seul |
+| `GET /api/devices[?user=]` · `POST /api/devices/{id}/revoke` · `POST /api/devices/{id}/rotate` | session | `admin` | ceux de **tous** les comptes : un opérateur parti de l'entreprise ne se révoque pas lui-même |
+
+⚠️ **`POST /api/devices/token` vit hors de `/api/me/*`** : ce n'est pas une
+session qui l'authentifie. La ranger dans `/api/me/*` l'aurait mise derrière la
+garde de session, c'est-à-dire derrière ce qu'elle existe précisément pour
+remplacer. Même raison que les quatre routes à jeton de sonde (§17).
+
+**Aucune route ne supprime un appareil**, comme aucune ne supprime un compte ni
+une sonde. On révoque : la ligne reste, parce que le journal d'audit la nomme, et
+une ligne d'audit qui pointe une cible disparue ne prouve rien.
+
+### Ce qui ne coupe PAS l'accès
+
+| Événement | Pourquoi il ne change rien |
+|---|---|
+| Le jeton d'accès expire | renouvelé sans écran ni saisie. Cas nominal, quatre-vingt-seize fois par jour |
+| **Changement de mot de passe** | le mot de passe n'authentifie pas l'appareil |
+| Redémarrage du hub | la ligne `paired_devices` est en base, pas en mémoire |
+| Trois semaines sans réseau | **aucune** règle « non vu depuis N jours = révoqué » |
+| Mise à jour de l'app | le trousseau y survit |
+| Rétrogradation du compte | l'accès tient, ce qu'il permet rétrécit |
+
+⚠️ **Le point contre-intuitif, et il exige une phrase à l'écran.** Sur le web,
+changer son mot de passe est le geste réflexe de « j'ai perdu mon téléphone ».
+Ici, il ne fait rien. L'écran de changement de mot de passe du hub doit donc
+porter : « cela ne déconnecte aucun appareil appairé — voir Appareils ». Sans
+elle, on fabrique quelqu'un qui se croit protégé et ne l'est pas.
+
+⚠️ **Pas de révocation par inactivité.** Une révocation « non vu depuis 90 jours »
+est une expiration déguisée qui se déclenche au retour de congés. Le hub affiche
+« vu il y a 41 j » et laisse un humain décider.
+
+⚠️ **Un appareil n'a pas de rôle propre** : il hérite du rôle et de la portée de
+site **courants** de son propriétaire, relus à chaque requête comme pour une
+session (§11). Jamais d'une copie figée à l'appairage — une portée gelée dans un
+jeton survivrait à sa révocation.
+
+### Ce qui coupe l'accès — trois actes explicites
+
+1. **Révoquer l'appareil.** Audit : `device.revoke`.
+2. **Désactiver le compte propriétaire.** Ses appareils tombent avec lui : le
+   §11 pose déjà la règle pour les sessions, et un appareil qui y survivrait
+   serait un trou dans la seule procédure de départ d'un salarié.
+3. **Restaurer une sauvegarde antérieure à l'appairage.** Ce n'est pas une
+   révocation, mais ça y ressemble — d'où le motif `unknown` ci-dessous.
+
+### 🔴 Le secret d'appareil NE TOURNE PAS à l'usage
+
+Le réflexe du métier est la *refresh token rotation* : faire tourner le secret
+durable à chaque renouvellement, ce qui détecte un secret copié par rejeu. **Ici
+c'est le mauvais choix, et il produit précisément la panne interdite.**
+
+Faire tourner, c'est écrire le nouveau secret des deux côtés. Si la réponse se
+perd — une 4G qui coupe entre l'écriture du hub et la réception du téléphone — le
+téléphone garde un secret mort et le hub un secret jamais arrivé. L'app doit se
+réappairer. Et ce scénario ne se déclenche pas au hasard : il se déclenche là où
+le réseau est mauvais, c'est-à-dire **là où le technicien travaille**.
+
+Retenu : le secret tourne sur un **geste explicite** depuis le hub
+(`POST /api/devices/{id}/rotate`), et le mot est celui du produit — *faire
+tourner*, comme `probe.rotate` (§9).
+
+Ce qu'on perd : la détection automatique d'un secret copié. Il n'y a plus de
+rejeu à repérer. Le seul détecteur restant est **humain** — la dernière vue et la
+dernière adresse dans l'écran Appareils. C'est le prix, payé sciemment, et c'est
+ce qui rend cet écran obligatoire plutôt que confortable.
+
+Variante gardée en réserve, si un audit l'exige : rotation **avec recouvrement**
+— l'ancien secret reste valable jusqu'à ce que le nouveau serve une fois. Elle
+règle la réponse perdue, coûte deux secrets à tenir de chaque côté, pour un gain
+que l'écran Appareils couvre déjà. Écartée en v1, pas condamnée.
+
+### ⚠️ « Session expirée » est le mot à ne plus employer
+
+`POST /api/devices/token` rend `401` **avec un motif**, parce que les trois causes
+appellent trois conduites différentes :
+
+| `reason` | Ce que l'app affiche | Ce que la personne fait |
+|---|---|---|
+| `revoked` | « Cet appareil a été révoqué depuis le hub. » | elle appelle celui qui l'a révoqué — réappairer serait un contournement |
+| `unknown` | « Ce hub ne connaît pas cet appareil — il a peut-être été restauré depuis une sauvegarde antérieure à l'appairage. » | elle réappaire, légitimement |
+| `account_disabled` | « Le compte `benjamin` a été désactivé. » | rien de ce qu'elle fera sur ce téléphone n'y changera quelque chose |
+
+⚠️ **Un refus définitif arrête l'app** : elle va à l'écran d'appairage et s'y
+tient. Une erreur **réseau**, elle, se réessaie avec un délai croissant — c'est
+l'inverse. Sans cette distinction, un téléphone révoqué inonderait le journal
+d'audit, qui est en ajout seul et sans purge.
+
+## 23. Rapports produits par le hub
+
+Jusqu'ici le classeur SLA était fabriqué **dans le navigateur**
+(`web-ui/src/lib/sla-report.ts`, `exceljs` + `<canvas>`). Une app native n'a ni
+l'un ni l'autre. Le hub produit donc le fichier, et **le même** : pas un
+équivalent, pas une version mobile allégée. Un seul générateur, un seul document
+— sans quoi on ne passe pas de deux générateurs à un, on passe à trois.
+
+### 🔴 Un rapport gardé n'est pas un fichier, c'est une trace
+
+Tant que le classeur naissait dans le navigateur, il n'existait nulle part : un
+`Blob` en mémoire, remis au navigateur, et rien ne restait. Personne ne savait
+qui l'avait sorti. Dès qu'il est produit par le hub et gardé pour être
+retéléchargé, il devient **une extraction de données d'un client, faite par
+quelqu'un, à une date**.
+
+⚠️ **Et la purge efface la traçabilité si l'on ne sépare pas deux objets.**
+Purger « les rapports » du dimanche emporterait la réponse à « qui a extrait les
+données de Durand le 12 août ».
+
+| | Le fichier | L'entrée |
+|---|---|---|
+| Quoi | le `.xlsx` | qui, depuis quel appareil, quel client, quelle fenêtre, quelles sondes, quand |
+| Où | `<config-dir>/reports/` | table `reports` et journal d'audit |
+| Poids | des centaines de ko | des dizaines d'octets |
+| Durée | purgé au délai réglé (`report_days`, §7) | **jamais purgée** |
+
+C'est la distinction que le §11 pose déjà pour ses deux journaux. Ici, deux
+registres : celui qui sert à travailler, celui qui sert à rendre des comptes.
+
+### Table `reports` — deux durées de vie dans une seule table
+
+```sql
+CREATE TABLE reports (
+  report_id    TEXT PRIMARY KEY,              -- UUIDv4, non devinable : il sert d'URL
+  site_id      TEXT NOT NULL REFERENCES sites(site_id),
+  requested_by TEXT NOT NULL REFERENCES users(username),
+  device_id    TEXT REFERENCES paired_devices(device_id),  -- NULL = demandé depuis le hub web
+  probe_ids    TEXT NOT NULL,                 -- JSON : les sondes retenues
+  locale       TEXT NOT NULL,                 -- la langue de l'opérateur au moment de la demande
+  range_start  INTEGER NOT NULL,
+  range_stop   INTEGER NOT NULL,
+  state        TEXT NOT NULL,                 -- preparing | ready | failed | purged
+  step         TEXT,                          -- « sonde 2 sur 3 — Lyon »
+  error        TEXT,                          -- la cause NOMMÉE, jamais « erreur »
+  file_name    TEXT,
+  file_size    INTEGER,
+  file_sha256  TEXT,
+  requested_at INTEGER NOT NULL,
+  ready_at     INTEGER,
+  expires_at   INTEGER,
+  purged_at    INTEGER,
+  downloads    INTEGER NOT NULL DEFAULT 0
+);
+```
+
+🔴 **La ligne n'est JAMAIS supprimée.** La purge remplit `purged_at`, vide
+`file_name` / `file_size` / `file_sha256` et met `state = 'purged'`. Un rapport
+purgé reste visible dans la liste, à sa date, avec son demandeur — il n'est
+simplement plus téléchargeable. C'est ce qui fait tenir « savoir qui a demandé »
+en présence de la purge.
+
+⚠️ **`device_id` n'est pas du zèle.** « Qui a demandé » désigne une personne ; si
+un téléphone est perdu et que celui qui le tient sort trois rapports clients,
+l'audit dira « benjamin » — ce qui est vrai et trompeur. L'appareil restreint la
+réponse. `NULL` veut dire « depuis le hub web », pas « inconnu ».
+
+⚠️ **`locale` est écrite dans la ligne, pas relue à la génération.** La langue est
+celle de l'opérateur **au moment où il demande** (voir plus bas) ; la relire au
+moment de produire donnerait un classeur dans la langue de qui regarde l'écran
+cinq minutes plus tard.
+
+### Les quatre routes
+
+```
+POST /api/sites/{id}/reports   { probe_ids?: [...], range | start/stop, locale }
+                               → 202 { report_id, state: "preparing" }
+GET  /api/sites/{id}/reports   l'historique du site
+GET  /api/reports/{id}         le suivi — state, step, error, file_size, expires_at
+GET  /api/reports/{id}/file    le fichier : Content-Length garanti + empreinte
+                               410 Gone si purgé
+```
+
+⚠️ **Un site, une fenêtre, un sous-ensemble de ses sondes.** Le générateur lit le
+site et la fenêtre du **premier** relevé et suppose qu'ils valent pour tous : il
+ne sait pas produire un classeur à deux sites ni à deux périodes. C'est déjà vrai
+par construction dans l'interface — on ne peut pas cocher des sondes de sites
+différents — et ça se traduit ici directement en contrat de route. `probe_ids`
+absent = **toutes les sondes du site dans la portée de l'appelant**, jamais
+toutes celles du site.
+
+⚠️ **L'historique est une route DE SITE (`GET /api/sites/{id}/reports`), pas une
+liste globale filtrée par un paramètre.** Un `GET /api/reports?site=` aurait
+obligé le handler à vérifier lui-même sa portée — la forme dont le §17 dit
+qu'elle finit par être oubliée. Ici le site est dans le chemin, donc la garde de
+portée s'applique **avant** le handler, sans que personne ait à y penser. Un
+compte restreint à Durand ne voit pas qu'un rapport Martin existe : le nom d'un
+client est déjà une information.
+
+⚠️ **`GET /api/reports/{id}` et `/file` portent un `report_id`, pas un
+`site_id`** : leur portée se vérifie sur le site **du rapport**, dans le handler.
+Un rapport hors portée rend `404` — même code, même message que partout ailleurs.
+
+**Aucune route ne supprime un rapport**, et l'app n'a pas de bouton
+« supprimer ». Un fichier s'en va par la purge, à sa date annoncée. Qui peut
+effacer un rapport peut effacer la trace de son extraction — la raison même qui
+interdit de nettoyer le journal d'audit.
+
+### 🔴 Un fichier tronqué s'ouvre très bien
+
+Sur un chantier, un téléchargement s'interrompt. Un CSV coupé en deux se lit sans
+erreur, avec moins de lignes. Un XLSX tronqué échoue *généralement* à l'ouverture
+— mais « généralement » n'est pas une garantie. Un rapport incomplet remis à un
+client est très exactement la valeur plausible et fausse que ce produit refuse, à
+l'endroit où elle coûte le plus cher.
+
+**Règle : un téléchargement à moitié réussi se solde par un échec visible, jamais
+par un fichier disponible.** Ce qui la garantit, côté hub :
+
+- **`Content-Length` sur une réponse non *chunkée*.** ⚠️ Une réponse construite en
+  flux part volontiers en `Transfer-Encoding: chunked`, auquel cas il n'y a
+  **aucune taille à comparer** et la garantie tombe en silence. Le corps est donc
+  servi d'un bloc, avec sa longueur annoncée.
+- **Une empreinte du corps** — `X-LanProbe-Sha256`, la même que `file_sha256`.
+  C'est le seul contrôle qui attrape aussi une **corruption silencieuse**, pas
+  seulement une coupure.
+- Le message d'échec côté app dit **les deux nombres** : « attendu 248 013 o ·
+  reçu 91 220 o ». Un « erreur réseau » générique ne permet pas de décider s'il
+  faut réessayer ou appeler.
+
+⚠️ **Un fichier purgé rend `410`, pas `404`.**
+`410 { "state": "purged", "purged_at": … }` dit « il a existé, il n'est plus
+là » — ce que l'entrée dit aussi. `404` dirait « ça n'a jamais existé », et l'app
+afficherait un rapport dont elle vient d'afficher la ligne. L'écran propose alors
+*Redemander*. Jamais un fichier de zéro octet, jamais un classeur partiel. Le
+retéléchargement subit **exactement** les mêmes contrôles que le premier.
+
+### La langue du rapport est celle de l'OPÉRATEUR
+
+Tranché par Benjamin. Le classeur est rédigé dans la langue de celui qui le
+demande, transmise en `locale` et figée dans la ligne.
+
+⚠️ **Le commentaire de `web-ui/src/lib/sla-report.ts` disait l'inverse** — « le
+rapport part chez un client, il doit être dans SA langue » — alors que le code y
+passait déjà la locale de l'interface, c'est-à-dire celle de l'opérateur. Un
+commentaire qui contredit son propre code est pire qu'aucun commentaire : le
+suivant l'applique. Corrigé.
+
+Ce n'est pas un renoncement : l'opérateur relit le document avant de l'envoyer
+(*télécharger → ouvrir → vérifier → envoyer*), et il ne peut relire que ce qu'il
+lit. Un classeur produit dans une langue que le demandeur ne parle pas ne serait
+vérifié par personne.
+
+### La purge
+
+- Sur les fichiers dont `expires_at` est passé, avec
+  `expires_at = ready_at + report_days` (§7).
+- ⚠️ **`expires_at` est fixé à la préparation et ne bouge plus**, même si le
+  réglage change ensuite. L'app a affiché « disponible jusqu'à demain 9:44 » : un
+  réglage raccourci ne doit pas faire disparaître le fichier plus tôt que ce qui
+  a été annoncé. **Une date annoncée est tenue.** Le nouveau réglage vaut pour
+  les rapports suivants.
+- Un rapport **en préparation** n'est jamais purgé : il n'a pas encore de date de
+  fin.
+- ⚠️ **Au démarrage, le hub clôt en échec ce qui était « en préparation ».** Sans
+  ça, un redémarrage laisse une demande éternellement en cours et l'app affiche
+  une progression qui n'avance plus — une valeur plausible et fausse. Cause
+  nommée : « le hub a redémarré pendant la préparation ». **Rien ne reprend tout
+  seul** : une préparation reprise à moitié produirait un classeur partiel.
+
+### Les deux lignes d'audit, et ce qu'elles peuvent honnêtement affirmer
+
+| Action | Écrite quand | Pourquoi séparée |
+|---|---|---|
+| `report.request` | à la demande, puis une **seconde** ligne au verdict (`success`/`failure`, cause dans `detail`) | `detail` porte le périmètre : site, fenêtre, nombre de sondes |
+| `report.download` | à **chaque** envoi du fichier | demander et télécharger ne sont pas le même acte, ni forcément la même personne. Claire prépare lundi, Benjamin retélécharge jeudi |
+
+⚠️ **Le hub sait qu'il a servi le fichier ; il ne sait pas que le téléphone l'a
+reçu.** Une connexion qui meurt à 80 % laisse une réponse commencée côté serveur
+et rien d'exploitable côté client. Le libellé est donc « le hub a servi le fichier
+à X », pas « X a téléchargé ». Un journal qui affirme plus que ce qu'il observe
+est un journal sur lequel on s'appuiera un jour à tort.
+
+⚠️ **Pourquoi l'audit ne peut pas tenir lieu de liste**, et donc pourquoi la table
+`reports` existe : `GET /api/audit` est `admin`, alors que le technicien qui
+retélécharge est `operator` — lui ouvrir l'audit lui donnerait toutes les
+connexions et toutes les révocations du hub pour retrouver un fichier. Et l'audit
+est sans état : il ne sait dire ni « prêt » ni « purgé », ni où est le fichier, ni
+sa taille, ni son empreinte — les cinq choses dont l'écran a besoin.
+
+### Écarté : dédoublonner deux demandes identiques
+
+Tentant — deux techniciens sur le même site le même jour font tourner deux fois
+trente requêtes Flux. Écarté en v1 : la règle d'équivalence (même site, mêmes
+sondes, même fenêtre — à quelle granularité ?) est plus coûteuse à définir juste
+qu'à recalculer, et un faux « c'est le même rapport » remettrait le fichier
+d'hier en le présentant comme celui d'aujourd'hui. C'est la valeur plausible et
+fausse, sur le document qui part chez le client.
