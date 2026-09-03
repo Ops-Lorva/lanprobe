@@ -2066,13 +2066,13 @@ route rendait `500 { "error": "FOREIGN KEY constraint failed" }` — un code qui
 **affirme que le hub est en panne** quand la vérité est « cette sonde n'existe
 pas », et qui livrait au passage le nom d'une contrainte SQL au navigateur.
 
-### L'ajout note la décision du hub au moment où il l'émet
+### Le hub note sa décision au moment où il l'émet, ajout comme retrait
 
-⚠️ **L'ajout n'a pas de route dédiée, et n'en a pas besoin : il passe par la file
-de commandes (§14), et c'est `POST /api/probes/{id}/commands` avec
-`kind: "add_monitor"` qui écrit la décision dans `probe_monitors`, en plus
-d'empiler l'ordre.** L'asymétrie d'avant se lit dans la base de production du
-02/09 :
+⚠️ **`POST /api/probes/{id}/commands` écrit la décision dans `probe_monitors` en
+plus d'empiler l'ordre, pour `kind: "add_monitor"` comme pour
+`kind: "remove_monitor"`.** L'ajout n'a pas de route dédiée et n'en a pas besoin :
+il passe par la file (§14). L'asymétrie d'avant se lit dans la base de production
+du 02/09 :
 
 ```
 02:09:16  commande add_monitor {"ip":"8.8.8.8"}  ← émise par le hub
@@ -2102,10 +2102,19 @@ hub avait demandée trois minutes plus tôt.
 - Sonde inconnue : `404 { "error": "sonde inconnue" }` **avant toute écriture**,
   et toujours indiscernable d'une sonde hors portée.
 
-⚠️ **`remove_monitor` reste, lui, dans l'état d'avant** : le type de commande est
-toujours servi et n'écrit aucune suppression. L'interface ne l'emprunte plus — son
-bouton « Retirer » passe par `POST /monitors/remove` — mais un appel scripté à la
-route de commandes rouvre la même fenêtre. À traiter avec le même geste.
+⚠️ **`remove_monitor` par la file de commandes fait de même**, et pour la même
+raison. L'interface ne l'emprunte plus — son bouton « Retirer » passe par
+`POST /monitors/remove` — mais le type de commande reste servi, et un appel
+scripté rouvrait exactement la même fenêtre, en miroir. **Le défaut n'était pas
+dans l'appelant, il était dans le hub qui émet un ordre sans noter sa décision** :
+c'est donc là qu'il est corrigé, une fois, pour les deux gestes et pour tous les
+appelants — y compris le tableau de découverte réseau, qui empile lui aussi un
+`add_monitor`.
+
+⚠️ **L'arbitrage vaut dans les deux sens.** Un retrait émis par la file **perd**
+contre un ajout plus récent, exactement comme un ajout perd contre un retrait plus
+récent. C'est la même règle, au même endroit — `apply_monitor_change` — et aucun
+de ces deux chemins n'écrit de ligne en propre.
 
 ### ⚠️ Deux champs, deux faits — ce n'est pas une redondance
 

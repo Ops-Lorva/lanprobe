@@ -3878,21 +3878,32 @@ async fn create_command(
     // `probe_monitors` seulement à 02:12:31 — le hub attendait que la sonde
     // RÉANNONCE une cible qu'il venait lui-même de demander. Trois minutes
     // pendant lesquelles une cible mesurée était inconnue de la liste
-    // partagée, et l'écran la marquait « plus annoncée ». Retirer écrivait
-    // déjà tout de suite ; ajouter est maintenant symétrique.
+    // partagée, et l'écran la marquait « plus annoncée ».
+    //
+    // ⚠️ Les DEUX gestes, pas seulement l'ajout. Le bouton « Retirer » de
+    // l'écran passe par `POST /monitors/remove` depuis 8a946d5, mais le type
+    // de commande `remove_monitor` reste servi : un appel scripté rouvrait la
+    // même fenêtre, en miroir. Le défaut n'est pas dans l'appelant, il est
+    // ici — un ordre qui part sans que le hub note sa décision.
     //
     // ⚠️ APRÈS l'empilement, jamais avant. Si l'écriture échoue, on retombe
-    // sur le comportement d'avant — le battement suivant inscrira la cible.
-    // Dans l'autre ordre, un empilement raté laisserait une cible
-    // « surveillée » côté hub que personne ne pingue : l'écran afficherait
-    // « en attente du premier relevé » pour toujours.
+    // sur le comportement d'avant — le battement suivant portera le
+    // changement. Dans l'autre ordre, un empilement raté laisserait une
+    // décision que rien ne viendrait jamais confirmer : une cible
+    // « surveillée » que personne ne pingue, ou une cible « retirée » qui
+    // continue de l'être.
     //
-    // ⚠️ L'arbitrage reste délégué à `apply_monitor_change` : un ajout ne
-    // force pas la ligne, un retrait plus récent continue de gagner (§20).
+    // ⚠️ L'arbitrage reste délégué à `apply_monitor_change`, et rien n'est
+    // écrit en propre : un ajout ne ressuscite pas une cible retirée plus
+    // récemment, un retrait ne piétine pas un ajout plus récent (§20).
     //
     // ⚠️ Pas de second `audit` : `probe.command` ci-dessus nomme déjà le geste
     // et son auteur. Deux entrées pour un seul clic feraient lire deux gestes.
-    if kind == "add_monitor" {
+    if let Some(removed) = match kind {
+        "add_monitor" => Some(false),
+        "remove_monitor" => Some(true),
+        _ => None,
+    } {
         if let Some(target) = args
             .get("ip")
             .and_then(|v| v.as_str())
@@ -3901,10 +3912,10 @@ async fn create_command(
         {
             if let Err(e) = state
                 .db
-                .apply_monitor_change(&id, target, false, crate::db::now())
+                .apply_monitor_change(&id, target, removed, crate::db::now())
             {
                 tracing::warn!(
-                    "décision d'ajout de « {target} » non notée ({e}) — le battement de la sonde l'inscrira"
+                    "décision de {kind} sur « {target} » non notée ({e}) — le battement de la sonde la portera"
                 );
             }
         }
@@ -6940,6 +6951,83 @@ mod tests {
         assert!(
             h.state.db.monitors("sonde-qui-nexiste-pas").unwrap().is_empty(),
             "rien d'écrit pour une sonde qui n'existe pas"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_from_the_command_queue_is_recorded_at_once_too() {
+        // 🔴 Le miroir du défaut de l'ajout, et le dernier de la série. Le
+        // bouton « Retirer » de l'écran passe par `POST /monitors/remove`
+        // depuis 8a946d5 et écrit tout de suite ; mais le type de commande
+        // `remove_monitor` est toujours servi, et il rouvrait exactement la
+        // même fenêtre pour un appel scripté : l'ordre partait sans que le hub
+        // note sa propre décision.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+        h.state
+            .db
+            .apply_monitor_change(&probe_id, "8.8.8.8", false, crate::db::now() - 60)
+            .unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    json!({ "kind": "remove_monitor", "args": { "ip": "8.8.8.8" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["state"], "pending", "la commande part toujours : {body}");
+
+        // ⚠️ AUCUN battement entre les deux.
+        let entries = h.state.db.monitors(&probe_id).unwrap();
+        assert_eq!(entries.len(), 1, "la ligne reste, c'est un fait daté");
+        assert!(
+            entries[0].removed_at.is_some(),
+            "la suppression est écrite sans attendre la sonde"
+        );
+        assert_eq!(
+            h.state.db.list_commands(&probe_id, 50).unwrap().len(),
+            1,
+            "la file garde son ordre : c'est elle qui fait AGIR la sonde"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_never_beats_an_add_made_more_recently() {
+        // ⚠️ L'arbitrage du §20 dans l'autre sens, et c'est la propriété que ce
+        // cinquième correctif pouvait casser : un retrait doit PERDRE contre un
+        // ajout postérieur, exactement comme l'ajout perd contre un retrait
+        // postérieur. Rien n'est écrit en propre ici, tout passe par
+        // `apply_monitor_change` — c'est lui, et lui seul, qui tranche.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+        h.state
+            .db
+            .apply_monitor_change(&probe_id, "8.8.8.8", false, crate::db::now() + 60)
+            .unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    json!({ "kind": "remove_monitor", "args": { "ip": "8.8.8.8" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        assert_eq!(
+            h.state.db.monitors(&probe_id).unwrap()[0].removed_at,
+            None,
+            "l'ajout plus récent tient : le retrait ne le piétine pas"
         );
     }
 
