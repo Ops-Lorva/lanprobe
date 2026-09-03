@@ -1335,7 +1335,11 @@ pub struct Identity {
 /// identifiants du compte, jeton d'appareil : trois chemins d'authentification,
 /// une seule fabrique. Deux fabriques, c'est une qui oubliera un jour de relire
 /// le rôle ou la portée — et une portée figée survivrait à sa révocation.
-fn identity_of(
+///
+/// ⚠️ `pub(crate)` : le jeton d'accès d'un appareil (§ 22) passe par elle, et
+/// c'est précisément ce qu'on veut — une seconde fabrique dans `pairing.rs`
+/// serait celle qui oublierait un jour de relire le rôle ou la portée.
+pub(crate) fn identity_of(
     state: &AppState,
     username: &str,
     device_id: Option<String>,

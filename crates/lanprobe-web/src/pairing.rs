@@ -424,11 +424,89 @@ fn poisoned() -> DbError {
 /// stocké. Une table de jetons de quinze minutes demanderait un balayage de
 /// nettoyage que personne ne surveille, pour n'apporter qu'une révocation
 /// immédiate que la révocation de l'appareil couvre déjà.
-pub(crate) fn identity_from_access_token(_state: &AppState, _token: &str) -> Option<Identity> {
-    // ⚠️ Pas de `todo!()` : cette fonction est appelée à CHAQUE requête portant
-    // un en-tête `Authorization`. Une panique ici couperait le hub sur une
-    // requête quelconque, avant même que l'appairage existe.
-    None
+pub(crate) fn identity_from_access_token(state: &AppState, token: &str) -> Option<Identity> {
+    // ⚠️ Pas de `panic!` ni d'`unwrap` sur ce chemin : il est parcouru à CHAQUE
+    // requête portant un en-tête `Authorization`, y compris celles qui n'ont
+    // rien à voir avec l'appairage. Tout ce qui rate rend `None`.
+    let plain = state.secrets.open_text(token).ok()?;
+    let claim: AccessClaim = serde_json::from_str(&plain).ok()?;
+    if claim.expires_at <= crate::db::now() {
+        return None;
+    }
+
+    // 🔴 **`revoked_at` est relu ICI, à chaque requête, jamais mis en cache.**
+    // Le jeton vit quinze minutes ; le porter en cache donnerait donc quinze
+    // minutes d'accès résiduel à un téléphone qu'on vient de révoquer — sur le
+    // seul mécanisme de sécurité du modèle, puisque rien d'autre n'expire.
+    let device = state.db.get_paired_device(&claim.device_id).ok()?;
+    if device.revoked_at.is_some() {
+        return None;
+    }
+
+    // ⚠️ **Rôle et portée sont relus dans `identity_of`, jamais lus dans le
+    // jeton** — qui ne les porte d'ailleurs pas. Un jeton qui porterait le rôle
+    // survivrait quinze minutes à une rétrogradation, et une portée gelée
+    // survivrait à sa révocation. `identity_of` rend aussi `None` quand le
+    // compte a été désactivé.
+    crate::web::identity_of(state, &device.username, Some(device.device_id))
+}
+
+/// Ce que le jeton d'accès transporte, et rien de plus.
+///
+/// ⚠️ **Ni rôle ni portée.** Ils sont relus à chaque requête : les mettre ici
+/// les figerait pour quinze minutes, c'est-à-dire ferait survivre une portée
+/// à sa révocation. Le jeton ne dit que « qui », jamais « ce qui est permis ».
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AccessClaim {
+    device_id: String,
+    /// Redondant avec la ligne de l'appareil, et gardé quand même : il rend le
+    /// sceau lisible en cas d'incident, sans jointure.
+    username: String,
+    expires_at: i64,
+}
+
+/// Émet un jeton d'accès de quinze minutes pour un appareil.
+///
+/// ⚠️ **Le secret d'appareil ne bouge PAS ici**, et c'est tout l'arbitrage du
+/// § 22. La *refresh token rotation* du métier ferait tourner le secret durable
+/// à chaque renouvellement pour détecter un rejeu ; ici, une réponse perdue —
+/// une 4G qui coupe entre l'écriture du hub et sa réception — laisserait le
+/// téléphone avec un secret mort et obligerait à réappairer. Ce scénario ne se
+/// déclenche pas au hasard : il se déclenche là où le réseau est mauvais,
+/// c'est-à-dire là où le technicien travaille, en haut d'une échelle.
+///
+/// 🔴 **Un relecteur « corrigera » ce point en croyant bien faire.** La
+/// rotation à l'usage produit exactement la panne que l'appairage existe pour
+/// ne jamais produire. La rotation est un geste explicite depuis le hub
+/// (`POST /api/devices/{id}/rotate`), et le prix — plus aucune détection
+/// automatique d'un secret copié — est payé sciemment : le seul détecteur
+/// restant est humain, la dernière vue et la dernière adresse de l'écran
+/// « Appareils ».
+pub(crate) fn issue_access_token(state: &AppState, device: &PairedDevice) -> Result<String, String> {
+    seal_access_token(
+        state,
+        &device.device_id,
+        &device.username,
+        crate::db::now() + ACCESS_TOKEN_TTL_SECS,
+    )
+}
+
+/// Scelle une prétention d'accès à l'échéance demandée. Séparée d'
+/// [`issue_access_token`] pour que les tests puissent en fabriquer une périmée
+/// sans attendre un quart d'heure.
+fn seal_access_token(
+    state: &AppState,
+    device_id: &str,
+    username: &str,
+    expires_at: i64,
+) -> Result<String, String> {
+    let claim = AccessClaim {
+        device_id: device_id.to_string(),
+        username: username.to_string(),
+        expires_at,
+    };
+    let plain = serde_json::to_string(&claim).map_err(|e| e.to_string())?;
+    state.secrets.seal_text(&plain)
 }
 
 /// Les routes de l'appairage (contrat § 22).
@@ -492,6 +570,36 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.create_initial_admin("admin", "mot-de-passe-de-test").unwrap();
         db
+    }
+
+    /// Un hub complet, mais **sans Influx ni faux serveur** : l'appairage n'en
+    /// touche aucun. Le harnais de `web.rs` monte un Influx factice à chaque
+    /// test — ici ce serait un serveur HTTP par cas pour rien.
+    pub(super) fn state_with_admin() -> AppState {
+        use std::sync::Arc;
+        let db = Arc::new(db_with_admin());
+        let settings = crate::settings::Settings::new(db.clone());
+        let secrets = crate::secrets::Secrets::ephemeral(db.clone()).unwrap();
+        AppState {
+            auth: Arc::new(crate::auth::Auth::new(db.clone())),
+            influx: Arc::new(crate::influx::Influx::new(
+                settings.clone(),
+                "jeton-operateur-de-test".into(),
+            )),
+            notifier: crate::notify::Notifier::new(db.clone(), secrets.clone(), settings.clone()),
+            ceremonies: Arc::new(crate::passkeys::Ceremonies::new()),
+            db,
+            settings,
+            secrets,
+            // Hub en clair derrière un proxy : aucun certificat du hub à
+            // épingler, donc aucune empreinte à annoncer.
+            tls: false,
+            cert_fingerprint: None,
+            restart_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            config_dir: std::env::temp_dir().join("lanprobe-pairing-tests"),
+            backup_dir: std::env::temp_dir().join("lanprobe-pairing-tests"),
+            influx_cli: "influx-absent-des-tests".into(),
+        }
     }
 
     // ── Le code d'appairage ────────────────────────────────────────────────
@@ -726,5 +834,174 @@ mod tests {
             db.user_scope("dupont", Role::Operator).unwrap(),
             Scope::Sites(vec![site.site_id])
         );
+    }
+}
+
+#[cfg(test)]
+mod access_token_tests {
+    use super::tests::state_with_admin;
+    use super::*;
+    use crate::db::{now, Role, Scope};
+
+    /// Appaire un appareil et rend `(l'appareil, son jeton d'accès)`.
+    fn paired(state: &AppState, username: &str) -> (PairedDevice, String) {
+        let (device, _secret) = state
+            .db
+            .pair_device(username, "iPhone", Some("iOS 18.2"), Some("1.0.0"))
+            .unwrap();
+        let token = issue_access_token(state, &device).unwrap();
+        (device, token)
+    }
+
+    #[test]
+    fn an_access_token_names_the_device_it_came_from() {
+        // L'audit dirait « admin », ce qui est vrai et trompeur le jour où le
+        // téléphone est entre d'autres mains (contrat § 23).
+        let state = state_with_admin();
+        let (device, token) = paired(&state, "admin");
+
+        let identity = identity_from_access_token(&state, &token).expect("jeton valide");
+
+        assert_eq!(identity.username, "admin");
+        assert_eq!(identity.device_id.as_deref(), Some(device.device_id.as_str()));
+    }
+
+    #[test]
+    fn an_access_token_reads_the_current_role_and_scope_at_every_request() {
+        // 🔴 Écrit avec un compte `Scope::All` — règle du § 17.3. Un test écrit
+        // avec un compte restreint reste vert quoi qu'on casse sur ce chemin :
+        // c'est l'angle mort qui a laissé le même défaut revenir trois fois.
+        let state = state_with_admin();
+        state
+            .db
+            .create_user("second-admin", "mot-de-passe-de-test", Role::Admin)
+            .unwrap();
+        let (_device, token) = paired(&state, "admin");
+
+        let avant = identity_from_access_token(&state, &token).expect("jeton valide");
+        assert_eq!(avant.role, Role::Admin);
+        assert_eq!(avant.scope, Scope::All);
+
+        // Rétrogradation du COMPTE : l'accès tient, ce qu'il permet rétrécit.
+        // Le jeton n'a pas bougé — c'est bien la relecture qui décide.
+        state
+            .db
+            .set_user_role("second-admin", "admin", Role::Viewer)
+            .unwrap();
+        let site = state.db.create_site("Durand").unwrap();
+        state
+            .db
+            .set_user_sites("admin", &[site.site_id.clone()])
+            .unwrap();
+
+        let apres = identity_from_access_token(&state, &token).expect("l'accès tient");
+        assert_eq!(apres.role, Role::Viewer, "le rôle du jeton a survécu");
+        assert_eq!(
+            apres.scope,
+            Scope::Sites(vec![site.site_id]),
+            "une portée figée survivrait à sa révocation"
+        );
+    }
+
+    #[test]
+    fn revoking_a_device_refuses_the_very_next_request() {
+        // 🔴 Sans attendre aucune expiration. `revoked_at` mis en cache pour la
+        // durée du jeton laisserait quinze minutes d'accès résiduel sur un
+        // téléphone perdu — sur le seul mécanisme de sécurité du modèle.
+        let state = state_with_admin();
+        let (device, token) = paired(&state, "admin");
+        assert!(identity_from_access_token(&state, &token).is_some());
+
+        state.db.revoke_paired_device(&device.device_id).unwrap();
+
+        assert!(
+            identity_from_access_token(&state, &token).is_none(),
+            "accès résiduel après révocation"
+        );
+    }
+
+    #[test]
+    fn a_disabled_account_takes_its_devices_with_it() {
+        let state = state_with_admin();
+        state
+            .db
+            .create_user("dupont", "mot-de-passe-de-test", Role::Operator)
+            .unwrap();
+        let (_device, token) = paired(&state, "dupont");
+        assert!(identity_from_access_token(&state, &token).is_some());
+
+        state.db.set_user_disabled("admin", "dupont", true).unwrap();
+
+        assert!(identity_from_access_token(&state, &token).is_none());
+    }
+
+    #[test]
+    fn an_expired_access_token_is_no_identity() {
+        // Son expiration n'a aucune conséquence visible : l'app en redemande
+        // un. C'est le seul objet des trois qui meurt du temps qui passe.
+        let state = state_with_admin();
+        let (device, _) = state.db.pair_device("admin", "iPhone", None, None).unwrap();
+        let perime = seal_access_token(&state, &device.device_id, "admin", now() - 1).unwrap();
+
+        assert!(identity_from_access_token(&state, &perime).is_none());
+    }
+
+    #[test]
+    fn a_token_sealed_with_another_key_is_no_identity() {
+        // Le jeton est SANS ÉTAT : rien ne le retrouve en base, c'est le sceau
+        // seul qui le rend croyable. Un sceau d'un autre hub — ou un jeton
+        // bricolé — ne doit donc rien ouvrir.
+        let state = state_with_admin();
+        let (_device, token) = paired(&state, "admin");
+
+        let autre = state_with_admin();
+        assert!(identity_from_access_token(&autre, &token).is_none());
+
+        for bricolage in ["", "n-importe-quoi", "enc:v1:AAAA"] {
+            assert!(
+                identity_from_access_token(&state, bricolage).is_none(),
+                "{bricolage} ouvre une session"
+            );
+        }
+    }
+
+    #[test]
+    fn the_access_token_is_never_stored() {
+        // ⚠️ Aucune table de jetons de quinze minutes : elle demanderait un
+        // balayage de nettoyage que personne ne surveille, pour n'apporter
+        // qu'une révocation immédiate que la révocation de l'appareil couvre
+        // déjà.
+        let state = state_with_admin();
+        let (_device, token) = paired(&state, "admin");
+
+        let tables: Vec<String> = {
+            let conn = state.db.conn().lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<Result<Vec<String>, _>>().unwrap()
+        };
+        assert!(
+            !tables.iter().any(|t| t.contains("access_token")),
+            "{tables:?}"
+        );
+
+        // Et il ne traîne dans aucune colonne texte de la base.
+        let conn = state.db.conn().lock().unwrap();
+        for table in &tables {
+            let mut stmt = conn
+                .prepare(&format!("SELECT * FROM \"{table}\""))
+                .unwrap();
+            let colonnes = stmt.column_count();
+            let mut rows = stmt.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                for i in 0..colonnes {
+                    if let Ok(v) = row.get::<_, String>(i) {
+                        assert!(!v.contains(&token), "jeton retrouvé dans {table}");
+                    }
+                }
+            }
+        }
     }
 }

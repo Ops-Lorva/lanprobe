@@ -54,6 +54,27 @@ impl Secrets {
         })
     }
 
+    /// Scelle une chaîne **sans la stocker**, et rend le sceau.
+    ///
+    /// 🔴 C'est ce qui rend croyable le jeton d'accès d'un appareil appairé
+    /// (contrat § 22) : le jeton est *sans état*, rien ne le retrouve en base,
+    /// c'est le sceau seul qui prouve que le hub l'a émis. Une table de jetons
+    /// de quinze minutes demanderait un balayage de nettoyage que personne ne
+    /// surveille, pour n'apporter qu'une révocation immédiate que la
+    /// révocation de l'appareil couvre déjà.
+    ///
+    /// ⚠️ La clé est celle du volume : elle survit aux redémarrages, et un
+    /// jeton scellé par un autre hub ne s'ouvre pas ici.
+    pub(crate) fn seal_text(&self, plain: &str) -> Result<String, String> {
+        secrets::seal(&self.key, plain)
+    }
+
+    /// Ouvre un sceau produit par [`Secrets::seal_text`]. Échoue si la valeur
+    /// n'est pas scellée, si la clé a changé, ou si le sceau a été altéré.
+    pub(crate) fn open_text(&self, sealed: &str) -> Result<String, String> {
+        secrets::open(&self.key, sealed)
+    }
+
     pub fn put_json<T: serde::Serialize>(&self, key: &str, value: &T) -> DbResult<()> {
         let plain = serde_json::to_string(value)
             .map_err(|e| crate::db::DbError::Internal(e.to_string()))?;
