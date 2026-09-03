@@ -35,7 +35,9 @@ use axum::{
     Router,
 };
 
-use crate::db::{Db, DbResult, Role};
+use rusqlite::OptionalExtension;
+
+use crate::db::{Db, DbError, DbResult, Role};
 use crate::web::{guarded, AppState, Identity};
 
 /// Durée de vie d'un jeton d'accès. Quinze minutes : il vit en mémoire vive et
@@ -110,12 +112,48 @@ pub(crate) struct PairCode {
     pub expires_at: i64,
 }
 
+/// Colonnes de `paired_devices`, dans l'ordre où [`device_from_row`] les lit.
+/// Une seule liste : deux `SELECT` qui divergent d'une colonne se paient en
+/// panique au premier appel de la seule route qui l'emploie.
+const DEVICE_COLUMNS: &str = "device_id, username, name, platform, app_version, \
+                              created_at, last_seen, last_ip, revoked_at";
+
+fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairedDevice> {
+    Ok(PairedDevice {
+        device_id: row.get(0)?,
+        username: row.get(1)?,
+        name: row.get(2)?,
+        platform: row.get(3)?,
+        app_version: row.get(4)?,
+        created_at: row.get(5)?,
+        last_seen: row.get(6)?,
+        last_ip: row.get(7)?,
+        revoked_at: row.get(8)?,
+    })
+}
+
 /// Le stockage de l'appairage, hors de `db.rs` — qui fait déjà 5 200 lignes et
 /// qu'aucune tâche parallèle ne peut se partager.
 impl Db {
     /// Émet un code court pour un compte. Usage unique, 15 minutes.
-    pub(crate) fn create_pair_code(&self, _username: &str, _ttl_secs: i64) -> DbResult<PairCode> {
-        todo!("tâche « appairage » : calque de create_enroll_code, table pair_codes")
+    pub(crate) fn create_pair_code(&self, username: &str, ttl_secs: i64) -> DbResult<PairCode> {
+        // Le même générateur que le code d'enrôlement, et pas une copie :
+        // l'alphabet sans `0`/`O` ni `1`/`I` est ce qui rend le code dictable
+        // au téléphone.
+        let code = crate::db::generate_enroll_code();
+        let code_hash = lanprobe_core::passwords::hash_password(&code)
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        let created_at = crate::db::now();
+        let expires_at = created_at + ttl_secs;
+        {
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.execute(
+                "INSERT INTO pair_codes (code_hash, username, created_at, expires_at, code_plain)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![code_hash, username, created_at, expires_at, code],
+            )?;
+        }
+        Ok(PairCode { code, expires_at })
     }
 
     /// Consomme un code et rend le compte auquel il appartient.
@@ -123,8 +161,61 @@ impl Db {
     /// ⚠️ **Consommé au premier succès**, dans la même transaction que sa
     /// lecture : deux téléphones qui présentent le même code au même instant
     /// doivent laisser exactement un gagnant.
-    pub(crate) fn consume_pair_code(&self, _code: &str, _now: i64) -> DbResult<String> {
-        todo!("tâche « appairage » : calque de consume_enroll_code")
+    pub(crate) fn consume_pair_code(&self, code: &str, now: i64) -> DbResult<String> {
+        let mut conn = self.conn().lock().map_err(|_| poisoned())?;
+        // `IMMEDIATE` prend le verrou d'écriture dès l'ouverture : la lecture
+        // des candidats et la marque de consommation ne peuvent pas être
+        // entrelacées avec celles d'une autre transaction.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        // Le code est haché : on ne peut pas l'indexer, il faut vérifier les
+        // candidats vivants un par un. Ils se comptent sur les doigts d'une
+        // main — un code vit 15 minutes.
+        let candidates: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT code_hash, username FROM pair_codes
+                 WHERE consumed_at IS NULL AND expires_at > ?1",
+            )?;
+            let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (code_hash, username) in candidates {
+            if lanprobe_core::passwords::verify_password(&code_hash, code).is_err() {
+                continue;
+            }
+            let changed = tx.execute(
+                "UPDATE pair_codes SET code_plain = NULL, consumed_at = ?2
+                 WHERE code_hash = ?1 AND consumed_at IS NULL",
+                rusqlite::params![code_hash, now],
+            )?;
+            if changed == 0 {
+                break;
+            }
+            tx.commit()?;
+            return Ok(username);
+        }
+        // ⚠️ Un seul message pour les trois cas — inconnu, expiré, déjà
+        // utilisé. Distinguer « déjà utilisé » apprendrait à qui essaie au
+        // hasard qu'il a touché un code réel.
+        Err(DbError::Unauthorized(
+            "code d'appairage inconnu, expiré ou déjà utilisé".into(),
+        ))
+    }
+
+    /// Les codes de ce compte encore ouverts, purge du clair expiré comprise.
+    /// Sert à ce que réémettre un code n'en laisse pas trois valables.
+    pub(crate) fn purge_stale_pair_codes(&self, now: i64) -> DbResult<()> {
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        // Le clair ne survit ni à l'expiration ni à la consommation. On purge
+        // ici plutôt que par une tâche de fond : pas de minuterie à
+        // surveiller, et c'est fait avant toute lecture.
+        conn.execute(
+            "UPDATE pair_codes SET code_plain = NULL
+             WHERE code_plain IS NOT NULL AND (expires_at <= ?1 OR consumed_at IS NOT NULL)",
+            [now],
+        )?;
+        Ok(())
     }
 
     /// Enregistre un appareil et rend `(la ligne, le secret en clair)`.
@@ -133,12 +224,50 @@ impl Db {
     /// condensat argon2id, comme pour un jeton de sonde.
     pub(crate) fn pair_device(
         &self,
-        _username: &str,
-        _name: &str,
-        _platform: Option<&str>,
-        _app_version: Option<&str>,
+        username: &str,
+        name: &str,
+        platform: Option<&str>,
+        app_version: Option<&str>,
     ) -> DbResult<(PairedDevice, String)> {
-        todo!("tâche « appairage » : calque de enroll_probe")
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(DbError::Conflict("le nom de l'appareil est requis".into()));
+        }
+        let secret = lanprobe_core::passwords::generate_token();
+        let secret_hash = lanprobe_core::passwords::hash_password(&secret)
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        let device_id = uuid::Uuid::new_v4().to_string();
+        {
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.execute(
+                "INSERT INTO paired_devices
+                   (device_id, username, name, secret_hash, platform, app_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    device_id,
+                    username,
+                    name,
+                    secret_hash,
+                    platform,
+                    app_version,
+                    crate::db::now()
+                ],
+            )?;
+        }
+        Ok((self.get_paired_device(&device_id)?, secret))
+    }
+
+    /// Un appareil, révoqué ou non. La révocation ne cache pas la ligne : on
+    /// ne supprime rien, et l'écran « Appareils » montre l'état.
+    pub(crate) fn get_paired_device(&self, device_id: &str) -> DbResult<PairedDevice> {
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        conn.query_row(
+            &format!("SELECT {DEVICE_COLUMNS} FROM paired_devices WHERE device_id = ?1"),
+            [device_id],
+            device_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| DbError::NotFound("appareil inconnu".into()))
     }
 
     /// Vérifie un secret d'appareil.
@@ -148,30 +277,88 @@ impl Db {
     /// serait un trou dans la seule procédure de départ d'un salarié.
     pub(crate) fn authenticate_device(
         &self,
-        _device_id: &str,
-        _secret: &str,
+        device_id: &str,
+        secret: &str,
     ) -> Result<PairedDevice, Refusal> {
-        todo!("tâche « appairage » : trois motifs de refus distincts")
+        let device = self.get_paired_device(device_id).map_err(|_| Refusal::Unknown)?;
+        let stored: String = {
+            let conn = self.conn().lock().map_err(|_| Refusal::Unknown)?;
+            conn.query_row(
+                "SELECT secret_hash FROM paired_devices WHERE device_id = ?1",
+                [device_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| Refusal::Unknown)?
+        };
+        // 🔴 **Le secret se vérifie AVANT de nommer le motif.** Répondre
+        // « révoqué » à qui présente un `device_id` sans son secret
+        // apprendrait l'existence de l'appareil à qui ne la connaissait pas.
+        // Un mauvais secret est donc `Unknown`, comme un appareil absent.
+        if lanprobe_core::passwords::verify_password(&stored, secret).is_err() {
+            return Err(Refusal::Unknown);
+        }
+        // ⚠️ **`revoked_at` est relu ICI, à chaque renouvellement**, jamais
+        // mis en cache : la révocation est le seul mécanisme de sécurité du
+        // modèle, et un cache de quinze minutes laisserait un accès résiduel
+        // sur un téléphone perdu.
+        if device.revoked_at.is_some() {
+            return Err(Refusal::Revoked);
+        }
+        let owner = self
+            .get_user(&device.username)
+            .map_err(|_| Refusal::AccountDisabled)?;
+        if owner.disabled_at.is_some() {
+            return Err(Refusal::AccountDisabled);
+        }
+        Ok(device)
     }
 
     /// Les appareils d'un compte, ou de tous quand `username` est `None`.
     /// Les révoqués **en font partie** : la ligne reste, l'audit la nomme.
     pub(crate) fn list_paired_devices(
         &self,
-        _username: Option<&str>,
+        username: Option<&str>,
     ) -> DbResult<Vec<PairedDevice>> {
-        todo!("tâche « appairage »")
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {DEVICE_COLUMNS} FROM paired_devices
+             WHERE (?1 IS NULL OR username = ?1)
+             ORDER BY created_at DESC, device_id"
+        ))?;
+        let rows = stmt.query_map([username], device_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// « iPhone » et « iPhone » ne se distinguent pas, et on ne révoque pas au
     /// hasard dans une liste.
-    pub(crate) fn rename_paired_device(&self, _device_id: &str, _name: &str) -> DbResult<()> {
-        todo!("tâche « appairage »")
+    pub(crate) fn rename_paired_device(&self, device_id: &str, name: &str) -> DbResult<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(DbError::Conflict("le nom de l'appareil est requis".into()));
+        }
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        let changed = conn.execute(
+            "UPDATE paired_devices SET name = ?2 WHERE device_id = ?1",
+            rusqlite::params![device_id, name],
+        )?;
+        if changed == 0 {
+            return Err(DbError::NotFound("appareil inconnu".into()));
+        }
+        Ok(())
     }
 
     /// Révoque — **ne supprime pas**. `revoked_at` daté, la ligne reste.
-    pub(crate) fn revoke_paired_device(&self, _device_id: &str) -> DbResult<()> {
-        todo!("tâche « appairage »")
+    pub(crate) fn revoke_paired_device(&self, device_id: &str) -> DbResult<()> {
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        let changed = conn.execute(
+            "UPDATE paired_devices SET revoked_at = ?2
+             WHERE device_id = ?1 AND revoked_at IS NULL",
+            rusqlite::params![device_id, crate::db::now()],
+        )?;
+        if changed == 0 {
+            return Err(DbError::NotFound("appareil inconnu ou déjà révoqué".into()));
+        }
+        Ok(())
     }
 
     /// Fait tourner le secret sur un geste explicite, et rend le nouveau.
@@ -179,8 +366,23 @@ impl Db {
     /// ⚠️ **Jamais appelée depuis le renouvellement de jeton.** C'est tout
     /// l'arbitrage du § 22 : une rotation à l'usage perd le secret quand la
     /// réponse se perd, là où le réseau est mauvais.
-    pub(crate) fn rotate_paired_device_secret(&self, _device_id: &str) -> DbResult<String> {
-        todo!("tâche « appairage » : calque de rotate_probe_token")
+    pub(crate) fn rotate_paired_device_secret(&self, device_id: &str) -> DbResult<String> {
+        let secret = lanprobe_core::passwords::generate_token();
+        let secret_hash = lanprobe_core::passwords::hash_password(&secret)
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        // ⚠️ Sans recouvrement : l'ancien secret meurt à l'instant. C'est la
+        // variante écartée en v1 du § 22 — elle règle la réponse perdue, coûte
+        // deux secrets à tenir de chaque côté, et l'écran « Appareils » couvre
+        // déjà ce qu'elle apporterait. Écartée, pas condamnée.
+        let changed = conn.execute(
+            "UPDATE paired_devices SET secret_hash = ?2 WHERE device_id = ?1",
+            rusqlite::params![device_id, secret_hash],
+        )?;
+        if changed == 0 {
+            return Err(DbError::NotFound("appareil inconnu".into()));
+        }
+        Ok(secret)
     }
 
     /// Note la dernière vue et la dernière adresse.
@@ -190,12 +392,22 @@ impl Db {
     /// appareil observable.
     pub(crate) fn touch_paired_device(
         &self,
-        _device_id: &str,
-        _now: i64,
-        _ip: Option<&str>,
+        device_id: &str,
+        now: i64,
+        ip: Option<&str>,
     ) -> DbResult<()> {
-        todo!("tâche « appairage »")
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        conn.execute(
+            "UPDATE paired_devices SET last_seen = ?2, last_ip = COALESCE(?3, last_ip)
+             WHERE device_id = ?1",
+            rusqlite::params![device_id, now, ip],
+        )?;
+        Ok(())
     }
+}
+
+fn poisoned() -> DbError {
+    DbError::Internal("verrou de la base empoisonné".into())
 }
 
 /// Relit un jeton d'accès et rend l'identité de son propriétaire.
@@ -267,4 +479,252 @@ async fn not_implemented() -> axum::response::Response {
         axum::Json(serde_json::json!({ "error": "appairage non encore implémenté" })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{now, Scope};
+
+    /// Un hub installé, un compte admin, rien d'autre. La couche de stockage
+    /// n'a besoin ni d'Influx ni du routeur.
+    fn db_with_admin() -> Db {
+        let db = Db::open_in_memory().unwrap();
+        db.create_initial_admin("admin", "mot-de-passe-de-test").unwrap();
+        db
+    }
+
+    // ── Le code d'appairage ────────────────────────────────────────────────
+
+    #[test]
+    fn a_pair_code_names_the_account_that_issued_it() {
+        // Le code ne crée aucun compte et n'élève aucun droit : il désigne
+        // celui qui l'a émis, et l'appareil héritera de LUI (contrat § 22).
+        let db = db_with_admin();
+
+        let code = db.create_pair_code("admin", PAIR_CODE_TTL_SECS).unwrap();
+
+        assert!(code.expires_at > now(), "un code émis est vivant");
+        assert_eq!(db.consume_pair_code(&code.code, now()).unwrap(), "admin");
+    }
+
+    #[test]
+    fn a_pair_code_consumed_twice_fails_the_second_time() {
+        // 🔴 « Un second essai échouera — et c'est le signal. » Un code
+        // réutilisable serait un identifiant permanent posé dans une image.
+        let db = db_with_admin();
+        let code = db.create_pair_code("admin", PAIR_CODE_TTL_SECS).unwrap();
+
+        db.consume_pair_code(&code.code, now()).unwrap();
+
+        let second = db.consume_pair_code(&code.code, now());
+        assert!(second.is_err(), "le second essai passe : {second:?}");
+    }
+
+    #[test]
+    fn an_expired_pair_code_opens_nothing() {
+        // Pas 24 h : le confort d'une fois par appareil ne paie pas une
+        // fenêtre d'attaque d'une journée.
+        let db = db_with_admin();
+        let code = db.create_pair_code("admin", -1).unwrap();
+
+        assert!(db.consume_pair_code(&code.code, now()).is_err());
+    }
+
+    #[test]
+    fn the_stored_pair_code_is_hashed_and_the_plaintext_dies_with_it() {
+        // Une base volée ne doit pas livrer de quoi appairer un téléphone.
+        let db = db_with_admin();
+        let code = db.create_pair_code("admin", PAIR_CODE_TTL_SECS).unwrap();
+
+        let hashes: Vec<String> = {
+            let conn = db.conn().lock().unwrap();
+            let mut stmt = conn.prepare("SELECT code_hash FROM pair_codes").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<Result<Vec<String>, _>>().unwrap()
+        };
+        assert_eq!(hashes.len(), 1);
+        assert!(hashes[0].starts_with("$argon2id$"), "{}", hashes[0]);
+        assert!(!hashes[0].contains(&code.code));
+
+        // Le clair ne survit pas à la consommation : il n'était là que pour
+        // l'écran qui l'affiche.
+        db.consume_pair_code(&code.code, now()).unwrap();
+        let restant: Option<String> = db
+            .conn()
+            .lock()
+            .unwrap()
+            .query_row("SELECT code_plain FROM pair_codes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(restant, None);
+    }
+
+    // ── L'identité d'appareil ──────────────────────────────────────────────
+
+    #[test]
+    fn pairing_returns_the_secret_once_and_stores_only_its_hash() {
+        let db = db_with_admin();
+
+        let (device, secret) = db
+            .pair_device("admin", "iPhone 15 — Benjamin", Some("iOS 18.2"), Some("1.0.0"))
+            .unwrap();
+
+        assert_eq!(device.username, "admin");
+        assert_eq!(device.name, "iPhone 15 — Benjamin");
+        assert!(device.revoked_at.is_none());
+        assert!(device.last_seen.is_none(), "jamais vu avant sa première requête");
+
+        let hash: String = db
+            .conn()
+            .lock()
+            .unwrap()
+            .query_row("SELECT secret_hash FROM paired_devices", [], |r| r.get(0))
+            .unwrap();
+        assert!(hash.starts_with("$argon2id$"), "{hash}");
+        assert!(!hash.contains(&secret));
+
+        // Il n'existe aucune lecture qui rende le secret : il ne sort qu'ici.
+        let rendu = serde_json::to_string(&device).unwrap();
+        assert!(!rendu.contains(&secret), "{rendu}");
+        assert!(!rendu.contains("$argon2"), "{rendu}");
+    }
+
+    #[test]
+    fn a_paired_device_authenticates_on_its_secret() {
+        let db = db_with_admin();
+        let (device, secret) = db.pair_device("admin", "iPhone", None, None).unwrap();
+
+        let vu = db.authenticate_device(&device.device_id, &secret).unwrap();
+        assert_eq!(vu.device_id, device.device_id);
+
+        assert_eq!(
+            db.authenticate_device(&device.device_id, "mauvais-secret").unwrap_err(),
+            Refusal::Unknown,
+            "un mauvais secret ne dit pas si l'appareil existe"
+        );
+        assert_eq!(
+            db.authenticate_device("appareil-jamais-vu", &secret).unwrap_err(),
+            Refusal::Unknown
+        );
+    }
+
+    #[test]
+    fn a_revoked_device_is_refused_with_its_own_reason() {
+        // 🔴 Trois causes, trois conduites. « Session expirée » ferait attendre
+        // une reconnexion qui n'arrivera pas.
+        let db = db_with_admin();
+        let (device, secret) = db.pair_device("admin", "iPhone", None, None).unwrap();
+
+        db.revoke_paired_device(&device.device_id).unwrap();
+
+        assert_eq!(
+            db.authenticate_device(&device.device_id, &secret).unwrap_err(),
+            Refusal::Revoked
+        );
+        // La ligne reste : le journal d'audit la nomme, et une ligne d'audit
+        // qui pointe une cible disparue ne prouve rien.
+        let restant = db.list_paired_devices(Some("admin")).unwrap();
+        assert_eq!(restant.len(), 1);
+        assert!(restant[0].revoked_at.is_some());
+    }
+
+    #[test]
+    fn a_device_falls_with_the_account_that_owns_it() {
+        // Un appareil qui survivrait à la désactivation de son propriétaire
+        // serait un trou dans la seule procédure de départ d'un salarié.
+        let db = db_with_admin();
+        db.create_user("dupont", "mot-de-passe-de-test", Role::Operator)
+            .unwrap();
+        let (device, secret) = db.pair_device("dupont", "iPhone", None, None).unwrap();
+
+        db.set_user_disabled("admin", "dupont", true).unwrap();
+
+        assert_eq!(
+            db.authenticate_device(&device.device_id, &secret).unwrap_err(),
+            Refusal::AccountDisabled
+        );
+    }
+
+    #[test]
+    fn rotating_the_secret_is_an_explicit_gesture_that_kills_the_old_one() {
+        // ⚠️ Le secret ne tourne PAS à l'usage : faire tourner à chaque
+        // renouvellement perd le secret quand la réponse se perd, c'est-à-dire
+        // là où le réseau est mauvais — là où le technicien travaille. Ceci
+        // n'arrive donc que sur un geste depuis le hub.
+        let db = db_with_admin();
+        let (device, ancien) = db.pair_device("admin", "iPhone", None, None).unwrap();
+
+        let nouveau = db.rotate_paired_device_secret(&device.device_id).unwrap();
+
+        assert_ne!(nouveau, ancien);
+        assert!(db.authenticate_device(&device.device_id, &nouveau).is_ok());
+        assert_eq!(
+            db.authenticate_device(&device.device_id, &ancien).unwrap_err(),
+            Refusal::Unknown
+        );
+    }
+
+    #[test]
+    fn the_last_seen_and_last_address_are_the_only_human_detector() {
+        // Faute de rotation à l'usage, il n'y a plus de rejeu à repérer : la
+        // dernière vue et la dernière adresse sont ce qui reste. C'est ce qui
+        // rend l'écran « Appareils » obligatoire plutôt que confortable.
+        let db = db_with_admin();
+        let (device, _) = db.pair_device("admin", "iPhone", None, None).unwrap();
+
+        db.touch_paired_device(&device.device_id, 1_700_000_000, Some("10.0.0.42"))
+            .unwrap();
+
+        let vu = &db.list_paired_devices(Some("admin")).unwrap()[0];
+        assert_eq!(vu.last_seen, Some(1_700_000_000));
+        assert_eq!(vu.last_ip.as_deref(), Some("10.0.0.42"));
+    }
+
+    #[test]
+    fn devices_are_listed_per_account_or_for_everyone() {
+        let db = db_with_admin();
+        db.create_user("dupont", "mot-de-passe-de-test", Role::Viewer)
+            .unwrap();
+        db.pair_device("admin", "iPhone d'admin", None, None).unwrap();
+        db.pair_device("dupont", "iPhone de Dupont", None, None).unwrap();
+
+        assert_eq!(db.list_paired_devices(Some("dupont")).unwrap().len(), 1);
+        assert_eq!(db.list_paired_devices(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_device_can_be_renamed_because_two_iphones_look_alike() {
+        // « iPhone » et « iPhone » ne se distinguent pas, et on ne révoque pas
+        // au hasard dans une liste.
+        let db = db_with_admin();
+        let (device, _) = db.pair_device("admin", "iPhone", None, None).unwrap();
+
+        db.rename_paired_device(&device.device_id, "iPhone — atelier")
+            .unwrap();
+
+        assert_eq!(
+            db.list_paired_devices(Some("admin")).unwrap()[0].name,
+            "iPhone — atelier"
+        );
+    }
+
+    #[test]
+    fn a_device_inherits_the_current_role_and_scope_of_its_owner() {
+        // ⚠️ Un appareil n'a AUCUN droit propre. Rien dans sa ligne ne porte un
+        // rôle ni une portée : il n'y a donc rien à figer, et rien qui puisse
+        // survivre à une rétrogradation.
+        let db = db_with_admin();
+        let site = db.create_site("Durand").unwrap();
+        db.create_user("dupont", "mot-de-passe-de-test", Role::Operator)
+            .unwrap();
+        db.pair_device("dupont", "iPhone", None, None).unwrap();
+
+        assert_eq!(db.user_scope("dupont", Role::Operator).unwrap(), Scope::All);
+
+        db.set_user_sites("dupont", &[site.site_id.clone()]).unwrap();
+        assert_eq!(
+            db.user_scope("dupont", Role::Operator).unwrap(),
+            Scope::Sites(vec![site.site_id])
+        );
+    }
 }

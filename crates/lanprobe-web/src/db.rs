@@ -3444,7 +3444,12 @@ fn migrate(conn: &Connection) -> DbResult<()> {
 /// Code court en `XXXX-XXXX`, sur un alphabet sans `0`/`O` ni `1`/`I` — il
 /// est lu à voix haute et recopié à la main, une confusion de caractère se
 /// paie en enrôlement raté sans message utile.
-fn generate_enroll_code() -> String {
+///
+/// ⚠️ **`pub(crate)` pour que le code d'appairage (§ 22) l'emploie tel quel**,
+/// plutôt qu'une copie. Deux alphabets qui divergeraient donneraient un code
+/// dictable d'un côté et pas de l'autre, et le défaut ne se verrait qu'au
+/// téléphone, devant un client.
+pub(crate) fn generate_enroll_code() -> String {
     const ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
     let mut bytes = [0u8; 8];
     getrandom::getrandom(&mut bytes).expect("getrandom failed");
