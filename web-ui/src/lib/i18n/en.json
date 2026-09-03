@@ -1061,6 +1061,19 @@
     "devices_rotate_hint": "The device will have to be paired again. Do this if you suspect its secret was copied — the last seen date and address are the only clue.",
     "devices_all_title": "Devices of every account",
     "devices_owner": "Owner",
-    "password_no_logout": "⚠️ Changing your password does not sign out any paired device — see Devices."
+    "password_no_logout": "⚠️ Changing your password does not sign out any paired device — see Devices.",
+    "identity_password": "Identity and password",
+    "sum_identity": "{user} · {role}",
+    "sum_totp_on": "Second factor on",
+    "sum_totp_pending": "Second factor awaiting confirmation",
+    "sum_totp_off": "Second factor off",
+    "sum_passkeys": "{n, plural, =0 {no passkeys} one {# passkey} other {# passkeys}}",
+    "sum_devices": "{n, plural, =0 {no devices} one {# device} other {# devices}}",
+    "sum_devices_revoked": "{n, plural, =0 {no devices} one {# device} other {# devices}} · {revoked, plural, one {# revoked} other {# revoked}}",
+    "sum_unavailable": "State unavailable",
+    "sum_loading": "Loading…",
+    "always_open": "always expanded",
+    "section_expand": "Expand “{name}”",
+    "section_collapse": "Collapse “{name}”"
   }
 }

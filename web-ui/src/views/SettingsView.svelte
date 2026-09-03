@@ -37,6 +37,8 @@
     type PairedDevice,
   } from '$lib/devices';
   import { REPORT_DAYS_DEFAULT, isValidReportDays } from '$lib/report-days';
+  import AccountSection from '$lib/components/AccountSection.svelte';
+  import { accountSections, type AccountSectionId } from '$lib/account-sections';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
   const lang = $derived($locale ?? 'en');
@@ -600,6 +602,62 @@
     }
   }
 
+  // ── « Mon compte » en sections repliables ────────────────────────────────
+  //
+  // L'onglet avait accumulé le mot de passe, le second facteur, les clés
+  // d'accès et les appareils appairés : une pile sans hiérarchie qu'on
+  // parcourait en entier pour y trouver une ligne. Le calcul de ce que chaque
+  // section dit fermée — et de celles qui refusent de se fermer — vit dans
+  // `account-sections.ts`, où il se teste.
+  const sections = $derived(
+    accountSections({
+      identity: {
+        username: $identity?.username ?? null,
+        role: $identity ? $_(`accounts.role_${$identity.role}`) : null,
+      },
+      totp: {
+        enabled: totpEnabled,
+        pending: totpPending,
+        enrolling: totpSecret !== '',
+        failed: totpError !== '',
+      },
+      passkeys: { count: passkeys.length, failed: pkError !== '' },
+      devices: {
+        loaded: devicesLoaded,
+        active: devices.filter((r) => !r.revoked).length,
+        revoked: devices.filter((r) => r.revoked).length,
+        // ⚠️ Un code expiré ne compte pas : il n'y a plus de compte à rebours
+        // à surveiller, seulement une phrase qui dit de le régénérer.
+        codeLive: pairCode != null && pairLeft > 0,
+        failed: devicesError !== '',
+      },
+    }),
+  );
+
+  /**
+   * Les intitulés, dans le vocabulaire du produit. « Identité et mot de
+   * passe » réunit deux anciennes cartes : c'est la même question — qui suis-je
+   * sur ce hub, et comment j'y entre.
+   */
+  const SECTION_TITLES: Record<AccountSectionId, string> = {
+    identity: 'account.identity_password',
+    totp: 'account.second_factor',
+    passkeys: 'account.passkeys',
+    devices: 'account.devices_title',
+  };
+
+  /**
+   * Ce que la personne a ouvert. Vide au départ : une section épinglée
+   * s'ouvre d'elle-même, et les autres n'ont rien à montrer qui ne soit déjà
+   * dans leur résumé.
+   */
+  let openSections = $state<Record<AccountSectionId, boolean>>({
+    identity: false,
+    totp: false,
+    passkeys: false,
+    devices: false,
+  });
+
   const ALL_TABS: { id: Tab; key: string; admin?: true }[] = [
     // En tête : c'est le seul onglet que TOUS les rôles peuvent utiliser, et
     // celui qu'un lecteur vient chercher. Le reléguer en fin de rangée le
@@ -853,345 +911,360 @@
   {/if}
 
   {#if tab === 'account'}
+  <!--
+    🔴 Les sections se replient, mais PAS celles qui portent un signal. Un
+    appareil appairé qu'on ne reconnaît pas, une clé d'accès inattendue : ce
+    sont des moyens d'accès permanents, et personne ne déplie une section
+    qu'il ne soupçonne pas déjà. `account-sections.ts` décide, et se teste.
+
+    ⚠️ Et chaque en-tête porte l'état de sa section : un accordéon muet
+    obligerait à tout ouvrir, donc ne ferait rien gagner sur la pile qu'il
+    remplace.
+  -->
   <div class="cards" role="tabpanel" id="panel-account" aria-labelledby="tab-account" tabindex="-1">
-    <section class="lp-card block">
-      <h2 class="lp-title">{$_('account.identity')}</h2>
-      <dl class="idlist">
-        <div><dt>{$_('accounts.username')}</dt><dd class="lp-mono">{$identity?.username ?? '—'}</dd></div>
-        <div>
-          <dt>{$_('accounts.role')}</dt>
-          <dd>{$identity ? $_(`accounts.role_${$identity.role}`) : '—'}</dd>
-        </div>
-      </dl>
-      <p class="hint">{$_('account.role_hint')}</p>
-    </section>
+    {#each sections as s (s.id)}
+      <AccountSection
+        id={s.id}
+        title={$_(SECTION_TITLES[s.id])}
+        summary={$_(s.summary.key, { values: s.summary.values })}
+        pinned={s.pinned}
+        open={openSections[s.id]}
+        ontoggle={() => (openSections[s.id] = !openSections[s.id])}
+      >
+        {#if s.id === 'identity'}
+          <h3 class="subhead lp-title">{$_('account.identity')}</h3>
+          <dl class="idlist">
+            <div><dt>{$_('accounts.username')}</dt><dd class="lp-mono">{$identity?.username ?? '—'}</dd></div>
+            <div>
+              <dt>{$_('accounts.role')}</dt>
+              <dd>{$identity ? $_(`accounts.role_${$identity.role}`) : '—'}</dd>
+            </div>
+          </dl>
+          <p class="hint">{$_('account.role_hint')}</p>
 
-    <section class="lp-card block">
-      <h2 class="lp-title">{$_('account.password')}</h2>
-      <!-- ⚠️ L'ancien mot de passe est exigé par le hub, pas seulement demandé
-           ici : une session volée suffirait sinon à s'approprier le compte
-           définitivement, sans aucun chemin de retour pour son titulaire. -->
-      <p class="hint">{$_('account.password_hint')}</p>
-      <!-- 🔴 Le point contre-intuitif du § 22, et il exige cette phrase. Sur le
-           web, changer son mot de passe est le geste réflexe de « j'ai perdu
-           mon téléphone ». Ici il ne fait RIEN : le mot de passe n'authentifie
-           pas un appareil appairé. Sans cette ligne, on fabrique quelqu'un qui
-           se croit protégé et ne l'est pas. -->
-      <p class="warn-inline">{$_('account.password_no_logout')}</p>
-      <label class="lp-field">
-        {$_('account.current')}
-        <input class="lp-input" type="password" bind:value={pwCurrent} autocomplete="current-password" />
-      </label>
-      <label class="lp-field">
-        {$_('account.next')}
-        <input class="lp-input" type="password" bind:value={pwNext} autocomplete="new-password" />
-      </label>
-      <label class="lp-field">
-        {$_('account.confirm')}
-        <input class="lp-input" type="password" bind:value={pwConfirm} autocomplete="new-password" />
-      </label>
-      <div class="pwrow">
-        <button class="lp-btn primary" onclick={changePassword} disabled={pwBusy || !pwReady}>
-          {pwBusy ? $_('common.saving') : $_('account.change')}
-        </button>
-        {#if pwError}<span class="pwerr">{pwError}</span>{/if}
-        {#if pwDone}<span class="pwok">{$_('account.changed')}</span>{/if}
-      </div>
-    </section>
-
-    <section class="lp-card block">
-      <h2 class="lp-title">{$_('account.second_factor')}</h2>
-
-      {#if totpEnabled}
-        <p class="ok" role="status">{$_('account.totp_on')}</p>
-        <p class="hint">{$_('account.totp_lost_device')}</p>
-        {#if totpOffOpen}
-          <!-- Le mot de passe est exigé par le hub, pas seulement demandé
-               ici : sans lui, une session volée suffirait à retirer le
-               second facteur, c'est-à-dire à annuler ce contre quoi il
-               protège. -->
+          <!-- Le mot de passe sous l'identité, dans la même section : c'est la
+               même question — « qui suis-je sur ce hub, et comment j'y
+               entre ». Deux cartes voisines pour un seul sujet, c'était deux
+               titres à lire pour un geste. -->
+          <h3 class="subhead lp-title">{$_('account.password')}</h3>
+          <!-- ⚠️ L'ancien mot de passe est exigé par le hub, pas seulement demandé
+               ici : une session volée suffirait sinon à s'approprier le compte
+               définitivement, sans aucun chemin de retour pour son titulaire. -->
+          <p class="hint">{$_('account.password_hint')}</p>
+          <!-- 🔴 Le point contre-intuitif du § 22, et il exige cette phrase. Sur le
+               web, changer son mot de passe est le geste réflexe de « j'ai perdu
+               mon téléphone ». Ici il ne fait RIEN : le mot de passe n'authentifie
+               pas un appareil appairé. Sans cette ligne, on fabrique quelqu'un qui
+               se croit protégé et ne l'est pas. -->
+          <p class="warn-inline">{$_('account.password_no_logout')}</p>
           <label class="lp-field">
-            {$_('account.current_password')}
-            <input
-              class="lp-input"
-              type="password"
-              bind:value={totpOffPassword}
-              autocomplete="current-password"
-            />
+            {$_('account.current')}
+            <input class="lp-input" type="password" bind:value={pwCurrent} autocomplete="current-password" />
           </label>
-          <div class="row-btns">
-            <button class="lp-btn" onclick={() => (totpOffOpen = false)}>
-              {$_('common.cancel')}
+          <label class="lp-field">
+            {$_('account.next')}
+            <input class="lp-input" type="password" bind:value={pwNext} autocomplete="new-password" />
+          </label>
+          <label class="lp-field">
+            {$_('account.confirm')}
+            <input class="lp-input" type="password" bind:value={pwConfirm} autocomplete="new-password" />
+          </label>
+          <div class="pwrow">
+            <button class="lp-btn primary" onclick={changePassword} disabled={pwBusy || !pwReady}>
+              {pwBusy ? $_('common.saving') : $_('account.change')}
             </button>
-            <button
-              class="lp-btn danger"
-              onclick={disableTotp}
-              disabled={totpBusy || totpOffPassword === ''}
-            >
-              {$_('account.totp_disable')}
-            </button>
+            {#if pwError}<span class="pwerr">{pwError}</span>{/if}
+            {#if pwDone}<span class="pwok">{$_('account.changed')}</span>{/if}
           </div>
-        {:else}
-          <div class="row-btns">
-            <button class="lp-btn danger" onclick={() => (totpOffOpen = true)}>
-              {$_('account.totp_disable')}
-            </button>
-          </div>
-        {/if}
-      {:else if totpSecret}
-        <p class="sub">{$_('account.totp_scan')}</p>
-        <!-- QR rendu par le hub, pas par une bibliothèque JavaScript : le
-             secret ne traverse aucune dépendance de plus, et la page reste
-             lisible sur un réseau fermé, sans CDN. -->
-        <div class="qr">{@html totpQr}</div>
-        <p class="hint">{$_('account.totp_manual')}</p>
-        <p class="secret lp-mono">{totpSecret}</p>
+        {:else if s.id === 'totp'}
 
-        <label class="lp-field">
-          {$_('account.totp_code')}
-          <input
-            class="lp-input code"
-            type="text"
-            bind:value={totpCode}
-            inputmode="numeric"
-            autocomplete="one-time-code"
-            maxlength="6"
-            placeholder="000000"
-          />
-          <span class="hint">{$_('account.totp_confirm_hint')}</span>
-        </label>
+          {#if totpEnabled}
+            <p class="ok" role="status">{$_('account.totp_on')}</p>
+            <p class="hint">{$_('account.totp_lost_device')}</p>
+            {#if totpOffOpen}
+              <!-- Le mot de passe est exigé par le hub, pas seulement demandé
+                   ici : sans lui, une session volée suffirait à retirer le
+                   second facteur, c'est-à-dire à annuler ce contre quoi il
+                   protège. -->
+              <label class="lp-field">
+                {$_('account.current_password')}
+                <input
+                  class="lp-input"
+                  type="password"
+                  bind:value={totpOffPassword}
+                  autocomplete="current-password"
+                />
+              </label>
+              <div class="row-btns">
+                <button class="lp-btn" onclick={() => (totpOffOpen = false)}>
+                  {$_('common.cancel')}
+                </button>
+                <button
+                  class="lp-btn danger"
+                  onclick={disableTotp}
+                  disabled={totpBusy || totpOffPassword === ''}
+                >
+                  {$_('account.totp_disable')}
+                </button>
+              </div>
+            {:else}
+              <div class="row-btns">
+                <button class="lp-btn danger" onclick={() => (totpOffOpen = true)}>
+                  {$_('account.totp_disable')}
+                </button>
+              </div>
+            {/if}
+          {:else if totpSecret}
+            <p class="sub">{$_('account.totp_scan')}</p>
+            <!-- QR rendu par le hub, pas par une bibliothèque JavaScript : le
+                 secret ne traverse aucune dépendance de plus, et la page reste
+                 lisible sur un réseau fermé, sans CDN. -->
+            <div class="qr">{@html totpQr}</div>
+            <p class="hint">{$_('account.totp_manual')}</p>
+            <p class="secret lp-mono">{totpSecret}</p>
 
-        {#if totpError}<p class="err" role="alert">{totpError}</p>{/if}
-        <div class="row-btns">
-          <button
-            class="lp-btn primary"
-            onclick={confirmTotp}
-            disabled={totpBusy || totpCode.trim().length !== 6}
-          >
-            {$_('account.totp_activate')}
-          </button>
-        </div>
-      {:else}
-        <p class="sub">{$_('account.totp_lead')}</p>
-        {#if totpPending}
-          <!-- Un secret existe, personne n'a prouvé qu'il fonctionne : le dire
-               évite de croire la 2FA active alors que la connexion ne la
-               demande pas. -->
-          <p class="hint">{$_('account.totp_pending')}</p>
-        {/if}
-        {#if totpError}<p class="err" role="alert">{totpError}</p>{/if}
-        <div class="row-btns">
-          <button class="lp-btn primary" onclick={startTotp} disabled={totpBusy}>
-            {$_('account.totp_enable')}
-          </button>
-        </div>
-      {/if}
+            <label class="lp-field">
+              {$_('account.totp_code')}
+              <input
+                class="lp-input code"
+                type="text"
+                bind:value={totpCode}
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="6"
+                placeholder="000000"
+              />
+              <span class="hint">{$_('account.totp_confirm_hint')}</span>
+            </label>
 
-    </section>
-
-    <section class="lp-card block">
-      <h2 class="lp-title">{$_('account.passkeys')}</h2>
-      <p class="sub">{$_('account.pk_lead')}</p>
-
-      {#if passkeys.length > 0}
-        <div class="pk-list">
-          {#each passkeys as k (k.id)}
-            <div class="pk-row">
-              <span class="pk-name">{k.label}</span>
-              <span class="pk-when">
-                {k.last_used_at
-                  ? $_('account.pk_last_used', {
-                      values: { date: dateOnly(k.last_used_at, lang) },
-                    })
-                  : $_('account.pk_never_used')}
-              </span>
-              <button class="lp-btn danger sm" disabled={pkBusy} onclick={() => removePasskey(k.id)}>
-                {$_('account.pk_remove')}
+            {#if totpError}<p class="err" role="alert">{totpError}</p>{/if}
+            <div class="row-btns">
+              <button
+                class="lp-btn primary"
+                onclick={confirmTotp}
+                disabled={totpBusy || totpCode.trim().length !== 6}
+              >
+                {$_('account.totp_activate')}
               </button>
             </div>
-          {/each}
-        </div>
-      {/if}
-
-      {#if pkUsable}
-        <label class="lp-field">
-          {$_('account.pk_label')}
-          <input
-            class="lp-input"
-            bind:value={pkLabel}
-            placeholder={$_('account.pk_label_placeholder')}
-            maxlength="40"
-          />
-          <!-- Sans nom, « en révoquer une » n'a aucun sens dès qu'on en a
-               deux : on ne saurait pas laquelle est le téléphone perdu. -->
-          <span class="hint">{$_('account.pk_label_hint')}</span>
-        </label>
-        {#if pkError}<p class="err" role="alert">{pkError}</p>{/if}
-        <div class="row-btns">
-          <button class="lp-btn primary" onclick={addPasskey} disabled={pkBusy}>
-            {pkBusy ? $_('account.pk_waiting') : $_('account.pk_add')}
-          </button>
-        </div>
-      {:else}
-        <!-- ⚠️ Le bouton n'est pas grisé, il est ABSENT, et la raison est
-             écrite. Le navigateur refuserait l'API sans message exploitable,
-             et un bouton qui ne fait rien laisse chercher la panne ailleurs. -->
-        <p class="warn-inline">{$_('account.passkey_warning')}</p>
-        {#if pkRpId}
-          <p class="hint">{$_('account.pk_rp', { values: { host: pkRpId } })}</p>
-        {/if}
-      {/if}
-
-      {#if pkUsable && pkRpId}
-        <p class="hint">{$_('account.pk_rp_bound', { values: { host: pkRpId } })}</p>
-      {/if}
-    </section>
-
-    <!--
-      🔴 Appareils appairés (contrat § 22). Cette carte n'est pas du confort.
-      L'identité d'un appareil n'expire pas : tant qu'elle n'est pas révoquée,
-      l'app se reconnecte toujours seule — c'est ce qui est demandé, on ne tape
-      pas son mot de passe en haut d'une échelle. Le prix est entier : un
-      téléphone perdu garde l'accès jusqu'à sa révocation. Ni le temps, ni un
-      changement de mot de passe, ni un redémarrage du hub ne le coupent. Le
-      bouton « Révoquer » de cette liste est donc le seul organe qui rend le
-      modèle acceptable.
-    -->
-    <section class="lp-card block">
-      <h2 class="lp-title">{$_('account.devices_title')}</h2>
-      <p class="sub">{$_('account.devices_lead')}</p>
-
-      {#if pairCode}
-        <div class="pairbox">
-          {#if pairLeft === 0}
-            <!-- Un code mort le dit, plutôt que de se faire réessayer trois
-                 fois avant qu'on comprenne. -->
-            <p class="warn-inline" role="status">{$_('account.devices_code_expired')}</p>
           {:else}
-            <span class="lp-label">{$_('account.devices_code_title')}</span>
-            {#if pairCode.qr_svg}
-              <!-- QR rendu par le hub, comme celui du second facteur : le
-                   secret ne traverse aucune dépendance de plus, et la page
-                   reste lisible sur un réseau fermé, sans CDN. -->
-              <div class="qr">{@html pairCode.qr_svg}</div>
+            <p class="sub">{$_('account.totp_lead')}</p>
+            {#if totpPending}
+              <!-- Un secret existe, personne n'a prouvé qu'il fonctionne : le dire
+                   évite de croire la 2FA active alors que la connexion ne la
+                   demande pas. -->
+              <p class="hint">{$_('account.totp_pending')}</p>
             {/if}
-
-            <!-- Le code en clair À CÔTÉ du QR, et non à la place : c'est le
-                 chemin de secours obligatoire. La caméra tombe en panne, le QR
-                 est illisible en plein soleil, et le hub web est parfois ouvert
-                 sur le téléphone lui-même — il n'y a alors aucun second écran à
-                 photographier. -->
-            <div class="pair-manual">
-              <span class="lp-label">{$_('code.label_url')}</span>
-              <p class="pair-url lp-mono">{pairUrl}</p>
-              <CopyLine value={pairUrl} shell={false} hideValue />
-              <span class="lp-label">{$_('code.label_code')}</span>
-              <p class="secret code lp-mono">{pairCode.code}</p>
-              <CopyLine value={pairCode.code} shell={false} hideValue />
+            {#if totpError}<p class="err" role="alert">{totpError}</p>{/if}
+            <div class="row-btns">
+              <button class="lp-btn primary" onclick={startTotp} disabled={totpBusy}>
+                {$_('account.totp_enable')}
+              </button>
             </div>
-            <p class="hint">{$_('account.devices_manual_hint')}</p>
+          {/if}
 
-            <p class="ttl lp-mono" role="status">
-              {$_('account.devices_code_expires', { values: { n: countdown(pairLeft, lang) } })}
-            </p>
+        {:else if s.id === 'passkeys'}
+          <p class="sub">{$_('account.pk_lead')}</p>
 
-            <!-- 🔴 Le QR contient un secret qui TRANSITE : qui le photographie
-                 par-dessus l'épaule appaire son propre téléphone, et cet
-                 appareil-là ne s'en ira qu'à une révocation explicite. -->
-            <p class="warn-inline">{$_('account.devices_code_shoulder')}</p>
-            <p class="hint">{$_('account.devices_code_hint')}</p>
+          {#if passkeys.length > 0}
+            <div class="pk-list">
+              {#each passkeys as k (k.id)}
+                <div class="pk-row">
+                  <span class="pk-name">{k.label}</span>
+                  <span class="pk-when">
+                    {k.last_used_at
+                      ? $_('account.pk_last_used', {
+                          values: { date: dateOnly(k.last_used_at, lang) },
+                        })
+                      : $_('account.pk_never_used')}
+                  </span>
+                  <button class="lp-btn danger sm" disabled={pkBusy} onclick={() => removePasskey(k.id)}>
+                    {$_('account.pk_remove')}
+                  </button>
+                </div>
+              {/each}
+            </div>
+          {/if}
 
-            {#if pairCode.cert_fingerprint}
-              <p class="hint lp-mono">
-                {$_('account.devices_fingerprint', {
-                  values: { fingerprint: pairCode.cert_fingerprint },
-                })}
-              </p>
-            {:else if !saved.tls_enabled}
-              <!-- ⚠️ Seulement quand le hub sert EN CLAIR. TLS activé sans
-                   empreinte reçue veut dire que le hub ne la sert pas encore :
-                   annoncer « pas d'empreinte à épingler » serait faux. -->
-              <p class="hint">{$_('account.devices_fingerprint_none')}</p>
+          {#if pkUsable}
+            <label class="lp-field">
+              {$_('account.pk_label')}
+              <input
+                class="lp-input"
+                bind:value={pkLabel}
+                placeholder={$_('account.pk_label_placeholder')}
+                maxlength="40"
+              />
+              <!-- Sans nom, « en révoquer une » n'a aucun sens dès qu'on en a
+                   deux : on ne saurait pas laquelle est le téléphone perdu. -->
+              <span class="hint">{$_('account.pk_label_hint')}</span>
+            </label>
+            {#if pkError}<p class="err" role="alert">{pkError}</p>{/if}
+            <div class="row-btns">
+              <button class="lp-btn primary" onclick={addPasskey} disabled={pkBusy}>
+                {pkBusy ? $_('account.pk_waiting') : $_('account.pk_add')}
+              </button>
+            </div>
+          {:else}
+            <!-- ⚠️ Le bouton n'est pas grisé, il est ABSENT, et la raison est
+                 écrite. Le navigateur refuserait l'API sans message exploitable,
+                 et un bouton qui ne fait rien laisse chercher la panne ailleurs. -->
+            <p class="warn-inline">{$_('account.passkey_warning')}</p>
+            {#if pkRpId}
+              <p class="hint">{$_('account.pk_rp', { values: { host: pkRpId } })}</p>
             {/if}
           {/if}
 
-          <div class="row-btns">
-            <button class="lp-btn" onclick={createPairCode} disabled={pairBusy}>
-              {pairBusy ? $_('code.generating') : $_('account.devices_code_regen')}
-            </button>
-          </div>
-        </div>
-      {:else}
-        <div class="row-btns">
-          <button class="lp-btn primary" onclick={createPairCode} disabled={pairBusy}>
-            {pairBusy ? $_('code.generating') : $_('account.devices_pair_cta')}
-          </button>
-        </div>
-      {/if}
+          {#if pkUsable && pkRpId}
+            <p class="hint">{$_('account.pk_rp_bound', { values: { host: pkRpId } })}</p>
+          {/if}
+        {:else if s.id === 'devices'}
 
-      {#if pairError}<p class="err" role="alert">{pairError}</p>{/if}
+        <!--
+          🔴 Appareils appairés (contrat § 22). Cette carte n'est pas du confort.
+          L'identité d'un appareil n'expire pas : tant qu'elle n'est pas révoquée,
+          l'app se reconnecte toujours seule — c'est ce qui est demandé, on ne tape
+          pas son mot de passe en haut d'une échelle. Le prix est entier : un
+          téléphone perdu garde l'accès jusqu'à sa révocation. Ni le temps, ni un
+          changement de mot de passe, ni un redémarrage du hub ne le coupent. Le
+          bouton « Révoquer » de cette liste est donc le seul organe qui rend le
+          modèle acceptable.
+        -->
+          <p class="sub">{$_('account.devices_lead')}</p>
 
-      {#if devicesError}
-        <!-- Un échec se DIT. Les routes de l'appairage rendent `501` tant
-             qu'elles ne sont pas écrites côté hub : sans cette ligne, la carte
-             resterait vide et on chercherait la panne ailleurs. -->
-        <p class="err" role="alert">{devicesError}</p>
-      {:else if devices.length > 0}
-        <!-- Même grille que la table des jetons : les deux listes se lisent de
-             la même façon, une seconde mise en forme n'apporterait rien. -->
-        <table class="tok-table dev-table">
-          <thead>
-            <tr>
-              <th>{$_('account.devices_col_name')}</th>
-              <th>{$_('account.devices_col_platform')}</th>
-              <th>{$_('account.devices_col_paired')}</th>
-              <th>{$_('account.devices_col_last_seen')}</th>
-              <th>{$_('account.devices_col_last_ip')}</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each devices as row (row.device.device_id)}
-              <tr class:revoked={row.revoked}>
-                <td>{row.device.name}</td>
-                <td>{row.device.platform || '—'}</td>
-                <td class="lp-mono">{dateOnly(row.device.created_at, lang)}</td>
-                <!-- ⚠️ « vu il y a 41 j », et rien d'autre : il n'y a AUCUNE
-                     révocation par inactivité. Un libellé qui laisserait croire
-                     à une expiration automatique promettrait un filet qui
-                     n'existe pas. -->
-                <td>
-                  {row.device.last_seen == null
-                    ? $_('account.devices_never_seen')
-                    : $_('account.devices_last_seen_raw', {
-                        values: { age: ageLabel(row.device.last_seen, lang, $now) },
-                      })}
-                </td>
-                <!-- Avec la dernière vue, la seule trace qui puisse trahir un
-                     secret copié : il ne tourne pas à l'usage. -->
-                <td class="lp-mono id">{row.device.last_ip || '—'}</td>
-                <td class="right">
-                  {#if row.revoked}
-                    <span class="muted">
-                      {$_('account.devices_revoked', {
-                        values: { date: dateOnly(row.device.revoked_at, lang) },
-                      })}
-                    </span>
-                  {:else}
-                    <button class="lp-btn danger sm" onclick={() => (revokeDevice = row.device)}>
-                      {$_('account.devices_revoke')}
-                    </button>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {:else if devicesLoaded}
-        <!-- Sa phrase, jamais un tableau vide sans explication. -->
-        <p class="muted">{$_('account.devices_empty')}</p>
-      {/if}
-    </section>
+          {#if pairCode}
+            <div class="pairbox">
+              {#if pairLeft === 0}
+                <!-- Un code mort le dit, plutôt que de se faire réessayer trois
+                     fois avant qu'on comprenne. -->
+                <p class="warn-inline" role="status">{$_('account.devices_code_expired')}</p>
+              {:else}
+                <span class="lp-label">{$_('account.devices_code_title')}</span>
+                {#if pairCode.qr_svg}
+                  <!-- QR rendu par le hub, comme celui du second facteur : le
+                       secret ne traverse aucune dépendance de plus, et la page
+                       reste lisible sur un réseau fermé, sans CDN. -->
+                  <div class="qr">{@html pairCode.qr_svg}</div>
+                {/if}
+
+                <!-- Le code en clair À CÔTÉ du QR, et non à la place : c'est le
+                     chemin de secours obligatoire. La caméra tombe en panne, le QR
+                     est illisible en plein soleil, et le hub web est parfois ouvert
+                     sur le téléphone lui-même — il n'y a alors aucun second écran à
+                     photographier. -->
+                <div class="pair-manual">
+                  <span class="lp-label">{$_('code.label_url')}</span>
+                  <p class="pair-url lp-mono">{pairUrl}</p>
+                  <CopyLine value={pairUrl} shell={false} hideValue />
+                  <span class="lp-label">{$_('code.label_code')}</span>
+                  <p class="secret code lp-mono">{pairCode.code}</p>
+                  <CopyLine value={pairCode.code} shell={false} hideValue />
+                </div>
+                <p class="hint">{$_('account.devices_manual_hint')}</p>
+
+                <p class="ttl lp-mono" role="status">
+                  {$_('account.devices_code_expires', { values: { n: countdown(pairLeft, lang) } })}
+                </p>
+
+                <!-- 🔴 Le QR contient un secret qui TRANSITE : qui le photographie
+                     par-dessus l'épaule appaire son propre téléphone, et cet
+                     appareil-là ne s'en ira qu'à une révocation explicite. -->
+                <p class="warn-inline">{$_('account.devices_code_shoulder')}</p>
+                <p class="hint">{$_('account.devices_code_hint')}</p>
+
+                {#if pairCode.cert_fingerprint}
+                  <p class="hint lp-mono">
+                    {$_('account.devices_fingerprint', {
+                      values: { fingerprint: pairCode.cert_fingerprint },
+                    })}
+                  </p>
+                {:else if !saved.tls_enabled}
+                  <!-- ⚠️ Seulement quand le hub sert EN CLAIR. TLS activé sans
+                       empreinte reçue veut dire que le hub ne la sert pas encore :
+                       annoncer « pas d'empreinte à épingler » serait faux. -->
+                  <p class="hint">{$_('account.devices_fingerprint_none')}</p>
+                {/if}
+              {/if}
+
+              <div class="row-btns">
+                <button class="lp-btn" onclick={createPairCode} disabled={pairBusy}>
+                  {pairBusy ? $_('code.generating') : $_('account.devices_code_regen')}
+                </button>
+              </div>
+            </div>
+          {:else}
+            <div class="row-btns">
+              <button class="lp-btn primary" onclick={createPairCode} disabled={pairBusy}>
+                {pairBusy ? $_('code.generating') : $_('account.devices_pair_cta')}
+              </button>
+            </div>
+          {/if}
+
+          {#if pairError}<p class="err" role="alert">{pairError}</p>{/if}
+
+          {#if devicesError}
+            <!-- Un échec se DIT. Les routes de l'appairage rendent `501` tant
+                 qu'elles ne sont pas écrites côté hub : sans cette ligne, la carte
+                 resterait vide et on chercherait la panne ailleurs. -->
+            <p class="err" role="alert">{devicesError}</p>
+          {:else if devices.length > 0}
+            <!-- Même grille que la table des jetons : les deux listes se lisent de
+                 la même façon, une seconde mise en forme n'apporterait rien. -->
+            <table class="tok-table dev-table">
+              <thead>
+                <tr>
+                  <th>{$_('account.devices_col_name')}</th>
+                  <th>{$_('account.devices_col_platform')}</th>
+                  <th>{$_('account.devices_col_paired')}</th>
+                  <th>{$_('account.devices_col_last_seen')}</th>
+                  <th>{$_('account.devices_col_last_ip')}</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each devices as row (row.device.device_id)}
+                  <tr class:revoked={row.revoked}>
+                    <td>{row.device.name}</td>
+                    <td>{row.device.platform || '—'}</td>
+                    <td class="lp-mono">{dateOnly(row.device.created_at, lang)}</td>
+                    <!-- ⚠️ « vu il y a 41 j », et rien d'autre : il n'y a AUCUNE
+                         révocation par inactivité. Un libellé qui laisserait croire
+                         à une expiration automatique promettrait un filet qui
+                         n'existe pas. -->
+                    <td>
+                      {row.device.last_seen == null
+                        ? $_('account.devices_never_seen')
+                        : $_('account.devices_last_seen_raw', {
+                            values: { age: ageLabel(row.device.last_seen, lang, $now) },
+                          })}
+                    </td>
+                    <!-- Avec la dernière vue, la seule trace qui puisse trahir un
+                         secret copié : il ne tourne pas à l'usage. -->
+                    <td class="lp-mono id">{row.device.last_ip || '—'}</td>
+                    <td class="right">
+                      {#if row.revoked}
+                        <span class="muted">
+                          {$_('account.devices_revoked', {
+                            values: { date: dateOnly(row.device.revoked_at, lang) },
+                          })}
+                        </span>
+                      {:else}
+                        <button class="lp-btn danger sm" onclick={() => (revokeDevice = row.device)}>
+                          {$_('account.devices_revoke')}
+                        </button>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {:else if devicesLoaded}
+            <!-- Sa phrase, jamais un tableau vide sans explication. -->
+            <p class="muted">{$_('account.devices_empty')}</p>
+          {/if}
+        {/if}
+      </AccountSection>
+    {/each}
   </div>
   {/if}
 
@@ -1893,8 +1966,17 @@
 
 <style>
   /* ── Mon compte ─────────────────────────────────────────────────────── */
-  .block {
-    padding: 16px 18px;
+
+  /* Sous-section : un cran sous le titre de l'accordéon, et nettement moins
+     appuyé — sinon on lit deux titres de même poids et la hiérarchie que les
+     sections viennent d'installer se défait. */
+  .subhead {
+    margin: 0;
+    font-size: 13px;
+    color: var(--ep-text-secondary);
+  }
+  .subhead:not(:first-child) {
+    margin-top: 6px;
   }
   .idlist {
     display: flex;

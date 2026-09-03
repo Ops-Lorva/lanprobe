@@ -1061,6 +1061,19 @@
     "devices_rotate_hint": "Habrá que volver a emparejar el dispositivo. Hágalo si sospecha que su secreto fue copiado — la última vez visto y la última dirección son la única pista.",
     "devices_all_title": "Dispositivos de todas las cuentas",
     "devices_owner": "Propietario",
-    "password_no_logout": "⚠️ Cambiar su contraseña no desconecta ningún dispositivo emparejado — véase Dispositivos."
+    "password_no_logout": "⚠️ Cambiar su contraseña no desconecta ningún dispositivo emparejado — véase Dispositivos.",
+    "identity_password": "Identidad y contraseña",
+    "sum_identity": "{user} · {role}",
+    "sum_totp_on": "Segundo factor activado",
+    "sum_totp_pending": "Segundo factor por confirmar",
+    "sum_totp_off": "Segundo factor desactivado",
+    "sum_passkeys": "{n, plural, =0 {ninguna llave de acceso} one {# llave de acceso} other {# llaves de acceso}}",
+    "sum_devices": "{n, plural, =0 {ningún dispositivo} one {# dispositivo} other {# dispositivos}}",
+    "sum_devices_revoked": "{n, plural, =0 {ningún dispositivo} one {# dispositivo} other {# dispositivos}} · {revoked, plural, one {# revocado} other {# revocados}}",
+    "sum_unavailable": "Estado no disponible",
+    "sum_loading": "Cargando…",
+    "always_open": "siempre desplegada",
+    "section_expand": "Desplegar «{name}»",
+    "section_collapse": "Plegar «{name}»"
   }
 }

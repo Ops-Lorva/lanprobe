@@ -310,6 +310,38 @@ describe('catalogues de traduction', () => {
     });
   }
 
+  // « Mon compte » en sections repliables.
+  //
+  // 🔴 Les clés `sum_*` sont ce que chaque section dit FERMÉE. Sans elles,
+  // l'accordéon est muet : il oblige à tout ouvrir, et ne fait donc rien
+  // gagner sur la pile qu'il remplace.
+  //
+  // ⚠️ `account.always_open` dit POURQUOI une section refuse de se replier.
+  // Sans elle, une section sans bouton de repli se lit comme une panne de
+  // l'interface, et non comme le signal qu'elle porte.
+  const REQUISES_COMPTE_SECTIONS = [
+    'account.identity_password',
+    'account.sum_identity',
+    'account.sum_totp_on',
+    'account.sum_totp_pending',
+    'account.sum_totp_off',
+    'account.sum_passkeys',
+    'account.sum_devices',
+    'account.sum_devices_revoked',
+    'account.sum_unavailable',
+    'account.sum_loading',
+    'account.always_open',
+    'account.section_expand',
+    'account.section_collapse',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des sections de « Mon compte »`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_COMPTE_SECTIONS.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
   // Rapports produits par le hub (contrat § 23).
   //
   // 🔴 `report.hub_purged` et `report.hub_purged_hint` portent la distinction

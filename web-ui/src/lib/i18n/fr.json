@@ -1061,6 +1061,19 @@
     "devices_rotate_hint": "L'appareil devra être réappairé. À faire si vous soupçonnez que son secret a été copié — la dernière vue et la dernière adresse sont le seul indice.",
     "devices_all_title": "Appareils de tous les comptes",
     "devices_owner": "Propriétaire",
-    "password_no_logout": "⚠️ Changer votre mot de passe ne déconnecte aucun appareil appairé — voir Appareils."
+    "password_no_logout": "⚠️ Changer votre mot de passe ne déconnecte aucun appareil appairé — voir Appareils.",
+    "identity_password": "Identité et mot de passe",
+    "sum_identity": "{user} · {role}",
+    "sum_totp_on": "Second facteur activé",
+    "sum_totp_pending": "Second facteur à confirmer",
+    "sum_totp_off": "Second facteur désactivé",
+    "sum_passkeys": "{n, plural, =0 {aucune clé d'accès} one {# clé d'accès} other {# clés d'accès}}",
+    "sum_devices": "{n, plural, =0 {aucun appareil} one {# appareil} other {# appareils}}",
+    "sum_devices_revoked": "{n, plural, =0 {aucun appareil} one {# appareil} other {# appareils}} · {revoked, plural, one {# révoqué} other {# révoqués}}",
+    "sum_unavailable": "État indisponible",
+    "sum_loading": "Chargement…",
+    "always_open": "toujours dépliée",
+    "section_expand": "Déplier « {name} »",
+    "section_collapse": "Replier « {name} »"
   }
 }
