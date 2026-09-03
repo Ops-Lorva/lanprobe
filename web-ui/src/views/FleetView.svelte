@@ -42,6 +42,7 @@
   import StatusMark from '$lib/components/StatusMark.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import SiteAlerts from '$lib/components/SiteAlerts.svelte';
+  import PackagesModal from '$lib/components/PackagesModal.svelte';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
 
@@ -157,6 +158,15 @@
   let addBusySite = $state<string | null>(null);
   let addErrors = $state<Record<string, string>>({});
   let pendingBusyKey = $state<string | null>(null);
+
+  /**
+   * La liste des paquets de la sonde, ouverte depuis la ligne d'enrôlement.
+   *
+   * 🔴 **Montée seulement quand on l'ouvre.** C'est elle qui fait l'appel
+   * sortant ; l'écran d'enrôlement, lui, n'en dépend pas — un hub sans Internet
+   * affiche son code comme d'habitude.
+   */
+  let packagesOpen = $state(false);
 
   async function addProbe(siteId: string, siteName: string) {
     if (addBusySite) return;
@@ -745,11 +755,20 @@
         addError={addErrors[g.site.site_id] ?? ''}
         onregenerate={(row) => void regenerate(row)}
         onhidePending={(row) => enrollments.hide(row.key)}
+        onpackages={() => (packagesOpen = true)}
         {pendingBusyKey}
         filtered={hasFilter}
       />
     {/each}
   </div>
+{/if}
+
+{#if packagesOpen}
+  <PackagesModal
+    open={packagesOpen}
+    onclose={() => (packagesOpen = false)}
+    onexpired={onExpired}
+  />
 {/if}
 
 <Modal

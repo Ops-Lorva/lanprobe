@@ -10,8 +10,17 @@
     error?: string;
     onregenerate: () => void;
     onhide: () => void;
+    /**
+     * Ouvre la liste des paquets de la sonde.
+     *
+     * 🔴 C'est ICI que le lien manquait : le hub donne un code d'enrôlement, et
+     * il fallait aller chercher le binaire ailleurs. Un seul bouton, une seule
+     * fenêtre — quatre boutons par plateforme noieraient le geste principal de
+     * cet écran, qui reste l'enrôlement.
+     */
+    ondownload: () => void;
   }
-  let { row, busy = false, error = '', onregenerate, onhide }: Props = $props();
+  let { row, busy = false, error = '', onregenerate, onhide, ondownload }: Props = $props();
 
   /** Ré-enrôlement = réparation d'une sonde existante. Ce n'est pas le même
       geste qu'ajouter une machine, et ça ne doit pas s'y confondre. */
@@ -105,6 +114,21 @@
       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
         <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
         <polyline points="13.5,2 13.5,5 10.5,5" />
+      </svg>
+    </button>
+    <!-- ⚠️ N'appelle RIEN au chargement : le code d'enrôlement s'affiche sur un
+         hub sans Internet comme sur les autres. C'est la fenêtre qui sort, et
+         seulement quand on l'ouvre. -->
+    <button
+      class="ib"
+      onclick={ondownload}
+      title={$_('packages.open_hint')}
+      aria-label={$_('packages.open')}
+    >
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 2v8" />
+        <polyline points="4.5,7 8,10.5 11.5,7" />
+        <path d="M3 13h10" />
       </svg>
     </button>
     <!-- « Masquer » et non « Annuler » : le hub garde le code valable, cette

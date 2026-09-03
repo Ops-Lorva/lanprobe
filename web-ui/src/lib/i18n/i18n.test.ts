@@ -310,6 +310,59 @@ describe('catalogues de traduction', () => {
     });
   }
 
+  // Paquets de la sonde servis par le hub (contrat § 24).
+  //
+  // 🔴 `packages.unsigned` et `packages.absent` ne sont pas décoratives : un
+  // paquet que le hub ne peut pas vérifier n'a PAS de bouton, et une ligne sans
+  // bouton ni explication se lit comme une panne de l'interface.
+  //
+  // ⚠️ `packages.offline` dit qu'un hub auto-hébergé peut ne pas avoir
+  // Internet, et `packages.fetching_note` occupe le temps d'un paquet de 17 Mo :
+  // un bouton muet pendant ce temps-là se lit lui aussi comme une panne.
+  //
+  // ⚠️ `packages.mobile_soon` tient la place de l'app mobile SANS lien : un
+  // lien mort vers l'App Store est pire que pas de lien.
+  const REQUISES_PAQUETS = [
+    'packages.title',
+    'packages.lead',
+    'packages.loading',
+    'packages.open',
+    'packages.open_hint',
+    'packages.detected',
+    'packages.platform_macos',
+    'packages.platform_windows',
+    'packages.platform_debian',
+    'packages.platform_debian-headless',
+    'packages.cached',
+    'packages.not_cached',
+    'packages.unsigned',
+    'packages.absent',
+    'packages.offline',
+    'packages.offline_row',
+    'packages.fetch',
+    'packages.fetching',
+    'packages.fetching_note',
+    'packages.download',
+    'packages.release',
+    'packages.release_page',
+    'packages.keep',
+    'packages.mobile_soon',
+    'settings.package_keep_title',
+    'settings.package_keep_lead',
+    'settings.package_keep_label',
+    'settings.package_keep_unit',
+    'settings.package_keep_hint',
+    'settings.package_keep_current',
+    'settings.invalid_package_keep',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des paquets de la sonde`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_PAQUETS.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
   // « Mon compte » en sections repliables.
   //
   // 🔴 Les clés `sum_*` sont ce que chaque section dit FERMÉE. Sans elles,

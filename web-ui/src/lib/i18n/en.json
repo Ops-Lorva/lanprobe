@@ -167,7 +167,14 @@
     "report_days_label": "Report file retention",
     "report_days_hint": "In days. Unlike the other retentions, 0 does not mean “unlimited” here: it is refused. A volume piling up every client's workbook is the most sensitive heap this hub produces.",
     "report_days_purge_count": "{n} file(s) will be purged.",
-    "invalid_report_days": "At least 1 day. 0 would let client data pile up on disk indefinitely."
+    "invalid_report_days": "At least 1 day. 0 would let client data pile up on disk indefinitely.",
+    "package_keep_title": "Probe packages",
+    "package_keep_lead": "The hub fetches the installers from GitHub, verifies their signature and keeps them on its volume. The machine downloading them then never needs to reach GitHub.",
+    "package_keep_label": "Versions kept",
+    "package_keep_unit": "versions",
+    "package_keep_hint": "In versions, not days: “older than N days” would purge the current version's package on a quiet hub, only to re-download it at the next enrolment. Nothing is lost — a purged package is fetched again, and the hub verifies its signature anew.",
+    "package_keep_current": "Currently: the last {n} versions.",
+    "invalid_package_keep": "At least 1 version: a cache emptied on every fetch is no longer a cache."
   },
   "backup": {
     "auto_title": "Automatic backup",
@@ -595,6 +602,32 @@
     "confirm": "Revoke access",
     "working": "Revoking…",
     "done": "“{name}” was removed from the fleet. Its measurements are kept."
+  },
+  "packages": {
+    "title": "Download the probe",
+    "lead": "The hub fetches the package from GitHub, verifies its signature, then serves it to you itself. Your machine never needs to reach GitHub.",
+    "loading": "Reading versions…",
+    "open": "Download the probe",
+    "open_hint": "Probe packages, for every system",
+    "detected": "detected",
+    "platform_macos": "macOS (.pkg)",
+    "platform_windows": "Windows (.exe)",
+    "platform_debian": "Debian / Ubuntu (.deb)",
+    "platform_debian-headless": "Debian / Ubuntu — headless (.deb)",
+    "cached": "Ready · version {version} · {size} · signature verified",
+    "not_cached": "Not fetched yet",
+    "unsigned": "Unsigned: the hub only distributes what it can verify. Take it from the release page.",
+    "absent": "Not published in the latest release.",
+    "offline": "This hub cannot reach the list of releases. Whatever it already holds stays downloadable; the rest needs a way out to the internet.",
+    "offline_row": "Unavailable without internet access",
+    "fetch": "Fetch",
+    "fetching": "Fetching…",
+    "fetching_note": "The hub is downloading the package and verifying its signature. This can take a minute — nothing is served until the signature checks out.",
+    "download": "Download",
+    "release": "Latest published release: {version}.",
+    "release_page": "See this release on GitHub",
+    "keep": "The hub keeps the packages of the last {n} releases.",
+    "mobile_soon": "The mobile app is not published yet. No link here until it is: a dead link is worse than no link."
   },
   "code": {
     "title": "Enrolment code",

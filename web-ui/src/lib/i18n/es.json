@@ -167,7 +167,14 @@
     "report_days_label": "Conservación de los archivos de informe",
     "report_days_hint": "En días. A diferencia de las otras retenciones, aquí 0 no es «ilimitado»: se rechaza. Un volumen que acumula los libros de todos los clientes es el montón más sensible que produce este hub.",
     "report_days_purge_count": "Se purgarán {n} archivo(s).",
-    "invalid_report_days": "Al menos 1 día. 0 dejaría acumularse indefinidamente datos de clientes en el disco."
+    "invalid_report_days": "Al menos 1 día. 0 dejaría acumularse indefinidamente datos de clientes en el disco.",
+    "package_keep_title": "Paquetes de la sonda",
+    "package_keep_lead": "El hub recupera los instaladores desde GitHub, verifica su firma y los guarda en su volumen. El equipo que los descarga ya no necesita alcanzar GitHub.",
+    "package_keep_label": "Versiones conservadas",
+    "package_keep_unit": "versiones",
+    "package_keep_hint": "En versiones, no en días: «más de N días» purgaría el paquete de la versión actual en un hub tranquilo, para volver a descargarlo en la siguiente inscripción. No se pierde nada: un paquete purgado se recupera de nuevo, y el hub vuelve a verificar su firma.",
+    "package_keep_current": "Actualmente: las {n} últimas versiones.",
+    "invalid_package_keep": "Al menos 1 versión: una caché vaciada en cada recuperación ya no es una caché."
   },
   "backup": {
     "auto_title": "Copia de seguridad automática",
@@ -595,6 +602,32 @@
     "confirm": "Revocar el acceso",
     "working": "Revocando…",
     "done": "«{name}» se quitó del parque. Se conservan sus mediciones."
+  },
+  "packages": {
+    "title": "Descargar la sonda",
+    "lead": "El hub recupera el paquete desde GitHub, verifica su firma y luego se lo sirve él mismo. Su equipo no necesita alcanzar GitHub.",
+    "loading": "Leyendo las versiones…",
+    "open": "Descargar la sonda",
+    "open_hint": "Los paquetes de la sonda, para cada sistema",
+    "detected": "detectado",
+    "platform_macos": "macOS (.pkg)",
+    "platform_windows": "Windows (.exe)",
+    "platform_debian": "Debian / Ubuntu (.deb)",
+    "platform_debian-headless": "Debian / Ubuntu — sin interfaz (.deb)",
+    "cached": "Listo · versión {version} · {size} · firma verificada",
+    "not_cached": "Aún no recuperado",
+    "unsigned": "Sin firma: el hub solo distribuye lo que puede verificar. Tómelo en la página de la versión.",
+    "absent": "Ausente de la última versión publicada.",
+    "offline": "Este hub no alcanza la lista de versiones. Lo que ya tiene en caché sigue descargable; el resto exige una salida a Internet.",
+    "offline_row": "No disponible sin acceso a Internet",
+    "fetch": "Recuperar",
+    "fetching": "Recuperando…",
+    "fetching_note": "El hub descarga el paquete y verifica su firma. Puede tardar un minuto: no se sirve nada mientras la firma no esté verificada.",
+    "download": "Descargar",
+    "release": "Última versión publicada: {version}.",
+    "release_page": "Ver esta versión en GitHub",
+    "keep": "El hub conserva los paquetes de las {n} últimas versiones.",
+    "mobile_soon": "La aplicación móvil aún no está publicada. Ningún enlace aquí mientras no lo esté: un enlace muerto es peor que ningún enlace."
   },
   "code": {
     "title": "Código de alta",

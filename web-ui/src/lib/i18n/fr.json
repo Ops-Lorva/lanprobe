@@ -167,7 +167,14 @@
     "report_days_label": "Conservation des fichiers de rapport",
     "report_days_hint": "En jours. Contrairement aux autres rétentions, 0 n'est pas « illimité » : il est refusé. Un volume qui accumule les classeurs de tous les clients est le tas le plus sensible que ce hub produise.",
     "report_days_purge_count": "{n} fichier(s) seront purgés.",
-    "invalid_report_days": "Au moins 1 jour. 0 laisserait s'accumuler indéfiniment des données de clients sur le disque."
+    "invalid_report_days": "Au moins 1 jour. 0 laisserait s'accumuler indéfiniment des données de clients sur le disque.",
+    "package_keep_title": "Paquets de la sonde",
+    "package_keep_lead": "Le hub récupère les installeurs depuis GitHub, vérifie leur signature et les garde sur son volume. Le poste qui les télécharge n'a alors pas besoin d'atteindre GitHub.",
+    "package_keep_label": "Versions gardées",
+    "package_keep_unit": "versions",
+    "package_keep_hint": "En versions, pas en jours : « plus de N jours » purgerait le paquet de la version courante sur un hub tranquille, pour le faire retélécharger au prochain enrôlement. Rien ne se perd — un paquet purgé se récupère à nouveau, et le hub revérifie sa signature.",
+    "package_keep_current": "Actuellement : les {n} dernières versions.",
+    "invalid_package_keep": "Au moins 1 version : un cache vidé à chaque récupération n'est plus un cache."
   },
   "backup": {
     "auto_title": "Sauvegarde automatique",
@@ -595,6 +602,32 @@
     "confirm": "Révoquer l'accès",
     "working": "Révocation…",
     "done": "« {name} » a été retirée du parc. Ses mesures sont conservées."
+  },
+  "packages": {
+    "title": "Télécharger la sonde",
+    "lead": "Le hub récupère le paquet depuis GitHub, vérifie sa signature, puis vous le sert lui-même. Votre poste n'a pas besoin d'atteindre GitHub.",
+    "loading": "Lecture des versions…",
+    "open": "Télécharger la sonde",
+    "open_hint": "Les paquets de la sonde, pour chaque système",
+    "detected": "détecté",
+    "platform_macos": "macOS (.pkg)",
+    "platform_windows": "Windows (.exe)",
+    "platform_debian": "Debian / Ubuntu (.deb)",
+    "platform_debian-headless": "Debian / Ubuntu — sans interface (.deb)",
+    "cached": "Prêt · version {version} · {size} · signature vérifiée",
+    "not_cached": "Pas encore récupéré",
+    "unsigned": "Non signé : le hub ne distribue que ce qu'il peut vérifier. À prendre sur la page de la version.",
+    "absent": "Absent de la dernière version publiée.",
+    "offline": "Ce hub ne joint pas la liste des versions. Ce qu'il a déjà en cache reste téléchargeable ; le reste demande une sortie vers Internet.",
+    "offline_row": "Indisponible sans accès à Internet",
+    "fetch": "Récupérer",
+    "fetching": "Récupération…",
+    "fetching_note": "Le hub télécharge le paquet et vérifie sa signature. Cela peut prendre une minute — rien n'est servi tant que la signature n'est pas vérifiée.",
+    "download": "Télécharger",
+    "release": "Dernière version publiée : {version}.",
+    "release_page": "Voir la page de cette version sur GitHub",
+    "keep": "Le hub garde les paquets des {n} dernières versions.",
+    "mobile_soon": "L'application mobile n'est pas encore publiée. Aucun lien ici tant qu'elle ne l'est pas : un lien mort est pire que pas de lien."
   },
   "code": {
     "title": "Code d'enrôlement",

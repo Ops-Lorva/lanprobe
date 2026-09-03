@@ -37,6 +37,10 @@
     type PairedDevice,
   } from '$lib/devices';
   import { REPORT_DAYS_DEFAULT, isValidReportDays } from '$lib/report-days';
+  /** Défaut du hub (`settings::DEFAULT_PACKAGE_KEEP_VERSIONS`) : la version
+      qu'on installe, et celle d'avant — qu'on réinstalle quand la nouvelle pose
+      problème. */
+  const PACKAGE_KEEP_DEFAULT = 2;
   import AccountSection from '$lib/components/AccountSection.svelte';
   import { accountSections, type AccountSectionId } from '$lib/account-sections';
 
@@ -69,6 +73,7 @@
   let backupKeep = $state('7');
   let inventoryDays = $state('0');
   let reportDays = $state(String(REPORT_DAYS_DEFAULT));
+  let packageKeep = $state(String(PACKAGE_KEEP_DEFAULT));
   let tlsEnabled = $state(false);
   let trustedProxies = $state('');
 
@@ -108,6 +113,7 @@
     // pas, et un champ non contrôlé se croirait modifié dès l'ouverture — le
     // formulaire partirait alors enregistrer une clé que le hub refuse.
     reportDays = String(s.report_days ?? REPORT_DAYS_DEFAULT);
+    packageKeep = String(s.package_keep_versions ?? PACKAGE_KEEP_DEFAULT);
     tlsEnabled = s.tls_enabled;
     // ⚠️ `?? ''` et non `s.trusted_proxies` : un hub plus ancien que ce
     // réglage ne le renvoie pas, et `undefined` dans un `<input>` laisserait
@@ -255,6 +261,8 @@
   const reportDaysNum = $derived(Number.parseInt(reportDays, 10));
   /** Référence du réglage : `?? 7` pour un hub qui ne le sert pas encore. */
   const savedReportDays = $derived(saved.report_days ?? REPORT_DAYS_DEFAULT);
+  const packageKeepNum = $derived(Number.parseInt(packageKeep, 10));
+  const savedPackageKeep = $derived(saved.package_keep_versions ?? PACKAGE_KEEP_DEFAULT);
 
   function retentionLabel(days: number) {
     return days === 0
@@ -337,6 +345,7 @@
     if (keepNum !== saved.backup_keep_last) p.backup_keep_last = keepNum;
     if (inventoryNum !== saved.inventory_days) p.inventory_days = inventoryNum;
     if (reportDaysNum !== savedReportDays) p.report_days = reportDaysNum;
+    if (packageKeepNum !== savedPackageKeep) p.package_keep_versions = packageKeepNum;
     if (tlsEnabled !== saved.tls_enabled) p.tls_enabled = tlsEnabled;
     if (trustedProxies.trim() !== (saved.trusted_proxies ?? ''))
       p.trusted_proxies = trustedProxies.trim();
@@ -715,7 +724,8 @@
       'influx_bucket' in patch ||
       'retention_days' in patch ||
       'inventory_days' in patch ||
-      'report_days' in patch,
+      'report_days' in patch ||
+      'package_keep_versions' in patch,
     // ⚠️ Les trois champs de sauvegarde ont suivi leur panneau. Laissés sur
     // « Mesures », la pastille se serait allumée sur l'onglet où le champ
     // modifié n'est plus visible — donc introuvable.
@@ -780,6 +790,10 @@
     // indéfiniment des données de clients sur le disque.
     if (!isValidReportDays(reportDaysNum))
       return { msg: $_('settings.invalid_report_days'), tab: 'storage' };
+    // ⚠️ Le plancher est de UNE version : un cache vidé à chaque récupération
+    // n'est plus un cache, et le hub refuse `0` en 400.
+    if (!Number.isInteger(packageKeepNum) || packageKeepNum < 1)
+      return { msg: $_('settings.invalid_package_keep'), tab: 'storage' };
     // ⚠️ 5 s, pas 10 : c'est le plancher que la sonde applique réellement
     // (`hub.rs:876`). Un formulaire plus permissif ou plus strict que la sonde
     // affiche un réglage qu'elle n'applique pas.
@@ -1668,6 +1682,39 @@
               label: $_('settings.retention_days_label', { values: { n: savedReportDays } }),
             },
           })}
+        </span>
+      </label>
+    </section>
+
+    <!--
+      Les paquets de la sonde, juste sous les rapports : ce sont les deux
+      choses que le hub garde sur son volume sans qu'on les lui ait données.
+
+      ⚠️ Des VERSIONS et non des jours. « Plus de N jours » purgerait le paquet
+      de la version courante sur un hub tranquille, pour le faire retélécharger
+      au prochain enrôlement. Et rien ne se perd : un paquet purgé se
+      retéléchargera depuis GitHub, et le hub revérifiera sa signature.
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.package_keep_title')}</h2>
+      <p class="sub">{$_('settings.package_keep_lead')}</p>
+
+      <label class="lp-field">
+        {$_('settings.package_keep_label')}
+        <span class="unit-row">
+          <input
+            class="lp-input num"
+            type="number"
+            min="1"
+            step="1"
+            bind:value={packageKeep}
+            disabled={!$isAdmin}
+          />
+          <span class="unit">{$_('settings.package_keep_unit')}</span>
+        </span>
+        <span class="hint">{$_('settings.package_keep_hint')}</span>
+        <span class="cur">
+          {$_('settings.package_keep_current', { values: { n: savedPackageKeep } })}
         </span>
       </label>
     </section>

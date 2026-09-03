@@ -35,6 +35,8 @@
     addError?: string;
     onregenerate: (row: PendingRow) => void;
     onhidePending: (row: PendingRow) => void;
+    /** Ouvre la liste des paquets de la sonde, depuis la ligne d'enrôlement. */
+    onpackages: () => void;
     /** Clé de la ligne en attente dont la génération tourne. */
     pendingBusyKey?: string | null;
     /** Vrai quand un filtre est actif : le vide « site sans sonde » ne s'applique plus. */
@@ -58,6 +60,7 @@
     addError = '',
     onregenerate,
     onhidePending,
+    onpackages,
     pendingBusyKey = null,
     filtered,
     onexportSla,
@@ -199,6 +202,7 @@
           busy={pendingBusyKey === row.key}
           onregenerate={() => onregenerate(row)}
           onhide={() => onhidePending(row)}
+          ondownload={onpackages}
         />
       {/each}
 

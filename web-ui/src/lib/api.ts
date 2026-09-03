@@ -215,6 +215,17 @@ export interface HubSettings {
    */
   report_days: number;
   /**
+   * Combien de VERSIONS de paquets de sonde le hub garde sur son volume
+   * (contrat § 24).
+   *
+   * ⚠️ Des versions et non des jours : « plus de N jours » purgerait le paquet
+   * de la version courante sur un hub tranquille, pour le faire retélécharger
+   * au prochain enrôlement.
+   *
+   * ⚠️ Un hub antérieur à ce réglage ne le renvoie pas : lire `?? 2`.
+   */
+  package_keep_versions: number;
+  /**
    * Le hub termine lui-même le TLS, avec un certificat auto-signé.
    * ⚠️ Lu au démarrage seulement : l'activer ne change rien tant que le
    * conteneur n'a pas redémarré.
@@ -270,6 +281,7 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   backup_keep_last: 7,
   inventory_days: 0,
   report_days: 7,
+  package_keep_versions: 2,
   tls_enabled: false,
   trusted_proxies: '',
   realtime_duration_min: 30,
