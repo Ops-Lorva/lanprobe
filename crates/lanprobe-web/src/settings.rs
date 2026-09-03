@@ -72,6 +72,21 @@ pub mod keys {
     /// éteindre le mode une fois redescendu de l'échelle. Sans minuterie, tout
     /// le parc finit par battre toutes les 5 s sans que personne sache
     /// pourquoi — ça marche, et la charge a été multipliée pour rien.
+    /// Durée de conservation des **fichiers** de rapport, en jours (§ 23).
+    ///
+    /// 🔴 **`0` n'y vaut PAS « illimité »**, contrairement à `retention_days`
+    /// et `inventory_days` : la valeur est refusée, plancher `1`. Quelqu'un la
+    /// mettra par analogie avec les deux autres et obtiendra le seul réglage du
+    /// produit qui laisse s'accumuler indéfiniment des données de clients sur
+    /// le disque — un volume qui accumule les classeurs SLA de tous les clients
+    /// est le tas le plus sensible que le hub sache produire.
+    ///
+    /// ⚠️ La purge ne touche **que le fichier**. L'entrée d'historique — qui a
+    /// demandé quel rapport, quand — n'est jamais purgée : c'est tout l'objet
+    /// du § 23, et une ligne d'audit qui pointe une cible disparue ne prouve
+    /// rien.
+    pub const REPORT_DAYS: &str = "report_days";
+
     pub const REALTIME_DURATION_MIN: &str = "realtime_duration_min";
     pub const REALTIME_WINDOW_MIN: &str = "realtime_window_min";
     pub const REALTIME_HEARTBEAT_SECS: &str = "realtime_heartbeat_secs";
@@ -92,6 +107,7 @@ pub mod keys {
         INVENTORY_DAYS,
         TLS_ENABLED,
         TRUSTED_PROXIES,
+        REPORT_DAYS,
         REALTIME_DURATION_MIN,
         REALTIME_WINDOW_MIN,
         REALTIME_HEARTBEAT_SECS,
@@ -114,6 +130,16 @@ pub const MIN_HEARTBEAT_INTERVAL_SECS: i64 = 5;
 /// explicite — la rétention de l'inventaire s'active donc à la main, et
 /// l'interface explique pourquoi on voudrait le faire.
 pub const DEFAULT_INVENTORY_DAYS: i64 = 0;
+/// Une semaine de fichiers de rapport.
+///
+/// ⚠️ **Le seul réglage de rétention dont le défaut n'est pas « illimité »**, et
+/// c'est délibéré : un rapport se régénère — les relevés restent en base, seul
+/// le classeur disparaît — alors qu'une mesure effacée ne se refait pas. Le
+/// défaut sûr s'inverse donc.
+pub const DEFAULT_REPORT_DAYS: i64 = 7;
+/// Plancher de [`DEFAULT_REPORT_DAYS`]. `0` est refusé, pas traduit en
+/// « illimité » : voir [`keys::REPORT_DAYS`].
+pub const MIN_REPORT_DAYS: i64 = 1;
 /// Une demi-heure : le temps de monter, brancher, vérifier et redescendre.
 pub const DEFAULT_REALTIME_DURATION_MIN: i64 = 30;
 /// Fenêtre affichée quand le mode temps réel est actif, en minutes.
@@ -239,6 +265,13 @@ impl Settings {
             .unwrap_or(DEFAULT_INVENTORY_DAYS)
     }
 
+    /// Combien de jours un **fichier** de rapport est conservé (§ 23).
+    pub fn report_days(&self) -> i64 {
+        self.get_or(keys::REPORT_DAYS, &DEFAULT_REPORT_DAYS.to_string())
+            .parse()
+            .unwrap_or(DEFAULT_REPORT_DAYS)
+    }
+
     /// Le hub doit-il servir en HTTPS lui-même.
     ///
     /// ⚠️ Lu **au démarrage seulement**. `--tls` (ou `LANPROBE_WEB_TLS`)
@@ -332,6 +365,7 @@ impl Settings {
             keys::BACKUP_INTERVAL_HOURS: self.backup_interval_hours(),
             keys::BACKUP_KEEP_LAST: self.backup_keep_last(),
             keys::INVENTORY_DAYS: self.inventory_days(),
+            keys::REPORT_DAYS: self.report_days(),
             keys::TLS_ENABLED: self.tls_enabled(),
             keys::TRUSTED_PROXIES: self.stored_trusted_proxies(),
             keys::REALTIME_DURATION_MIN: self.realtime_duration_min(),
@@ -499,6 +533,27 @@ impl Settings {
                     )));
                 }
             }
+            keys::REPORT_DAYS => {
+                let parsed: i64 = value
+                    .parse()
+                    .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
+                // 🔴 **Pas de `confirm_data_loss` ici, et ce n'est pas un
+                // oubli.** C'est le seul réglage de rétention dont la baisse ne
+                // fait pas signer : un rapport se régénère, les relevés restent
+                // en base. Une confirmation qui ne protège rien apprend à
+                // cliquer sans lire — et cette habitude-là se paiera sur
+                // `retention_days`, où elle protège vraiment.
+                //
+                // 🔴 **`0` est refusé, pas traduit en « illimité ».** C'est la
+                // saisie naturelle de qui vient de régler les deux autres
+                // rétentions, et elle donnerait le seul réglage du produit qui
+                // accumule sans fin des classeurs de clients sur le disque.
+                if parsed < MIN_REPORT_DAYS {
+                    return Err(DbError::Conflict(format!(
+                        "{key} vaut au minimum {MIN_REPORT_DAYS} jour : ici 0 ne veut pas dire                          « illimité », il n'y a pas de conservation sans fin des fichiers de                          rapport. Les entrées d'historique, elles, ne sont jamais purgées."
+                    )));
+                }
+            }
             other => return Err(DbError::Conflict(format!("réglage inconnu : {other}"))),
         }
         self.db.set_setting(key, value)
@@ -593,6 +648,44 @@ mod tests {
         assert_eq!(s.retention_days(), 0, "0 = rétention illimitée");
         assert_eq!(s.heartbeat_interval_secs(), 60);
         assert!(s.stored_advertise_url().is_none());
+    }
+
+    #[test]
+    fn report_days_is_a_known_setting_with_a_floor_of_one() {
+        // 🔴 `0` n'est PAS « illimité » ici, contrairement à `retention_days`
+        // et `inventory_days` : quelqu'un le mettra par analogie et obtiendra
+        // le seul réglage du produit qui laisse s'accumuler indéfiniment des
+        // classeurs de clients sur le disque (contrat § 7).
+        let s = settings();
+        assert_eq!(s.report_days(), DEFAULT_REPORT_DAYS);
+        assert_eq!(s.all()[keys::REPORT_DAYS], DEFAULT_REPORT_DAYS);
+
+        s.put(keys::REPORT_DAYS, "30", false).unwrap();
+        assert_eq!(s.report_days(), 30);
+
+        let refus = s.put(keys::REPORT_DAYS, "0", false).unwrap_err();
+        assert!(refus.to_string().contains("1"), "{refus}");
+        assert!(s.put(keys::REPORT_DAYS, "-3", false).is_err());
+        assert!(s.put(keys::REPORT_DAYS, "sept", false).is_err());
+        // Le refus n'écrase rien.
+        assert_eq!(s.report_days(), 30);
+    }
+
+    #[test]
+    fn shrinking_report_days_needs_no_confirmation() {
+        // ⚠️ Le seul réglage de rétention dont la baisse ne fait pas signer :
+        // un rapport se RÉGÉNÈRE — les relevés restent en base, seul le
+        // classeur disparaît. Une confirmation qui ne protège rien apprend à
+        // cliquer sans lire.
+        //
+        // ⚠️ Et la purge ne touche que le FICHIER : l'entrée d'historique — qui
+        // a demandé quel rapport, quand — n'est jamais purgée (§ 23).
+        let s = settings();
+        s.put(keys::REPORT_DAYS, "90", false).unwrap();
+
+        s.put(keys::REPORT_DAYS, "1", false).unwrap();
+
+        assert_eq!(s.report_days(), 1);
     }
 
     #[test]

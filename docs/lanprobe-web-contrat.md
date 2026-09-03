@@ -921,10 +921,18 @@ Deux conséquences, et elles vont dans des sens opposés :
 - **Réduire `report_days` ne demande aucune confirmation.** L'écran dit combien
   de fichiers seront purgés ; il ne fait pas signer. Une confirmation qui ne
   protège rien apprend à cliquer sans lire.
-- 🔴 **`0` n'est pas « illimité » ici : la valeur est refusée**, en `400`, avec un
+- 🔴 **`0` n'est pas « illimité » ici : la valeur est refusée**, en `409`, avec un
   message qui dit pourquoi. Quelqu'un la mettra par analogie avec les deux autres
   réglages et obtiendra le seul réglage du produit qui laisse s'accumuler
   indéfiniment des données de clients sur le disque. Minimum `1`.
+
+  ⚠️ **`409`, et non `400` comme ce paragraphe l'a d'abord écrit.** Les dix-huit
+  autres réglages refusent une valeur invalide en `409` — `DbError::Conflict`,
+  une seule sortie dans `settings.rs::put`. Faire diverger cette clé seule aurait
+  donné au même formulaire deux chemins d'erreur pour le même geste, et le second
+  n'aurait été exercé que par la clé la plus récente. Aligner les dix-huit autres
+  sur `400` aurait cassé une API déjà livrée. Le contrat suit donc le code :
+  c'est le code qui a dix-huit précédents.
 
 ⚠️ La purge ne touche **que le fichier**. L'entrée d'historique, elle, n'est
 jamais purgée — c'est tout l'objet du §23.
