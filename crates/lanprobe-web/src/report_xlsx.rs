@@ -25,15 +25,16 @@
 //! graphique Excel natif se recalcule à l'ouverture — le client trie une
 //! colonne et la courbe bouge sous ses yeux — et surtout il ne sait pas
 //! peindre les bandes de coupure : il relierait deux mesures séparées par une
-//! panne, ce qui est la faute cardinale de ce produit. Le dessin arrive avec
-//! le module de tracé ; le classeur se lit très bien sans, puisque l'image
-//! illustre des chiffres qui sont déjà dans les cellules.
+//! panne, ce qui est la faute cardinale de ce produit. Le dessin vit dans
+//! [`crate::report_chart`] ; le classeur se lit très bien sans, puisque
+//! l'image illustre des chiffres qui sont déjà dans les cellules.
 // Le générateur n'a pas encore d'appelant : la route qui le branche est
 // écrite à part (contrat § 23).
 #![allow(dead_code)]
 
 use serde::Deserialize;
 
+use crate::report_chart::chart_png;
 use crate::report_i18n::{iso_day, round_to, trim_num, Catalog};
 
 /// Délai d'attente d'un ping, côté sonde (`lanprobe-core/src/ping.rs`).
@@ -57,6 +58,15 @@ pub(crate) const PING_TIMEOUT_MS: f64 = 1000.0;
 /// colonne de 300 caractères qui pousse tout le reste hors de l'écran.
 const LARGEUR_MIN: usize = 10;
 const LARGEUR_MAX: usize = 46;
+
+/// Où se pose le graphique, et à quelle taille — repris du navigateur.
+///
+/// ⚠️ **À droite des données, jamais dessus** : il ne doit pas masquer les
+/// chiffres qu'il illustre. Colonne F, ligne 2.
+const IMAGE_LIGNE: u32 = 1;
+const IMAGE_COLONNE: u16 = 5;
+const IMAGE_LARGEUR: f64 = 720.0;
+const IMAGE_HAUTEUR: f64 = 210.0;
 
 /// Un onglet ne dépasse pas 31 caractères, et Excel refuse `\ / * ? : [ ]`.
 const NOM_ONGLET_MAX: usize = 31;
@@ -534,6 +544,22 @@ impl Feuille {
         self.ligne += 1;
     }
 
+    /// Pose le graphique à droite des données.
+    ///
+    /// ⚠️ L'échelle ramène les 900 × 260 pixels du dessin aux 720 × 210 points
+    /// du classeur du navigateur : dessiner plus grand puis réduire garde le
+    /// texte des axes lisible à l'impression.
+    fn image(&mut self, png: Vec<u8>) -> Result<(), String> {
+        let image = rust_xlsxwriter::Image::new_from_buffer(&png)
+            .map_err(|e| format!("graphique illisible : {e}"))?
+            .set_scale_width(IMAGE_LARGEUR / crate::report_chart::LARGEUR as f64)
+            .set_scale_height(IMAGE_HAUTEUR / crate::report_chart::HAUTEUR as f64);
+        self.ws
+            .insert_image(IMAGE_LIGNE, IMAGE_COLONNE, &image)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Ajuste chaque colonne au plus long contenu qu'elle porte, puis rend
     /// l'onglet prêt à être posé dans le classeur.
     fn poser(mut self, wb: &mut rust_xlsxwriter::Workbook) -> Result<(), String> {
@@ -779,6 +805,13 @@ pub(crate) fn build(workbook: &Workbook, catalog: &Catalog) -> Result<BuiltFile,
                     None => Cell::Vide,
                 },
             ])?;
+        }
+        // Le graphique se pose à droite des données, jamais dessus : il ne
+        // doit pas masquer les chiffres qu'il illustre. Absent quand la série
+        // est trop courte pour dire quoi que ce soit — le classeur se lit très
+        // bien sans, l'image illustre des chiffres qui sont déjà là.
+        if let Some(png) = chart_png(&l.samples, catalog) {
+            f.image(png)?;
         }
         f.poser(&mut wb)?;
     }
@@ -1654,6 +1687,43 @@ mod tests {
         assert!(onglet
             .values()
             .any(|v| *v == Lu::Texte("Indéterminé".into())));
+    }
+
+    // ── Le graphique ─────────────────────────────────────────────────────
+
+    fn images(bytes: &[u8]) -> usize {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut n = 0;
+        for i in 0..zip.len() {
+            if zip.by_index(i).unwrap().name().starts_with("xl/media/") {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// 🔴 Une IMAGE, jamais un graphique Excel natif : il se recalcule à
+    /// l'ouverture et ne sait pas peindre les bandes de coupure.
+    #[test]
+    fn chaque_feuille_de_cible_porte_son_graphique() {
+        let (_, f) = classeur(vec![payload_complet()], "fr");
+        // Accès internet et la cible : deux séries, deux dessins.
+        assert_eq!(images(&f.bytes), 2);
+    }
+
+    /// Une image ne s'invente pas à partir d'un point, et un cadre vide dans un
+    /// rapport se lit comme une panne de l'outil.
+    #[test]
+    fn une_serie_trop_courte_ne_recoit_pas_de_graphique_invente() {
+        let mut p = payload_complet();
+        p["targets"] = json!([{
+            "ip": "10.0.0.9",
+            "samples": [releve(0, Some(true), Some(5.0))],
+            "coverage": null,
+        }]);
+        p["internet"] = json!([]);
+        let (_, f) = classeur(vec![p], "fr");
+        assert_eq!(images(&f.bytes), 0);
     }
 
     // ── Largeur des colonnes ─────────────────────────────────────────────

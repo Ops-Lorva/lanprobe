@@ -397,7 +397,7 @@ fn plural_arm(body: &str, forme: &str) -> Option<String> {
 ///
 /// Algorithme `civil_from_days` de Howard Hinnant : pas de dépendance, pas de
 /// table, et juste sur les années bissextiles — que le rapport rencontrera.
-fn civil_from_epoch(epoch_secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+pub(crate) fn civil_from_epoch(epoch_secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     let days = epoch_secs.div_euclid(86_400);
     let rem = epoch_secs.rem_euclid(86_400);
     let z = days + 719_468;

@@ -68,6 +68,13 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 # contractuel.
 rust_xlsxwriter = { version = "0.99", default-features = false }
 
+# Le graphique du classeur : une IMAGE, jamais un graphique Excel natif — il se
+# recalcule à l'ouverture et ne sait pas peindre les bandes de coupure. `png`
+# encode le dessin, `fontdue` rastérise le texte des axes. Le poids de la
+# police embarquée est assumé côté hub : son image Docker se tire une fois.
+png = { version = "0.18", default-features = false }
+fontdue = "0.9"
+
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
