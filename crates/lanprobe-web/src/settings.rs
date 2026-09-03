@@ -87,6 +87,14 @@ pub mod keys {
     /// rien.
     pub const REPORT_DAYS: &str = "report_days";
 
+    /// Combien de **versions** de paquets de sonde le hub garde en cache.
+    ///
+    /// ⚠️ Des versions, pas des jours. « Ce qui date de plus de N jours »
+    /// purgerait le paquet de la version courante sur un hub tranquille, pour
+    /// le faire retélécharger au prochain enrôlement. « Les N dernières
+    /// versions » dit ce qui est gardé, et c'est ce que l'écran affiche.
+    pub const PACKAGE_KEEP_VERSIONS: &str = "package_keep_versions";
+
     pub const REALTIME_DURATION_MIN: &str = "realtime_duration_min";
     pub const REALTIME_WINDOW_MIN: &str = "realtime_window_min";
     pub const REALTIME_HEARTBEAT_SECS: &str = "realtime_heartbeat_secs";
@@ -108,6 +116,7 @@ pub mod keys {
         TLS_ENABLED,
         TRUSTED_PROXIES,
         REPORT_DAYS,
+        PACKAGE_KEEP_VERSIONS,
         REALTIME_DURATION_MIN,
         REALTIME_WINDOW_MIN,
         REALTIME_HEARTBEAT_SECS,
@@ -141,6 +150,12 @@ pub const DEFAULT_REPORT_DAYS: i64 = 7;
 /// « illimité » : voir [`keys::REPORT_DAYS`].
 pub const MIN_REPORT_DAYS: i64 = 1;
 /// Une demi-heure : le temps de monter, brancher, vérifier et redescendre.
+/// Deux versions : celle qu'on installe, et celle d'avant — qu'on réinstalle
+/// quand la nouvelle pose problème.
+pub const DEFAULT_PACKAGE_KEEP_VERSIONS: i64 = crate::packages::DEFAULT_KEEP_VERSIONS;
+/// Plancher : un cache vidé à chaque récupération n'est plus un cache.
+pub const MIN_PACKAGE_KEEP_VERSIONS: i64 = 1;
+
 pub const DEFAULT_REALTIME_DURATION_MIN: i64 = 30;
 /// Fenêtre affichée quand le mode temps réel est actif, en minutes.
 ///
@@ -272,6 +287,16 @@ impl Settings {
             .unwrap_or(DEFAULT_REPORT_DAYS)
     }
 
+    /// Combien de versions de paquets de sonde restent sur le volume.
+    pub fn package_keep_versions(&self) -> i64 {
+        self.get_or(
+            keys::PACKAGE_KEEP_VERSIONS,
+            &DEFAULT_PACKAGE_KEEP_VERSIONS.to_string(),
+        )
+        .parse()
+        .unwrap_or(DEFAULT_PACKAGE_KEEP_VERSIONS)
+    }
+
     /// Le hub doit-il servir en HTTPS lui-même.
     ///
     /// ⚠️ Lu **au démarrage seulement**. `--tls` (ou `LANPROBE_WEB_TLS`)
@@ -366,6 +391,7 @@ impl Settings {
             keys::BACKUP_KEEP_LAST: self.backup_keep_last(),
             keys::INVENTORY_DAYS: self.inventory_days(),
             keys::REPORT_DAYS: self.report_days(),
+            keys::PACKAGE_KEEP_VERSIONS: self.package_keep_versions(),
             keys::TLS_ENABLED: self.tls_enabled(),
             keys::TRUSTED_PROXIES: self.stored_trusted_proxies(),
             keys::REALTIME_DURATION_MIN: self.realtime_duration_min(),
@@ -551,6 +577,19 @@ impl Settings {
                 if parsed < MIN_REPORT_DAYS {
                     return Err(DbError::Conflict(format!(
                         "{key} vaut au minimum {MIN_REPORT_DAYS} jour : ici 0 ne veut pas dire                          « illimité », il n'y a pas de conservation sans fin des fichiers de                          rapport. Les entrées d'historique, elles, ne sont jamais purgées."
+                    )));
+                }
+            }
+            keys::PACKAGE_KEEP_VERSIONS => {
+                let parsed: i64 = value
+                    .parse()
+                    .map_err(|_| DbError::Conflict(format!("{key} doit être un entier")))?;
+                // Aucune confirmation de perte : un paquet purgé se retélécharge
+                // depuis GitHub, et le hub le revérifie. Rien ne se perd.
+                if parsed < MIN_PACKAGE_KEEP_VERSIONS {
+                    return Err(DbError::Conflict(format!(
+                        "{key} vaut au minimum {MIN_PACKAGE_KEEP_VERSIONS} version : \
+                         un cache vidé à chaque récupération n'est plus un cache."
                     )));
                 }
             }

@@ -273,6 +273,18 @@ async fn main() -> Result<(), String> {
                     n => tracing::info!("rapports : {n} classeur(s) échus retirés du volume"),
                 }
 
+                // Paquets de sonde au-delà des N dernières versions. Le cache
+                // ne grossit qu'à une récupération, qui le taille déjà ; cette
+                // passe-ci est ce qui fait prendre effet une baisse du réglage
+                // sur un hub où personne ne récupère plus rien.
+                let keep = settings.package_keep_versions();
+                match lanprobe_web::packages::purge_cached_packages(&config_dir, keep) {
+                    0 => {}
+                    n => tracing::info!(
+                        "paquets : {n} fichier(s) au-delà des {keep} dernières versions retirés"
+                    ),
+                }
+
                 let days = settings.inventory_days();
                 if days <= 0 {
                     continue;

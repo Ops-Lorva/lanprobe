@@ -295,6 +295,7 @@ pub fn build_router(state: AppState) -> Router {
         // Chacune tient son module, celui-ci ne tient que la couture.
         .merge(crate::pairing::routes(&state))
         .merge(crate::reports::routes(&state))
+        .merge(crate::packages::routes(&state))
         .with_state(state)
         // L'interface web est servie en dernier : toute requête qui n'a
         // trouvé aucune route d'API tombe ici.

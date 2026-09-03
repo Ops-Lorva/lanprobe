@@ -2509,6 +2509,7 @@ dependencies = [
  "http-body-util",
  "lanprobe-core",
  "mime_guess",
+ "minisign-verify",
  "png 0.18.1",
  "qrcode",
  "rcgen",

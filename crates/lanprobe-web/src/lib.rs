@@ -12,6 +12,7 @@ pub mod client_ip;
 pub mod db;
 pub mod influx;
 pub mod notify;
+pub mod packages;
 pub mod pairing;
 pub mod probe;
 pub mod report_chart;

@@ -55,6 +55,13 @@ ring = "0.17"
 base64 = "0.22"
 getrandom = "0.2"
 
+# 🔴 Le hub distribue les paquets de la sonde : il vérifie leur signature
+# minisign AVANT de les servir. Même mécanisme et même clé publique que
+# l'updater embarqué dans l'app (`src-tauri/src/updater.rs`) — servir un
+# binaire non vérifié depuis son propre serveur serait moins sûr que de
+# renvoyer la personne vers GitHub, où elle verrait au moins d'où il vient.
+minisign-verify = "0.2"
+
 # Archive de sauvegarde. ZIP et non tar.zst : l'utilisateur doit pouvoir
 # l'ouvrir avec l'explorateur de son système sans rien installer, ce qui
 # exclut zstd sous Windows et macOS. `deflate` seul — les autres méthodes de

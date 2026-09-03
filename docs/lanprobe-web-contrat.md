@@ -735,6 +735,7 @@ du hub, et un lecteur qui parcourt le §3 doit savoir qu'elles existent.
 | `GET`/`PATCH /api/me/devices[/{id}]`, `POST /api/me/devices/{id}/revoke` | §22 |
 | `GET /api/devices[?user=]`, `POST /api/devices/{id}/revoke` | §22 |
 | `POST`/`GET /api/sites/{id}/reports`, `GET /api/reports/{id}`, `GET /api/reports/{id}/file` | §23 |
+| `GET /api/packages`, `POST /api/packages/{platform}/fetch`, `GET /api/packages/{platform}/file` | §24 |
 
 ⚠️ **`POST /api/pair` et `POST /api/devices/token` ne sont pas authentifiées par
 session** — c'est le code, puis le secret d'appareil, qui authentifient. Elles
@@ -1178,6 +1179,7 @@ d'objet, parce que le paramètre porte le même nom et ne désigne pas la même 
 | `GET /api/settings`, `GET /api/settings/influx-advertise`, `GET /api/influx` | `viewer` | aucune de ces réponses ne porte de secret |
 | `GET /api/notifications/subscriptions` | `viewer` | |
 | `GET /api/probes/{id}/metrics`, `/uptime`, `/inventory`, `/sla`, `/sla.csv`, `/public-ips` | `viewer` | **portée** |
+| `GET /api/packages`, `POST /api/packages/{p}/fetch`, `GET /api/packages/{p}/file` | `operator` | distribuer un installeur prolonge l'enrôlement (§24) |
 | `POST /api/sites` | `operator` | |
 | `PATCH`/`DELETE /api/sites/{id}`, `POST /api/sites/{id}/archive` | `operator` | **portée** |
 | `POST`/`GET /api/sites/{id}/reports` | `viewer` | **portée** — §23 |
@@ -1283,7 +1285,8 @@ Actions journalisées : `auth.setup`, `auth.login`, `auth.logout`,
 `site.unarchive`, `user.scope`, `user.password_reset_cli`, `backup.create`,
 `backup.restore`, `backup.retention`, `device.pair_code`, `device.pair`,
 `device.rename`, `device.revoke`, `device.rotate`, `device.refused`,
-`report.request`, `report.download`, `report.purge`.
+`report.request`, `report.download`, `report.purge`, `package.fetch`,
+`package.download`.
 
 ⚠️ **Deux actions volontairement ABSENTES de cette liste.**
 
@@ -2809,3 +2812,77 @@ sondes, même fenêtre — à quelle granularité ?) est plus coûteuse à défi
 qu'à recalculer, et un faux « c'est le même rapport » remettrait le fichier
 d'hier en le présentant comme celui d'aujourd'hui. C'est la valeur plausible et
 fausse, sur le document qui part chez le client.
+
+
+## 24. Paquets de la sonde, servis par le hub
+
+Le besoin naît à l'enrôlement : le hub donne un code, et il fallait aller
+chercher le binaire ailleurs. **C'est à cet endroit précis que le lien
+manquait** — pas dans les réglages.
+
+Un seul bouton, qui ouvre une liste. Quatre boutons noieraient le geste
+principal de cet écran, qui reste l'enrôlement.
+
+### Le hub relaie, il ne pointe pas
+
+1. **Le poste du client n'a plus besoin d'atteindre GitHub** — seul le hub sort.
+   Sur un réseau d'entreprise filtré, c'est la différence entre « ça marche » et
+   « débrouillez-vous ».
+2. 🔴 **Le hub vérifie la signature minisign avant de servir.** Même mécanisme
+   et même clé que l'updater embarqué dans l'app. C'est le point qui justifie
+   toute la fonctionnalité, pas une option : un hub qui distribue des binaires
+   non vérifiés depuis son propre serveur est **moins** sûr que le lien GitHub
+   qu'il remplace, parce que la personne ne voit même plus d'où ils viennent.
+
+⚠️ **Récupération à la demande, jamais au démarrage.** Tirer cinquante
+mégaoctets sur chaque hub pour des paquets que personne ne demandera peut-être
+est un coût pour rien.
+
+⚠️ **L'écran d'enrôlement ne dépend d'aucun appel sortant.** Ces routes sont les
+seules à sortir, et seulement quand on ouvre la liste. Un hub sans Internet
+affiche son code d'enrôlement comme d'habitude ; l'indisponibilité des paquets
+**se dit**, elle ne se devine pas devant un bouton mort.
+
+### Ce qui est distribuable, et ce qui ne l'est pas
+
+| Plateforme | Fichier | Signé par la CI |
+|---|---|---|
+| `macos` | `lanprobe_vX.Y.Z_universal.pkg` | oui |
+| `windows` | `lanprobe_vX.Y.Z_x64-setup.exe` | oui |
+| `debian` | `lanprobe_vX.Y.Z_amd64.deb` | oui |
+| `debian-headless` | `lanprobe-server_vX.Y.Z_amd64.deb` | **non — voir ci-dessous** |
+
+🔴 **Le `.dmg` n'est pas distribué** : la CI ne le signe pas (elle publie un
+`.sha256` à côté, sur la même release — une empreinte publiée au même endroit
+que le fichier ne prouve rien contre une release compromise). Le `.pkg`, lui,
+est signé, notarisé et stapled : c'est celui que le hub sert.
+
+🔴 **Le `.deb` headless n'a aujourd'hui aucun `.sig` publié.** Son job de CI ne
+comporte pas d'étape de signature, contrairement aux trois autres. Le hub ne le
+sert donc pas, et **le dit avant le clic** — la présence de `<asset>.sig` dans
+la liste des assets de la release se lit sans rien télécharger. Le jour où la CI
+le signe, rien à changer côté hub : il devient distribuable tout seul.
+
+### Le cache
+
+Sur le volume, à côté des rapports : `packages/<tag>/<nom d'asset>`. Un
+téléchargement en cours porte le suffixe `.part` et **n'est jamais servi** — un
+installeur tronqué s'ouvre, et échoue beaucoup plus loin, sur la machine du
+client. Le fichier n'est renommé qu'**après** vérification de sa signature.
+
+⚠️ **La purge compte des versions, pas des jours** (`package_keep_versions`,
+défaut 2, plancher 1). « Ce qui date de plus de N jours » purgerait le paquet de
+la version courante sur un hub tranquille, pour le faire retélécharger au
+prochain enrôlement. « Les deux dernières versions » dit ce qui est gardé, et
+c'est ce que l'écran affiche. Un répertoire dont le nom n'est pas une version
+n'est **pas** retiré : on ne supprime pas ce qu'on ne sait pas lire.
+
+⚠️ **Aucun numéro de version en dur, nulle part.** Il est lu du tag de la
+release, ou de celui du répertoire de cache, ou il est absent. Un numéro figé se
+périme et devient un mensonge.
+
+### L'app mobile
+
+⚠️ **Aucun lien vers l'App Store tant qu'elle n'y est pas.** Un lien mort est
+pire que pas de lien : il envoie chercher une application qui n'existe pas et
+fait douter du reste de l'écran.
