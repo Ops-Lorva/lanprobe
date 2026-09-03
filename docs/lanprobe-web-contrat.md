@@ -2066,6 +2066,47 @@ route rendait `500 { "error": "FOREIGN KEY constraint failed" }` — un code qui
 **affirme que le hub est en panne** quand la vérité est « cette sonde n'existe
 pas », et qui livrait au passage le nom d'une contrainte SQL au navigateur.
 
+### L'ajout note la décision du hub au moment où il l'émet
+
+⚠️ **L'ajout n'a pas de route dédiée, et n'en a pas besoin : il passe par la file
+de commandes (§14), et c'est `POST /api/probes/{id}/commands` avec
+`kind: "add_monitor"` qui écrit la décision dans `probe_monitors`, en plus
+d'empiler l'ordre.** L'asymétrie d'avant se lit dans la base de production du
+02/09 :
+
+```
+02:09:16  commande add_monitor {"ip":"8.8.8.8"}  ← émise par le hub
+02:10:34  la cible est PINGUÉE, et absente de probe_monitors
+02:12:31  probe_monitors reçoit enfin sa ligne
+```
+
+Trois minutes pendant lesquelles une cible réellement mesurée était **inconnue de
+la liste partagée du hub — qui venait pourtant de l'ordonner**. Le hub attendait
+que la sonde **réannonce** la cible pour l'inscrire. Retirer écrivait déjà tout de
+suite ; ajouter attendait. C'est ce trou qui faisait porter à la cible le drapeau
+« plus annoncée » sur la fiche de la sonde : il disait vrai, sur une cible que le
+hub avait demandée trois minutes plus tôt.
+
+- ⚠️ **Les deux chemins sont nécessaires, et aucun n'est retiré.** La commande
+  fait **agir** la sonde ; l'écriture ne fait qu'**enregistrer la décision**.
+  Noter sans empiler donnerait une cible « surveillée » que personne ne pingue —
+  l'écran afficherait « en attente du premier relevé » indéfiniment.
+- ⚠️ **L'écriture vient APRÈS l'empilement.** Si elle échoue, on retombe sur le
+  comportement d'avant et le battement suivant inscrit la cible. Dans l'autre
+  ordre, un empilement raté laisserait une ligne que rien ne viendrait confirmer.
+- ⚠️ **L'arbitrage reste celui du §20** : l'ajout passe par
+  `apply_monitor_change`, il ne force pas la ligne. Un retrait **plus récent**
+  continue de gagner — un ajout ne ressuscite jamais une cible retirée après lui.
+- **Une seule ligne d'audit**, `probe.command`, qui nomme déjà le geste et son
+  auteur. Un second `probe.monitor_add` ferait lire deux gestes pour un clic.
+- Sonde inconnue : `404 { "error": "sonde inconnue" }` **avant toute écriture**,
+  et toujours indiscernable d'une sonde hors portée.
+
+⚠️ **`remove_monitor` reste, lui, dans l'état d'avant** : le type de commande est
+toujours servi et n'écrit aucune suppression. L'interface ne l'emprunte plus — son
+bouton « Retirer » passe par `POST /monitors/remove` — mais un appel scripté à la
+route de commandes rouvre la même fenêtre. À traiter avec le même geste.
+
 ### ⚠️ Deux champs, deux faits — ce n'est pas une redondance
 
 `GET /api/probes` expose les deux :

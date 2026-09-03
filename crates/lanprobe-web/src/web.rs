@@ -3870,6 +3870,46 @@ async fn create_command(
         Outcome::Success,
         Some(&format!("{kind} sur « {} »", probe.name)),
     );
+
+    // 🔴 Le hub note SA PROPRE décision, au moment où il l'émet.
+    //
+    // Lu dans la base de production le 02/09 : commande `add_monitor` à
+    // 02:09:16, cible réellement pinguée à 02:10:34, ligne dans
+    // `probe_monitors` seulement à 02:12:31 — le hub attendait que la sonde
+    // RÉANNONCE une cible qu'il venait lui-même de demander. Trois minutes
+    // pendant lesquelles une cible mesurée était inconnue de la liste
+    // partagée, et l'écran la marquait « plus annoncée ». Retirer écrivait
+    // déjà tout de suite ; ajouter est maintenant symétrique.
+    //
+    // ⚠️ APRÈS l'empilement, jamais avant. Si l'écriture échoue, on retombe
+    // sur le comportement d'avant — le battement suivant inscrira la cible.
+    // Dans l'autre ordre, un empilement raté laisserait une cible
+    // « surveillée » côté hub que personne ne pingue : l'écran afficherait
+    // « en attente du premier relevé » pour toujours.
+    //
+    // ⚠️ L'arbitrage reste délégué à `apply_monitor_change` : un ajout ne
+    // force pas la ligne, un retrait plus récent continue de gagner (§20).
+    //
+    // ⚠️ Pas de second `audit` : `probe.command` ci-dessus nomme déjà le geste
+    // et son auteur. Deux entrées pour un seul clic feraient lire deux gestes.
+    if kind == "add_monitor" {
+        if let Some(target) = args
+            .get("ip")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            if let Err(e) = state
+                .db
+                .apply_monitor_change(&id, target, false, crate::db::now())
+            {
+                tracing::warn!(
+                    "décision d'ajout de « {target} » non notée ({e}) — le battement de la sonde l'inscrira"
+                );
+            }
+        }
+    }
+
     // La sonde ne l'exécutera qu'à son prochain battement : le dire évite
     // qu'on croie la commande perdue pendant la minute qui suit.
     ok_json(json!({
@@ -6772,6 +6812,134 @@ mod tests {
             h.state.db.monitors(&probe_id).unwrap()[0].removed_at,
             None,
             "réactiver, c'est effacer la suppression"
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_from_the_hub_is_recorded_at_once_like_removing_is() {
+        // 🔴 Lu dans la base de production le 02/09 :
+        //
+        //     02:09:16  commande add_monitor {"ip":"8.8.8.8"}  ← émise par le hub
+        //     02:10:34  la cible est PINGUÉE, mais absente de probe_monitors
+        //     02:12:31  probe_monitors reçoit enfin sa ligne
+        //
+        // Trois minutes pendant lesquelles le hub ne connaît pas une cible
+        // qu'il vient lui-même d'ordonner de surveiller. C'est ce trou qui
+        // produisait le drapeau « plus annoncée » sur l'écran de la sonde : il
+        // disait vrai, sur une cible que le hub avait demandée.
+        //
+        // Retirer écrit tout de suite depuis `POST /monitors/remove`. Ajouter
+        // attendait que la sonde RÉANNONCE la cible. Les deux gestes doivent
+        // être symétriques : le hub note sa décision au moment où il l'émet.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    json!({ "kind": "add_monitor", "args": { "ip": "8.8.8.8" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // ⚠️ AUCUN battement entre les deux : c'est tout l'objet du test.
+        let entries = h.state.db.monitors(&probe_id).unwrap();
+        assert_eq!(entries.len(), 1, "la décision du hub est écrite sans attendre la sonde : {body}");
+        assert_eq!(entries[0].target, "8.8.8.8");
+        assert_eq!(entries[0].removed_at, None, "elle est ajoutée, pas retirée");
+    }
+
+    #[tokio::test]
+    async fn adding_from_the_hub_still_sends_the_order_to_the_probe() {
+        // ⚠️ On AJOUTE un chemin, on n'en retire pas. La route ne fait
+        // qu'enregistrer la décision ; c'est la commande qui fait AGIR la
+        // sonde. Noter la décision sans empiler la commande donnerait une
+        // cible « surveillée » côté hub que personne ne pingue — l'écran
+        // afficherait « en attente du premier relevé » pour toujours.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    json!({ "kind": "add_monitor", "args": { "ip": "8.8.8.8" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["state"], "pending", "la commande part toujours : {body}");
+
+        let commands = h.state.db.list_commands(&probe_id, 50).unwrap();
+        assert_eq!(commands.len(), 1, "la file garde son ordre");
+    }
+
+    #[tokio::test]
+    async fn adding_never_resurrects_a_target_removed_more_recently() {
+        // ⚠️ Règle du §20, et c'est exactement ce qu'un ajout écrit « en
+        // direct » peut casser : l'arbitrage au plus récent reste délégué à
+        // `apply_monitor_change`, l'ajout ne force jamais la ligne. Un retrait
+        // postérieur — la sonde rapporte au battement un geste local daté
+        // d'après le nôtre — doit continuer de gagner.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+        h.state
+            .db
+            .apply_monitor_change(&probe_id, "8.8.8.8", true, crate::db::now() + 60)
+            .unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    json!({ "kind": "add_monitor", "args": { "ip": "8.8.8.8" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let entries = h.state.db.monitors(&probe_id).unwrap();
+        assert!(
+            entries[0].removed_at.is_some(),
+            "le retrait plus récent tient : l'ajout ne le piétine pas"
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_on_an_unknown_probe_writes_nothing_and_still_says_404() {
+        // ⚠️ Acquis à ne pas casser : « sonde inconnue » et « sonde hors
+        // portée » restent indiscernables — même code, même message. Et une
+        // décision notée pour une sonde qui n'existe pas serait une ligne
+        // orpheline qu'aucun battement ne viendrait jamais confirmer.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    "/api/probes/sonde-qui-nexiste-pas/commands",
+                    json!({ "kind": "add_monitor", "args": { "ip": "8.8.8.8" } }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "sonde inconnue", "{body}");
+        assert!(
+            h.state.db.monitors("sonde-qui-nexiste-pas").unwrap().is_empty(),
+            "rien d'écrit pour une sonde qui n'existe pas"
         );
     }
 
