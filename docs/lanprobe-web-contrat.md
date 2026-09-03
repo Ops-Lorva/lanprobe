@@ -2159,3 +2159,32 @@ pas avec le rendu, et ces trois défauts y étaient tous attrapables.
 Le CSS, lui, reste hors de portée d'un test unitaire. Le défaut n°1 se serait
 vu à l'œil, pas dans une assertion : une capture avant/après reste nécessaire
 pour toute modification de mise en page.
+
+### Le périmètre de compilation — `cargo check --workspace`
+
+🔴 **`cargo-lowmem check --workspace --all-targets` fait partie des gestes
+manuels d'avant-livraison, au même titre que `cargo test` et `npm test`.**
+
+Il existe pour une raison datée. Le 02/09/2026, la publication a échoué **sur
+les trois plateformes** sur une erreur de compilation triviale : `ec83f01`
+avait changé `PingSample.alive` en `Option<bool>` dans `lanprobe-core`, et le
+site d'appel de `src-tauri` n'avait pas suivi. Personne ne l'a vue parce que
+les suites étaient lancées en `-p lanprobe-core -p lanprobe-server -p
+lanprobe-web` : **le crate de l'application de bureau n'était dans aucun `-p`**,
+et rien ne le compilait donc jamais. Il contenait pourtant déjà des tests
+(`src-tauri/src/updater.rs`) que personne n'exécutait.
+
+⚠️ **Le trou n'était pas dans la finesse des tests, il était dans le périmètre
+de compilation.** Aucun test supplémentaire n'aurait attrapé cette erreur : un
+test ne s'exécute que sur du code compilé, et ce code ne l'était pas. Une suite
+ciblée laisse des crates entiers hors du champ, et c'est ce qui a laissé une
+erreur de compilation aller jusqu'à la publication.
+
+⚠️ `--all-targets` n'est pas facultatif : sans lui, les `#[cfg(test)]` restent
+hors du champ, et un test qui ne compile plus passe inaperçu jusqu'au jour où
+on le lance.
+
+⚠️ Ce dépôt **n'a aucune CI de test** (cf. le début de cette section) : le tag
+déclenche une construction, qui est le premier moment où le crate de bureau est
+compilé. Sans ce geste manuel, la première machine à découvrir qu'un crate ne
+compile plus est celle qui produit les binaires livrés.
