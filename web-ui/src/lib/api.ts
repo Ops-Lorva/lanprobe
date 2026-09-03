@@ -203,6 +203,18 @@ export interface HubSettings {
    */
   inventory_days: number;
   /**
+   * Rétention des **fichiers** de rapport, en jours.
+   *
+   * 🔴 **Le seul réglage de rétention dont `0` ne veut pas dire « illimité » :
+   * il est refusé.** Les deux autres gardent des mesures qu'on ne peut pas
+   * refaire ; un rapport, lui, se régénère — seul le fichier disparaît, jamais
+   * l'entrée d'historique qui dit qui l'a demandé.
+   *
+   * ⚠️ Un hub antérieur à ce réglage ne le renvoie pas : lire `?? 7` plutôt que
+   * la valeur brute, sans quoi le formulaire se croit modifié dès l'ouverture.
+   */
+  report_days: number;
+  /**
    * Le hub termine lui-même le TLS, avec un certificat auto-signé.
    * ⚠️ Lu au démarrage seulement : l'activer ne change rien tant que le
    * conteneur n'a pas redémarré.
@@ -257,6 +269,7 @@ export const SETTINGS_DEFAULTS: HubSettings = {
   backup_interval_hours: 24,
   backup_keep_last: 7,
   inventory_days: 0,
+  report_days: 7,
   tls_enabled: false,
   trusted_proxies: '',
   realtime_duration_min: 30,
