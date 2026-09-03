@@ -3,6 +3,7 @@ import {
   curveTarget,
   engineLabel,
   gapLimit,
+  hasPreviousAnswer,
   internetSamples,
   normalizeState,
   segments,
@@ -146,5 +147,42 @@ describe('internetSamples', () => {
     ]);
     expect(rows.map((s) => s.alive)).toEqual([true, false, false, false]);
     expect(rows.map((s) => s.state)).toEqual(['online', 'limited', 'offline', 'unknown']);
+  });
+});
+
+describe('hasPreviousAnswer', () => {
+  it('dit non tant qu\u2019aucune lecture n\u2019a abouti', () => {
+    // Le premier chargement, et lui seul, a le droit de vider l'écran : il n'y
+    // a rien à garder.
+    expect(hasPreviousAnswer(['loading', 'loading', 'loading'])).toBe(false);
+  });
+
+  it('dit oui dès qu\u2019un graphe porte des points', () => {
+    expect(hasPreviousAnswer(['ready', 'loading', 'loading'])).toBe(true);
+  });
+
+  it('dit oui sur une fenêtre SANS mesure', () => {
+    // 🔴 Le défaut : la règle demandait un graphe « ready ». Sur une fenêtre
+    // vide les trois tonalités valent `empty`, elle répondait donc non, et le
+    // tour de lecture remettait tout à `loading` — un chargeur qui revenait
+    // toutes les trois secondes sur une carte qui n'a rien à montrer.
+    expect(hasPreviousAnswer(['empty', 'empty', 'empty'])).toBe(true);
+  });
+
+  it('dit oui sur une lecture en échec', () => {
+    // 🔴 Même défaut, et celui-là est pire : l'erreur disparaissait le temps
+    // de chaque tour. Un message qui clignote se lit comme un incident qui va
+    // et vient, alors que c'est la même panne qui dure.
+    expect(hasPreviousAnswer(['error', 'error', 'error'])).toBe(true);
+  });
+
+  it('ne demande pas que TOUS aient répondu', () => {
+    // Les trois graphes ne se remplissent pas ensemble : exiger l'unanimité
+    // reviendrait à vider les deux autres à cause du troisième.
+    expect(hasPreviousAnswer(['loading', 'empty', 'loading'])).toBe(true);
+  });
+
+  it('ne dit rien d\u2019une liste vide', () => {
+    expect(hasPreviousAnswer([])).toBe(false);
   });
 });

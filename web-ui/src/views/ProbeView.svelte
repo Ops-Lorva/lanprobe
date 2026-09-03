@@ -59,6 +59,7 @@
     internetSamples,
     curveTarget,
     engineLabel,
+    hasPreviousAnswer,
   } from '$lib/charts';
   // Le découpage en cartes vit dans un `.ts` avec son test : le projet ne
   // monte pas de composants, une règle écrite dans ce gabarit ne serait
@@ -436,6 +437,14 @@
   let speed = $state<ChartState>({ ...blank });
   let refreshing = $state(false);
   /**
+   * Au bout de combien de temps une lecture en cours mérite d'être annoncée.
+   *
+   * ⚠️ À rapprocher de `REFRESH_MS` (3 s) : en dessous de ce délai, l'annonce
+   * ne dirait pas « je lis », elle dirait « je clignote ». Au-dessus, elle
+   * redevient ce qu'elle doit être — le signe que le hub met du temps.
+   */
+  const ANNONCE_LECTURE_MS = 600;
+  /**
    * Instant de la dernière lecture : c'est lui qui borne l'axe, pas `now`.
    * Une horloge réactive ferait glisser les trois graphiques à chaque
    * seconde alors que leurs points, eux, ne bougent pas.
@@ -487,13 +496,26 @@
   }
 
   async function loadMetrics() {
-    const hadData = ping.tone === 'ready' || inet.tone === 'ready' || speed.tone === 'ready';
-    refreshing = hadData;
-    if (!hadData) {
+    // ⚠️ Le premier chargement, et lui seul, a le droit de vider l'écran : il
+    // n'y a rien à garder. Passé celui-là, on tient les dernières données
+    // valides jusqu'à l'arrivée des nouvelles — la règle vit dans `charts.ts`,
+    // avec ses tests, parce qu'elle s'était déjà trompée deux fois ici.
+    const dejaRepondu = hasPreviousAnswer([ping.tone, inet.tone, speed.tone]);
+    if (!dejaRepondu) {
       ping = { ...blank };
       inet = { ...blank };
       speed = { ...blank };
     }
+    // 🔴 La lecture ne s'annonce qu'au-delà d'un DÉLAI. Elle s'annonçait
+    // aussitôt, et comme la fiche se relit toutes les 3 s, les six cartes
+    // s'assombrissaient puis revenaient trois fois par minute : un clignotement
+    // permanent, sur le mode d'usage qu'on encourage — la fiche qu'on laisse
+    // ouverte. Une lecture qui aboutit en un dixième de seconde n'a rien à
+    // annoncer ; celle qui traîne, si, et elle le dit désormais VRAIMENT au
+    // lieu de se confondre avec les autres.
+    const annonce = dejaRepondu
+      ? setTimeout(() => (refreshing = true), ANNONCE_LECTURE_MS)
+      : null;
     // ⚠️ La fenêtre est figée pour tout le tour : lue trois fois, un clic
     // pendant le chargement donnerait trois graphiques sur trois périodes.
     const choice = win;
@@ -506,6 +528,7 @@
     inet = i;
     speed = s;
     loadedAt = Date.now();
+    if (annonce) clearTimeout(annonce);
     refreshing = false;
     // Même fenêtre que les courbes, lue dans la foulée : le graphe et le
     // tableau par adresse doivent parler de la même période, sinon un repère

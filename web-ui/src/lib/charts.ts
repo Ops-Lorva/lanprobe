@@ -146,3 +146,29 @@ export function segments<T extends { t: number }>(points: T[]): T[][] {
   if (current.length) out.push(current);
   return out;
 }
+
+/** Tonalité d'un graphe — la même que celle de `ChartCard`. */
+export type ChartTone = 'loading' | 'error' | 'empty' | 'ready';
+
+/**
+ * Y a-t-il déjà quelque chose à l'écran qu'un nouveau tour de lecture doive
+ * ÉPARGNER ?
+ *
+ * 🔴 La fiche se relit toutes les trois secondes. Si chaque tour repasse par
+ * l'état vide, l'écran ne montre pas une lecture : il montre une disparition,
+ * trois fois par minute. On garde donc les dernières données valides jusqu'à ce
+ * que les nouvelles arrivent, et le premier chargement — le seul qui n'ait rien
+ * à garder — reste le seul à afficher son attente.
+ *
+ * ⚠️ « A répondu » et non « a des points ». La règle exigeait une tonalité
+ * `ready` : sur une fenêtre sans mesure les trois graphes valent `empty`, elle
+ * répondait donc non et le tour remettait tout à `loading`. Et sur une lecture
+ * en échec, c'est le MESSAGE D'ERREUR qui disparaissait à chaque tour — une
+ * panne qui dure se lisait comme un incident qui va et vient.
+ *
+ * ⚠️ `some` et non `every` : les trois graphes ne se remplissent pas ensemble,
+ * exiger l'unanimité reviendrait à vider les deux autres à cause du troisième.
+ */
+export function hasPreviousAnswer(tones: ChartTone[]): boolean {
+  return tones.some((t) => t !== 'loading');
+}
