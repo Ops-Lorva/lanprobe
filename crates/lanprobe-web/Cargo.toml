@@ -61,6 +61,13 @@ getrandom = "0.2"
 # compression du format ne sont pas lues par tous les outils intégrés.
 zip = { version = "4", default-features = false, features = ["deflate"] }
 
+# Le classeur SLA remis au client (contrat § 23). Un XLSX est un zip et `zip`
+# est déjà là — mais écrire le SpreadsheetML à la main serait une bibliothèque
+# de plus à maintenir, avec ses formats de cellule, ses chaînes partagées et
+# ses noms d'onglet à valider. Une dette permanente pour un document
+# contractuel.
+rust_xlsxwriter = { version = "0.99", default-features = false }
+
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,10 +1,17 @@
 /**
  * Rapport SLA à remettre à un client, au format Excel.
  *
- * ⚠️ Pourquoi ici et pas côté hub : produire un XLSX en Rust demanderait une
- * dépendance de plus dans un binaire qu'on veut petit, et le rapport est une
- * mise en forme, pas une donnée. Le hub rend les relevés bruts ; la mise en
- * page vit là où on la regarde.
+ * ⚠️ **Ce générateur n'est plus le seul, et il n'est plus la référence.** Le
+ * hub produit désormais le même classeur (`crates/lanprobe-web/src/
+ * report_xlsx.rs`, contrat § 23) parce qu'une app native n'a ni `exceljs` ni
+ * `<canvas>`. Ce fichier doit basculer sur la route du hub : sans cela on ne
+ * passe pas de deux générateurs à un, on passe à trois.
+ *
+ * ⚠️ L'argument qui tenait ici — « une dépendance de plus dans un binaire
+ * qu'on veut petit » — vaut pour la SONDE, qu'on installe chez le client, pas
+ * pour le hub : son image Docker se tire une fois. Il a servi à justifier de
+ * laisser la mise en page au navigateur ; il ne le justifie plus, et le
+ * laisser écrit ferait rejeter la bonne solution au prochain passage.
  *
  * Ce rapport est **destiné à être lu par quelqu'un qui n'était pas là**. D'où
  * trois partis pris :
