@@ -507,6 +507,7 @@
     "monitoring_dropped": "Plus annoncée",
     "monitoring_dropped_hint": "La sonde n'annonce plus cette cible, et le hub n'enregistre aucun retrait pour elle. Ses relevés restent affichés tant qu'ils sont dans la fenêtre.",
     "monitor_stats_hint": "Valeurs annoncées par la sonde sur sa propre fenêtre glissante, pas sur la période affichée.",
+    "monitor_stats_loading": "Lecture des statistiques…",
     "monitor_alive": "Répond",
     "monitor_down": "Ne répond pas",
     "col_state": "État",

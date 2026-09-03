@@ -507,6 +507,7 @@
     "monitoring_dropped": "Ya no se anuncia",
     "monitoring_dropped_hint": "La sonda ya no anuncia este destino, y el hub no registra ninguna retirada para él. Sus mediciones siguen en pantalla mientras estén dentro de la ventana.",
     "monitor_stats_hint": "Valores anunciados por la sonda sobre su propia ventana deslizante, no sobre el periodo mostrado.",
+    "monitor_stats_loading": "Leyendo las estadísticas…",
     "monitor_alive": "Responde",
     "monitor_down": "No responde",
     "col_state": "Estado",

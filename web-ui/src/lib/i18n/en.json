@@ -507,6 +507,7 @@
     "monitoring_dropped": "No longer announced",
     "monitoring_dropped_hint": "The probe no longer announces this target, and the hub holds no removal for it. Its readings stay on screen while they are inside the window.",
     "monitor_stats_hint": "Values reported by the probe over its own rolling window, not over the displayed period.",
+    "monitor_stats_loading": "Reading statistics…",
     "monitor_alive": "Answering",
     "monitor_down": "Not answering",
     "col_state": "State",

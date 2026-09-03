@@ -510,8 +510,13 @@
     // Même fenêtre que les courbes, lue dans la foulée : le graphe et le
     // tableau par adresse doivent parler de la même période, sinon un repère
     // se pose là où le tableau ne compte rien.
-    await loadPublicIps(choice);
-    await loadUptime(choice);
+    //
+    // ⚠️ ENSEMBLE, et non l'une après l'autre. Les deux lectures ne partagent
+    // rien : `/public-ips` remplit `ipIntervals`, `/uptime` remplit
+    // `uptimeByTarget`, et aucune des deux ne lit ce que l'autre écrit. Les
+    // enchaîner ne servait qu'à faire arriver le taux sur la période un tour
+    // de réseau après le reste, sur une fiche qui se relit toutes les 3 s.
+    await Promise.all([loadPublicIps(choice), loadUptime(choice)]);
   }
 
   // ── Adresses publiques traversées (contrat § 15) ─────────────────────────
@@ -2005,6 +2010,20 @@
                       </div>
                     {/if}
                   </dl>
+                {:else if $fleet.loadedAt === null}
+                  <!-- 🔴 « Je charge » et « il n'y a rien » ne sont pas la même
+                       phrase. Ces statistiques viennent du PARC, pas des
+                       mesures : la carte et son graphe s'affichent d'abord, et
+                       le bloc restait VIDE le temps que le battement arrive.
+                       Un vide se lit comme une absence — on a cru la
+                       fonctionnalité supprimée.
+
+                       ⚠️ La condition porte sur `loadedAt` du parc et sur rien
+                       d'autre : une fois qu'il a répondu, un bloc absent l'est
+                       pour de bon — cible non annoncée, ou sonde qui n'a encore
+                       rien mesuré — et annoncer une lecture en cours serait
+                       alors une attente qui ne finit jamais. -->
+                  <p class="cardnote">{$_('probe.monitor_stats_loading')}</p>
                 {/if}
 
                 {#snippet table()}

@@ -222,7 +222,11 @@ describe('catalogues de traduction', () => {
   // ⚠️ `col_uptime` et `monitor_samples` nomment les valeurs de la SONDE, à
   // côté de celles de la période : deux nombres proches et différents sans
   // libellé qui les sépare se lisent comme une erreur.
+  // 🔴 `monitor_stats_loading` distingue « je charge » de « il n'y a rien ».
+  // Le bloc restait VIDE le temps que le parc réponde, et un vide se lit comme
+  // une absence : on a cru la fonctionnalité supprimée.
   const REQUISES_UPTIME = [
+    'probe.monitor_stats_loading',
     'probe.uptime_period',
     'probe.uptime_samples',
     'probe.uptime_gap',
