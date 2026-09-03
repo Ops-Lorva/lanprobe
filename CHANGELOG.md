@@ -6,6 +6,54 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.1] - 2026-09-02
+
+### English
+
+- **Fixed: no more false outages when the interface loses its IPv4
+  address.** The probe now writes nothing at all, instead of reporting
+  every one of its targets as down.
+- **Fixed: removing your last target really clears the list.** An empty
+  watch list is sent as empty, so the hub can say "nothing" instead of
+  going on showing the old one.
+- **Pick the network interface without a screen.** `--interface` chooses
+  it, `lanprobe-server interfaces` lists what the machine has. An unknown
+  name fails loudly and names the ones that exist.
+- **The gateway and the link state are read for real — on Linux.** The
+  machine's default gateway is no longer copied onto every interface, and
+  an unplugged cable no longer presents itself as an active link.
+  ⚠️ On macOS and Windows these two fields are still hardcoded: only Linux
+  reads them.
+- **A measurement with no verdict is reported as "undetermined."** It used
+  to count as an outage, which turned a silence into a fact.
+  ⚠️ This holds for the hub's screens and exports. The desktop app's
+  monitoring screen still computes its own rate and does not know
+  "undetermined" yet — it will follow in a later version.
+
+### Français
+
+- **Corrigé : plus de fausses pannes quand l'interface perd son adresse
+  IPv4.** La sonde n'écrit alors plus rien du tout, au lieu de déclarer
+  toutes ses cibles en panne.
+- **Corrigé : retirer sa dernière cible efface vraiment la liste.** Une
+  liste de surveillance vide est émise comme telle, pour que le hub puisse
+  dire « rien » au lieu de continuer à montrer l'ancienne.
+- **Désigner l'interface réseau sans écran.** `--interface` la choisit,
+  `lanprobe-server interfaces` liste celles de la machine. Un nom inconnu
+  échoue franchement et nomme celles qui existent.
+- **La passerelle et l'état du lien sont lus pour de vrai — sur Linux.**
+  La passerelle par défaut de la machine n'est plus recopiée sur toutes
+  les interfaces, et un câble débranché ne se présente plus comme un lien
+  actif.
+  ⚠️ Sur macOS et Windows, ces deux champs restent codés en dur : seul
+  Linux les lit.
+- **Une mesure sans verdict est rendue « indéterminée ».** Elle comptait
+  jusqu'ici pour une panne, ce qui faisait d'un silence un fait.
+  ⚠️ Cela vaut pour les écrans et les exports du hub. L'écran de
+  surveillance de l'application de bureau recalcule encore son propre taux
+  et ne connaît pas encore l'indéterminé — il suivra dans une prochaine
+  version.
+
 ## [2.3.0] - 2026-09-02
 
 ### English
