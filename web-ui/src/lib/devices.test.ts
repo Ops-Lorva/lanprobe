@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api';
 import {
   PAIR_CODE_TTL_SECS,
+  ageLabel,
   deviceRows,
   devicesApi,
   pairingAddress,
@@ -100,6 +101,33 @@ describe('deviceRows', () => {
       'jamais_vu_recent',
       'vu_il_y_a_longtemps',
     ]);
+  });
+});
+
+describe('ageLabel', () => {
+  const MAINTENANT = 1_700_000_000_000;
+
+  it('rend une durée NUE, pas un « il y a »', () => {
+    // ⚠️ La phrase est déjà dans le catalogue : « vu il y a {age} ». Y glisser
+    // un `Intl.RelativeTimeFormat` donnerait « vu il y a il y a 41 j ».
+    const label = ageLabel(MAINTENANT / 1000 - 41 * 86_400, 'en', MAINTENANT);
+    expect(label).toContain('41');
+    expect(label.toLowerCase()).not.toContain('ago');
+  });
+
+  it('choisit l’unité qui se lit, et s’arrête au jour', () => {
+    expect(ageLabel(MAINTENANT / 1000 - 30, 'en', MAINTENANT)).toContain('30');
+    expect(ageLabel(MAINTENANT / 1000 - 3 * 3600, 'en', MAINTENANT)).toContain('3');
+    // ⚠️ « vu il y a 1 mois » ne se tranche pas ; « vu il y a 90 j », si.
+    // Cette ligne est le seul endroit où l'ancienneté d'un appareil se lit :
+    // il n'existe aucune révocation par inactivité pour la rattraper.
+    expect(ageLabel(MAINTENANT / 1000 - 90 * 86_400, 'en', MAINTENANT)).toContain('90');
+  });
+
+  it('ne rend jamais un âge négatif', () => {
+    // Une horloge de téléphone en avance sur celle du hub est banale. « vu il
+    // y a -3 min » se lit comme une panne de l'écran, pas comme un décalage.
+    expect(ageLabel(MAINTENANT / 1000 + 180, 'en', MAINTENANT)).not.toContain('-');
   });
 });
 

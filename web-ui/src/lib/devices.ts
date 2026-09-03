@@ -127,6 +127,47 @@ export function deviceRows(devices: PairedDevice[]): DeviceRow[] {
 }
 
 /**
+ * Paliers d'unités, du plus fin au plus grossier, avec leur facteur suivant.
+ *
+ * ⚠️ **On s'arrête au jour** : « vu il y a 41 j » est le fait sur lequel un
+ * humain tranche, « vu il y a 1 mois » ne l'est plus. Et comme il n'existe
+ * aucune révocation par inactivité, cette ligne est le seul endroit où
+ * l'ancienneté se lit — l'arrondir, c'est la perdre.
+ */
+const PALIERS: [Intl.NumberFormatOptions['unit'], number][] = [
+  ['second', 60],
+  ['minute', 60],
+  ['hour', 24],
+  ['day', Number.POSITIVE_INFINITY],
+];
+
+/**
+ * Âge **nu** d'un horodatage : « 41 j », « 3 h », « 30 s ».
+ *
+ * ⚠️ Nu, et pas « il y a 41 j » : le catalogue porte déjà la phrase — « vu il
+ * y a {age} ». Y glisser un `Intl.RelativeTimeFormat` afficherait « vu il y a
+ * il y a 41 j ».
+ *
+ * ⚠️ Jamais négatif. Une horloge de téléphone en avance sur celle du hub est
+ * banale ; « vu il y a -3 min » se lit comme une panne de l'écran.
+ */
+export function ageLabel(seconds: number, locale: string, atMs: number): string {
+  let delta = Math.max(0, atMs / 1000 - seconds);
+  for (const [unit, pas] of PALIERS) {
+    if (delta < pas || pas === Number.POSITIVE_INFINITY) {
+      return new Intl.NumberFormat(locale, {
+        style: 'unit',
+        unit,
+        unitDisplay: 'short',
+        maximumFractionDigits: 0,
+      }).format(delta);
+    }
+    delta /= pas;
+  }
+  return '—';
+}
+
+/**
  * L'adresse à afficher à côté du code, pour la saisie à la main.
  *
  * ⚠️ L'adresse publique réglée sur le hub prime sur celle de la page :
