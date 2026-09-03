@@ -75,6 +75,18 @@ COPY src-tauri ./src-tauri
 # `cargo build`, et non dans l'image finale.
 COPY --from=web-ui-builder /src/web-ui/dist ./web-ui/dist
 
+# Les libellés du classeur SLA sont ceux du navigateur : `report_i18n.rs` les
+# embarque par `include_str!("../../../web-ui/src/lib/i18n/*.json")` plutôt
+# que d'en garder une copie, pour qu'un renommage de clé casse la compilation
+# au lieu de laisser diverger les intitulés du classeur et ceux de
+# l'interface. Ces catalogues doivent donc être présents à la COMPILATION, au
+# même chemin relatif que dans le dépôt (ici /build/web-ui/src/lib/i18n) —
+# `web-ui/dist` ne contient que le résultat du build de l'interface, pas ses
+# sources. Leur absence a fait échouer la construction de l'image 1.6.0.
+# ⚠️ Le dossier des catalogues seul : copier tout `web-ui/src` alourdirait le
+# contexte sans rien apporter au binaire.
+COPY web-ui/src/lib/i18n ./web-ui/src/lib/i18n
+
 # `web-ui/dist` doit exister ici : le binaire l'embarque via rust-embed.
 RUN cargo build --release --locked -p lanprobe-web --bin lanprobe-web
 

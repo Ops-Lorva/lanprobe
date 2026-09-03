@@ -2373,6 +2373,33 @@ déclenche une construction, qui est le premier moment où le crate de bureau es
 compilé. Sans ce geste manuel, la première machine à découvrir qu'un crate ne
 compile plus est celle qui produit les binaires livrés.
 
+### Le contexte de build de l'image — `docker build --target rust-builder`
+
+🔴 **Avant toute release du hub : `docker build --target rust-builder -t
+lp-check .`**, puis `docker rmi lp-check` (et `docker builder prune -f` si le
+disque manque).
+
+Il existe pour une raison datée. Le 03/09/2026, la construction de l'image
+`hub-1.6.0` a échoué sur trois `include_str!` : `report_i18n.rs` embarque les
+catalogues du navigateur (`web-ui/src/lib/i18n/*.json`) pour qu'un renommage de
+clé casse la compilation plutôt que de laisser diverger les libellés du
+classeur et ceux de l'interface. Or l'étape `rust-builder` ne copiait que
+`Cargo.toml`, `Cargo.lock`, `crates`, `src-tauri` et `web-ui/dist` — **jamais
+les sources de `web-ui`**. Les fichiers n'existaient donc pas dans le contexte.
+
+⚠️ **La compilation locale ne pouvait pas voir ce défaut, et elle n'a pas
+menti** : sur la machine, le dépôt entier est présent, donc `include_str!`
+trouve ses fichiers. **Le défaut n'était pas dans le code, il était dans le
+contexte de build de l'image** — un ensemble de fichiers strictement plus petit
+que le dépôt, que seul un `docker build` reproduit. C'est la même leçon que
+`--all-targets` la veille : le trou est dans le périmètre de vérification, pas
+dans la finesse des tests.
+
+⚠️ `--target rust-builder` et pas l'image entière : c'est l'étape qui compile,
+elle s'arrête avant le téléchargement d'InfluxDB, et elle attrape tout ce qui
+manque au contexte. Sur la machine à 3,8 Go, la lancer **seule** — c'est une
+compilation Rust en `--release`.
+
 ## 22. Appairage d'un appareil
 
 Demandé pour l'app iOS. L'exigence est une phrase, et elle commande tout le
