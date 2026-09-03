@@ -1248,6 +1248,12 @@ mod routes_tests {
             octets.len().to_string(),
         );
         assert!(entêtes.get(header::TRANSFER_ENCODING).is_none());
+        // Un classeur, pas un flux d'octets anonyme : c'est ce que le
+        // téléphone regarde pour l'ouvrir dans le bon lecteur.
+        assert_eq!(
+            entêtes.get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            XLSX
+        );
         // L'empreinte porte sur les octets SERVIS.
         let attendu: String = ring::digest::digest(&ring::digest::SHA256, &octets)
             .as_ref()
