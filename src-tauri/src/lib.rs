@@ -548,8 +548,25 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Un relevé tel que la fenêtre l'envoie.
+///
+/// 🔴 `alive` est un `Option<bool>` comme dans `PingSample` : absent ou nul, le
+/// relevé est **indéterminé**, et il traverse l'IPC tel quel. On ne fabrique
+/// **jamais** de `Some(false)` — ce serait affirmer « la cible ne répond pas »
+/// à partir d'une absence d'information, exactement la faute que `ec83f01` a
+/// retirée du cœur.
+///
+/// ⚠️ Les producteurs d'aujourd'hui écrivent tous le verdict : `ping:tick` et
+/// `cmd_get_monitoring_snapshot` portent des `PingResult`, dont le `alive` est
+/// un `bool`, et la boucle de `monitor.rs` **saute** un tour plutôt que
+/// d'émettre un relevé sans verdict. Ce n'est pas une raison pour un
+/// `Some(d.alive)` : le JSON qui traverse l'IPC n'est typé par rien — les types
+/// TypeScript de la fenêtre sont des déclarations, pas des garanties — et le
+/// jour où l'application relira l'historique du hub (où les points antérieurs
+/// au champ `alive` n'en ont pas, cf. `samples_from_flux_csv`), c'est ici que
+/// le faux verdict entrerait. Le type doit l'interdire par construction.
 #[derive(Deserialize, Default)]
-struct PingSampleDto { alive: bool, latency_ms: Option<u64> }
+struct PingSampleDto { alive: Option<bool>, latency_ms: Option<u64> }
 
 #[tauri::command]
 fn cmd_compute_sla(ip: String, samples: Vec<PingSampleDto>) -> SlaStats {
@@ -989,4 +1006,40 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ⚠️ Un relevé que la fenêtre envoie **sans verdict** n'est ni disponible
+    /// ni en panne : il est indéterminé, et sort du dénominateur. Le traduire
+    /// en `alive: false` affirmerait une panne à partir d'une absence
+    /// d'information — la faute que `ec83f01` a retirée du cœur, et qu'il ne
+    /// faut pas réintroduire au passage de l'IPC.
+    #[test]
+    fn un_releve_sans_verdict_ne_devient_pas_une_panne() {
+        let samples: Vec<PingSampleDto> =
+            serde_json::from_str(r#"[{"latency_ms": 12}, {"alive": null, "latency_ms": null}]"#)
+                .expect("le relevé sans verdict doit se lire");
+        let stats = cmd_compute_sla("10.0.0.1".to_string(), samples);
+        assert_eq!(stats.uptime_pct, None);
+        assert_eq!(stats.total_samples, 0);
+        assert_eq!(stats.failed_samples, 0);
+        assert_eq!(stats.undetermined_samples, 2);
+    }
+
+    /// Un verdict annoncé, lui, est transmis tel quel — dans les deux sens.
+    #[test]
+    fn un_verdict_annonce_est_transmis_tel_quel() {
+        let samples: Vec<PingSampleDto> = serde_json::from_str(
+            r#"[{"alive": true, "latency_ms": 5}, {"alive": false, "latency_ms": null}]"#,
+        )
+        .expect("le relevé avec verdict doit se lire");
+        let stats = cmd_compute_sla("10.0.0.1".to_string(), samples);
+        assert_eq!(stats.uptime_pct, Some(50.0));
+        assert_eq!(stats.total_samples, 2);
+        assert_eq!(stats.failed_samples, 1);
+        assert_eq!(stats.undetermined_samples, 0);
+    }
 }
