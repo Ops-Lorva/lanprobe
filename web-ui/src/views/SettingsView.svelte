@@ -23,9 +23,20 @@
   import NotificationsView from './NotificationsView.svelte';
   import { go, route, type SettingsTab } from '$lib/router';
   import { canOperate, identity, isAdmin } from '$lib/session';
-  import { dateOnly, humanBytes } from '$lib/time';
+  import { countdown, dateOnly, humanBytes, now, secondsLeft } from '$lib/time';
   import { passkeysSupported, createCredential, ceremonyError } from '$lib/webauthn';
   import { validateRealtime, type RealtimeIssue } from '$lib/realtime-settings';
+  import {
+    ageLabel,
+    deviceRows,
+    devicesApi,
+    pairingAddress,
+    parseDevices,
+    type DeviceRow,
+    type PairCode,
+    type PairedDevice,
+  } from '$lib/devices';
+  import { REPORT_DAYS_DEFAULT, isValidReportDays } from '$lib/report-days';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
   const lang = $derived($locale ?? 'en');
@@ -55,6 +66,7 @@
   let backupInterval = $state('24');
   let backupKeep = $state('7');
   let inventoryDays = $state('0');
+  let reportDays = $state(String(REPORT_DAYS_DEFAULT));
   let tlsEnabled = $state(false);
   let trustedProxies = $state('');
 
@@ -90,6 +102,10 @@
     backupInterval = String(s.backup_interval_hours);
     backupKeep = String(s.backup_keep_last);
     inventoryDays = String(s.inventory_days);
+    // ⚠️ `?? 7` : le hub qui ne connaît pas encore ce réglage ne le renvoie
+    // pas, et un champ non contrôlé se croirait modifié dès l'ouverture — le
+    // formulaire partirait alors enregistrer une clé que le hub refuse.
+    reportDays = String(s.report_days ?? REPORT_DAYS_DEFAULT);
     tlsEnabled = s.tls_enabled;
     // ⚠️ `?? ''` et non `s.trusted_proxies` : un hub plus ancien que ce
     // réglage ne le renvoie pas, et `undefined` dans un `<input>` laisserait
@@ -114,6 +130,9 @@
     void load();
     void loadTotp();
     void loadPasskeys();
+    // Ouverte à tous les rôles : chacun ses appareils. Celui qui perd son
+    // téléphone à 22 h doit pouvoir le révoquer seul (contrat § 22).
+    void loadDevices();
     void loadInflux();
     // Ces deux-là ont un rôle minimum (contrat § 11) : le test d'URL annoncée
     // demande `operator`, les jetons de lecture `admin`. Les appeler pour tout
@@ -231,6 +250,9 @@
   const intervalNum = $derived(Number.parseInt(backupInterval, 10));
   const keepNum = $derived(Number.parseInt(backupKeep, 10));
   const inventoryNum = $derived(Number.parseInt(inventoryDays, 10));
+  const reportDaysNum = $derived(Number.parseInt(reportDays, 10));
+  /** Référence du réglage : `?? 7` pour un hub qui ne le sert pas encore. */
+  const savedReportDays = $derived(saved.report_days ?? REPORT_DAYS_DEFAULT);
 
   function retentionLabel(days: number) {
     return days === 0
@@ -312,6 +334,7 @@
     if (intervalNum !== saved.backup_interval_hours) p.backup_interval_hours = intervalNum;
     if (keepNum !== saved.backup_keep_last) p.backup_keep_last = keepNum;
     if (inventoryNum !== saved.inventory_days) p.inventory_days = inventoryNum;
+    if (reportDaysNum !== savedReportDays) p.report_days = reportDaysNum;
     if (tlsEnabled !== saved.tls_enabled) p.tls_enabled = tlsEnabled;
     if (trustedProxies.trim() !== (saved.trusted_proxies ?? ''))
       p.trusted_proxies = trustedProxies.trim();
@@ -479,6 +502,81 @@
     }
   }
 
+  // ── Appareils appairés (contrat § 22) ────────────────────────────────────
+  //
+  // 🔴 **L'identité d'un appareil n'expire pas.** C'est ce qui est demandé : on
+  // ne tape pas son mot de passe en haut d'une échelle. Le prix est entier —
+  // un téléphone perdu garde l'accès jusqu'à sa révocation, et rien d'autre ne
+  // le coupe : ni le temps, ni un changement de mot de passe, ni un
+  // redémarrage du hub. Cette carte est donc la seule chose qui rend le modèle
+  // acceptable, pas un agrément.
+  let devices = $state<DeviceRow[]>([]);
+  let devicesError = $state('');
+  let devicesLoaded = $state(false);
+  let pairCode = $state<PairCode | null>(null);
+  let pairBusy = $state(false);
+  let pairError = $state('');
+  let revokeDevice = $state<PairedDevice | null>(null);
+  let revokeDeviceBusy = $state(false);
+
+  /** Secondes restantes au code affiché. `0` = expiré, et l'écran le dit. */
+  const pairLeft = $derived(pairCode ? secondsLeft(pairCode.expires_at, $now) : 0);
+
+  /**
+   * L'adresse que le téléphone doit joindre — celle réglée sur le hub, pas
+   * celle de cette page : `location.origin` peut être une IP interne joignable
+   * depuis ce poste et de nulle part ailleurs.
+   */
+  const pairUrl = $derived(
+    pairingAddress(saved.hub_public_url, typeof location === 'undefined' ? '' : location.origin),
+  );
+
+  async function loadDevices() {
+    try {
+      devices = deviceRows(parseDevices(await devicesApi.myDevices()));
+      devicesError = '';
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      // ⚠️ Le hub rend `501` tant que l'appairage n'est pas écrit de son côté.
+      // On affiche son message : une carte vide ou un chargement qui ne
+      // finit pas laisserait chercher la panne ailleurs.
+      devices = [];
+      devicesError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      devicesLoaded = true;
+    }
+  }
+
+  async function createPairCode() {
+    pairBusy = true;
+    pairError = '';
+    try {
+      pairCode = await devicesApi.createPairCode();
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      pairCode = null;
+      pairError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      pairBusy = false;
+    }
+  }
+
+  async function confirmRevokeDevice() {
+    if (!revokeDevice) return;
+    revokeDeviceBusy = true;
+    try {
+      await devicesApi.revokeMyDevice(revokeDevice.device_id);
+      revokeDevice = null;
+      await loadDevices();
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      devicesError = e instanceof ApiError ? e.message : String(e);
+      revokeDevice = null;
+    } finally {
+      revokeDeviceBusy = false;
+    }
+  }
+
   const pwReady = $derived(
     pwCurrent !== '' && pwNext.length >= 8 && pwNext === pwConfirm && pwNext !== pwCurrent,
   );
@@ -558,7 +656,8 @@
       'influx_org' in patch ||
       'influx_bucket' in patch ||
       'retention_days' in patch ||
-      'inventory_days' in patch,
+      'inventory_days' in patch ||
+      'report_days' in patch,
     // ⚠️ Les trois champs de sauvegarde ont suivi leur panneau. Laissés sur
     // « Mesures », la pastille se serait allumée sur l'onglet où le champ
     // modifié n'est plus visible — donc introuvable.
@@ -617,6 +716,12 @@
     }
     if (!Number.isInteger(retentionNum) || retentionNum < 0)
       return { msg: $_('settings.invalid_retention'), tab: 'storage' };
+    // ⚠️ Le seul réglage de rétention où `0` n'est PAS « illimité » : il est
+    // refusé, ici comme au hub. Quelqu'un le mettra par analogie avec les deux
+    // autres et obtiendrait le seul réglage qui laisse s'accumuler
+    // indéfiniment des données de clients sur le disque.
+    if (!isValidReportDays(reportDaysNum))
+      return { msg: $_('settings.invalid_report_days'), tab: 'storage' };
     // ⚠️ 5 s, pas 10 : c'est le plancher que la sonde applique réellement
     // (`hub.rs:876`). Un formulaire plus permissif ou plus strict que la sonde
     // affiche un réglage qu'elle n'applique pas.
@@ -767,6 +872,12 @@
            ici : une session volée suffirait sinon à s'approprier le compte
            définitivement, sans aucun chemin de retour pour son titulaire. -->
       <p class="hint">{$_('account.password_hint')}</p>
+      <!-- 🔴 Le point contre-intuitif du § 22, et il exige cette phrase. Sur le
+           web, changer son mot de passe est le geste réflexe de « j'ai perdu
+           mon téléphone ». Ici il ne fait RIEN : le mot de passe n'authentifie
+           pas un appareil appairé. Sans cette ligne, on fabrique quelqu'un qui
+           se croit protégé et ne l'est pas. -->
+      <p class="warn-inline">{$_('account.password_no_logout')}</p>
       <label class="lp-field">
         {$_('account.current')}
         <input class="lp-input" type="password" bind:value={pwCurrent} autocomplete="current-password" />
@@ -933,6 +1044,152 @@
 
       {#if pkUsable && pkRpId}
         <p class="hint">{$_('account.pk_rp_bound', { values: { host: pkRpId } })}</p>
+      {/if}
+    </section>
+
+    <!--
+      🔴 Appareils appairés (contrat § 22). Cette carte n'est pas du confort.
+      L'identité d'un appareil n'expire pas : tant qu'elle n'est pas révoquée,
+      l'app se reconnecte toujours seule — c'est ce qui est demandé, on ne tape
+      pas son mot de passe en haut d'une échelle. Le prix est entier : un
+      téléphone perdu garde l'accès jusqu'à sa révocation. Ni le temps, ni un
+      changement de mot de passe, ni un redémarrage du hub ne le coupent. Le
+      bouton « Révoquer » de cette liste est donc le seul organe qui rend le
+      modèle acceptable.
+    -->
+    <section class="lp-card block">
+      <h2 class="lp-title">{$_('account.devices_title')}</h2>
+      <p class="sub">{$_('account.devices_lead')}</p>
+
+      {#if pairCode}
+        <div class="pairbox">
+          {#if pairLeft === 0}
+            <!-- Un code mort le dit, plutôt que de se faire réessayer trois
+                 fois avant qu'on comprenne. -->
+            <p class="warn-inline" role="status">{$_('account.devices_code_expired')}</p>
+          {:else}
+            <span class="lp-label">{$_('account.devices_code_title')}</span>
+            {#if pairCode.qr_svg}
+              <!-- QR rendu par le hub, comme celui du second facteur : le
+                   secret ne traverse aucune dépendance de plus, et la page
+                   reste lisible sur un réseau fermé, sans CDN. -->
+              <div class="qr">{@html pairCode.qr_svg}</div>
+            {/if}
+
+            <!-- Le code en clair À CÔTÉ du QR, et non à la place : c'est le
+                 chemin de secours obligatoire. La caméra tombe en panne, le QR
+                 est illisible en plein soleil, et le hub web est parfois ouvert
+                 sur le téléphone lui-même — il n'y a alors aucun second écran à
+                 photographier. -->
+            <div class="pair-manual">
+              <span class="lp-label">{$_('code.label_url')}</span>
+              <p class="pair-url lp-mono">{pairUrl}</p>
+              <CopyLine value={pairUrl} shell={false} hideValue />
+              <span class="lp-label">{$_('code.label_code')}</span>
+              <p class="secret code lp-mono">{pairCode.code}</p>
+              <CopyLine value={pairCode.code} shell={false} hideValue />
+            </div>
+            <p class="hint">{$_('account.devices_manual_hint')}</p>
+
+            <p class="ttl lp-mono" role="status">
+              {$_('account.devices_code_expires', { values: { n: countdown(pairLeft, lang) } })}
+            </p>
+
+            <!-- 🔴 Le QR contient un secret qui TRANSITE : qui le photographie
+                 par-dessus l'épaule appaire son propre téléphone, et cet
+                 appareil-là ne s'en ira qu'à une révocation explicite. -->
+            <p class="warn-inline">{$_('account.devices_code_shoulder')}</p>
+            <p class="hint">{$_('account.devices_code_hint')}</p>
+
+            {#if pairCode.cert_fingerprint}
+              <p class="hint lp-mono">
+                {$_('account.devices_fingerprint', {
+                  values: { fingerprint: pairCode.cert_fingerprint },
+                })}
+              </p>
+            {:else if !saved.tls_enabled}
+              <!-- ⚠️ Seulement quand le hub sert EN CLAIR. TLS activé sans
+                   empreinte reçue veut dire que le hub ne la sert pas encore :
+                   annoncer « pas d'empreinte à épingler » serait faux. -->
+              <p class="hint">{$_('account.devices_fingerprint_none')}</p>
+            {/if}
+          {/if}
+
+          <div class="row-btns">
+            <button class="lp-btn" onclick={createPairCode} disabled={pairBusy}>
+              {pairBusy ? $_('code.generating') : $_('account.devices_code_regen')}
+            </button>
+          </div>
+        </div>
+      {:else}
+        <div class="row-btns">
+          <button class="lp-btn primary" onclick={createPairCode} disabled={pairBusy}>
+            {pairBusy ? $_('code.generating') : $_('account.devices_pair_cta')}
+          </button>
+        </div>
+      {/if}
+
+      {#if pairError}<p class="err" role="alert">{pairError}</p>{/if}
+
+      {#if devicesError}
+        <!-- Un échec se DIT. Les routes de l'appairage rendent `501` tant
+             qu'elles ne sont pas écrites côté hub : sans cette ligne, la carte
+             resterait vide et on chercherait la panne ailleurs. -->
+        <p class="err" role="alert">{devicesError}</p>
+      {:else if devices.length > 0}
+        <!-- Même grille que la table des jetons : les deux listes se lisent de
+             la même façon, une seconde mise en forme n'apporterait rien. -->
+        <table class="tok-table dev-table">
+          <thead>
+            <tr>
+              <th>{$_('account.devices_col_name')}</th>
+              <th>{$_('account.devices_col_platform')}</th>
+              <th>{$_('account.devices_col_paired')}</th>
+              <th>{$_('account.devices_col_last_seen')}</th>
+              <th>{$_('account.devices_col_last_ip')}</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each devices as row (row.device.device_id)}
+              <tr class:revoked={row.revoked}>
+                <td>{row.device.name}</td>
+                <td>{row.device.platform || '—'}</td>
+                <td class="lp-mono">{dateOnly(row.device.created_at, lang)}</td>
+                <!-- ⚠️ « vu il y a 41 j », et rien d'autre : il n'y a AUCUNE
+                     révocation par inactivité. Un libellé qui laisserait croire
+                     à une expiration automatique promettrait un filet qui
+                     n'existe pas. -->
+                <td>
+                  {row.device.last_seen == null
+                    ? $_('account.devices_never_seen')
+                    : $_('account.devices_last_seen_raw', {
+                        values: { age: ageLabel(row.device.last_seen, lang, $now) },
+                      })}
+                </td>
+                <!-- Avec la dernière vue, la seule trace qui puisse trahir un
+                     secret copié : il ne tourne pas à l'usage. -->
+                <td class="lp-mono id">{row.device.last_ip || '—'}</td>
+                <td class="right">
+                  {#if row.revoked}
+                    <span class="muted">
+                      {$_('account.devices_revoked', {
+                        values: { date: dateOnly(row.device.revoked_at, lang) },
+                      })}
+                    </span>
+                  {:else}
+                    <button class="lp-btn danger sm" onclick={() => (revokeDevice = row.device)}>
+                      {$_('account.devices_revoke')}
+                    </button>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else if devicesLoaded}
+        <!-- Sa phrase, jamais un tableau vide sans explication. -->
+        <p class="muted">{$_('account.devices_empty')}</p>
       {/if}
     </section>
   </div>
@@ -1302,6 +1559,47 @@
     {/if}
 
     <!--
+      La rétention des rapports vit ici, avec le reste de ce que le hub garde,
+      mais PAS sous la barre rouge : elle ne détruit rien qu'on ne puisse
+      refaire, et le contrat lui interdit la confirmation — une confirmation
+      qui ne protège rien apprend à cliquer sans lire.
+
+      🔴 La ligne doit dire ce qu'elle purge ET ce qu'elle ne purge pas : le
+      FICHIER s'en va, l'entrée d'historique — qui a demandé quoi, quand —
+      reste. Sans cette phrase, on croit effacer une trace qu'on garde, ou
+      l'inverse.
+    -->
+    <section class="card lp-card">
+      <h2 class="lp-title">{$_('settings.report_days_title')}</h2>
+      <p class="sub">{$_('settings.report_days_lead')}</p>
+
+      <label class="lp-field">
+        {$_('settings.report_days_label')}
+        <span class="unit-row">
+          <input
+            class="lp-input num"
+            type="number"
+            min="1"
+            step="1"
+            bind:value={reportDays}
+            disabled={!$isAdmin}
+          />
+          <span class="unit">{$_('settings.retention_unit')}</span>
+        </span>
+        <!-- ⚠️ `min="1"` n'est pas la garde : le champ se contourne. La règle
+             est dans `report-days.ts`, testée, et le hub refuse `0` en 400. -->
+        <span class="hint">{$_('settings.report_days_hint')}</span>
+        <span class="cur">
+          {$_('settings.retention_current', {
+            values: {
+              label: $_('settings.retention_days_label', { values: { n: savedReportDays } }),
+            },
+          })}
+        </span>
+      </label>
+    </section>
+
+    <!--
       La conservation appartient bien à InfluxDB — c'est la rétention du bucket,
       appliquée par la base. Mais c'est aussi le seul réglage de cet onglet qui
       DÉTRUIT des mesures : il est donc renvoyé tout en bas, derrière une
@@ -1498,6 +1796,26 @@
       <button class="lp-btn" onclick={() => (revokeToken = null)}>{$_('common.cancel')}</button>
       <button class="lp-btn danger" onclick={confirmRevokeToken} disabled={revokeBusy}>
         {revokeBusy ? $_('settings.tokens_revoking') : $_('settings.tokens_revoke_confirm')}
+      </button>
+    {/snippet}
+  </Modal>
+  <!--
+    ⚠️ La confirmation NOMME l'appareil. Deux téléphones du même modèle se
+    ressemblent dans une liste, et une révocation prise pour une autre coupe
+    l'accès de quelqu'un qui n'a rien demandé — il faudra le réappairer, en
+    haut de son échelle.
+  -->
+  <Modal
+    open={revokeDevice !== null}
+    title={$_('account.devices_revoke')}
+    onclose={() => (revokeDevice = null)}
+  >
+    <p>{$_('account.devices_revoke_confirm', { values: { name: revokeDevice?.name ?? '' } })}</p>
+    <p class="lp-mono id">{revokeDevice?.device_id ?? ''}</p>
+    {#snippet footer()}
+      <button class="lp-btn" onclick={() => (revokeDevice = null)}>{$_('common.cancel')}</button>
+      <button class="lp-btn danger" onclick={confirmRevokeDevice} disabled={revokeDeviceBusy}>
+        {$_('account.devices_revoke')}
       </button>
     {/snippet}
   </Modal>
@@ -1804,6 +2122,48 @@
     background: #fff;
     padding: 8px;
     border-radius: 6px;
+  }
+  /* Le code d'appairage et son QR, encadrés : ce bloc porte un secret vivant
+     pendant quinze minutes, il ne se confond pas avec le reste de la carte. */
+  .pairbox {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 10px 0;
+    padding: 12px 14px;
+    border: 1px solid var(--ep-border);
+    border-radius: var(--ep-radius-md);
+    background: var(--ep-bg-tertiary);
+  }
+  .pair-manual {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .pair-url {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ep-text-primary);
+    overflow-wrap: anywhere;
+  }
+  /* Le compte à rebours : un code dont on ne voit pas l'expiration se réessaie
+     trois fois avant qu'on comprenne. */
+  .ttl {
+    margin: 0;
+    align-self: flex-start;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--ep-warning);
+    border: 1px solid color-mix(in srgb, var(--ep-warning) 45%, var(--ep-border));
+    border-radius: 999px;
+    padding: 3px 9px;
+  }
+  /* Un appareil révoqué reste en base — aucune route ne supprime — mais il
+     n'est plus la question : il s'efface visuellement, pas de la liste. */
+  .dev-table tr.revoked td {
+    color: var(--ep-text-dim);
   }
   .secret {
     margin: 4px 0 10px;
