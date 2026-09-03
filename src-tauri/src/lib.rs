@@ -775,6 +775,11 @@ fn cmd_hub_status(state: tauri::State<'_, SharedState>) -> serde_json::Value {
         "last_beat_at": live.last_beat_at,
         "last_error": live.last_error,
         "buffered_points": live.buffered_points,
+        // ⚠️ `null` = personne n'a répondu (DNS, TCP, TLS, délai dépassé) ;
+        // un code = quelque chose a répondu et a refusé. L'écran ne peut pas
+        // deviner la différence depuis le seul message, et l'annoncer comme
+        // une panne réseau envoie chercher là où il n'y a rien.
+        "refused_status": live.refused_status,
     })
 }
 

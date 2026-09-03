@@ -116,8 +116,14 @@
 
   // Rattachement à un hub : visible seulement s'il y en a un. Le rattachement
   // est optionnel, son absence n'est pas un défaut à signaler.
-  let hub = $state<{ state: string; url: string; buffered_points: number; last_error: string | null }>({
-    state: 'off', url: '', buffered_points: 0, last_error: null,
+  // ⚠️ `refused_status` : `null` = rien n'a répondu, un code = on a répondu et
+  // on a refusé. Sans lui, un 403 renvoyé par un proxy devant un hub en pleine
+  // forme s'affichait « Hub injoignable », et on cherchait une panne réseau.
+  let hub = $state<{
+    state: string; url: string; buffered_points: number;
+    last_error: string | null; refused_status: number | null;
+  }>({
+    state: 'off', url: '', buffered_points: 0, last_error: null, refused_status: null,
   });
   let hubTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -222,7 +228,15 @@
       <!-- Trois états, trois conduites différentes : `degraded` se répare seul
            au retour du lien, `broken` jamais — le hub a refusé le jeton, il
            faut ré-enrôler. Les confondre ferait attendre une reconnexion
-           impossible. -->
+           impossible.
+
+           🔴 Et `degraded` se dit de deux façons, parce qu'on ne cherche pas
+           au même endroit : rien n'a répondu (DNS, TCP, TLS, délai dépassé),
+           ou quelque chose a répondu et a refusé. Le 02/09, Cloudflare
+           renvoyait 403 devant un hub parfaitement sain — le ping vers CE hub
+           passait à 100 % dans cette même app — et l'écran affichait « Hub
+           injoignable ». Le code de retour dit de quel côté regarder ; il
+           était jeté. Le tampon et le repli, eux, ne changent pas. -->
       <span class="hub-pill" class:ok={hub.state === 'ok'}
             class:warn={hub.state === 'degraded'} class:bad={hub.state === 'broken'}
             title={hub.last_error ? `${hub.url} — ${hub.last_error}` : hub.url}>
@@ -233,9 +247,11 @@
         <span class="hub-state">
           {hub.state === 'broken'
             ? $_('dashboard.hub_broken')
-            : hub.state === 'degraded'
-              ? $_('dashboard.hub_degraded')
-              : $_('dashboard.hub_ok')}
+            : hub.state !== 'degraded'
+              ? $_('dashboard.hub_ok')
+              : hub.refused_status != null
+                ? $_('dashboard.hub_refused', { values: { code: hub.refused_status } })
+                : $_('dashboard.hub_degraded')}
         </span>
         {#if hub.state === 'degraded' && hub.buffered_points > 0}
           <span class="hub-buf">{$_('dashboard.hub_buffered', { values: { n: hub.buffered_points } })}</span>

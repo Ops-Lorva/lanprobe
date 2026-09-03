@@ -85,7 +85,8 @@
     "hub_buffered": "{n} measurements pending",
     "hub_broken": "probe revoked — re-enrol",
     "hub_ok": "Hub connected",
-    "hub_degraded": "Hub unreachable"
+    "hub_degraded": "Hub unreachable",
+    "hub_refused": "Hub reached — refused ({code})"
   },
   "discovery": {
     "title": "Network Discovery",

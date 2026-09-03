@@ -85,7 +85,8 @@
     "hub_buffered": "{n} mesures en attente",
     "hub_broken": "sonde révoquée — ré-enrôler",
     "hub_ok": "Hub connecté",
-    "hub_degraded": "Hub injoignable"
+    "hub_degraded": "Hub injoignable",
+    "hub_refused": "Hub atteint — refusé ({code})"
   },
   "discovery": {
     "title": "Network Discovery",

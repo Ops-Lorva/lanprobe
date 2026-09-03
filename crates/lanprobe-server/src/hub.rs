@@ -1043,6 +1043,14 @@ pub struct HubSnapshot {
     pub last_error: Option<String>,
     /// Points en attente d'écriture — c'est la profondeur du retard.
     pub buffered_points: usize,
+    /// Code de retour quand quelque chose a RÉPONDU et a refusé. `None` quand
+    /// rien n'a répondu — DNS, TCP, TLS, délai dépassé.
+    ///
+    /// 🔴 Sans lui, l'écran disait « Hub injoignable » d'un hub en parfaite
+    /// santé derrière un Cloudflare qui renvoyait 403 : on part chercher une
+    /// panne réseau qui n'existe pas. Le code de retour est la seule chose qui
+    /// dise de quel côté regarder.
+    pub refused_status: Option<u16>,
 }
 
 /// État partagé entre la boucle de battement et l'interface.
@@ -1061,6 +1069,7 @@ impl HubStatus {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.state = HubState::Off;
         g.last_error = None;
+        g.refused_status = None;
     }
 
     pub fn record_success(&self, buffered_points: usize, at: i64) {
@@ -1068,6 +1077,7 @@ impl HubStatus {
         g.state = HubState::Ok;
         g.last_beat_at = Some(at);
         g.last_error = None;
+        g.refused_status = None;
         g.buffered_points = buffered_points;
     }
 
@@ -1082,6 +1092,9 @@ impl HubStatus {
             _ => HubState::Degraded,
         };
         g.last_error = Some(error.message().to_string());
+        // Toujours réécrit, jamais accumulé : un refus remplacé par une vraie
+        // coupure ne doit pas laisser « refusé 403 » sur un lien bien mort.
+        g.refused_status = error.http_status();
         g.buffered_points = buffered_points;
     }
 }
@@ -1096,12 +1109,33 @@ pub enum BeatError {
     /// Hub injoignable, réseau coupé, réponse illisible : le prochain tick
     /// réessaiera, et un jour ça repassera.
     Transient(String),
+    /// Quelque chose a RÉPONDU, et sa réponse est un refus — le hub lui-même,
+    /// ou ce qui se tient devant lui.
+    ///
+    /// ⚠️ Réessayable exactement comme `Transient` : même repli exponentiel,
+    /// même tampon, rien n'est jeté. Il ne s'en distingue que par ce qu'on en
+    /// dit, et c'est tout l'objet : « personne ne répond » et « on m'a répondu
+    /// non » n'envoient pas chercher au même endroit.
+    Refused { status: u16, message: String },
 }
 
 impl BeatError {
     pub fn message(&self) -> &str {
         match self {
             BeatError::Unrecoverable(m) | BeatError::Transient(m) => m,
+            BeatError::Refused { message, .. } => message,
+        }
+    }
+
+    /// Le code de retour, quand une réponse est arrivée.
+    ///
+    /// `None` dit « rien n'a répondu » : DNS, TCP, TLS, délai dépassé. C'est
+    /// cette différence-là que l'écran doit rendre, et elle ne se devine pas
+    /// depuis le texte du message.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            BeatError::Refused { status, .. } => Some(*status),
+            _ => None,
         }
     }
 }
@@ -1123,7 +1157,12 @@ fn error_for_status(status: reqwest::StatusCode) -> Option<BeatError> {
     if status.is_success() {
         return None;
     }
-    Some(BeatError::Transient(format!("réponse {status}")))
+    // ⚠️ `Refused`, pas `Transient` : une réponse est arrivée. Réessayable de
+    // la même façon, mais l'écran ne doit pas en faire une panne réseau.
+    Some(BeatError::Refused {
+        status: status.as_u16(),
+        message: format!("réponse {status}"),
+    })
 }
 
 // ── Boucle de battement de cœur ────────────────────────────────────────────
@@ -1653,12 +1692,66 @@ mod tests {
             error_for_status(StatusCode::UNAUTHORIZED),
             Some(BeatError::Unrecoverable(_))
         ));
-        // Un hub en train de redémarrer n'a révoqué personne.
+        // Un hub en train de redémarrer n'a révoqué personne. Il a répondu,
+        // en revanche : c'est un refus daté d'un code, pas un lien mort.
         assert!(matches!(
             error_for_status(StatusCode::BAD_GATEWAY),
-            Some(BeatError::Transient(_))
+            Some(BeatError::Refused { status: 502, .. })
         ));
         assert!(error_for_status(StatusCode::OK).is_none());
+    }
+
+    #[test]
+    fn a_refusal_carries_its_code_instead_of_passing_for_a_dead_link() {
+        // 🔴 Constaté le 02/09 : Cloudflare répondait 403 devant un hub en
+        // parfaite santé — le ping vers CE hub passait à 100 % dans l'app.
+        // L'écran affichait « Hub injoignable — 1419 mesures en attente », et
+        // un installateur serait parti chercher une panne réseau qui n'existe
+        // pas. L'information utile était dans le code de retour, et elle
+        // était jetée.
+        use reqwest::StatusCode;
+        let refused = error_for_status(StatusCode::FORBIDDEN).expect("403 est un échec");
+        assert_eq!(refused.http_status(), Some(403), "le code est ce qui dit où chercher");
+
+        // ⚠️ Personne n'a répondu : il n'y a aucun code à nommer, et c'est
+        // exactement la distinction que l'écran doit faire.
+        assert_eq!(BeatError::Transient("hub injoignable".into()).http_status(), None);
+        assert_eq!(BeatError::Unrecoverable("jeton refusé".into()).http_status(), None);
+    }
+
+    #[test]
+    fn a_refusal_stays_retryable_and_keeps_the_buffer() {
+        // ⚠️ Un message, pas une mécanique : le repli exponentiel et le tampon
+        // ne bougent pas. Un 403 dû à un VPN se répare tout seul quand on s'en
+        // détache, et les 1419 mesures en attente doivent repartir intactes.
+        use reqwest::StatusCode;
+        let status = HubStatus::default();
+        let refused = error_for_status(StatusCode::FORBIDDEN).unwrap();
+        status.record_failure(&refused, 1_419);
+
+        let snap = status.snapshot();
+        assert_eq!(snap.state, HubState::Degraded, "réessayable, comme avant");
+        assert_ne!(snap.state, HubState::Broken, "un 403 ne révoque personne");
+        assert_eq!(snap.refused_status, Some(403));
+        assert_eq!(snap.buffered_points, 1_419, "un refus ne jette rien");
+    }
+
+    #[test]
+    fn a_code_that_no_longer_applies_does_not_stay_on_screen() {
+        // Le refus réparé, ou remplacé par une vraie coupure : garder l'ancien
+        // code ferait dire « refusé 403 » à un lien qui, lui, est bien mort.
+        use reqwest::StatusCode;
+        let status = HubStatus::default();
+        status.record_failure(&error_for_status(StatusCode::FORBIDDEN).unwrap(), 5);
+        assert_eq!(status.snapshot().refused_status, Some(403));
+
+        status.record_failure(&BeatError::Transient("hub injoignable".into()), 5);
+        assert_eq!(status.snapshot().refused_status, None);
+
+        status.record_failure(&error_for_status(StatusCode::BAD_GATEWAY).unwrap(), 5);
+        assert_eq!(status.snapshot().refused_status, Some(502));
+        status.record_success(0, 2_000);
+        assert_eq!(status.snapshot().refused_status, None);
     }
 
     #[test]
@@ -1675,6 +1768,16 @@ mod tests {
         let json = serde_json::to_value(status.snapshot()).unwrap();
         assert_eq!(json["state"], "degraded");
         assert_eq!(json["last_error"], "réseau coupé");
+        // Rien n'a répondu : l'app ne doit trouver aucun code à nommer.
+        assert_eq!(json["refused_status"], serde_json::Value::Null);
+
+        status.record_failure(
+            &error_for_status(reqwest::StatusCode::FORBIDDEN).unwrap(),
+            7,
+        );
+        let json = serde_json::to_value(status.snapshot()).unwrap();
+        assert_eq!(json["state"], "degraded");
+        assert_eq!(json["refused_status"], 403);
     }
 
     /// Identité réseau minimale pour les tests du cache d'IP publique.
