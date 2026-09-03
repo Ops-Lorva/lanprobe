@@ -73,6 +73,54 @@ describe('monitorCards', () => {
     const cards = monitorCards([monitor('10.0.0.1'), monitor('10.0.0.2')], [curve('10.0.0.9')]);
     expect(new Set(cards.map((c) => c.key)).size).toBe(3);
   });
+
+  it('marque RETIRÉE la cible que le hub dit retirée, jamais « plus annoncée »', () => {
+    // 🔴 Le défaut rencontré à l'écran : la carte était construite depuis les
+    // seules mesures de la fenêtre, donc une cible retirée restait sous
+    // « Actives » avec un drapeau qui disait le contraire de l'onglet. Sur une
+    // fenêtre de sept jours, elle y serait restée une semaine.
+    const cards = monitorCards([monitor('10.0.0.1')], [curve('10.0.0.9')], ['10.0.0.9']);
+    const gone = cards.find((c) => c.target === '10.0.0.9');
+    expect(gone?.removed).toBe(true);
+    // Les deux drapeaux s'excluent : « plus annoncée » est ce qu'on dit quand
+    // on NE SAIT PAS pourquoi la cible a cessé. Ici on sait — c'est daté.
+    expect(gone?.stale).toBe(false);
+  });
+
+  it('garde la courbe de la cible retirée : elle change de place, elle ne disparaît pas', () => {
+    // ⚠️ On range l'historique au bon endroit, on ne le supprime pas : c'est
+    // l'appelant qui rendra cette carte sous « Retirées ».
+    const cards = monitorCards([], [curve('10.0.0.9', [12, 15, 11])], ['10.0.0.9']);
+    const gone = cards.find((c) => c.target === '10.0.0.9');
+    expect(gone?.curve?.points).toHaveLength(3);
+  });
+
+  it('n’invente pas un retrait pour une cible mesurée que rien ne réclame', () => {
+    // ⚠️ Le cas de `8.8.8.8` : elle a des relevés dans la fenêtre, la sonde ne
+    // l'annonce plus, et le hub n'a AUCUNE ligne pour elle — ni active, ni
+    // retirée. La ranger dans « Retirées » affirmerait une décision que
+    // personne n'a prise. Elle reste visible, marquée « plus annoncée ».
+    const cards = monitorCards([monitor('10.0.0.1')], [curve('8.8.8.8')], ['10.0.0.9']);
+    const orphan = cards.find((c) => c.target === '8.8.8.8');
+    expect(orphan?.removed).toBe(false);
+    expect(orphan?.stale).toBe(true);
+  });
+
+  it('sort des actives une cible retirée que la sonde annonce encore', () => {
+    // Le retrait est un fait daté ; l'annonce est un état qui n'a pas encore
+    // reçu l'ordre. `effectiveMonitors` écarte déjà ce cas en amont, mais la
+    // règle ne doit pas dépendre de son appelant : deux endroits qui énoncent
+    // le même fait finissent par diverger.
+    const cards = monitorCards([monitor('10.0.0.9')], [curve('10.0.0.9')], ['10.0.0.9']);
+    expect(cards.find((c) => c.target === '10.0.0.9')?.removed).toBe(true);
+  });
+
+  it('ne marque rien retiré quand l’appelant ne fournit aucune liste de retraits', () => {
+    // Un hub antérieur à la liste partagée n'en tient pas : l'absence de
+    // retrait connu n'est pas un retrait, et ne l'est pas non plus l'inverse.
+    const cards = monitorCards([monitor('10.0.0.1')], [curve('10.0.0.9')]);
+    expect(cards.every((c) => c.removed === false)).toBe(true);
+  });
 });
 
 const speedCurve = (engine: string, field: string, values: number[]): SpeedCurve => {

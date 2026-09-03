@@ -29,8 +29,20 @@ export interface MonitorCard {
   monitor: MonitorState | null;
   /** Ce qui a été mesuré pendant la fenêtre. `null` avant le premier relevé. */
   curve: LatencyCurve | null;
-  /** Mesurée sur la fenêtre, mais absente des surveillances annoncées. */
+  /**
+   * Mesurée sur la fenêtre, plus annoncée par la sonde, et le hub n'enregistre
+   * AUCUN retrait pour elle : on constate qu'elle a cessé, on ne sait pas
+   * pourquoi. Le drapeau dit ce qu'on observe, pas ce qu'on suppose.
+   */
   stale: boolean;
+  /**
+   * Le hub porte un retrait daté pour cette cible.
+   *
+   * ⚠️ Exclusif de `stale` : quand le retrait est connu, il n'y a rien à
+   * supposer. C'est ce drapeau qui range la carte sous « Retirées » — jamais
+   * sous « Actives », quelle que soit la fenêtre affichée.
+   */
+  removed: boolean;
 }
 
 /**
@@ -45,11 +57,21 @@ export interface MonitorCard {
  *
  * `monitors === null` = sonde antérieure à cette annonce. Rien n'est alors
  * marqué comme retiré : conclure au retrait de toutes ses cibles serait faux.
+ *
+ * 🔴 `removedTargets` est la troisième source, et la seule qui TRANCHE. Les
+ * cartes se construisaient depuis les mesures de la fenêtre : une cible
+ * retirée y restait tant que ses points y étaient — sous « Actives », avec un
+ * drapeau qui contredisait l'onglet. « Elle partira dans dix minutes » n'est
+ * pas une réponse quand la fenêtre fait sept jours. Sa carte n'est pas perdue
+ * pour autant : elle porte `removed`, et l'appelant la range sous « Retirées »
+ * avec sa courbe.
  */
 export function monitorCards(
   monitors: MonitorState[] | null,
   curves: LatencyCurve[],
+  removedTargets: Iterable<string> = [],
 ): MonitorCard[] {
+  const removed = new Set(removedTargets);
   const byTarget = new Map(curves.filter((c) => c.target).map((c) => [c.target, c]));
   const placed = new Set<string>();
   const cards: MonitorCard[] = [];
@@ -57,19 +79,33 @@ export function monitorCards(
   for (const m of monitors ?? []) {
     const curve = byTarget.get(m.ip) ?? null;
     if (curve) placed.add(curve.key);
-    cards.push({ key: `t:${m.ip}`, target: m.ip, monitor: m, curve, stale: false });
+    cards.push({
+      key: `t:${m.ip}`,
+      target: m.ip,
+      monitor: m,
+      curve,
+      stale: false,
+      // ⚠️ Le retrait est un fait daté, l'annonce un état qui n'a pas encore
+      // reçu l'ordre — le hub ne joint jamais la sonde. C'est donc le fait qui
+      // gagne, ici comme dans `effectiveMonitors` : la règle ne doit pas
+      // dépendre de l'appelant qui la précède.
+      removed: removed.has(m.ip),
+    });
   }
 
   for (const c of curves) {
     if (placed.has(c.key)) continue;
+    const gone = c.target !== '' && removed.has(c.target);
     cards.push({
       key: c.target ? `t:${c.target}` : `c:${c.key}`,
       target: c.target,
       monitor: null,
       curve: c,
       // Une courbe anonyme ne se rapproche d'aucune surveillance annoncée :
-      // on ne peut donc rien affirmer sur son retrait.
-      stale: monitors !== null && c.target !== '',
+      // on ne peut donc rien affirmer sur son retrait. Et quand le retrait est
+      // connu, il n'y a plus rien à supposer : les deux drapeaux s'excluent.
+      stale: monitors !== null && c.target !== '' && !gone,
+      removed: gone,
     });
   }
 

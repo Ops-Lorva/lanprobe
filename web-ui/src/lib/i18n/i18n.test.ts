@@ -201,6 +201,11 @@ describe('catalogues de traduction', () => {
     'probe.monitoring_remove_working',
     'probe.monitoring_remove_done',
     'probe.monitoring_remove_moot',
+    // 🔴 Une cible retirée ne figure plus sous « Actives » : sa carte et sa
+    // courbe sont rangées sous « Retirées ». Sans ces deux libellés, cet
+    // historique déplacé arriverait sans rien qui dise ce qu'il est.
+    'probe.monitoring_removed_flag',
+    'probe.monitoring_removed_history',
   ];
 
   for (const [lang, catalog] of Object.entries(CATALOGS)) {

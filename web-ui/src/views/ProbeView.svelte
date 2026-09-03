@@ -832,6 +832,15 @@
   const activeMonitors = $derived(effectiveMonitors(sharedMonitors, probe?.monitors ?? null));
   /** Retirées, la suppression la plus récente en tête. */
   const removedList = $derived(removedMonitors(sharedMonitors));
+  /**
+   * Les seules cibles dont on SAIT qu'elles ont été retirées — le hub le date.
+   *
+   * 🔴 C'est ce qui interdit à une cible retirée de reparaître sous
+   * « Actives » : la grille se construisait depuis les mesures de la fenêtre,
+   * donc une cible retirée y restait tant que ses points y étaient. Sur sept
+   * jours, une semaine.
+   */
+  const removedTargets = $derived(removedList.map((e) => e.target));
   const staleTargets = $derived(
     activeMonitors === null
       ? []
@@ -1104,7 +1113,19 @@
   // tableau en tête d'onglet puis se répétaient sous chaque graphe : deux
   // lectures de la même chose, à cinq centimètres d'écart. Elles sont
   // maintenant dans la carte de leur cible, et nulle part ailleurs.
-  const monitorGrid = $derived(monitorCards(activeMonitors, pingCurves));
+  const monitorGrid = $derived(monitorCards(activeMonitors, pingCurves, removedTargets));
+  /**
+   * Les deux sous-onglets se partagent la MÊME grille, chacun sa moitié.
+   *
+   * ⚠️ On ne perd pas l'accès à l'historique : une cible retirée garde sa
+   * carte et sa courbe, rangées sous « Retirées ». C'est un déplacement, pas
+   * une suppression.
+   */
+  const activeGrid = $derived(monitorGrid.filter((c) => !c.removed));
+  /** Retirées QUI ont des relevés dans la fenêtre : les autres n'ont rien à tracer. */
+  const removedGrid = $derived(
+    monitorGrid.filter((c) => c.removed && (c.curve?.points.length ?? 0) > 0),
+  );
   const speedGrid = $derived(speedCards(speedCurves, speedHistory ?? []));
 
   // Trois graphes par ligne au lieu d'un : la hauteur suit, sinon une ligne de
@@ -1732,6 +1753,49 @@
             {#if reviveNote}<p class="rnote" role="status">{reviveNote}</p>{/if}
             {#if reviveError}<p class="err" role="alert">{reviveError}</p>{/if}
           </section>
+
+          <!-- 🔴 L'historique d'une cible retirée. Il était sous « Actives »,
+               où il affirmait une surveillance qui n'existe plus ; il est ici,
+               où il ne contredit rien. Le retirer complètement aurait été
+               l'autre erreur : ces relevés sont exactement ce qu'on vient
+               chercher après avoir retiré une cible par erreur. -->
+          {#if removedGrid.length > 0}
+            <p class="bsub">{$_('probe.monitoring_removed_history')}</p>
+            <div class="cardgrid">
+              {#each removedGrid as card (card.key)}
+                <ChartCard
+                  title={$_('charts.latency_of', { values: { target: card.target } })}
+                  sub={$_('charts.own_scale')}
+                  tone="ready"
+                  {refreshing}
+                >
+                  {#snippet action()}
+                    <span class="flag">{$_('probe.monitoring_removed_flag')}</span>
+                  {/snippet}
+
+                  <TimeSeriesChart
+                    series={[card.curve!]}
+                    {domain}
+                    unit={$_('charts.unit_ms')}
+                    height={CARD_HEIGHT}
+                  />
+
+                  {#snippet table()}
+                    <ValueTable
+                      columns={[
+                        $_('charts.table_time'),
+                        `${$_('charts.latency')} (${$_('charts.unit_ms')})`,
+                      ]}
+                      rows={(card.curve?.points ?? []).map((p) => [
+                        tooltipTime(p.t, lang),
+                        p.v.toFixed(0),
+                      ])}
+                    />
+                  {/snippet}
+                </ChartCard>
+              {/each}
+            </div>
+          {/if}
         {:else}
         <!-- Sous-onglet « Actives ». Son contenu garde volontairement son
              indentation d'origine : le réaligner d'un niveau réécrirait cent
@@ -1760,7 +1824,7 @@
         {#if removeNote}<p class="rnote" role="status">{removeNote}</p>{/if}
         {#if removeError}<p class="err" role="alert">{removeError}</p>{/if}
 
-        {#if monitorGrid.length === 0}
+        {#if activeGrid.length === 0}
           {#if pingTone === 'loading' || pingTone === 'error'}
             <!-- Une lecture en cours ou en échec doit se voir : sans ça,
                  l'onglet paraît simplement vide. -->
@@ -1787,7 +1851,7 @@
                rendent mutuellement illisibles : le premier est une ligne plate
                au ras de l'axe, le second écrase tout. -->
           <div class="cardgrid">
-            {#each monitorGrid as card (card.key)}
+            {#each activeGrid as card (card.key)}
               <ChartCard
                 title={card.target
                   ? $_('charts.latency_of', { values: { target: card.target } })
