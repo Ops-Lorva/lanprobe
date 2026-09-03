@@ -287,6 +287,19 @@ describe('reportsApi', () => {
     expect(envoyé.range).toBe('-7d');
   });
 
+  it('laisse partir une liste VIDE fournie explicitement, pour que le hub la refuse', async () => {
+    // 🔴 Vide n'est pas « toutes ». La transformer en « absent » ici produirait
+    // le classeur du site entier là où l'écran affichait zéro case cochée — et
+    // le classeur part chez un client. Le hub, lui, refuse en `400` avec une
+    // phrase qui nomme la règle.
+    const spy = captureFetch({ error: 'aucune sonde à mettre dans ce rapport' }, 400);
+    await reportsApi
+      .requestReport('s1', { probe_ids: [], window: { range: '-7d' }, locale: 'fr' })
+      .catch(() => {});
+    const [, init] = spy.mock.calls[0];
+    expect(JSON.parse(String(init?.body)).probe_ids).toEqual([]);
+  });
+
   it('suit un rapport par son identifiant, pas par son site', async () => {
     const spy = captureFetch(report());
     await reportsApi.trackReport('r/1');

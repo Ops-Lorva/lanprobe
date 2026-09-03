@@ -274,7 +274,12 @@ export const reportsApi = {
     request<{ report_id: string; state: string }>(`/api/sites/${enc(siteId)}/reports`, {
       method: 'POST',
       body: JSON.stringify({
-        ...(body.probe_ids && body.probe_ids.length > 0 ? { probe_ids: body.probe_ids } : {}),
+        // 🔴 **Absent et vide ne sont pas la même chose**, et la nuance vaut un
+        // classeur : absent = toutes les sondes du site, vide = une demande
+        // sans sonde, que le hub refuse. Remplacer l'un par l'autre ici
+        // produirait le classeur du site entier là où l'écran affichait zéro
+        // case cochée — et ce classeur part chez un client.
+        ...(body.probe_ids !== undefined ? { probe_ids: body.probe_ids } : {}),
         ...(body.window.start != null && body.window.stop != null
           ? { start: body.window.start, stop: body.window.stop }
           : { range: body.window.range ?? '-24h' }),
