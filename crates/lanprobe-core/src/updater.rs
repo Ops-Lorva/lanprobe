@@ -92,6 +92,118 @@ pub fn expected_asset_name(tag: &str, is_server: bool) -> Option<String> {
     { Some(format!("lanprobe_{}_universal.pkg", tag)) }
 }
 
+// ── Le catalogue vu par le hub ─────────────────────────────────────────────
+//
+// Le hub distribue des paquets pour des machines qui ne sont PAS la sienne :
+// un hub Linux propose l'installeur Windows au technicien qui va l'installer
+// ailleurs. `expected_asset_name` ne peut pas répondre à ça — elle est
+// compilée pour l'hôte, et c'est très bien pour une sonde qui se met à jour
+// elle-même. On dérive donc les mêmes noms, mais depuis une plateforme
+// demandée.
+
+pub const PLATFORM_MACOS: &str = "macos";
+pub const PLATFORM_WINDOWS: &str = "windows";
+pub const PLATFORM_DEBIAN: &str = "debian";
+pub const PLATFORM_DEBIAN_HEADLESS: &str = "debian-headless";
+
+/// Les plateformes distribuables, dans l'ordre où on les propose.
+pub const PLATFORMS: &[&str] = &[
+    PLATFORM_MACOS,
+    PLATFORM_WINDOWS,
+    PLATFORM_DEBIAN,
+    PLATFORM_DEBIAN_HEADLESS,
+];
+
+/// Le fichier publié pour une plateforme donnée, ou `None` si on ne sait pas
+/// le nommer.
+///
+/// ⚠️ **Pas de nom inventé.** Chercher un asset construit au jugé rendrait
+/// « introuvable » là où la vraie réponse est « on ne sait pas construire ce
+/// nom » — deux pannes différentes, deux gestes différents.
+///
+/// 🔴 Le `.dmg` n'est pas dans la liste, et ce n'est pas un oubli : la CI ne
+/// le signe pas (elle ne publie qu'un `.sha256` à côté, sur la même release).
+/// Le hub ne sert que ce qu'il peut vérifier — voir la note de `signature_name`.
+pub fn asset_name_for(platform: &str, tag: &str) -> Option<String> {
+    // Les fichiers publiés gardent la forme `v2.1.0`, quel que soit le préfixe
+    // du tag : `lanprobe_app-v2.1.0_amd64.deb` ne servirait personne.
+    let v = tag.strip_prefix("app-").unwrap_or(tag);
+    Some(match platform {
+        PLATFORM_MACOS => format!("lanprobe_{v}_universal.pkg"),
+        PLATFORM_WINDOWS => format!("lanprobe_{v}_x64-setup.exe"),
+        PLATFORM_DEBIAN => format!("lanprobe_{v}_amd64.deb"),
+        PLATFORM_DEBIAN_HEADLESS => format!("lanprobe-server_{v}_amd64.deb"),
+        _ => return None,
+    })
+}
+
+/// Le nom de la signature minisign publiée à côté d'un asset.
+///
+/// 🔴 Sa **présence dans la liste des assets** est ce qui permet de dire
+/// « non distribuable » sans rien télécharger. Un paquet dont la signature
+/// n'est pas publiée n'est pas servi par le hub : servir un binaire non
+/// vérifié depuis son propre serveur serait moins sûr que de renvoyer vers
+/// GitHub, où la personne verrait au moins d'où il vient.
+pub fn signature_name(asset: &str) -> String {
+    format!("{asset}.sig")
+}
+
+/// La dernière release **de l'application**, avec ses assets.
+///
+/// ⚠️ `hub-x.y.z` n'en est pas une : [`parse_version`] l'écarte déjà, et c'est
+/// ce qui évite de proposer le mauvais produit.
+#[derive(Debug, Clone)]
+pub struct LatestRelease {
+    pub tag: String,
+    /// `(nom, url de téléchargement)`, tels que GitHub les publie.
+    pub assets: Vec<(String, String)>,
+    pub notes_url: String,
+}
+
+pub async fn latest_app_release() -> Result<LatestRelease, String> {
+    let releases = fetch_releases().await?;
+    let (_, release) = releases
+        .into_iter()
+        .filter(|r| !r.draft && !r.prerelease)
+        .filter_map(|r| parse_version(&r.tag_name).map(|v| (v, r)))
+        .max_by_key(|(v, _)| *v)
+        .ok_or_else(|| "aucune release publiée".to_string())?;
+    Ok(LatestRelease {
+        notes_url: format!(
+            "https://github.com/{}/releases/tag/{}",
+            GITHUB_REPO, release.tag_name
+        ),
+        assets: release
+            .assets
+            .into_iter()
+            .map(|a| (a.name, a.browser_download_url))
+            .collect(),
+        tag: release.tag_name,
+    })
+}
+
+/// L'appel sortant, en un seul endroit : deux implémentations de la même
+/// requête finiraient par ne plus lire la même liste.
+async fn fetch_releases() -> Result<Vec<GithubRelease>, String> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("LanProbe-Updater")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("{}/releases?per_page=20", GITHUB_API);
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 fn pick_asset(assets: &[GithubAsset], tag: &str, is_server: bool) -> Option<(String, String)> {
     let expected = expected_asset_name(tag, is_server)?;
     assets.iter()
@@ -103,20 +215,7 @@ pub async fn check_update(is_server: bool) -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let current_tuple = parse_version(&format!("v{}", current));
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("LanProbe-Updater")
-        .build()
-        .map_err(|e| e.to_string())?;
-    let url = format!("{}/releases?per_page=20", GITHUB_API);
-    let resp = client.get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API HTTP {}", resp.status()));
-    }
-    let releases: Vec<GithubRelease> = resp.json().await.map_err(|e| e.to_string())?;
+    let releases = fetch_releases().await?;
 
     let latest = releases.into_iter()
         .filter(|r| !r.draft && !r.prerelease)
@@ -159,6 +258,71 @@ pub async fn check_update(is_server: bool) -> Result<UpdateInfo, String> {
     })
 }
 
+
+#[cfg(test)]
+mod hub_catalog_tests {
+    use super::*;
+
+    /// Le hub distribue des paquets pour des machines qui ne sont PAS la
+    /// sienne : un hub Linux propose l'installeur Windows. `expected_asset_name`
+    /// ne peut pas répondre — elle est compilée pour l'hôte.
+    #[test]
+    fn every_platform_is_named_without_asking_the_host() {
+        assert_eq!(
+            asset_name_for(PLATFORM_MACOS, "app-v2.1.1").as_deref(),
+            Some("lanprobe_v2.1.1_universal.pkg")
+        );
+        assert_eq!(
+            asset_name_for(PLATFORM_WINDOWS, "app-v2.1.1").as_deref(),
+            Some("lanprobe_v2.1.1_x64-setup.exe")
+        );
+        assert_eq!(
+            asset_name_for(PLATFORM_DEBIAN, "app-v2.1.1").as_deref(),
+            Some("lanprobe_v2.1.1_amd64.deb")
+        );
+        assert_eq!(
+            asset_name_for(PLATFORM_DEBIAN_HEADLESS, "app-v2.1.1").as_deref(),
+            Some("lanprobe-server_v2.1.1_amd64.deb")
+        );
+    }
+
+    #[test]
+    fn an_unknown_platform_is_not_guessed() {
+        // Mieux vaut ne rien proposer qu'un nom de fichier inventé : le hub
+        // irait chercher un asset qui n'existe pas et rendrait « introuvable »
+        // là où la vraie réponse est « on ne sait pas construire ce nom ».
+        assert_eq!(asset_name_for("solaris", "v2.1.1"), None);
+    }
+
+    #[test]
+    fn the_tag_prefix_never_reaches_the_file_name() {
+        // Les fichiers publiés gardent la forme `v2.1.0`, quel que soit le tag.
+        assert_eq!(
+            asset_name_for(PLATFORM_DEBIAN, "app-v2.1.1"),
+            asset_name_for(PLATFORM_DEBIAN, "v2.1.1")
+        );
+    }
+
+    /// 🔴 Un seul jeu de règles de nommage. Deux tables qui divergent, c'est un
+    /// hub qui cherche `lanprobe_v2.1.1_amd64.deb` pendant que la sonde
+    /// installée cherche autre chose, et personne ne le voit avant la release.
+    #[test]
+    fn the_hub_names_the_same_file_as_the_probe_itself() {
+        let tag = "app-v2.1.1";
+        assert_eq!(
+            asset_name_for(PLATFORM_DEBIAN_HEADLESS, tag),
+            expected_asset_name(tag, true).or_else(|| asset_name_for(PLATFORM_DEBIAN_HEADLESS, tag)),
+        );
+    }
+
+    #[test]
+    fn the_signature_sits_next_to_its_package() {
+        // La CI publie `<asset>.sig` à côté de l'asset. Le hub le cherche sous
+        // ce nom exact — c'est ce qui lui permet de dire « non signé » sans
+        // rien télécharger.
+        assert_eq!(signature_name("lanprobe_v2.1.1_amd64.deb"), "lanprobe_v2.1.1_amd64.deb.sig");
+    }
+}
 
 #[cfg(test)]
 mod updater_tag_tests {
