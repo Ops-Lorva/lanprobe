@@ -564,6 +564,25 @@ const MIGRATIONS: &[&str] = &[
     // dernière vue et la dernière adresse sont ce qui reste pour repérer un
     // secret copié, faute de détection automatique.
     //
+    // ── `pair_codes` — calquée sur `enroll_codes` ──
+    //
+    // ⚠️ **`enroll_codes` ne pouvait PAS la porter** : son `site_id` est
+    // `NOT NULL REFERENCES sites(site_id)` et un code d'appairage ne désigne
+    // aucun site — il désigne un COMPTE. L'y ranger aurait demandé de rendre
+    // la colonne facultative, c'est-à-dire d'affaiblir la contrainte qui
+    // empêche un code de sonde d'exister sans parc.
+    //
+    // Mêmes règles que le code d'enrôlement : 8 caractères, 15 minutes, usage
+    // unique. `code_plain` porte le code en clair PENDANT sa validité — le hub
+    // web l'affiche en QR et en toutes lettres, la saisie manuelle étant le
+    // chemin de secours obligatoire — et il est effacé à la consommation comme
+    // à l'expiration.
+    //
+    // ⚠️ Il n'y a **aucune** table pour le jeton d'accès de 15 minutes, et
+    // c'est délibéré : il vit dans la mémoire de l'app, se renouvelle en
+    // silence, et une table de jetons éphémères demanderait un balayage de
+    // nettoyage que personne ne surveille.
+    //
     // ── `reports` — DEUX durées de vie dans une seule table ──
     //
     // 🔴 La ligne n'est **jamais** supprimée. La purge remplit `purged_at`,
@@ -606,6 +625,15 @@ const MIGRATIONS: &[&str] = &[
       revoked_at  INTEGER
     );
     CREATE INDEX idx_paired_devices_user ON paired_devices(username);
+
+    CREATE TABLE pair_codes (
+      code_hash   TEXT PRIMARY KEY,
+      username    TEXT    NOT NULL REFERENCES users(username),
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER NOT NULL,
+      consumed_at INTEGER,
+      code_plain  TEXT
+    );
 
     CREATE TABLE reports (
       report_id    TEXT PRIMARY KEY,
@@ -3730,6 +3758,26 @@ mod tests {
             assert!(
                 devices.iter().any(|c| c == expected),
                 "colonne {expected} absente de paired_devices : {devices:?}"
+            );
+        }
+
+        // ⚠️ Le code d'appairage ne pouvait pas tenir dans `enroll_codes` :
+        // son `site_id` est NOT NULL et un code d'appairage désigne un compte,
+        // pas un site. Il voyage donc dans la même migration, faute de quoi la
+        // tâche d'appairage devrait en écrire une seconde — le défaut que
+        // celle-ci existe pour empêcher.
+        let codes = columns(&db, "pair_codes");
+        for expected in [
+            "code_hash",
+            "username",
+            "created_at",
+            "expires_at",
+            "consumed_at",
+            "code_plain",
+        ] {
+            assert!(
+                codes.iter().any(|c| c == expected),
+                "colonne {expected} absente de pair_codes : {codes:?}"
             );
         }
 
