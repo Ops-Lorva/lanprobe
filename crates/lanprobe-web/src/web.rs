@@ -4261,10 +4261,23 @@ pub fn aggregate_every(span_secs: i64, max_points: i64) -> Option<&'static str> 
 /// change pas, et c'est la raison pour laquelle elle n'embarque pas les
 /// horodatages bruts que `/sla` seul peut se permettre de lire.
 ///
-/// ⚠️ Les deux bornes ne donnent que les TROUS DE BORD. La couverture fine du
-/// rapport, elle, voit aussi les trous intérieurs : le chiffre de la carte est
-/// un minorant de celui du rapport, jamais un second chiffre concurrent. La
-/// règle est tenue côté interface, dans `web-ui/src/lib/uptime.ts`.
+/// 🔴 `elapsed()` puis `max()` rendent le PLUS GRAND trou intérieur, et c'est
+/// lui qui manquait : une sonde dont les relevés touchent les deux bords mais
+/// dort au milieu ne déclenchait rien, alors que 97 % de sa période n'a aucun
+/// relevé. `max` est un agrégat — une ligne par cible, comme les quatre autres.
+///
+/// 🔴 **`sort` n'est pas décoratif.** Vérifié sur un influxd 2.9.1 réel, sur une
+/// cible portant DEUX séries (un `host` qui change) : sans lui, `group` les
+/// concatène au lieu de les fusionner dans l'ordre du temps, et les trois
+/// rendus mentent ensemble — `first` rendait le premier point de la seconde
+/// série, `last` le dernier de la première, et `elapsed` un écart de 2 s là où
+/// les relevés sont à la seconde. Un `first` trop tardif gonfle le trou de bord
+/// annoncé : c'est exactement le sens qui casse le minorant.
+///
+/// ⚠️ Le chiffre reste un MINORANT de la couverture du rapport : les bords et
+/// le plus grand trou, jamais la somme de tous les trous que `compute_coverage`
+/// additionne. La démonstration vit avec le calcul, dans
+/// `web-ui/src/lib/uptime.ts`.
 fn uptime_flux(bucket: &str, probe_id: &str, window: &str) -> String {
     format!(
         "base = from(bucket: {})\n  |> range({})\n  \
@@ -4272,18 +4285,20 @@ fn uptime_flux(bucket: &str, probe_id: &str, window: &str) -> String {
          |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")\n  \
          |> filter(fn: (r) => r[\"_field\"] == \"alive\")\n  \
          |> toFloat()\n  \
-         |> group(columns: [\"ip\"])\n\n\
+         |> group(columns: [\"ip\"])\n  \
+         |> sort(columns: [\"_time\"])\n\n\
          base |> mean() |> yield(name: \"uptime\")\n\
          base |> count() |> yield(name: \"samples\")\n\
          base |> first() |> yield(name: \"first\")\n\
-         base |> last() |> yield(name: \"last\")\n",
+         base |> last() |> yield(name: \"last\")\n\
+         base |> elapsed(unit: 1s) |> max(column: \"elapsed\") |> yield(name: \"gap\")\n",
         flux_string(bucket),
         window,
         flux_string(probe_id),
     )
 }
 
-/// Les deux rendus (`uptime`, `samples`) recollés par cible.
+/// Les cinq rendus (`uptime`, `samples`, `first`, `last`, `gap`) recollés par cible.
 ///
 /// ⚠️ C'est la colonne `result` qui distingue les deux blocs — la seule route
 /// du hub où elle porte de l'information. `series_from_flux_csv` l'ignore
@@ -4301,6 +4316,11 @@ fn uptime_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
         /// Bornes en SECONDES epoch — `None` tant que le rendu n'est pas lu.
         first_at: Option<i64>,
         last_at: Option<i64>,
+        /// Plus grand écart entre deux relevés consécutifs, en secondes.
+        ///
+        /// ⚠️ `None` sous DEUX relevés : `elapsed` ne rend alors aucune ligne.
+        /// Constaté sur un influxd réel, pas supposé.
+        max_gap_secs: Option<i64>,
     }
 
     let mut by_ip: BTreeMap<String, Cible> = BTreeMap::new();
@@ -4338,6 +4358,10 @@ fn uptime_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
             // et le calcul de bord qui les consomme est le même des deux côtés.
             "first" => slot.first_at = at("_time").and_then(rfc3339_to_millis).map(|ms| ms / 1_000),
             "last" => slot.last_at = at("_time").and_then(rfc3339_to_millis).map(|ms| ms / 1_000),
+            // ⚠️ La valeur est dans la colonne `elapsed`, PAS dans `_value` :
+            // `elapsed` ajoute sa colonne et laisse `_value` intact — celui du
+            // relevé, donc le booléen `alive`. Le lire ici rendrait 0 ou 1.
+            "gap" => slot.max_gap_secs = at("elapsed").and_then(|v| v.parse::<i64>().ok()),
             _ => {}
         }
     }
@@ -4362,6 +4386,7 @@ fn uptime_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
                 "samples": c.samples,
                 "first_at": borne(c.first_at),
                 "last_at": borne(c.last_at),
+                "max_gap_secs": borne(c.max_gap_secs),
             })
         })
         .collect()
@@ -8238,6 +8263,99 @@ mod tests {
         assert_eq!(targets[0]["last_at"], 1_787_995_799);
     }
 
+    /// Réponse RÉELLE d'un influxd 2.9.1 jetable à la requête de `uptime_flux`,
+    /// sur quatre cibles construites pour les quatre cas qui comptent :
+    ///
+    /// - `10.0.8.1` : 1 600 relevés touchant les DEUX bords, avec un trou de
+    ///   20 001 s au milieu — la capture de Benjamin, celle que les seules
+    ///   bornes ne voyaient pas ;
+    /// - `10.0.8.2` : cadence régulière de 20 s, sans trou ;
+    /// - `10.0.8.3` : DEUX `host` pour une même IP, écrits dans le désordre —
+    ///   c'est elle qui a fait apparaître le besoin de `sort` ;
+    /// - `10.0.8.4` : UN seul relevé, donc aucun rendu `gap`.
+    ///
+    /// Capturée, pas écrite à la main.
+    const UPTIME_REEL_CSV: &str = "\
+,result,table,ip,_value
+,samples,0,10.0.8.1,1600
+,samples,1,10.0.8.2,1080
+,samples,2,10.0.8.3,600
+,samples,3,10.0.8.4,1
+
+,result,table,ip,_value
+,uptime,0,10.0.8.1,0.995
+,uptime,1,10.0.8.2,1
+,uptime,2,10.0.8.3,1
+,uptime,3,10.0.8.4,1
+
+,result,table,_start,_stop,_time,_value,_field,_measurement,host,ip,probe_id,site_id
+,first,0,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T10:40:00Z,0,alive,ping_latency,mac,10.0.8.1,sonde-1,s1
+,first,2,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T10:40:00Z,1,alive,ping_latency,b,10.0.8.3,sonde-1,s1
+,first,3,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T10:40:05Z,1,alive,ping_latency,a,10.0.8.4,sonde-1,s1
+
+,result,table,_start,_stop,_time,_value,_field,_measurement,host,ip,probe_id,site_id
+,last,0,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T16:39:59Z,1,alive,ping_latency,mac,10.0.8.1,sonde-1,s1
+,last,2,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T10:49:59Z,1,alive,ping_latency,a,10.0.8.3,sonde-1,s1
+,last,3,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T10:40:05Z,1,alive,ping_latency,a,10.0.8.4,sonde-1,s1
+
+,result,table,_start,_stop,_time,_value,_field,_measurement,host,ip,probe_id,site_id,elapsed
+,gap,0,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T16:18:20Z,1,alive,ping_latency,mac,10.0.8.1,sonde-1,s1,20001
+,gap,1,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T10:40:20Z,1,alive,ping_latency,mac,10.0.8.2,sonde-1,s1,20
+,gap,2,2026-08-29T10:40:00Z,2026-08-29T16:40:00Z,2026-08-29T10:40:01Z,1,alive,ping_latency,a,10.0.8.3,sonde-1,s1,1
+";
+
+    #[test]
+    fn the_largest_interior_hole_comes_back_with_the_rate() {
+        // 🔴 Le cas que les seules bornes laissaient passer : les relevés
+        // touchent les deux bords, la carte se taisait, et 93 % de la période
+        // n'avait aucun relevé. C'est `elapsed` qui le dit.
+        let cibles = uptime_from_flux_csv(UPTIME_REEL_CSV);
+        let de = |ip: &str| {
+            cibles.iter().find(|c| c["ip"] == ip).unwrap_or_else(|| panic!("{ip} absente")).clone()
+        };
+        assert_eq!(de("10.0.8.1")["max_gap_secs"], 20_001);
+        assert_eq!(de("10.0.8.2")["max_gap_secs"], 20);
+    }
+
+    #[test]
+    fn the_hole_is_read_in_the_elapsed_column_and_not_in_the_value() {
+        // ⚠️ `elapsed` AJOUTE sa colonne et laisse `_value` intact — celui du
+        // relevé, donc `alive`. Le lire là rendrait 0 ou 1, c'est-à-dire une
+        // cadence d'une seconde annoncée sur n'importe quelles données.
+        let cibles = uptime_from_flux_csv(UPTIME_REEL_CSV);
+        let une = cibles.iter().find(|c| c["ip"] == "10.0.8.3").unwrap();
+        assert_eq!(une["max_gap_secs"], 1, "la colonne `elapsed`, pas `_value` qui vaut 1");
+        assert_eq!(une["samples"], 600, "et le reste du recollage tient");
+    }
+
+    #[test]
+    fn a_single_sample_has_no_hole_at_all() {
+        // ⚠️ Constaté sur un influxd réel : `elapsed` ne rend AUCUNE ligne sous
+        // deux relevés. `null` donc, et l'écran ne dira rien — un point isolé ne
+        // dit pas quelle durée il représente.
+        let cibles = uptime_from_flux_csv(UPTIME_REEL_CSV);
+        let seule = cibles.iter().find(|c| c["ip"] == "10.0.8.4").unwrap();
+        assert!(seule["max_gap_secs"].is_null(), "{seule:?}");
+        assert_eq!(seule["samples"], 1);
+    }
+
+    #[test]
+    fn the_query_merges_the_series_of_one_target_in_time_order() {
+        // 🔴 Trouvé sur un influxd 2.9.1 réel, pas déduit : sur une cible
+        // portant deux `host`, `group` CONCATÈNE les séries. Sans `sort`,
+        // `first` rendait le premier point de la seconde série, `last` le
+        // dernier de la première, et `elapsed` 2 s là où les relevés sont à la
+        // seconde. Un `first` trop tardif gonfle le trou annoncé — le seul sens
+        // qui casse le minorant.
+        let flux = uptime_flux("lanprobe", "sonde-1", "start: -24h");
+        assert!(flux.contains("|> sort(columns: [\"_time\"])"), "{flux}");
+        // Et l'ordre compte : le tri doit précéder les rendus qui en dépendent.
+        let tri = flux.find("sort(columns:").expect("tri absent");
+        for rendu in ["|> first()", "|> last()", "|> elapsed("] {
+            assert!(flux.find(rendu).expect(rendu) > tri, "{rendu} avant le tri — {flux}");
+        }
+    }
+
     #[test]
     fn a_hub_answer_without_edges_carries_null_and_not_a_covered_window() {
         // ⚠️ Absence d'information n'est pas absence de trou. `null`, et
@@ -8245,6 +8363,7 @@ mod tests {
         let targets = uptime_from_flux_csv(UPTIME_CSV);
         assert!(targets[0]["first_at"].is_null(), "{targets:?}");
         assert!(targets[0]["last_at"].is_null(), "{targets:?}");
+        assert!(targets[0]["max_gap_secs"].is_null(), "{targets:?}");
     }
 
     #[test]
@@ -8277,6 +8396,9 @@ mod tests {
         // `/sla` assume et qu'elle refuse.
         assert!(flux.contains("|> first()"), "{flux}");
         assert!(flux.contains("|> last()"), "{flux}");
+        // ⚠️ `max(column: \"elapsed\")` et non `max()` : la valeur cherchée
+        // n'est pas dans `_value`. Vérifié sur un influxd 2.9.1 réel.
+        assert!(flux.contains("|> elapsed(unit: 1s) |> max(column: \"elapsed\")"), "{flux}");
     }
 
     #[test]

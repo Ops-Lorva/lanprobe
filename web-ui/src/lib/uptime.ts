@@ -28,6 +28,11 @@ export interface TargetUptime {
    */
   first_at?: number | null;
   last_at?: number | null;
+  /**
+   * Plus grand écart entre deux relevés consécutifs de la fenêtre, en
+   * secondes. `null` sous deux relevés : `elapsed` ne rend alors rien.
+   */
+  max_gap_secs?: number | null;
 }
 
 /**
@@ -51,6 +56,7 @@ export function normalizeUptime(payload: unknown): Record<string, TargetUptime> 
       samples: typeof row.samples === 'number' ? row.samples : 0,
       first_at: typeof row.first_at === 'number' ? row.first_at : null,
       last_at: typeof row.last_at === 'number' ? row.last_at : null,
+      max_gap_secs: typeof row.max_gap_secs === 'number' ? row.max_gap_secs : null,
     };
   }
   return out;
@@ -78,9 +84,29 @@ export function uptimeOf(
  *
  * ⚠️ Même facteur que `GAP_FACTOR` de `lanprobe-core/src/sla.rs`, et ce n'est
  * pas une coïncidence à préserver au hasard : c'est lui qui garantit que la
- * carte ne compte jamais un bord que le rapport, lui, laisserait passer.
+ * carte ne signale jamais un trou que le rapport, lui, laisserait passer.
  */
 const GAP_FACTOR = 3;
+
+/**
+ * 🔴 Le majorant qui rend le minorant DÉMONTRABLE : `médiane ≤ 2 × moyenne`.
+ *
+ * Le rapport seuille sur l'intervalle MÉDIAN ; ce chemin-ci ne connaît que la
+ * moyenne — une ligne par cible, pas les horodatages. Or « moyenne ≥ médiane »
+ * est faux en général : sur les intervalles `[1, 1, 1, 10, 10, 10, 10]`, la
+ * médiane vaut 10 et la moyenne 6,1. Un seuil à `3 × moyenne` serait alors PLUS
+ * PERMISSIF que celui du rapport, et la carte annoncerait un trou que le
+ * rapport ne voit pas — exactement la contradiction qu'on refuse. Un test tient
+ * ce contre-exemple.
+ *
+ * La majoration, elle, est toujours vraie. Sur `k` intervalles triés, la
+ * médiane que prend le rapport est le terme d'indice `⌊k/2⌋` ; il y a donc au
+ * moins `k/2` intervalles supérieurs ou égaux à elle, et leur somme ne peut pas
+ * dépasser la durée totale : `durée ≥ (k/2) × médiane`, donc
+ * `médiane ≤ 2 × durée / k = 2 × moyenne`. Le plancher à 1 s couvre le cas où
+ * le rapport ramène sa médiane à 1 (`intervals[...].max(1)`).
+ */
+const MEDIANE_MAJOREE_PAR = 2;
 
 /** Ce qu'on affiche est un dixième de point : en dessous, il n'y a rien à dire. */
 const PLUS_PETIT_AFFICHABLE = 0.05;
@@ -98,18 +124,26 @@ type Translate = (key: string, values?: Record<string, string | number>) => stri
  * la règle — mais seul, il est plausible et faux.
  *
  * 🔴 **Un MINORANT, jamais la couverture fine du rapport.** Ce chemin-ci ne
- * connaît que le premier et le dernier relevé de la fenêtre : il compte les
- * deux BORDS, et rien de ce qui manque entre les deux. `compute_coverage`, qui
- * a les horodatages, compte les bords ET les trous intérieurs. La carte en dit
- * donc toujours MOINS que le rapport, jamais plus, et les deux écrans ne
- * peuvent pas se contredire. D'où le « au moins » du libellé : il est porté
- * par le calcul, pas par une précaution de rédaction.
+ * connaît de la fenêtre que quatre nombres : le premier relevé, le dernier,
+ * leur nombre, et le PLUS GRAND écart entre deux consécutifs. Il compte donc
+ * les deux bords et ce seul trou. `compute_coverage`, qui a les horodatages,
+ * additionne TOUS les trous. Chaque terme d'ici est inférieur ou égal au terme
+ * correspondant de là-bas, et là-bas il y en a d'autres, tous positifs :
  *
- * 🔴 **Aucune cadence n'est supposée.** Le seuil au-delà duquel un bord devient
- * un trou est l'intervalle MOYEN OBSERVÉ — `(dernier − premier) / (relevés −
- * 1)` — multiplié par [`GAP_FACTOR`]. Il est toujours ≥ l'intervalle médian
- * dont le rapport se sert, donc toujours plus exigeant : ce que la carte
- * signale, le rapport le signale aussi.
+ * - un bord n'est compté ici que s'il dépasse `3 × 2 × moyenne`, donc `3 ×
+ *   médiane` (voir [`MEDIANE_MAJOREE_PAR`]) : le rapport le compte alors aussi,
+ *   et en entier des deux côtés ;
+ * - le plus grand trou n'est compté ici que pour `écart − 2 × moyenne`, quand
+ *   le rapport le compte pour `écart − médiane`, qui est plus grand puisque la
+ *   médiane est plus petite.
+ *
+ * La carte en dit donc toujours MOINS que le rapport, jamais plus, et les deux
+ * écrans ne peuvent pas se contredire. D'où le « au moins » du libellé : il est
+ * porté par le calcul, pas par une précaution de rédaction. Un test le vérifie
+ * sur sept formes de relevés au lieu de le croire sur parole.
+ *
+ * 🔴 **Aucune cadence n'est supposée.** Tout sort de l'intervalle moyen
+ * OBSERVÉ — `(dernier − premier) / (relevés − 1)`.
  *
  * ⚠️ `null` quand la fenêtre est couverte : un « 0 % » permanent est du bruit
  * qui finirait par masquer le cas utile. Même règle que `coverageLabel`.
@@ -132,7 +166,10 @@ export function unmeasuredLabel(
   if (row.samples < 2) return null;
 
   const moyen = Math.max(1, (last - first) / (row.samples - 1));
-  const seuil = moyen * GAP_FACTOR;
+  // Ce qui majore la médiane du rapport, donc ce qu'on retranche à un trou et
+  // ce sur quoi on seuille. Jamais la moyenne nue : voir MEDIANE_MAJOREE_PAR.
+  const majore = moyen * MEDIANE_MAJOREE_PAR;
+  const seuil = majore * GAP_FACTOR;
 
   // Les bords ne sont ouverts par aucun relevé : ils comptent en entier.
   let gap = 0;
@@ -140,6 +177,13 @@ export function unmeasuredLabel(
   if (avant > seuil) gap += avant;
   const apres = toSecs - last;
   if (apres > seuil) gap += apres;
+
+  // ⚠️ Le plus grand trou INTÉRIEUR, et lui seul. Les autres existent
+  // peut-être, mais ce chemin ne les connaît pas : les deviner reviendrait à
+  // supposer la cadence. Un espacement anormal ne manque que de son EXCÉDENT —
+  // le pas normal est déjà couvert par le relevé qui l'ouvre.
+  const creux = row.max_gap_secs;
+  if (typeof creux === 'number' && creux > seuil) gap += creux - majore;
 
   const pct = (Math.min(gap, windowSecs) / windowSecs) * 100;
   if (pct < PLUS_PETIT_AFFICHABLE) return null;

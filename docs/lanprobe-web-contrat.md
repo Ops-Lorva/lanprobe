@@ -640,9 +640,10 @@ inconnue, `400` sur une fenêtre illisible.
 ```json
 { "range": "-24h",
   "targets": [ { "ip": "10.0.8.1",  "uptime_pct": 99.87, "samples": 8640,
-                 "first_at": 1788000000, "last_at": 1788086399 },
+                 "first_at": 1788000000, "last_at": 1788086399,
+                 "max_gap_secs": 20 },
                { "ip": "10.0.8.20", "uptime_pct": null,  "samples": 0,
-                 "first_at": null, "last_at": null } ] }
+                 "first_at": null, "last_at": null, "max_gap_secs": null } ] }
 ```
 
 ⚠️ **Ce n'est pas un doublon de `/sla`, c'est l'autre bout du même chiffre.**
@@ -663,32 +664,54 @@ portent un verdict, donc `count()` ne les voit pas. `samples` est ce dénominate
 `uptime_pct` vaut **`null`** — jamais `0` — dès qu'aucun relevé déterminé n'existe
 sur la fenêtre. Même règle que partout : `0 %` se lirait comme une panne totale.
 
-🔴 **`first_at` / `last_at` : les deux bornes des relevés déterminés de la
-fenêtre, en secondes epoch.** Elles sont là parce qu'un taux sans sa couverture
-est **plausible et faux** : « 99,50 % » sur six heures dont vingt-huit minutes
-seulement ont été mesurées se lit « tout va bien depuis six heures ». Le taux,
-lui, reste juste — l'indéterminé sort du dénominateur, c'est la règle — mais
-l'écran ne disait nulle part que la période n'avait pas été mesurée.
+🔴 **`first_at`, `last_at`, `max_gap_secs` : de quoi dire, à côté du taux, quelle
+part de la période n'a AUCUN relevé.** Un taux sans sa couverture est **plausible
+et faux** : « 99,50 % » sur six heures dont vingt-huit minutes seulement ont été
+mesurées se lit « tout va bien depuis six heures ». Le taux, lui, reste juste —
+l'indéterminé sort du dénominateur, c'est la règle — mais l'écran ne disait nulle
+part que la période n'avait pas été mesurée. Les deux bornes sont en **secondes
+epoch** ; `max_gap_secs` est le plus grand écart entre deux relevés consécutifs.
 
-⚠️ **Ce sont des SÉLECTEURS Flux, une ligne par cible**, comme `mean()` et
+⚠️ **Trois agrégats de plus, une ligne par cible chacun**, comme `mean()` et
 `count()`. Le volume de la route ne change pas : elle ne relit toujours pas les
 horodatages bruts que `/sla` seul peut se permettre de lire.
+
+🔴 **`sort(columns: ["_time"])` fait partie du contrat, pas de la décoration.**
+Vérifié sur un influxd 2.9.1 jetable, sur une cible portant **deux séries** (un
+`host` qui change) : sans lui, `group` les **concatène** au lieu de les fusionner
+dans l'ordre du temps, et les trois rendus mentent ensemble — `first` rend le
+premier point de la seconde série, `last` le dernier de la première, `elapsed`
+un écart de 2 s là où les relevés sont à la seconde. Un `first` trop tardif
+gonfle le trou annoncé : le seul sens qui casse le minorant.
+
+⚠️ `max_gap_secs` se lit dans la colonne **`elapsed`**, pas dans `_value` :
+`elapsed()` ajoute sa colonne et laisse `_value` intact — celui du relevé, donc
+le booléen `alive`. Le lire là rendrait 0 ou 1.
+
+⚠️ `elapsed()` ne rend **aucune ligne** sous deux relevés : `max_gap_secs` vaut
+alors `null`. Constaté sur un influxd réel, pas supposé.
 
 🔴 **La couverture FINE ne figure toujours PAS ici, et pour la raison d'origine.**
 Un chemin agrégé n'a pas les horodatages ; la déduire des intervalles vides
 donnerait une résolution plus grossière que celle du rapport, donc deux chiffres
-contradictoires sur la même donnée. Ce que ces deux bornes permettent est
+contradictoires sur la même donnée. Ce que ces trois valeurs permettent est
 différent et volontairement **plus faible** : un **minorant** du trou, calculé sur
-les deux BORDS de la fenêtre et sur rien d'autre. `compute_coverage` (§ rapport)
-compte les bords **et** les trous intérieurs, donc son chiffre est toujours
+les deux BORDS et sur le PLUS GRAND trou intérieur — pas sur les autres.
+`compute_coverage` (§ rapport) les additionne tous, son chiffre est donc toujours
 supérieur ou égal. L'interface l'annonce en conséquence — « au moins X % de la
 période sans relevé » — et les deux écrans ne peuvent pas se contredire.
 
 ⚠️ Le calcul du minorant vit dans `web-ui/src/lib/uptime.ts` (`unmeasuredLabel`),
-avec ses tests. Il n'y suppose **aucune cadence** : son seuil est l'intervalle
-moyen observé × 3, toujours ≥ l'intervalle médian dont `compute_coverage` se sert
-— donc toujours plus exigeant. Quand la complétude exacte compte, c'est `/sla`
-qui la porte.
+avec ses tests. Il n'y suppose **aucune cadence**. Son seuil ne peut pas être
+« 3 × l'intervalle moyen » : *moyenne ≥ médiane* est **faux** en général — sur les
+intervalles `[1, 1, 1, 10, 10, 10, 10]` la médiane vaut 10 et la moyenne 6,1 — et
+un tel seuil serait plus permissif que celui du rapport. C'est
+`3 × 2 × moyenne` qui est employé, en s'appuyant sur la majoration
+*médiane ≤ 2 × moyenne*, toujours vraie : au moins la moitié des intervalles sont
+≥ la médiane, donc leur somme, majorée par la durée totale, donne
+`durée ≥ (k/2) × médiane`. Un test tient le contre-exemple, un autre la propriété
+sur sept formes de relevés. Quand la complétude exacte compte, c'est `/sla` qui la
+porte.
 
 ### `GET /api/probes/{id}/inventory?kind=ports|discovery|speedtest`
 
