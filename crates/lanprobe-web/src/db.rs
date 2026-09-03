@@ -1384,6 +1384,9 @@ impl Db {
     /// ⚠️ **Le verrou reste au sein du crate** : `pub(crate)`, jamais `pub`.
     /// Le rendre public laisserait n'importe qui contourner les invariants que
     /// les méthodes tiennent — la portée, l'audit, l'absence de suppression.
+    // Posée d'avance pour les tâches d'appairage et de rapports : elle n'a
+    // encore d'appelant que dans les tests.
+    #[allow(dead_code)]
     pub(crate) fn conn(&self) -> &Mutex<Connection> {
         &self.conn
     }

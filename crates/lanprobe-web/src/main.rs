@@ -271,6 +271,24 @@ async fn main() -> Result<(), String> {
         secrets,
         ceremonies: Arc::new(lanprobe_web::passkeys::Ceremonies::new()),
         tls: tls_on,
+        // ⚠️ `None` quand le hub sert en clair : il n'y a alors aucun
+        // certificat DU HUB à épingler — celui que le téléphone verra est
+        // celui du reverse proxy. Annoncer une empreinte le ferait comparer à
+        // un certificat qui n'est pas le sien, et l'appairage échouerait sans
+        // que rien ne dise pourquoi.
+        //
+        // Un certificat illisible ne fait PAS échouer le démarrage : le hub
+        // sert, l'appairage par QR se passe alors de l'empreinte, et le défaut
+        // est journalisé plutôt que fatal.
+        cert_fingerprint: tls_on
+            .then(|| tls::fingerprint_sha256(&tls::tls_paths(&args.config_dir)))
+            .and_then(|r| match r {
+                Ok(empreinte) => Some(empreinte),
+                Err(e) => {
+                    tracing::warn!("empreinte du certificat du hub illisible : {e}");
+                    None
+                }
+            }),
         config_dir: args.config_dir.clone(),
         backup_dir: args.backup_dir.clone(),
         influx_cli: args.influx_cli.clone(),

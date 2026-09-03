@@ -51,6 +51,40 @@ pub fn ensure_certificate(paths: &TlsPaths) -> Result<(), String> {
     Ok(())
 }
 
+/// Empreinte SHA-256 du certificat du hub, au format `AB:CD:…` — celui
+/// qu'affichent les navigateurs et `openssl x509 -fingerprint`, donc celui
+/// qu'un opérateur peut comparer à l'œil.
+///
+/// 🔴 **C'est ce que le QR d'appairage transporte** (contrat § 22). Le
+/// téléphone épingle alors le certificat auto-signé du hub : l'empreinte lui
+/// arrive par un canal que l'utilisateur contrôle physiquement — l'écran qu'il
+/// a sous les yeux — plutôt que par le réseau qu'on cherche justement à
+/// authentifier. C'est déjà le motif que le hub emploie pour épingler le
+/// certificat d'Influx (contrat § 7).
+///
+/// ⚠️ **Elle ne bouge pas d'un démarrage à l'autre**, parce que le certificat
+/// est conservé. Un certificat régénéré à chaque démarrage invaliderait celui
+/// qu'ont épinglé tous les téléphones appairés — c'est-à-dire produirait très
+/// exactement la panne que l'appairage existe pour ne jamais produire.
+///
+/// ⚠️ Elle est lue **sur le certificat servi**, pas sur une valeur en base :
+/// une empreinte stockée survivrait au fichier qu'elle décrit.
+pub fn fingerprint_sha256(paths: &TlsPaths) -> Result<String, String> {
+    ensure_certificate(paths)?;
+    let cert_pem = std::fs::read(&paths.cert).map_err(|e| e.to_string())?;
+    let der = rustls_pemfile::certs(&mut cert_pem.as_slice())
+        .next()
+        .ok_or_else(|| "aucun certificat dans le fichier".to_string())?
+        .map_err(|e| e.to_string())?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, der.as_ref());
+    Ok(digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":"))
+}
+
 /// Charge — en le générant au besoin — la configuration TLS du serveur.
 pub fn server_config(paths: &TlsPaths) -> Result<Arc<rustls::ServerConfig>, String> {
     ensure_certificate(paths)?;
@@ -119,6 +153,43 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600, "la clé privée doit être 0600");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_certificate_carries_a_readable_fingerprint_that_does_not_move() {
+        // ⚠️ C'est cette empreinte que le QR d'appairage porte (contrat § 22) :
+        // elle arrive au téléphone par un canal que l'utilisateur contrôle
+        // physiquement — l'écran qu'il a sous les yeux. Épingler vaut mieux que
+        // désactiver la vérification : on garde l'authentification du serveur
+        // sans exiger une autorité que personne n'a sur un LAN.
+        let dir = tmp_dir("fingerprint");
+        let paths = tls_paths(&dir);
+
+        let empreinte = fingerprint_sha256(&paths).unwrap();
+        // Le format des navigateurs et d'`openssl x509 -fingerprint` : c'est
+        // celui qu'un opérateur peut comparer à l'œil.
+        let octets: Vec<&str> = empreinte.split(':').collect();
+        assert_eq!(octets.len(), 32, "SHA-256 = 32 octets : {empreinte}");
+        assert!(
+            octets.iter().all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit())),
+            "{empreinte}"
+        );
+
+        // 🔴 Elle ne bouge pas d'un démarrage à l'autre. Sinon chaque
+        // redémarrage du conteneur invaliderait le certificat épinglé par tous
+        // les téléphones appairés — c'est-à-dire exactement la panne que
+        // l'appairage existe pour ne jamais produire.
+        assert_eq!(fingerprint_sha256(&paths).unwrap(), empreinte);
+
+        let autre = tmp_dir("fingerprint-2");
+        assert_ne!(
+            fingerprint_sha256(&tls_paths(&autre)).unwrap(),
+            empreinte,
+            "deux certificats distincts ne peuvent pas partager une empreinte"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&autre);
     }
 
     #[test]

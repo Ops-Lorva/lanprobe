@@ -69,6 +69,25 @@ pub struct AppState {
     /// Vrai quand le hub termine lui-même le TLS. Faux quand il sert en clair
     /// derrière un reverse proxy — le cas courant en auto-hébergement.
     pub tls: bool,
+    /// Empreinte SHA-256 du certificat que le hub présente, `AB:CD:…`.
+    ///
+    /// 🔴 C'est ce que le QR d'appairage transporte (contrat § 22) : le
+    /// téléphone épingle le certificat auto-signé du hub, et l'empreinte lui
+    /// arrive par un canal que l'utilisateur contrôle physiquement — l'écran
+    /// qu'il a sous les yeux — plutôt que par le réseau qu'on cherche
+    /// justement à authentifier.
+    ///
+    /// ⚠️ `None` quand le hub sert **en clair** derrière un reverse proxy : il
+    /// n'y a alors aucun certificat du hub à épingler, celui que le téléphone
+    /// verra est celui du proxy. Annoncer une empreinte dans ce cas la ferait
+    /// comparer à un certificat qui n'est pas le sien, et l'appairage
+    /// échouerait sans que rien ne dise pourquoi.
+    ///
+    /// Calculée **une fois au démarrage**, sur le certificat servi : le
+    /// certificat est conservé entre deux démarrages, l'empreinte ne bouge
+    /// donc pas — sinon chaque redémarrage invaliderait celle qu'ont épinglée
+    /// tous les téléphones appairés.
+    pub cert_fingerprint: Option<String>,
     /// Vrai dès qu'une restauration a eu lieu dans ce processus.
     ///
     /// Le hub sert encore l'ancienne base : SQLite tient le fichier remplacé
@@ -270,6 +289,12 @@ pub fn build_router(state: AppState) -> Router {
         .merge(site_write)
         .merge(probe_write)
         .merge(administration)
+        // Les deux domaines de l'app mobile portent leurs routes eux-mêmes.
+        // ⚠️ Ils ne sont PAS déclarés ici : `web.rs` fait déjà 11 600 lignes,
+        // et deux tâches parallèles ne peuvent pas s'y partager le routeur.
+        // Chacune tient son module, celui-ci ne tient que la couture.
+        .merge(crate::pairing::routes(&state))
+        .merge(crate::reports::routes(&state))
         .with_state(state)
         // L'interface web est servie en dernier : toute requête qui n'a
         // trouvé aucune route d'API tombe ici.
@@ -284,7 +309,7 @@ pub fn build_router(state: AppState) -> Router {
 /// Authentifie puis exige un rôle minimum. L'ordre compte : `session_guard`
 /// est posée en dernier, donc s'exécute en premier et pose l'identité que
 /// `role_guard` relit.
-fn guarded(state: &AppState, minimum: Role, router: Router<AppState>) -> Router<AppState> {
+pub(crate) fn guarded(state: &AppState, minimum: Role, router: Router<AppState>) -> Router<AppState> {
     router
         .layer(middleware::from_fn_with_state((state.clone(), minimum), role_guard))
         .layer(middleware::from_fn_with_state(state.clone(), session_guard))
@@ -332,7 +357,7 @@ fn guarded_probe_scope(
 /// un site nommé dans le **corps** de la requête — code d'enrôlement, libellé
 /// de réseau, abonnement d'alerte, destination d'un déplacement de sonde. Un
 /// intergiciel ne lit que l'URL.
-fn guarded_site_scope(
+pub(crate) fn guarded_site_scope(
     state: &AppState,
     minimum: Role,
     router: Router<AppState>,
@@ -1293,11 +1318,28 @@ pub struct Identity {
     /// de restreindre continuerait de tout voir tant qu'il garde son onglet
     /// ouvert.
     pub scope: crate::db::Scope,
+    /// L'appareil appairé d'où vient la requête (contrat § 22). `None` pour
+    /// une session de navigateur.
+    ///
+    /// ⚠️ **Il ne porte aucun droit** : le rôle et la portée restent ceux du
+    /// compte, relus à chaque requête. Il sert à dire depuis QUEL téléphone un
+    /// rapport a été demandé (§ 23) — l'audit dirait « benjamin », ce qui est
+    /// vrai et trompeur le jour où le téléphone est entre d'autres mains.
+    pub device_id: Option<String>,
 }
 
 /// Rend l'identité d'un compte actif. `None` si le compte a été désactivé
 /// pendant que sa session courait — la session ne vaut alors plus rien.
-fn identity_of(state: &AppState, username: &str) -> Option<Identity> {
+///
+/// ⚠️ **C'est le seul endroit qui construit une `Identity`.** Session,
+/// identifiants du compte, jeton d'appareil : trois chemins d'authentification,
+/// une seule fabrique. Deux fabriques, c'est une qui oubliera un jour de relire
+/// le rôle ou la portée — et une portée figée survivrait à sa révocation.
+fn identity_of(
+    state: &AppState,
+    username: &str,
+    device_id: Option<String>,
+) -> Option<Identity> {
     let user = state.db.get_user(username).ok()?;
     if user.disabled_at.is_some() {
         return None;
@@ -1310,6 +1352,7 @@ fn identity_of(state: &AppState, username: &str) -> Option<Identity> {
         username: user.username,
         role: user.role,
         scope,
+        device_id,
     })
 }
 
@@ -1356,9 +1399,24 @@ async fn session_guard(
         )
             .into_response();
     }
+    // Le cookie d'abord — c'est le chemin du navigateur, le seul en
+    // production aujourd'hui, et il ne doit pas pouvoir régresser.
     let identity = session_of(&headers)
         .and_then(|t| state.auth.validate(&t))
-        .and_then(|username| identity_of(&state, &username));
+        .and_then(|username| identity_of(&state, &username, None))
+        // Puis le porteur : un appareil appairé présente un jeton d'accès de
+        // quinze minutes, jamais un cookie (contrat § 22).
+        //
+        // ⚠️ Le refus reste « session absente ou expirée » ICI, et c'est
+        // assumé : le motif d'un refus d'appareil — révoqué, inconnu, compte
+        // désactivé — se rend sur `POST /api/devices/token`, la route que
+        // l'app appelle pour renouveler. Le dire sur chaque route protégée
+        // apprendrait à qui présente un jeton quelconque quels appareils
+        // existent.
+        .or_else(|| {
+            bearer_token(&headers)
+                .and_then(|token| crate::pairing::identity_from_access_token(&state, &token))
+        });
     match identity {
         Some(identity) => {
             req.extensions_mut().insert(identity);
@@ -1453,12 +1511,12 @@ async fn session_or_credentials(
 ) -> Response {
     let mut identity = session_of(&headers)
         .and_then(|t| state.auth.validate(&t))
-        .and_then(|username| identity_of(&state, &username));
+        .and_then(|username| identity_of(&state, &username, None));
     if identity.is_none()
         && let Some((username, password)) = basic_credentials(&headers)
         && state.db.verify_credentials(&username, &password).is_ok()
     {
-        identity = identity_of(&state, &username);
+        identity = identity_of(&state, &username, None);
     }
     match identity {
         Some(identity) => {
@@ -5654,6 +5712,8 @@ mod tests {
                 // Les tests jouent le cas courant : hub en clair derrière un
                 // proxy. Le cookie `Secure` est vérifié via `X-Forwarded-Proto`.
                 tls: false,
+                // Hub en clair : aucun certificat du hub à épingler.
+                cert_fingerprint: None,
                 config_dir: scratch("volume"),
                 backup_dir: scratch("archives"),
                 // Aucune CLI `influx` en test : les sauvegardes doivent donc
@@ -8009,6 +8069,72 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["commands"].as_array().map(|c| c.len()), Some(0), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_identity_carries_the_device_it_came_from() {
+        // ⚠️ Un seul site de construction pour `Identity` : `identity_of`.
+        // Deux endroits qui la fabriquent, c'est un endroit qui oubliera un
+        // jour de relire le rôle ou la portée — et une portée figée survivrait
+        // à sa révocation (contrat § 22).
+        //
+        // `device_id` est `None` pour une session de navigateur, et nommé pour
+        // un appareil appairé : c'est ce qui permet à la ligne d'un rapport de
+        // dire depuis QUEL téléphone il a été demandé (§ 23). L'audit dirait
+        // « benjamin », ce qui est vrai et trompeur quand le téléphone est
+        // entre d'autres mains.
+        let h = Harness::with_admin().await;
+
+        let par_session = identity_of(&h.state, "admin", None).expect("le compte existe");
+        assert!(par_session.device_id.is_none(), "une session n'a pas d'appareil");
+        assert_eq!(par_session.role, Role::Admin);
+
+        let par_appareil = identity_of(&h.state, "admin", Some("appareil-1".into()))
+            .expect("le compte existe");
+        assert_eq!(par_appareil.device_id.as_deref(), Some("appareil-1"));
+        // ⚠️ Le rôle et la portée restent ceux du COMPTE, relus : un appareil
+        // n'a pas de droits propres.
+        assert_eq!(par_appareil.role, par_session.role);
+        assert_eq!(par_appareil.scope, par_session.scope);
+    }
+
+    #[tokio::test]
+    async fn a_bearer_on_a_session_route_is_judged_and_never_panics() {
+        // Le crochet d'authentification par porteur est posé dans
+        // `session_guard` ; sa souche ne reconnaît encore aucun jeton. Ce que
+        // ce test fige, c'est que le crochet EXISTE et qu'il refuse
+        // proprement — pas qu'il accepte.
+        //
+        // ⚠️ Il fige aussi l'ordre : le cookie d'abord, le porteur ensuite. Un
+        // navigateur n'envoie jamais d'en-tête `Authorization` et l'app
+        // n'aura jamais de cookie ; l'ordre inverse ne changerait rien en
+        // pratique, mais celui-ci ne peut pas régresser sur le chemin du
+        // navigateur, qui est le seul en production aujourd'hui.
+        let h = Harness::with_admin().await;
+
+        assert!(
+            crate::pairing::identity_from_access_token(&h.state, "jeton-inconnu").is_none(),
+            "aucun jeton d'accès n'est encore reconnu"
+        );
+
+        let mut req = empty_request("GET", "/api/probes");
+        req.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer jeton-inconnu".parse().unwrap(),
+        );
+        let (status, body, _) = h.call(req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"], "session absente ou expirée", "{body}");
+
+        // Le cookie continue de passer, porteur ou non.
+        let session = h.login().await;
+        let mut req = with_cookie(empty_request("GET", "/api/probes"), &session);
+        req.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer jeton-inconnu".parse().unwrap(),
+        );
+        let (status, body, _) = h.call(req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     #[tokio::test]
