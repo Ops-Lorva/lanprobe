@@ -716,7 +716,17 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/**
+ * ⚠️ **Exportée pour les écrans de l'appairage et des rapports** (contrat § 22,
+ * § 23), qui vivent dans leurs propres modules : `web.rs` a le même problème de
+ * son côté, et pour la même raison — un fichier partagé par plusieurs chantiers
+ * est un fichier que personne ne peut modifier tranquillement.
+ *
+ * Elle reste la SEULE porte : recoder un `fetch` ailleurs perdrait la
+ * traduction des refus du hub en `ApiError`, et un écran afficherait
+ * « undefined » là où le hub nomme la règle.
+ */
+export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -780,7 +790,7 @@ export interface MetricsWindow {
  * séparées finiraient par en couvrir deux légèrement différentes, et le
  * tableau par adresse contredirait la courbe qu'il légende.
  */
-function windowQuery(window: MetricsWindow): URLSearchParams {
+export function windowQuery(window: MetricsWindow): URLSearchParams {
   const q = new URLSearchParams();
   if (window.start != null && window.stop != null) {
     q.set('start', String(window.start));

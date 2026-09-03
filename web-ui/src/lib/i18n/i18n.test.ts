@@ -253,4 +253,101 @@ describe('catalogues de traduction', () => {
       expect(REQUISES_AGREGATION.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+
+  // Appairage d'un téléphone et écran « Appareils » (contrat § 22).
+  //
+  // 🔴 `account.password_no_logout` n'est pas décorative : sur le web, changer
+  // son mot de passe est le geste réflexe de « j'ai perdu mon téléphone ». Ici
+  // il ne déconnecte AUCUN appareil appairé. Sans cette phrase, on fabrique
+  // quelqu'un qui se croit protégé et ne l'est pas.
+  //
+  // ⚠️ `account.devices_last_seen_raw` dit « vu il y a 41 j » et rien d'autre :
+  // il n'y a aucune révocation par inactivité, et un libellé qui laisserait
+  // croire à une expiration automatique promettrait un filet qui n'existe pas.
+  const REQUISES_APPAREILS = [
+    'account.devices_title',
+    'account.devices_lead',
+    'account.devices_empty',
+    'account.devices_pair_cta',
+    'account.devices_code_title',
+    'account.devices_code_hint',
+    'account.devices_code_expires',
+    'account.devices_code_regen',
+    'account.devices_manual_hint',
+    'account.devices_fingerprint',
+    'account.devices_fingerprint_none',
+    'account.devices_col_name',
+    'account.devices_col_platform',
+    'account.devices_col_last_seen',
+    'account.devices_col_last_ip',
+    'account.devices_last_seen_raw',
+    'account.devices_never_seen',
+    'account.devices_rename',
+    'account.devices_revoke',
+    'account.devices_revoke_confirm',
+    'account.devices_revoked',
+    'account.devices_rotate',
+    'account.devices_rotate_hint',
+    'account.devices_all_title',
+    'account.devices_owner',
+    'account.password_no_logout',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés de l'appairage`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_APPAREILS.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
+  // Rapports produits par le hub (contrat § 23).
+  //
+  // 🔴 `report.hub_purged` et `report.hub_purged_hint` portent la distinction
+  // qui fait tout : le fichier s'en va, l'entrée reste, avec son demandeur.
+  // Sans elles, une ligne sans bouton de téléchargement se lit comme une panne.
+  //
+  // ⚠️ `report.hub_truncated` dit LES DEUX NOMBRES — « attendu 248 013 o · reçu
+  // 91 220 o ». Un « erreur réseau » générique ne permet pas de décider s'il
+  // faut réessayer ou appeler.
+  //
+  // ⚠️ `report.hub_served` et non « téléchargé » : le hub sait qu'il a servi le
+  // fichier, il ne sait pas que le téléphone l'a reçu.
+  const REQUISES_RAPPORTS_HUB = [
+    'report.hub_tab',
+    'report.hub_lead',
+    'report.hub_generate',
+    'report.hub_generate_hint',
+    'report.hub_window',
+    'report.hub_probes',
+    'report.hub_probes_all',
+    'report.hub_locale_hint',
+    'report.hub_preparing',
+    'report.hub_step',
+    'report.hub_ready',
+    'report.hub_failed',
+    'report.hub_download',
+    'report.hub_served',
+    'report.hub_purged',
+    'report.hub_purged_hint',
+    'report.hub_request_again',
+    'report.hub_expires_at',
+    'report.hub_requested_by',
+    'report.hub_requested_from_web',
+    'report.hub_size',
+    'report.hub_empty',
+    'report.hub_truncated',
+    'settings.report_days_title',
+    'settings.report_days_lead',
+    'settings.report_days_label',
+    'settings.report_days_hint',
+    'settings.report_days_purge_count',
+    'settings.invalid_report_days',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des rapports du hub`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_RAPPORTS_HUB.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });

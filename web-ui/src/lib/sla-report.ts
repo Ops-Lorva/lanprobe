@@ -415,8 +415,16 @@ function duration(seconds: number, t: Translate): string {
 /**
  * Construit le classeur et déclenche son téléchargement.
  *
- * `t` est la fonction de traduction : le rapport part chez un client, il doit
- * être dans SA langue, pas dans celle du code.
+ * `t` est la fonction de traduction : le rapport est rédigé dans la langue de
+ * l'OPÉRATEUR — celle de son interface —, pas dans celle du code.
+ *
+ * ⚠️ Ce commentaire disait l'inverse (« il doit être dans SA langue », celle du
+ * client) alors que le code y passait déjà la locale de l'interface. Un
+ * commentaire qui contredit son propre code est pire qu'aucun commentaire : le
+ * suivant l'applique. Tranché par Benjamin, et écrit au contrat § 23 — le
+ * parcours est « télécharger → ouvrir → vérifier → envoyer », et on ne peut
+ * relire que ce qu'on lit. Un classeur produit dans une langue que le demandeur
+ * ne parle pas ne serait vérifié par personne.
  */
 export async function downloadSlaReport(
   payload: SlaPayload,
