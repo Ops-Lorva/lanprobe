@@ -271,13 +271,23 @@ describe('catalogues de traduction', () => {
     'account.devices_pair_cta',
     'account.devices_code_title',
     'account.devices_code_hint',
+    // 🔴 Le QR porte un secret qui TRANSITE : qui le photographie par-dessus
+    // l'épaule appaire son propre téléphone, et cet appareil-là ne s'en ira
+    // qu'à une révocation explicite. L'écran doit le dire ; le passer sous
+    // silence laisse afficher un code d'accès permanent en réunion.
+    'account.devices_code_shoulder',
     'account.devices_code_expires',
+    'account.devices_code_expired',
     'account.devices_code_regen',
     'account.devices_manual_hint',
     'account.devices_fingerprint',
     'account.devices_fingerprint_none',
     'account.devices_col_name',
     'account.devices_col_platform',
+    // La date d'appairage : c'est elle qui rattache une ligne à un geste dont
+    // on se souvient — « le téléphone que j'ai appairé lundi ». Sans elle, deux
+    // appareils du même modèle ne se distinguent que par un nom saisi à la main.
+    'account.devices_col_paired',
     'account.devices_col_last_seen',
     'account.devices_col_last_ip',
     'account.devices_last_seen_raw',
