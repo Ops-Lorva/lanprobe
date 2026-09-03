@@ -158,8 +158,6 @@ pub fn build_router(state: AppState) -> Router {
         Role::Operator,
         Router::new()
             .route("/api/sites", post(create_site))
-            .route("/api/sites/{id}", patch(rename_site).delete(delete_site))
-            .route("/api/sites/{id}/archive", post(archive_site))
             .route("/api/enroll-codes", post(create_enroll_code))
             .route("/api/enroll-codes/pending", get(list_pending_codes))
             // Nommer un réseau est un acte de conduite du parc, pas une
@@ -170,6 +168,22 @@ pub fn build_router(state: AppState) -> Router {
                 "/api/notifications/subscriptions",
                 put(put_subscription),
             ),
+    );
+
+    // Les routes dont le `{id}` du chemin désigne UN SITE, derrière leur
+    // propre garde de portée.
+    //
+    // 🔴 **Elles appelaient `site_in_scope` à la main dans chaque handler.**
+    // Une garde qu'il faut penser à écrire finit par être oubliée — c'est le
+    // motif que le contrat § 17 décrit comme revenu trois fois côté sondes, et
+    // il était déjà là, en production, sur ces trois routes-ci. Un handler
+    // ajouté demain hérite désormais du garde sans que personne y pense.
+    let site_write = guarded_site_scope(
+        &state,
+        Role::Operator,
+        Router::new()
+            .route("/api/sites/{id}", patch(rename_site).delete(delete_site))
+            .route("/api/sites/{id}/archive", post(archive_site)),
     );
 
     // Les routes qui désignent UNE sonde vivent à part, derrière le garde de
@@ -253,6 +267,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(read_only)
         .merge(probe_read)
         .merge(parc)
+        .merge(site_write)
         .merge(probe_write)
         .merge(administration)
         .with_state(state)
@@ -292,6 +307,38 @@ fn guarded_probe_scope(
 ) -> Router<AppState> {
     router
         .layer(middleware::from_fn_with_state(state.clone(), probe_scope_guard))
+        .layer(middleware::from_fn_with_state((state.clone(), minimum), role_guard))
+        .layer(middleware::from_fn_with_state(state.clone(), session_guard))
+}
+
+/// Comme [`guarded`], plus la portée par site — pour les routes dont le `{id}`
+/// du chemin est un **`site_id`**.
+///
+/// ⚠️ **C'est le jumeau de [`guarded_probe_scope`], pas un doublon.** Les deux
+/// paramètres de chemin s'appellent `id` et ne désignent pas le même objet :
+/// un garde unique aurait cherché une sonde là où passe un site. La symétrie
+/// est dans la règle appliquée, pas dans le code.
+///
+/// 🔴 **Pourquoi une couche plutôt qu'un appel dans chaque handler.** La
+/// vérification de site était une fonction ordinaire, appelée à la main par
+/// `rename_site`, `delete_site` et `archive_site`. Elle marchait — jusqu'au
+/// handler où quelqu'un oublierait de l'écrire. C'est très exactement le motif
+/// que le contrat § 17 documente comme **revenu trois fois** côté sondes, et
+/// que `9f95a12` a fini par reprendre au niveau de la garde plutôt que route
+/// par route. Ici, un handler ajouté demain en hérite sans que personne y
+/// pense.
+///
+/// ⚠️ Ce que la couche NE couvre PAS, et qui garde donc son appel explicite :
+/// un site nommé dans le **corps** de la requête — code d'enrôlement, libellé
+/// de réseau, abonnement d'alerte, destination d'un déplacement de sonde. Un
+/// intergiciel ne lit que l'URL.
+fn guarded_site_scope(
+    state: &AppState,
+    minimum: Role,
+    router: Router<AppState>,
+) -> Router<AppState> {
+    router
+        .layer(middleware::from_fn_with_state(state.clone(), site_scope_guard))
         .layer(middleware::from_fn_with_state((state.clone(), minimum), role_guard))
         .layer(middleware::from_fn_with_state(state.clone(), session_guard))
 }
@@ -346,6 +393,46 @@ async fn probe_scope_guard(
     };
     if let Some(id) = probe_id {
         if let Err(refusal) = probe_in_scope(&state, &actor, &id) {
+            return refusal;
+        }
+    }
+    next.run(req).await
+}
+
+/// Rend 404 quand le site visé n'existe pas **ou** sort de la portée de
+/// l'appelant. Même règle, même code, même message que pour une sonde.
+///
+/// 🔴 **Elle vérifie l'existence pour TOUS les comptes, `Scope::All` compris**
+/// (contrat § 17.3). L'existence d'un site tenait par **effet de bord** — un
+/// `UPDATE` qui ne touche aucune ligne finit par se voir — et elle a lâché
+/// exactement là où l'effet de bord n'avait pas lieu.
+///
+/// ⚠️ **La garde parle AVANT que le corps de la requête soit lu.** Sur un site
+/// inconnu, un corps invalide rend donc `404` et non `400`. C'est le bon
+/// ordre : « ce site n'existe pas » est la plus vraie des deux réponses, et
+/// corriger son JSON n'aurait rien changé.
+async fn site_scope_guard(
+    State(state): State<AppState>,
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    use axum::extract::RawPathParams;
+    use axum::RequestExt;
+
+    // L'identité est posée par `session_guard`, qui tourne avant celui-ci.
+    let Some(actor) = req.extensions().get::<Identity>().cloned() else {
+        return next.run(req).await;
+    };
+
+    let site_id = match req.extract_parts::<RawPathParams>().await {
+        Ok(params) => params
+            .iter()
+            .find(|(name, _)| *name == "id")
+            .map(|(_, value)| value.to_string()),
+        Err(_) => None,
+    };
+    if let Some(id) = site_id {
+        if let Err(refusal) = site_in_scope(&state, &actor, &id) {
             return refusal;
         }
     }
@@ -2057,15 +2144,16 @@ struct ArchiveBody {
 /// vraiment rendrait ses mesures orphelines : un rapport SLA sur l'année
 /// écoulée n'aurait plus de site auquel se rattacher, et les séries d'Influx
 /// ne désigneraient plus rien. Ici tout reste, et l'opération se défait.
+///
+/// ⚠️ Le site du chemin est garanti **existant et dans la portée** par
+/// `site_scope_guard` : ce handler n'a plus à le vérifier pour son propre
+/// compte (contrat § 17).
 async fn archive_site(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
     Json(body): Json<ArchiveBody>,
 ) -> Response {
-    if let Err(refusal) = site_in_scope(&state, &actor, &id) {
-        return refusal;
-    }
     let action = if body.archived { "site.archive" } else { "site.unarchive" };
     match audited(
         &state,
@@ -2098,15 +2186,14 @@ async fn archive_probe(
     }
 }
 
+/// ⚠️ Site du chemin garanti existant et dans la portée par
+/// `site_scope_guard`.
 async fn rename_site(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
     Json(body): Json<SiteBody>,
 ) -> Response {
-    if let Err(refusal) = site_in_scope(&state, &actor, &id) {
-        return refusal;
-    }
     match audited(
         &state,
         Some(&actor.username),
@@ -2119,14 +2206,13 @@ async fn rename_site(
     }
 }
 
+/// ⚠️ Site du chemin garanti existant et dans la portée par
+/// `site_scope_guard`.
 async fn delete_site(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(refusal) = site_in_scope(&state, &actor, &id) {
-        return refusal;
-    }
     match audited(
         &state,
         Some(&actor.username),
@@ -7915,6 +8001,112 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["commands"].as_array().map(|c| c.len()), Some(0), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_site_guard_checks_existence_for_an_admin_too() {
+        // 🔴 **Écrit avec un compte `Scope::All`, et c'est tout son intérêt**
+        // (contrat § 17.3). Un test écrit avec un compte restreint reste vert
+        // quoi qu'on casse sur ce chemin : la portée d'un compte restreint
+        // vérifie l'existence par effet de bord, celle d'un admin ne vérifie
+        // rien. C'est l'angle mort qui a laissé le même défaut revenir trois
+        // fois côté sondes.
+        //
+        // Les trois routes de site appelaient `site_in_scope` **à la main**.
+        // Une garde qu'il faut penser à écrire finit par être oubliée : elle
+        // est devenue une couche.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let appels: Vec<(&str, Request<Body>)> = vec![
+            (
+                "PATCH /api/sites/{id}",
+                json_request("PATCH", "/api/sites/site-inconnu", json!({ "name": "Autre" })),
+            ),
+            (
+                "DELETE /api/sites/{id}",
+                empty_request("DELETE", "/api/sites/site-inconnu"),
+            ),
+            (
+                "POST /api/sites/{id}/archive",
+                json_request(
+                    "POST",
+                    "/api/sites/site-inconnu/archive",
+                    json!({ "archived": true }),
+                ),
+            ),
+        ];
+
+        for (nom, req) in appels {
+            let (status, body, _) = h.call(with_cookie(req, &session)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{nom} : {body}");
+            // ⚠️ Le CORPS autant que le code : un 404 qui nommerait la route,
+            // la table ou l'identifiant apprendrait ce que le 404 protège.
+            assert_eq!(body["error"], "site inconnu", "{nom} : {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_site_answers_before_the_body_is_read() {
+        // ⚠️ Effet de bord assumé du passage en couche (contrat § 17) : sur un
+        // site inconnu, un corps invalide rend **404 et non 400**. La garde
+        // parle avant que le corps soit lu, et c'est le bon ordre — « ce site
+        // n'existe pas » est la plus vraie des deux réponses, corriger son
+        // JSON n'aurait rien changé.
+        //
+        // C'est aussi ce qui prouve que la vérification a bien QUITTÉ le
+        // handler : tant qu'elle y était, axum refusait le corps le premier.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("PATCH", "/api/sites/site-inconnu", json!({ "pas_le_bon_champ": 1 })),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "site inconnu", "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_site_that_exists_is_still_renamed_archived_and_deleted() {
+        // ⚠️ La moitié qui prouve que le refus ci-dessus vise l'inexistence et
+        // non la route. Sans elle, une garde trop large rendrait « site
+        // inconnu » sur tout le parc sans qu'aucun test ne bronche.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let site = h.state.db.create_site("Durand").unwrap();
+        let id = site.site_id;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("PATCH", &format!("/api/sites/{id}"), json!({ "name": "Durand SA" })),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "renommage : {body}");
+        assert_eq!(body["name"], "Durand SA", "{body}");
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/sites/{id}/archive"),
+                    json!({ "archived": true }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "archivage : {body}");
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("DELETE", &format!("/api/sites/{id}")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "retrait : {body}");
     }
 
     #[tokio::test]
