@@ -216,7 +216,20 @@ describe('catalogues de traduction', () => {
   }
 
   // Taux de disponibilité par cible, affiché sur la fiche.
-  const REQUISES_UPTIME = ['probe.uptime_period', 'probe.uptime_samples', 'sla.undetermined'];
+  // ⚠️ `uptime_gap` dit quelle part de la fenêtre n'a AUCUN relevé. Sans lui,
+  // le taux se lit « tout va bien depuis six heures » quand il dit « tout
+  // allait bien pendant les vingt-huit minutes mesurées ».
+  // ⚠️ `col_uptime` et `monitor_samples` nomment les valeurs de la SONDE, à
+  // côté de celles de la période : deux nombres proches et différents sans
+  // libellé qui les sépare se lisent comme une erreur.
+  const REQUISES_UPTIME = [
+    'probe.uptime_period',
+    'probe.uptime_samples',
+    'probe.uptime_gap',
+    'probe.col_uptime',
+    'probe.monitor_samples',
+    'sla.undetermined',
+  ];
 
   for (const [lang, catalog] of Object.entries(CATALOGS)) {
     it(`${lang} porte les clés du taux par cible`, () => {

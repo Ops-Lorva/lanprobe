@@ -382,6 +382,7 @@
   "probe": {
     "uptime_period": "Availability over the period",
     "uptime_samples": "over {n} samples",
+    "uptime_gap": "at least {pct} % of the period unmeasured",
     "back": "Fleet",
     "rename": "Rename",
     "rename_label": "Probe name",
@@ -509,7 +510,8 @@
     "monitor_alive": "Answering",
     "monitor_down": "Not answering",
     "col_state": "State",
-    "col_uptime": "Uptime",
+    "col_uptime": "Recent uptime",
+    "monitor_samples": "Recent samples",
     "iperf_placeholder": "iperf3 server (e.g. 10.4.8.1)",
     "discovery_placeholder": "Network, blank = auto (e.g. 10.0.8.0/24)",
     "ports_count": "{n, plural, one {# open port} other {# open ports}}",

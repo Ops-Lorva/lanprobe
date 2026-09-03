@@ -4252,6 +4252,19 @@ pub fn aggregate_every(span_secs: i64, max_points: i64) -> Option<&'static str> 
 /// ⚠️ `mean()` d'un booléen converti en 0/1 EST le taux, et c'est
 /// arithmétiquement la même chose que `compute_sla` — un test tient cette
 /// égalité, pour qu'une divergence future casse la suite au lieu de s'installer.
+///
+/// 🔴 `first()` et `last()` sont là pour que l'écran puisse dire, à côté du
+/// taux, quelle PART de la fenêtre n'a aucun relevé. Un taux sans sa couverture
+/// se lit « tout va bien depuis six heures » quand il dit « tout allait bien
+/// pendant les vingt-huit minutes mesurées ». Ce sont des SÉLECTEURS : une
+/// ligne par cible, comme `mean` et `count` — le volume de cette route ne
+/// change pas, et c'est la raison pour laquelle elle n'embarque pas les
+/// horodatages bruts que `/sla` seul peut se permettre de lire.
+///
+/// ⚠️ Les deux bornes ne donnent que les TROUS DE BORD. La couverture fine du
+/// rapport, elle, voit aussi les trous intérieurs : le chiffre de la carte est
+/// un minorant de celui du rapport, jamais un second chiffre concurrent. La
+/// règle est tenue côté interface, dans `web-ui/src/lib/uptime.ts`.
 fn uptime_flux(bucket: &str, probe_id: &str, window: &str) -> String {
     format!(
         "base = from(bucket: {})\n  |> range({})\n  \
@@ -4261,7 +4274,9 @@ fn uptime_flux(bucket: &str, probe_id: &str, window: &str) -> String {
          |> toFloat()\n  \
          |> group(columns: [\"ip\"])\n\n\
          base |> mean() |> yield(name: \"uptime\")\n\
-         base |> count() |> yield(name: \"samples\")\n",
+         base |> count() |> yield(name: \"samples\")\n\
+         base |> first() |> yield(name: \"first\")\n\
+         base |> last() |> yield(name: \"last\")\n",
         flux_string(bucket),
         window,
         flux_string(probe_id),
@@ -4276,8 +4291,19 @@ fn uptime_flux(bucket: &str, probe_id: &str, window: &str) -> String {
 fn uptime_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
     use std::collections::BTreeMap;
 
-    // (taux 0..1, nombre de relevés déterminés)
-    let mut by_ip: BTreeMap<String, (Option<f64>, i64)> = BTreeMap::new();
+    /// Ce que les quatre rendus disent d'une même cible.
+    #[derive(Default)]
+    struct Cible {
+        /// Taux 0..1.
+        ratio: Option<f64>,
+        /// Nombre de relevés déterminés.
+        samples: i64,
+        /// Bornes en SECONDES epoch — `None` tant que le rendu n'est pas lu.
+        first_at: Option<i64>,
+        last_at: Option<i64>,
+    }
+
+    let mut by_ip: BTreeMap<String, Cible> = BTreeMap::new();
     let mut cols: Option<Vec<String>> = None;
 
     for line in csv.lines() {
@@ -4304,26 +4330,39 @@ fn uptime_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
         let (Some(result), Some(ip), Some(value)) = (at("result"), at("ip"), at("_value")) else {
             continue;
         };
-        let slot = by_ip.entry(ip.to_string()).or_insert((None, 0));
+        let slot = by_ip.entry(ip.to_string()).or_default();
         match result {
-            "uptime" => slot.0 = value.parse::<f64>().ok(),
-            "samples" => slot.1 = value.parse::<i64>().unwrap_or(0),
+            "uptime" => slot.ratio = value.parse::<f64>().ok(),
+            "samples" => slot.samples = value.parse::<i64>().unwrap_or(0),
+            // ⚠️ Secondes et non millisecondes : c'est l'unité de `Coverage`,
+            // et le calcul de bord qui les consomme est le même des deux côtés.
+            "first" => slot.first_at = at("_time").and_then(rfc3339_to_millis).map(|ms| ms / 1_000),
+            "last" => slot.last_at = at("_time").and_then(rfc3339_to_millis).map(|ms| ms / 1_000),
             _ => {}
         }
     }
 
     by_ip
         .into_iter()
-        .map(|(ip, (ratio, samples))| {
+        .map(|(ip, c)| {
             // ⚠️ `null` et jamais `0` quand aucun relevé déterminé n'existe :
             // « 0 % » se lirait comme une panne totale. Même règle que partout
             // depuis ce matin.
-            let uptime = (samples > 0)
-                .then_some(ratio)
+            let uptime = (c.samples > 0)
+                .then_some(c.ratio)
                 .flatten()
                 .map(|r| serde_json::Value::from(r * 100.0))
                 .unwrap_or(serde_json::Value::Null);
-            serde_json::json!({ "ip": ip, "uptime_pct": uptime, "samples": samples })
+            // ⚠️ `null` aussi pour les bornes, et pour la même raison : une
+            // borne absente ne veut pas dire « fenêtre couverte ».
+            let borne = |v: Option<i64>| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "ip": ip,
+                "uptime_pct": uptime,
+                "samples": c.samples,
+                "first_at": borne(c.first_at),
+                "last_at": borne(c.last_at),
+            })
         })
         .collect()
 }
@@ -8174,6 +8213,41 @@ mod tests {
     }
 
     #[test]
+    fn the_window_edges_come_back_with_the_rate() {
+        // 🔴 Ce que l'écran ne pouvait pas dire : « 99,5 % » sans jamais
+        // annoncer que la période n'a été mesurée qu'en partie. Les deux
+        // bornes suffisent à en énoncer un MINORANT sans supposer de cadence,
+        // et elles ne coûtent qu'une ligne de plus par cible — ce chemin
+        // existe justement pour ne pas relire des millions de points.
+        let csv = "\
+,result,table,ip,_value
+,samples,0,1.1.1.1,600
+
+,result,table,ip,_value
+,uptime,0,1.1.1.1,0.995
+
+,result,table,_time,_value,_field,ip
+,first,0,2026-08-29T09:00:00Z,1,alive,1.1.1.1
+
+,result,table,_time,_value,_field,ip
+,last,0,2026-08-29T09:29:59Z,1,alive,1.1.1.1
+";
+        let targets = uptime_from_flux_csv(csv);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0]["first_at"], 1_787_994_000);
+        assert_eq!(targets[0]["last_at"], 1_787_995_799);
+    }
+
+    #[test]
+    fn a_hub_answer_without_edges_carries_null_and_not_a_covered_window() {
+        // ⚠️ Absence d'information n'est pas absence de trou. `null`, et
+        // l'écran ne dira rien plutôt que d'affirmer une période couverte.
+        let targets = uptime_from_flux_csv(UPTIME_CSV);
+        assert!(targets[0]["first_at"].is_null(), "{targets:?}");
+        assert!(targets[0]["last_at"].is_null(), "{targets:?}");
+    }
+
+    #[test]
     fn a_target_without_a_single_determinate_sample_has_no_rate() {
         // ⚠️ Ni `0 %` — qui se lirait comme une panne totale — ni cellule
         // vide. `null`, et l'écran dira « indéterminé ».
@@ -8198,6 +8272,11 @@ mod tests {
         assert!(flux.contains("r[\"_field\"] == \"alive\""), "{flux}");
         assert!(flux.contains("|> mean()"), "{flux}");
         assert!(flux.contains("|> count()"), "{flux}");
+        // ⚠️ Deux SÉLECTEURS, donc une ligne chacun par cible : la borne de
+        // couverture ne fait pas retomber cette route dans le volume que
+        // `/sla` assume et qu'elle refuse.
+        assert!(flux.contains("|> first()"), "{flux}");
+        assert!(flux.contains("|> last()"), "{flux}");
     }
 
     #[test]

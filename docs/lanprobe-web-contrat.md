@@ -639,8 +639,10 @@ inconnue, `400` sur une fenêtre illisible.
 
 ```json
 { "range": "-24h",
-  "targets": [ { "ip": "10.0.8.1", "uptime_pct": 99.87, "samples": 8640  },
-               { "ip": "10.0.8.20", "uptime_pct": null,  "samples": 0 } ] }
+  "targets": [ { "ip": "10.0.8.1",  "uptime_pct": 99.87, "samples": 8640,
+                 "first_at": 1788000000, "last_at": 1788086399 },
+               { "ip": "10.0.8.20", "uptime_pct": null,  "samples": 0,
+                 "first_at": null, "last_at": null } ] }
 ```
 
 ⚠️ **Ce n'est pas un doublon de `/sla`, c'est l'autre bout du même chiffre.**
@@ -661,10 +663,32 @@ portent un verdict, donc `count()` ne les voit pas. `samples` est ce dénominate
 `uptime_pct` vaut **`null`** — jamais `0` — dès qu'aucun relevé déterminé n'existe
 sur la fenêtre. Même règle que partout : `0 %` se lirait comme une panne totale.
 
-⚠️ **La couverture ne figure PAS dans cette réponse, délibérément.** Un chemin
-agrégé n'a pas les horodatages : la déduire des intervalles vides donnerait une
-résolution plus grossière que celle du rapport, donc deux chiffres contradictoires
-sur la même donnée. Quand la complétude compte, c'est `/sla` qui la porte.
+🔴 **`first_at` / `last_at` : les deux bornes des relevés déterminés de la
+fenêtre, en secondes epoch.** Elles sont là parce qu'un taux sans sa couverture
+est **plausible et faux** : « 99,50 % » sur six heures dont vingt-huit minutes
+seulement ont été mesurées se lit « tout va bien depuis six heures ». Le taux,
+lui, reste juste — l'indéterminé sort du dénominateur, c'est la règle — mais
+l'écran ne disait nulle part que la période n'avait pas été mesurée.
+
+⚠️ **Ce sont des SÉLECTEURS Flux, une ligne par cible**, comme `mean()` et
+`count()`. Le volume de la route ne change pas : elle ne relit toujours pas les
+horodatages bruts que `/sla` seul peut se permettre de lire.
+
+🔴 **La couverture FINE ne figure toujours PAS ici, et pour la raison d'origine.**
+Un chemin agrégé n'a pas les horodatages ; la déduire des intervalles vides
+donnerait une résolution plus grossière que celle du rapport, donc deux chiffres
+contradictoires sur la même donnée. Ce que ces deux bornes permettent est
+différent et volontairement **plus faible** : un **minorant** du trou, calculé sur
+les deux BORDS de la fenêtre et sur rien d'autre. `compute_coverage` (§ rapport)
+compte les bords **et** les trous intérieurs, donc son chiffre est toujours
+supérieur ou égal. L'interface l'annonce en conséquence — « au moins X % de la
+période sans relevé » — et les deux écrans ne peuvent pas se contredire.
+
+⚠️ Le calcul du minorant vit dans `web-ui/src/lib/uptime.ts` (`unmeasuredLabel`),
+avec ses tests. Il n'y suppose **aucune cadence** : son seuil est l'intervalle
+moyen observé × 3, toujours ≥ l'intervalle médian dont `compute_coverage` se sert
+— donc toujours plus exigeant. Quand la complétude exacte compte, c'est `/sla`
+qui la porte.
 
 ### `GET /api/probes/{id}/inventory?kind=ports|discovery|speedtest`
 

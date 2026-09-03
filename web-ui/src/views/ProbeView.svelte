@@ -38,7 +38,7 @@
   // ⚠️ Le taux sur la PÉRIODE AFFICHÉE, à ne pas confondre avec celui que la
   // sonde annonce sur sa propre fenêtre glissante (`card.monitor.uptime_pct`).
   // Les deux répondent à des questions différentes et sont affichés séparément.
-  import { normalizeUptime, uptimeOf, type TargetUptime } from '$lib/uptime';
+  import { normalizeUptime, unmeasuredLabel, uptimeOf, type TargetUptime } from '$lib/uptime';
   // ⚠️ Une seule fenêtre pour toute la fiche, tenue dans un store partagé :
   // avant, elle n'existait que sur le tableau de bord et les quatre autres
   // onglets affichaient son choix sans le dire.
@@ -1944,9 +1944,24 @@
                       <dt>{$_('charts.stat_max')}</dt>
                       <dd class="lp-mono">{msOrDash(card.monitor.max_ms)}</dd>
                     </div>
+                    <!--
+                      ⚠️ « Récente » et non « Disponibilité » tout court : ces
+                      deux valeurs portent sur les 3 600 derniers relevés que la
+                      sonde garde en mémoire (`MONITOR_MAX_SAMPLES`), pas sur la
+                      période affichée, et elles repartent de zéro quand la
+                      sonde redémarre. Sans le dire dans le libellé, elles
+                      s'alignaient sous « Disponibilité » et « Relevés » à trois
+                      centimètres du taux de la période : deux nombres proches
+                      et différents se lisent comme une erreur, et le lecteur
+                      choisit celui qui l'arrange.
+                    -->
                     <div>
                       <dt>{$_('probe.col_uptime')}</dt>
                       <dd class="lp-mono">{card.monitor.uptime_pct.toFixed(1)} %</dd>
+                    </div>
+                    <div>
+                      <dt>{$_('probe.monitor_samples')}</dt>
+                      <dd class="lp-mono">{card.monitor.samples}</dd>
                     </div>
                     <!--
                       ⚠️ Le taux sur la PÉRIODE AFFICHÉE, distinct de celui
@@ -1961,6 +1976,12 @@
                     -->
                     {#if card.target && uptimeOf(uptimeByTarget, card.target)}
                       {@const u = uptimeOf(uptimeByTarget, card.target)!}
+                      {@const trou = unmeasuredLabel(
+                        uptimeByTarget[card.target],
+                        Math.floor(domain.from / 1000),
+                        Math.floor(domain.to / 1000),
+                        (k, v) => $_(k, { values: v }),
+                      )}
                       <div>
                         <dt>{$_('probe.uptime_period')}</dt>
                         <dd class="lp-mono">
@@ -1970,13 +1991,19 @@
                           <span class="uon">
                             {$_('probe.uptime_samples', { values: { n: u.samples } })}
                           </span>
+                          <!-- 🔴 La part de la période dont on SAIT qu'aucun
+                               relevé ne parle. Sans elle, « 99,50 % » se lisait
+                               « tout va bien depuis six heures » alors qu'il
+                               disait « tout allait bien pendant les vingt-huit
+                               minutes mesurées ». Rien quand la fenêtre est
+                               couverte : un « 0 % » permanent masquerait le cas
+                               utile. -->
+                          {#if trou}
+                            <span class="uon ugap">{trou}</span>
+                          {/if}
                         </dd>
                       </div>
                     {/if}
-                    <div>
-                      <dt>{$_('sla.col_samples')}</dt>
-                      <dd class="lp-mono">{card.monitor.samples}</dd>
-                    </div>
                   </dl>
                 {/if}
 
@@ -3043,6 +3070,12 @@
     display: block;
     font-size: 10.5px;
     color: var(--ep-text-muted);
+  }
+  /* ⚠️ Une réserve sur la lecture du taux, pas une panne : la teinte
+     d'avertissement, jamais celle du danger. Un rouge ferait chercher une
+     coupure là où il n'y a qu'une période partiellement mesurée. */
+  .ugap {
+    color: var(--ep-warning);
   }
   .slaerr {
     font-size: 11px;

@@ -382,6 +382,7 @@
   "probe": {
     "uptime_period": "Disponibilité sur la période",
     "uptime_samples": "sur {n} relevés",
+    "uptime_gap": "au moins {pct} % de la période sans relevé",
     "back": "Parc",
     "rename": "Renommer",
     "rename_label": "Nom de la sonde",
@@ -509,7 +510,8 @@
     "monitor_alive": "Répond",
     "monitor_down": "Ne répond pas",
     "col_state": "État",
-    "col_uptime": "Disponibilité",
+    "col_uptime": "Disponibilité récente",
+    "monitor_samples": "Relevés récents",
     "iperf_placeholder": "Serveur iperf3 (ex. 10.4.8.1)",
     "discovery_placeholder": "Réseau, vide = auto (ex. 10.0.8.0/24)",
     "ports_count": "{n, plural, one {# port ouvert} other {# ports ouverts}}",
