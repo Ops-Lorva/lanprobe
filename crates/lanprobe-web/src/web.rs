@@ -468,7 +468,7 @@ async fn site_scope_guard(
 
 /// Traduit une erreur du stockage en code HTTP. Les handlers ne devinent pas
 /// le code d'après le texte du message — ils se tromperaient.
-fn error_response(e: DbError) -> Response {
+pub(crate) fn error_response(e: DbError) -> Response {
     let status = match e {
         DbError::Conflict(_) => StatusCode::CONFLICT,
         DbError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -483,7 +483,7 @@ fn fail(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
-fn ok_json(value: serde_json::Value) -> Response {
+pub(crate) fn ok_json(value: serde_json::Value) -> Response {
     (StatusCode::OK, Json(value)).into_response()
 }
 
@@ -1468,7 +1468,7 @@ async fn role_guard(
 /// croire qu'il enregistre est pire que pas de journal du tout.
 ///
 /// **Aucun secret ne doit passer par `detail`.**
-fn audit(
+pub(crate) fn audit(
     state: &AppState,
     actor: Option<&str>,
     action: &str,
@@ -1483,7 +1483,7 @@ fn audit(
 
 /// Journalise le résultat d'une opération, quel qu'il soit, et rend la
 /// réponse. Les échecs comptent autant que les réussites.
-fn audited<T>(
+pub(crate) fn audited<T>(
     state: &AppState,
     actor: Option<&str>,
     action: &str,

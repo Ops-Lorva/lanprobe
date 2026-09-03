@@ -1,17 +1,26 @@
 //! Appairage d'un appareil et identité durable (contrat § 22).
 //!
-//! ⚠️ **Souche.** Les signatures sont réelles et le module compile ; les corps
-//! restent à écrire. Elles sont posées ici, et pas laissées à la tâche qui les
-//! remplira, parce que `web.rs` fait 11 600 lignes et que deux tâches
-//! parallèles ne peuvent pas s'y partager le routeur sans se marcher dessus.
+//! L'exigence est une phrase, et elle commande tout le reste : « je ne veux pas
+//! devoir taper mon mot de passe ou me ré-enrôler en haut d'une échelle, donc
+//! tant que l'app n'est pas révoquée côté hub, elle doit toujours arriver à se
+//! reconnecter ».
 //!
-//! 🔴 **Les routes rendent `501` et non `todo!()`.** Un `todo!()` sur une route
-//! branchée fait paniquer la tâche qui sert la requête et laisse le client
-//! devant une connexion coupée, sans rien à lire. Un `501` nommé dit ce qui se
-//! passe. Les fonctions de domaine, elles, portent bien un `todo!()` : personne
-//! ne les appelle encore.
+//! 🔴 **Lue littéralement, cette phrase interdit la session.** Une session est
+//! un objet qui expire — c'est sa définition. Tant que l'app s'authentifie par
+//! une session, il existe un instant où elle redemande le mot de passe, et cet
+//! instant tombe un jour en haut d'une échelle, parce que c'est là qu'on ouvre
+//! l'app. D'où trois objets et trois durées de vie :
 //!
-//! ## Ce que la tâche d'appairage doit tenir
+//! | Objet | Vit où | Durée |
+//! |---|---|---|
+//! | identité d'appareil (`device_id` + secret) | trousseau du téléphone · `paired_devices` | illimitée — une révocation, et rien d'autre |
+//! | jeton d'accès | mémoire vive de l'app | 15 min, sans conséquence visible |
+//! | session web | navigateur | inchangée, elle ne concerne pas l'app |
+//!
+//! Le module vit à part de `web.rs` — qui fait 11 600 lignes — pour que deux
+//! tâches parallèles n'aient pas à s'y partager le routeur.
+//!
+//! ## Ce que ce module tient, et qu'un relecteur ne doit pas « corriger »
 //!
 //! - **Le secret d'appareil ne tourne PAS à l'usage.** Faire tourner à chaque
 //!   renouvellement perd le secret quand la réponse se perd — c'est-à-dire là
@@ -25,19 +34,17 @@
 //!   ajout seul et sans purge, noieraient les lignes qui comptent. Les refus,
 //!   eux, s'écrivent.
 
-// Une souche n'a pas encore d'appelant : sans cette autorisation, chaque
-// signature posée d'avance produirait un avertissement, et le bruit finirait
-// par masquer celui qui compte.
-#![allow(dead_code)]
-
 use axum::{
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, patch, post},
-    Router,
+    Extension, Json, Router,
 };
 
 use rusqlite::OptionalExtension;
 
-use crate::db::{Db, DbError, DbResult, Role};
+use crate::db::{Db, DbError, DbResult, Outcome, Role};
 use crate::web::{guarded, AppState, Identity};
 
 /// Durée de vie d'un jeton d'accès. Quinze minutes : il vit en mémoire vive et
@@ -110,6 +117,27 @@ pub(crate) struct PairCode {
     /// pendant sa validité.
     pub code: String,
     pub expires_at: i64,
+    /// Le QR, en SVG, rendu **par le hub** — comme celui du second facteur
+    /// (`totp.rs`). Le code ne traverse alors aucune dépendance de plus, et la
+    /// page reste lisible sur un réseau fermé, sans CDN.
+    ///
+    /// ⚠️ Rempli par la route, pas par la couche de stockage : le QR porte
+    /// l'adresse du hub et l'empreinte de son certificat, que la base ne
+    /// connaît pas. La saisie manuelle reste le chemin de secours obligatoire —
+    /// la caméra échoue, et le hub web est parfois ouvert sur le téléphone
+    /// lui-même, auquel cas il n'y a aucun second écran à photographier.
+    pub qr_svg: Option<String>,
+    /// Empreinte SHA-256 du certificat du hub, à épingler par le téléphone.
+    ///
+    /// 🔴 Sans elle, iOS refuse un hub en certificat auto-signé. Elle arrive au
+    /// téléphone par un canal que l'utilisateur contrôle physiquement — l'écran
+    /// qu'il a sous les yeux — plutôt que par le réseau qu'on cherche
+    /// justement à authentifier.
+    ///
+    /// ⚠️ `None` quand le hub sert en clair derrière un reverse proxy : le
+    /// certificat que le téléphone verra est celui du proxy, et annoncer une
+    /// empreinte la ferait comparer à un certificat qui n'est pas le sien.
+    pub cert_fingerprint: Option<String>,
 }
 
 /// Colonnes de `paired_devices`, dans l'ordre où [`device_from_row`] les lit.
@@ -153,7 +181,14 @@ impl Db {
                 rusqlite::params![code_hash, username, created_at, expires_at, code],
             )?;
         }
-        Ok(PairCode { code, expires_at })
+        // Le QR et l'empreinte sont posés par la route : la base ne connaît
+        // ni l'adresse du hub ni son certificat.
+        Ok(PairCode {
+            code,
+            expires_at,
+            qr_svg: None,
+            cert_fingerprint: None,
+        })
     }
 
     /// Consomme un code et rend le compte auquel il appartient.
@@ -518,8 +553,8 @@ fn seal_access_token(
 pub(crate) fn routes(state: &AppState) -> Router<AppState> {
     // Le code, puis le secret d'appareil, authentifient. Aucune session.
     let ouvert = Router::new()
-        .route("/api/pair", post(not_implemented))
-        .route("/api/devices/token", post(not_implemented));
+        .route("/api/pair", post(pair))
+        .route("/api/devices/token", post(issue_token));
 
     // Chacun agit sur SON compte, quel que soit son rôle (contrat § 19).
     // Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir le
@@ -528,10 +563,10 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
         state,
         Role::Viewer,
         Router::new()
-            .route("/api/me/pair-codes", post(not_implemented))
-            .route("/api/me/devices", get(not_implemented))
-            .route("/api/me/devices/{id}", patch(not_implemented))
-            .route("/api/me/devices/{id}/revoke", post(not_implemented)),
+            .route("/api/me/pair-codes", post(create_pair_code))
+            .route("/api/me/devices", get(list_my_devices))
+            .route("/api/me/devices/{id}", patch(rename_my_device))
+            .route("/api/me/devices/{id}/revoke", post(revoke_my_device)),
     );
 
     // Ceux de tous les comptes : un opérateur parti de l'entreprise ne se
@@ -540,23 +575,472 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
         state,
         Role::Admin,
         Router::new()
-            .route("/api/devices", get(not_implemented))
-            .route("/api/devices/{id}/revoke", post(not_implemented))
-            .route("/api/devices/{id}/rotate", post(not_implemented)),
+            .route("/api/devices", get(list_all_devices))
+            .route("/api/devices/{id}/revoke", post(revoke_any_device))
+            .route("/api/devices/{id}/rotate", post(rotate_any_device)),
     );
 
     ouvert.merge(les_siens).merge(ceux_de_tous)
 }
 
-/// ⚠️ Une route annoncée mais pas encore écrite dit `501`, pas `404` : `404`
-/// laisserait croire à un client mal versionné qu'il s'est trompé de chemin.
-async fn not_implemented() -> axum::response::Response {
-    use axum::response::IntoResponse;
+// ── Le code d'appairage ────────────────────────────────────────────────────
+
+/// Émet un code pour **son propre** compte.
+///
+/// ⚠️ Il ne crée aucun compte et n'élève aucun droit : l'appareil héritera du
+/// rôle et de la portée de celui qui l'a émis, jamais plus. Un code volé chez
+/// un `viewer` ne donne qu'un `viewer`.
+async fn create_pair_code(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    headers: HeaderMap,
+) -> Response {
+    // Le clair des codes périmés s'en va avant qu'on en émette un de plus :
+    // pas de minuterie à surveiller, et c'est fait avant toute lecture.
+    if let Err(e) = state.db.purge_stale_pair_codes(crate::db::now()) {
+        tracing::warn!("codes d'appairage périmés non purgés : {e}");
+    }
+    // ⚠️ Le code lui-même n'entre jamais au journal : c'est de quoi appairer
+    // un téléphone.
+    let code = match crate::web::audited(
+        &state,
+        Some(&actor.username),
+        "device.pair_code",
+        Some(&actor.username),
+        state
+            .db
+            .create_pair_code(&actor.username, PAIR_CODE_TTL_SECS),
+    ) {
+        Ok(code) => code,
+        Err(e) => return crate::web::error_response(e),
+    };
+
+    let hub = hub_url(&state, &headers);
+    let uri = pairing_uri(&hub, &code.code, state.cert_fingerprint.as_deref());
+    // Un QR illisible ne fait pas échouer l'émission : le code en clair est le
+    // chemin de secours obligatoire, et il est déjà là.
+    let qr_svg = match qr_svg(&uri) {
+        Ok(svg) => Some(svg),
+        Err(e) => {
+            tracing::warn!("QR d'appairage non rendu : {e}");
+            None
+        }
+    };
+    crate::web::ok_json(serde_json::json!(PairCode {
+        qr_svg,
+        cert_fingerprint: state.cert_fingerprint.clone(),
+        ..code
+    }))
+}
+
+/// L'adresse du hub telle que le téléphone devra le joindre.
+///
+/// Le réglage `hub_public_url` gagne quand il est posé — c'est déjà l'adresse
+/// que les sondes reçoivent. Sinon l'en-tête `Host` de la requête : celui qui
+/// affiche le QR est sur la page du hub, l'adresse de sa barre d'URL est donc
+/// celle qui marche depuis son réseau.
+fn hub_url(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(url) = state.settings.hub_public_url() {
+        return url;
+    }
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    let schema = if state.tls { "https" } else { "http" };
+    format!("{schema}://{host}")
+}
+
+/// Ce que le QR transporte.
+///
+/// ⚠️ **Ni mot de passe, ni jeton de longue durée** — les deux raccourcis que
+/// le § 22 refuse : un mot de passe affiché à l'écran ne se révoque pas
+/// appareil par appareil, et un jeton durable ferait d'une image un identifiant
+/// permanent. Le QR ne porte qu'un code de quinze minutes à usage unique.
+fn pairing_uri(hub: &str, code: &str, fingerprint: Option<&str>) -> String {
+    let enc = |s: &str| {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                other => format!("%{other:02X}"),
+            })
+            .collect::<String>()
+    };
+    let mut uri = format!("lanprobe://pair?hub={}&code={}", enc(hub), enc(code));
+    // Absente quand le hub sert en clair : le téléphone n'a alors rien à
+    // épingler, et un champ vide le ferait comparer à du néant.
+    if let Some(fp) = fingerprint {
+        uri.push_str(&format!("&fp={}", enc(fp)));
+    }
+    uri
+}
+
+/// QR du code d'appairage, en SVG.
+///
+/// Même motif que celui du second facteur (`totp.rs`) : rendu côté hub, sans
+/// bibliothèque JavaScript. Le code ne traverse aucune dépendance de plus, et
+/// la page reste lisible sur un réseau fermé, sans CDN — ce qui compte pour un
+/// produit auto-hébergé.
+fn qr_svg(uri: &str) -> Result<String, String> {
+    use qrcode::render::svg;
+    let code = qrcode::QrCode::new(uri.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(code
+        .render()
+        .min_dimensions(240, 240)
+        .dark_color(svg::Color("#000000"))
+        .light_color(svg::Color("#ffffff"))
+        .build())
+}
+
+// ── L'appairage ────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct PairBody {
+    code: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    app_version: Option<String>,
+}
+
+/// Échange un code contre une identité d'appareil.
+///
+/// ⚠️ **Non authentifiée par session** : c'est le code qui authentifie. Le
+/// téléphone n'a rien d'autre à présenter, et lui demander un cookie
+/// reviendrait à lui demander de se connecter — c'est-à-dire à taper un mot de
+/// passe en haut d'une échelle.
+async fn pair(State(state): State<AppState>, Json(body): Json<PairBody>) -> Response {
+    let username = match state.db.consume_pair_code(body.code.trim(), crate::db::now()) {
+        Ok(username) => username,
+        Err(e) => {
+            // 🔴 **Bruyamment.** Un code réessayé — parce qu'il a déjà servi,
+            // ou parce que quelqu'un en essaie au hasard — est exactement ce
+            // qu'un journal doit montrer. L'acteur est inconnu : personne ne
+            // s'est authentifié.
+            crate::web::audit(
+                &state,
+                None,
+                "device.refused",
+                Some("pair"),
+                Outcome::Failure,
+                Some(&e.to_string()),
+            );
+            return crate::web::error_response(e);
+        }
+    };
+
+    // ⚠️ Le compte peut avoir été désactivé entre l'émission du code et son
+    // usage. Le vérifier ici évite un appareil né mort, qui échouerait au
+    // premier renouvellement sans que personne comprenne pourquoi.
+    let Some(identity) = crate::web::identity_of(&state, &username, None) else {
+        crate::web::audit(
+            &state,
+            Some(&username),
+            "device.refused",
+            Some("pair"),
+            Outcome::Failure,
+            Some(Refusal::AccountDisabled.as_str()),
+        );
+        return refusal_response(Refusal::AccountDisabled);
+    };
+
+    let name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or("Appareil");
+    let (device, secret) = match crate::web::audited(
+        &state,
+        Some(&username),
+        "device.pair",
+        Some(name),
+        state.db.pair_device(
+            &username,
+            name,
+            body.platform.as_deref(),
+            body.app_version.as_deref(),
+        ),
+    ) {
+        Ok(pair) => pair,
+        Err(e) => return crate::web::error_response(e),
+    };
+
+    // 🔴 `device_secret` ne sort **qu'ici, une fois**. La base n'en garde que
+    // le condensat : rien, nulle part, ne permettra de le relire.
     (
-        axum::http::StatusCode::NOT_IMPLEMENTED,
-        axum::Json(serde_json::json!({ "error": "appairage non encore implémenté" })),
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "device_id": device.device_id,
+            "device_secret": secret,
+            "user": identity.username,
+            // Rendus pour que l'app sache quoi afficher dès le premier écran —
+            // jamais pour qu'elle s'en serve comme d'une autorisation. Le hub
+            // les relit à chaque requête, quoi que l'app en fasse.
+            "role": identity.role.as_str(),
+            "scope": match &identity.scope {
+                crate::db::Scope::All => serde_json::Value::Null,
+                crate::db::Scope::Sites(ids) => serde_json::json!(ids),
+            },
+            "cert_fingerprint": state.cert_fingerprint,
+        })),
     )
         .into_response()
+}
+
+// ── Le jeton d'accès ───────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct TokenBody {
+    device_id: String,
+}
+
+/// Échange l'identité durable contre un jeton de quinze minutes.
+///
+/// 🔴 **C'est ce qui répare un 401 tout seul, sans écran de connexion.** L'app
+/// n'a jamais à redemander un mot de passe : tant que l'appareil n'est pas
+/// révoqué, cette route lui rend un jeton.
+///
+/// ⚠️ **Le secret d'appareil ne tourne PAS ici.** Voir [`issue_access_token`] :
+/// une rotation à l'usage perd le secret quand la réponse se perd, c'est-à-dire
+/// là où le réseau est mauvais — là où le technicien travaille.
+///
+/// ⚠️ **Aucune ligne d'audit sur le succès.** Quatre-vingt-seize par jour et par
+/// téléphone, dans un journal en ajout seul et sans purge, noieraient les
+/// lignes qui comptent. C'est `last_seen` qui rend l'usage observable. Les
+/// refus, eux, s'écrivent.
+async fn issue_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    // ⚠️ L'adresse de la socket est lue dans les extensions plutôt qu'extraite
+    // par `ConnectInfo` : cette route est celle qui ne doit JAMAIS échouer, et
+    // un extracteur qui rejette parce que la couche `connect_info` manque
+    // couperait tous les téléphones pour un champ d'affichage.
+    extensions: axum::http::Extensions,
+    Json(body): Json<TokenBody>,
+) -> Response {
+    let Some(secret) = bearer(&headers) else {
+        return refusal_response(Refusal::Unknown);
+    };
+    let device = match state.db.authenticate_device(body.device_id.trim(), &secret) {
+        Ok(device) => device,
+        Err(refusal) => {
+            crate::web::audit(
+                &state,
+                None,
+                "device.refused",
+                Some(body.device_id.trim()),
+                Outcome::Failure,
+                Some(refusal.as_str()),
+            );
+            return refusal_response(refusal);
+        }
+    };
+
+    let token = match issue_access_token(&state, &device) {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::error!("jeton d'accès non scellé : {e}");
+            return crate::web::error_response(crate::db::DbError::Internal(
+                "jeton d'accès non émis".into(),
+            ));
+        }
+    };
+
+    // ⚠️ La dernière vue et la dernière adresse sont le SEUL détecteur d'un
+    // secret copié, puisque le secret ne tourne pas à l'usage. Un échec
+    // d'écriture ne fait pas échouer le renouvellement — couper l'accès pour un
+    // relevé manqué serait exactement la panne interdite.
+    let ip = extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| {
+            crate::client_ip::resolve(
+                addr.ip(),
+                headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+                &state.settings.trusted_proxies(),
+            )
+            .to_string()
+        });
+    if let Err(e) = state
+        .db
+        .touch_paired_device(&device.device_id, crate::db::now(), ip.as_deref())
+    {
+        tracing::warn!("dernière vue de {} non notée : {e}", device.device_id);
+    }
+
+    crate::web::ok_json(serde_json::json!({
+        "access_token": token,
+        "expires_in": ACCESS_TOKEN_TTL_SECS,
+    }))
+}
+
+/// Le refus, avec son motif.
+///
+/// 🔴 **Jamais « session expirée ».** Rien n'expire dans ce modèle : le mot
+/// serait faux, et il ferait attendre une reconnexion qui n'arrivera pas. Trois
+/// causes, trois conduites — et c'est sur `reason` que l'app décide de
+/// s'arrêter ou de réappairer.
+fn refusal_response(refusal: Refusal) -> Response {
+    let message = match refusal {
+        Refusal::Revoked => "cet appareil a été révoqué depuis le hub",
+        Refusal::Unknown => {
+            "ce hub ne connaît pas cet appareil — il a peut-être été restauré \
+             depuis une sauvegarde antérieure à l'appairage"
+        }
+        Refusal::AccountDisabled => "le compte propriétaire de cet appareil a été désactivé",
+    };
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({ "error": message, "reason": refusal.as_str() })),
+    )
+        .into_response()
+}
+
+fn bearer(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+// ── L'écran « Appareils » ──────────────────────────────────────────────────
+
+fn devices_json(devices: Vec<PairedDevice>) -> Response {
+    crate::web::ok_json(serde_json::json!({ "devices": devices }))
+}
+
+async fn list_my_devices(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
+    match state.db.list_paired_devices(Some(&actor.username)) {
+        Ok(devices) => devices_json(devices),
+        Err(e) => crate::web::error_response(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DeviceFilter {
+    #[serde(default)]
+    user: Option<String>,
+}
+
+async fn list_all_devices(
+    State(state): State<AppState>,
+    Query(filter): Query<DeviceFilter>,
+) -> Response {
+    match state.db.list_paired_devices(filter.user.as_deref()) {
+        Ok(devices) => devices_json(devices),
+        Err(e) => crate::web::error_response(e),
+    }
+}
+
+/// Le sien, ou rien.
+///
+/// ⚠️ **404 et non 403** quand l'appareil est celui d'un autre : « ça existe
+/// mais pas pour vous » apprendrait déjà l'existence du téléphone de quelqu'un
+/// d'autre. C'est la règle que le § 17 applique aux sites et aux sondes.
+fn mine(state: &AppState, actor: &Identity, device_id: &str) -> Result<PairedDevice, Response> {
+    match state.db.get_paired_device(device_id) {
+        Ok(d) if d.username == actor.username => Ok(d),
+        _ => Err(crate::web::error_response(crate::db::DbError::NotFound(
+            "appareil inconnu".into(),
+        ))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RenameBody {
+    name: String,
+}
+
+async fn rename_my_device(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameBody>,
+) -> Response {
+    let device = match mine(&state, &actor, &id) {
+        Ok(device) => device,
+        Err(refus) => return refus,
+    };
+    match crate::web::audited(
+        &state,
+        Some(&actor.username),
+        "device.rename",
+        Some(&device.device_id),
+        state.db.rename_paired_device(&device.device_id, &body.name),
+    ) {
+        Ok(()) => crate::web::ok_json(serde_json::json!({ "ok": true })),
+        Err(e) => crate::web::error_response(e),
+    }
+}
+
+async fn revoke_my_device(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Response {
+    let device = match mine(&state, &actor, &id) {
+        Ok(device) => device,
+        Err(refus) => return refus,
+    };
+    revoke(&state, &actor, &device.device_id)
+}
+
+async fn revoke_any_device(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Response {
+    revoke(&state, &actor, &id)
+}
+
+/// Révoque — **ne supprime pas**. La ligne reste, parce que le journal d'audit
+/// la nomme, et qu'une ligne d'audit qui pointe une cible disparue ne prouve
+/// rien.
+fn revoke(state: &AppState, actor: &Identity, device_id: &str) -> Response {
+    match crate::web::audited(
+        state,
+        Some(&actor.username),
+        "device.revoke",
+        Some(device_id),
+        state.db.revoke_paired_device(device_id),
+    ) {
+        Ok(()) => crate::web::ok_json(serde_json::json!({ "ok": true })),
+        Err(e) => crate::web::error_response(e),
+    }
+}
+
+/// Fait tourner le secret — **sur ce geste, et sur lui seul**.
+///
+/// 🔴 L'appareil devra être réappairé. C'est le prix assumé du § 22 : le seul
+/// détecteur d'un secret copié étant humain — la dernière vue et la dernière
+/// adresse — c'est un humain qui décide de couper.
+async fn rotate_any_device(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Response {
+    match crate::web::audited(
+        &state,
+        Some(&actor.username),
+        "device.rotate",
+        Some(&id),
+        state.db.rotate_paired_device_secret(&id),
+    ) {
+        // Rendu une seule fois, comme à l'appairage.
+        Ok(secret) => crate::web::ok_json(serde_json::json!({ "device_secret": secret })),
+        Err(e) => crate::web::error_response(e),
+    }
 }
 
 #[cfg(test)]
@@ -1003,5 +1487,522 @@ mod access_token_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod routes_tests {
+    use super::tests::state_with_admin;
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    const MOT_DE_PASSE: &str = "mot-de-passe-de-test";
+
+    struct Harness {
+        state: AppState,
+        router: axum::Router,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let state = state_with_admin();
+            let router = crate::web::build_router(state.clone());
+            Self { state, router }
+        }
+
+        async fn call(&self, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+            let response = self.router.clone().oneshot(req).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, body)
+        }
+
+        /// Un cookie de session pour un compte, sans passer par l'écran.
+        fn session(&self, username: &str) -> String {
+            let token = self.state.auth.start_session(username.to_string()).unwrap();
+            format!("lanprobe_hub_session={token}")
+        }
+
+        async fn get(&self, path: &str, cookie: &str) -> (StatusCode, serde_json::Value) {
+            self.call(
+                Request::builder()
+                    .uri(path)
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+        }
+
+        async fn post(
+            &self,
+            path: &str,
+            cookie: &str,
+            body: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            self.call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(axum::http::header::COOKIE, cookie)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+        }
+
+        /// Une requête d'appareil : porteur, jamais de cookie.
+        async fn bearer(&self, method: &str, path: &str, token: &str, body: serde_json::Value)
+            -> (StatusCode, serde_json::Value)
+        {
+            self.call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+        }
+
+        /// Le parcours complet : un code, puis l'appairage, puis un jeton
+        /// d'accès. Rend `(device_id, secret, access_token)`.
+        async fn pair(&self, username: &str) -> (String, String, String) {
+            let cookie = self.session(username);
+            let (_, code) = self.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
+            let (status, paired) = self
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/pair")
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "code": code["code"],
+                                "name": "iPhone 15",
+                                "platform": "iOS 18.2",
+                                "app_version": "1.0.0",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{paired}");
+            let device_id = paired["device_id"].as_str().unwrap().to_string();
+            let secret = paired["device_secret"].as_str().unwrap().to_string();
+            let token = self.refresh(&device_id, &secret).await.1["access_token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            (device_id, secret, token)
+        }
+
+        async fn refresh(&self, device_id: &str, secret: &str) -> (StatusCode, serde_json::Value) {
+            self.bearer(
+                "POST",
+                "/api/devices/token",
+                secret,
+                serde_json::json!({ "device_id": device_id }),
+            )
+            .await
+        }
+
+        fn audit_actions(&self) -> Vec<String> {
+            self.state
+                .db
+                .list_audit(&crate::db::AuditFilter {
+                    limit: 100,
+                    before_id: None,
+                    actor: None,
+                    action: None,
+                })
+                .unwrap()
+                .into_iter()
+                .map(|e| e.action)
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pair_code_comes_with_its_qr_and_the_fingerprint_to_pin() {
+        // 🔴 Sans QR il n'y a que la saisie à la main, c'est-à-dire exactement
+        // ce que le QR existe pour supprimer. Et sans empreinte, iOS refuse un
+        // hub en certificat auto-signé : c'est le champ qui débloque le
+        // parcours.
+        let h = Harness::new();
+        let cookie = h.session("admin");
+
+        let (status, body) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["code"].as_str().map(str::len), Some(9), "{body}");
+        assert!(body["expires_at"].as_i64().unwrap() > crate::db::now());
+        let qr = body["qr_svg"].as_str().expect("un QR est rendu par le hub");
+        assert!(qr.contains("<svg"), "{qr}");
+        // Le QR porte le code : c'est ce qui évite la saisie à la main.
+        assert!(qr.len() > 200, "QR suspicieusement court");
+        // Hub en clair derrière un proxy : aucun certificat DU HUB à épingler.
+        // Annoncer une empreinte la ferait comparer à celle du proxy.
+        assert!(body["cert_fingerprint"].is_null(), "{body}");
+        assert!(h.audit_actions().contains(&"device.pair_code".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_pair_code_never_leaves_the_account_that_issued_it() {
+        // Un code volé chez un `viewer` ne donne qu'un `viewer` : l'appareil
+        // hérite de celui qui l'a émis, jamais plus.
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user("lecteur", MOT_DE_PASSE, Role::Viewer)
+            .unwrap();
+        let cookie = h.session("lecteur");
+        let (_, code) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
+
+        let (status, body) = h
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "code": code["code"], "name": "iPhone" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["user"], "lecteur");
+        assert_eq!(body["role"], "viewer");
+        // Le secret n'est rendu QU'ICI, une seule fois.
+        assert!(body["device_secret"].as_str().is_some_and(|s| s.len() > 20));
+        assert!(h.audit_actions().contains(&"device.pair".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_pair_code_used_twice_is_refused_loudly_the_second_time() {
+        // « Un second essai échouera — et c'est le signal. » Le refus laisse une
+        // ligne : un code réessayé est ce qu'un journal doit montrer.
+        let h = Harness::new();
+        let cookie = h.session("admin");
+        let (_, code) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
+        let corps = serde_json::json!({ "code": code["code"], "name": "iPhone" });
+
+        let premier = h
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(corps.to_string()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(premier.0, StatusCode::CREATED);
+
+        let second = h
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(corps.to_string()))
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(second.0, StatusCode::UNAUTHORIZED, "{}", second.1);
+        assert_eq!(
+            h.state.db.list_paired_devices(None).unwrap().len(),
+            1,
+            "le second essai a créé un appareil"
+        );
+        assert!(
+            h.audit_actions().contains(&"device.refused".to_string()),
+            "un code réessayé doit laisser une ligne : {:?}",
+            h.audit_actions()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_trades_its_lasting_identity_for_a_short_token() {
+        // 🔴 C'est ce qui répare un 401 tout seul, SANS écran de connexion.
+        let h = Harness::new();
+        let (device_id, secret, _) = h.pair("admin").await;
+
+        let (status, body) = h.refresh(&device_id, &secret).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["expires_in"], ACCESS_TOKEN_TTL_SECS);
+        let token = body["access_token"].as_str().unwrap();
+
+        // Le jeton ouvre une route protégée, sans le moindre cookie.
+        let (status, moi) = h
+            .bearer("GET", "/api/me", token, serde_json::Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{moi}");
+        assert_eq!(moi["username"], "admin");
+
+        // Le renouvellement n'écrit AUCUNE ligne d'audit — quatre-vingt-seize
+        // par jour et par téléphone noieraient celles qui comptent. C'est
+        // `last_seen` qui rend l'usage observable, et elle seule.
+        let vu = h.state.db.get_paired_device(&device_id).unwrap();
+        assert!(vu.last_seen.is_some(), "le renouvellement note la dernière vue");
+        assert!(
+            !h.audit_actions().contains(&"device.token".to_string()),
+            "{:?}",
+            h.audit_actions()
+        );
+
+        // ⚠️ Et le secret durable n'a PAS bougé : il resert au renouvellement
+        // suivant. Une rotation à l'usage perdrait le secret quand la réponse
+        // se perd, là où le réseau est mauvais.
+        assert_eq!(h.refresh(&device_id, &secret).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn revoking_a_device_refuses_the_next_request_without_waiting() {
+        // 🔴 Sans attendre aucune expiration : le jeton déjà émis vaut encore
+        // quatorze minutes, et il ne doit plus rien ouvrir.
+        let h = Harness::new();
+        let (device_id, secret, token) = h.pair("admin").await;
+        assert_eq!(
+            h.bearer("GET", "/api/me", &token, serde_json::Value::Null).await.0,
+            StatusCode::OK
+        );
+
+        let cookie = h.session("admin");
+        let (status, _) = h
+            .post(
+                &format!("/api/me/devices/{device_id}/revoke"),
+                &cookie,
+                serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        assert_eq!(
+            h.bearer("GET", "/api/me", &token, serde_json::Value::Null).await.0,
+            StatusCode::UNAUTHORIZED,
+            "accès résiduel après révocation"
+        );
+        let (status, refus) = h.refresh(&device_id, &secret).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(refus["reason"], "revoked", "{refus}");
+        assert!(h.audit_actions().contains(&"device.revoke".to_string()));
+        assert!(h.audit_actions().contains(&"device.refused".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_refusal_carries_a_reason_and_never_the_word_session() {
+        // ⚠️ Trois causes, trois conduites. « Session expirée » ferait attendre
+        // une reconnexion qui n'arrivera jamais : rien n'expire dans ce modèle,
+        // le mot serait faux.
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user("dupont", MOT_DE_PASSE, Role::Operator)
+            .unwrap();
+        let (device_id, secret, _) = h.pair("dupont").await;
+
+        // 1. Inconnu — le hub a peut-être été restauré depuis une sauvegarde
+        //    antérieure à l'appairage. Elle réappaire, légitimement.
+        let (status, inconnu) = h.refresh("appareil-jamais-vu", &secret).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(inconnu["reason"], "unknown", "{inconnu}");
+
+        // 2. Compte désactivé — rien de ce qu'elle fera sur ce téléphone n'y
+        //    changera quoi que ce soit.
+        h.state.db.set_user_disabled("admin", "dupont", true).unwrap();
+        let (status, desactive) = h.refresh(&device_id, &secret).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(desactive["reason"], "account_disabled", "{desactive}");
+
+        for corps in [&inconnu, &desactive] {
+            let rendu = corps.to_string().to_lowercase();
+            assert!(!rendu.contains("session"), "{rendu}");
+            assert!(!rendu.contains("expir"), "{rendu}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_inherits_the_role_of_its_account_and_loses_it_at_the_next_request() {
+        // 🔴 Écrit avec un compte `Scope::All` — règle du § 17.3. Un test écrit
+        // avec un compte restreint reste vert quoi qu'on casse : c'est l'angle
+        // mort qui a fait revenir le même défaut trois fois.
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user("second-admin", MOT_DE_PASSE, Role::Admin)
+            .unwrap();
+        let (_device_id, _secret, token) = h.pair("admin").await;
+
+        // Le téléphone d'un administrateur atteint une route d'administration.
+        let (status, comptes) = h
+            .bearer("GET", "/api/users", &token, serde_json::Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{comptes}");
+
+        // Rétrogradation du COMPTE. L'accès tient, ce qu'il permet rétrécit —
+        // et à la requête SUIVANTE, pas au prochain renouvellement.
+        h.state
+            .db
+            .set_user_role("second-admin", "admin", Role::Viewer)
+            .unwrap();
+
+        assert_eq!(
+            h.bearer("GET", "/api/users", &token, serde_json::Value::Null).await.0,
+            StatusCode::FORBIDDEN,
+            "le rôle du jeton a survécu à la rétrogradation"
+        );
+        // L'accès, lui, n'est pas coupé : une rétrogradation n'est pas une
+        // révocation.
+        assert_eq!(
+            h.bearer("GET", "/api/me", &token, serde_json::Value::Null).await.0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn everyone_manages_his_own_phones_and_no_one_else_s() {
+        // Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir
+        // le révoquer seul, sans réveiller un administrateur.
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user("lecteur", MOT_DE_PASSE, Role::Viewer)
+            .unwrap();
+        let (sien, _, _) = h.pair("lecteur").await;
+        let (celui_d_admin, _, _) = h.pair("admin").await;
+
+        let cookie = h.session("lecteur");
+        let (status, liste) = h.get("/api/me/devices", &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{liste}");
+        let devices = liste["devices"].as_array().expect("une enveloppe `devices`");
+        assert_eq!(devices.len(), 1, "{liste}");
+        assert_eq!(devices[0]["device_id"], sien);
+
+        // ⚠️ 404 et non 403 : « ça existe mais pas pour vous » apprendrait déjà
+        // l'existence de l'appareil d'un autre.
+        let (status, _) = h
+            .post(
+                &format!("/api/me/devices/{celui_d_admin}/revoke"),
+                &cookie,
+                serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            h.state
+                .db
+                .get_paired_device(&celui_d_admin)
+                .unwrap()
+                .revoked_at
+                .is_none()
+        );
+
+        // Le sien, en revanche, il le renomme et le révoque.
+        let (status, _) = h
+            .call(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/me/devices/{sien}"))
+                    .header(axum::http::header::COOKIE, &cookie)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "name": "iPhone — atelier" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            h.state.db.get_paired_device(&sien).unwrap().name,
+            "iPhone — atelier"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admin_reaches_the_devices_of_every_account() {
+        // Un opérateur parti de l'entreprise ne se révoque pas lui-même.
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user("parti", MOT_DE_PASSE, Role::Operator)
+            .unwrap();
+        let (le_sien, secret, _) = h.pair("parti").await;
+        let cookie = h.session("admin");
+
+        let (status, tous) = h.get("/api/devices", &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{tous}");
+        assert_eq!(tous["devices"].as_array().unwrap().len(), 1);
+
+        // La rotation est un GESTE, jamais un effet de bord du renouvellement.
+        let (status, tourne) = h
+            .post(
+                &format!("/api/devices/{le_sien}/rotate"),
+                &cookie,
+                serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{tourne}");
+        assert_ne!(tourne["device_secret"].as_str().unwrap(), secret);
+        assert_eq!(
+            h.refresh(&le_sien, &secret).await.0,
+            StatusCode::UNAUTHORIZED,
+            "l'ancien secret ouvre encore"
+        );
+
+        let (status, _) = h
+            .post(
+                &format!("/api/devices/{le_sien}/revoke"),
+                &cookie,
+                serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        // La ligne reste : aucune route ne supprime un appareil.
+        assert!(
+            h.state
+                .db
+                .get_paired_device(&le_sien)
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_viewer_cannot_reach_the_devices_of_every_account() {
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user("lecteur", MOT_DE_PASSE, Role::Viewer)
+            .unwrap();
+        let cookie = h.session("lecteur");
+
+        assert_eq!(h.get("/api/devices", &cookie).await.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn the_open_routes_need_no_session_at_all() {
+        // ⚠️ `POST /api/devices/token` vit hors de `/api/me/*` : la ranger
+        // derrière la garde de session la mettrait derrière ce qu'elle existe
+        // précisément pour remplacer.
+        let h = Harness::new();
+        let (device_id, secret, _) = h.pair("admin").await;
+
+        let (status, body) = h.refresh(&device_id, &secret).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["access_token"].as_str().is_some());
     }
 }

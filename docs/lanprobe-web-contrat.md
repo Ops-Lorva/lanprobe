@@ -2461,6 +2461,30 @@ manières de désigner le même compte dans le même schéma, et une jointure de
 | `GET /api/me/devices` · `PATCH /api/me/devices/{id}` · `POST /api/me/devices/{id}/revoke` | session | `viewer` | **les siens**. Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir le révoquer seul |
 | `GET /api/devices[?user=]` · `POST /api/devices/{id}/revoke` · `POST /api/devices/{id}/rotate` | session | `admin` | ceux de **tous** les comptes : un opérateur parti de l'entreprise ne se révoque pas lui-même |
 
+### Ce que le QR transporte
+
+```
+lanprobe://pair?hub=<url du hub>&code=<XXXX-XXXX>&fp=<empreinte SHA-256>
+```
+
+`hub` est le réglage `hub_public_url` quand il est posé — c'est déjà l'adresse
+que reçoivent les sondes — sinon l'en-tête `Host` de la requête : celui qui
+affiche le QR est sur la page du hub, l'adresse de sa barre d'URL est donc celle
+qui marche depuis son réseau.
+
+🔴 **`fp` est absent quand le hub sert en clair**, et son absence est une
+information : le téléphone n'a alors rien à épingler, parce que le certificat
+qu'il verra est celui du reverse proxy. Un champ vide le ferait comparer à du
+néant.
+
+⚠️ **Ni mot de passe, ni jeton de longue durée dans le QR** — les deux premiers
+raccourcis refusés ci-dessus. L'image ne porte qu'un code de quinze minutes à
+usage unique ; photographiée, elle ne vaut plus rien passé ce délai.
+
+`POST /api/devices/token` attend le `device_id` dans le **corps** et le secret en
+`Authorization: Bearer`. Le secret seul ne désignerait aucune ligne : il est
+haché en base, il ne s'indexe pas.
+
 ⚠️ **`POST /api/devices/token` vit hors de `/api/me/*`** : ce n'est pas une
 session qui l'authentifie. La ranger dans `/api/me/*` l'aurait mise derrière la
 garde de session, c'est-à-dire derrière ce qu'elle existe précisément pour
