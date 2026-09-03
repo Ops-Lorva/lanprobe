@@ -1808,9 +1808,14 @@
                          ⚠️ Il passe par la ROUTE du hub, pas par la file de
                          commandes : une commande dort jusqu'au retour de la
                          sonde, et retirer une cible pendant qu'elle est
-                         éteinte est justement le cas qu'on veut couvrir. -->
+                         éteinte est justement le cas qu'on veut couvrir.
+                         ⚠️ `danger`, la convention des destructions du dépôt —
+                         « Suppr. » des profils réseau, « Désactiver » d'un
+                         compte. En neutre, il se confondait avec « Voir les
+                         valeurs » juste à côté : deux boutons identiques dont
+                         l'un arrête la surveillance d'une machine. -->
                     <button
-                      class="lp-btn ghost sm"
+                      class="lp-btn danger sm"
                       disabled={removeBusy}
                       onclick={() => {
                         removeNote = '';
