@@ -3346,89 +3346,32 @@ async fn probe_inventory(
 /// série complète. Envoyer un résumé obligerait le hub à recalculer ce que
 /// l'application sait déjà faire, et les deux finiraient par diverger sur la
 /// définition d'une coupure.
+///
+/// 🔴 **Le corps est construit par `sla_payload::build`, pas ici.** Le hub doit
+/// produire le même rapport hors de toute requête HTTP pour fabriquer le
+/// classeur (contrat § 23) : deux constructions auraient donné deux corps qui
+/// divergent, et c'est celui du document remis au client qu'on ne saurait plus
+/// expliquer. Cette route ne fait plus que lire la fenêtre et traduire l'erreur
+/// en code.
 async fn probe_sla_samples(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
-    let probe = match state.db.get_probe(&id) {
-        Ok(probe) => probe,
-        Err(e) => return error_response(e),
-    };
     let window = match flux_window(&query) {
         Ok(w) => w,
         Err(refus) => return refus,
     };
-    let bucket = state.settings.influx_bucket();
-    let flux = format!(
-        "from(bucket: {})\n  |> range({})\n  \
-         |> filter(fn: (r) => r[\"probe_id\"] == {})\n  \
-         |> filter(fn: (r) => r[\"_measurement\"] == \"ping_latency\")",
-        flux_string(&bucket),
-        window.clause,
-        flux_string(&id),
-    );
-    let csv = match state.influx.query_flux(&flux).await {
-        Ok(csv) => csv,
-        Err(e) => return fail(StatusCode::BAD_GATEWAY, &e),
-    };
-
-    // L'accès internet est une ligne du rapport au même titre qu'une cible :
-    // un client qui lit « 99,9 % sur la passerelle » veut aussi savoir si le
-    // lien vers l'extérieur tenait pendant ce temps-là.
-    let internet_flux = format!(
-        "from(bucket: {})\n  |> range({})\n  \
-         |> filter(fn: (r) => r[\"probe_id\"] == {})\n  \
-         |> filter(fn: (r) => r[\"_measurement\"] == \"internet_status\")\n  \
-         |> filter(fn: (r) => r[\"_field\"] == \"state\" or r[\"_field\"] == \"icmp_ms\")",
-        flux_string(&bucket),
-        window.clause,
-        flux_string(&id),
-    );
-    let internet = match state.influx.query_flux(&internet_flux).await {
-        Ok(csv) => internet_samples_from_flux_csv(&csv),
-        // Un rapport sans le volet internet vaut mieux que pas de rapport :
-        // l'absence se verra à l'écran, elle ne fera pas échouer l'export.
-        Err(e) => {
-            tracing::warn!("volet internet du rapport SLA indisponible : {e}");
-            Vec::new()
+    match crate::sla_payload::build(&state, &id, &window, query.start, query.stop).await {
+        Ok(payload) => ok_json(payload),
+        // ⚠️ Deux codes et non un : une sonde inconnue est un 404, un Influx
+        // injoignable un 502. Les confondre ferait réessayer là où il n'y a
+        // rien à retrouver.
+        Err(crate::sla_payload::SlaPayloadError::Db(e)) => error_response(e),
+        Err(crate::sla_payload::SlaPayloadError::Influx(e)) => {
+            fail(StatusCode::BAD_GATEWAY, &e)
         }
-    };
-
-    let speedtests = state.db.speedtest_history(&id, 500).unwrap_or_default();
-    // Les inventaires du rapport : ce que la sonde a vu sur le réseau, et les
-    // ports ouverts qu'elle y a relevés. Un client qui reçoit un SLA veut
-    // aussi savoir ce qui tournait chez lui.
-    let discovery = state.db.latest_scan(&id, "discovery").ok().flatten();
-    let ports = state.db.latest_scan(&id, "ports").ok().flatten();
-
-    // L'historique des adresses voyage AVEC le rapport : le tableau de
-    // l'interface et l'onglet Excel découpent les mêmes relevés avec les mêmes
-    // intervalles. Deux sources séparées finiraient par diverger d'une minute
-    // et donneraient deux disponibilités différentes pour la même période.
-    //
-    // ⚠️ Une fenêtre antérieure à la migration ne contient aucun intervalle :
-    // le volet par adresse ressort alors entièrement en « indéterminé ». C'est
-    // la vérité, pas une panne — à l'interface de le dire.
-    let public_ip_history = state
-        .db
-        .public_ip_history(&id, window.from, window.to)
-        .unwrap_or_default();
-
-    ok_json(json!({
-        "probe": probe.name,
-        "site": probe.site_name,
-        "range": window.label,
-        "start": query.start,
-        "stop": query.stop,
-        "generated_at": crate::db::now(),
-        "targets": samples_from_flux_csv(&csv, (window.from, window.to)),
-        "internet": internet,
-        "speedtests": speedtests,
-        "discovery": discovery,
-        "ports": ports,
-        "public_ip_history": public_ip_history,
-    }))
+    }
 }
 
 /// Historique des adresses publiques d'une sonde, sur la même fenêtre que le
@@ -3531,7 +3474,7 @@ async fn set_network_label(
 /// ⚠️ `state` est un texte (`online` / `limited` / `offline`), pas un booléen.
 /// Le convertir en « vivant / mort » perdrait `limited`, qui est justement
 /// l'état qu'un client conteste — « ça marchait » alors que rien ne passait.
-fn internet_samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
+pub(crate) fn internet_samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
     use std::collections::BTreeMap;
 
     let mut points: BTreeMap<i64, (Option<String>, Option<f64>)> = BTreeMap::new();
@@ -3597,7 +3540,7 @@ fn internet_samples_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
 /// d'Influx. Les traiter séparément donnerait deux fois plus de relevés que
 /// la sonde n'en a pris, et une disponibilité calculée sur cette base serait
 /// fausse.
-fn samples_from_flux_csv(csv: &str, window: (i64, i64)) -> Vec<serde_json::Value> {
+pub(crate) fn samples_from_flux_csv(csv: &str, window: (i64, i64)) -> Vec<serde_json::Value> {
     use std::collections::BTreeMap;
 
     let mut by_ip: BTreeMap<String, BTreeMap<i64, (Option<bool>, Option<f64>)>> = BTreeMap::new();
@@ -4199,14 +4142,14 @@ impl SlidingWindow {
 /// même période. Deux calculs séparés finiraient par couvrir deux fenêtres
 /// légèrement différentes, et le tableau par adresse contredirait la courbe
 /// qu'il légende.
-struct Window {
+pub(crate) struct Window {
     /// Le contenu de la clause `range(...)`.
-    clause: String,
+    pub(crate) clause: String,
     /// Ce que la réponse annonce : `-24h`, ou `<start>..<stop>` quand les
     /// bornes sont explicites.
-    label: String,
-    from: i64,
-    to: i64,
+    pub(crate) label: String,
+    pub(crate) from: i64,
+    pub(crate) to: i64,
 }
 
 /// Lit la fenêtre d'une requête.
@@ -4840,7 +4783,7 @@ fn rfc3339_to_millis(s: &str) -> Option<i64> {
 
 /// Littéral de chaîne Flux échappé — les valeurs viennent de l'URL, elles ne
 /// sont pas de confiance.
-fn flux_string(value: &str) -> String {
+pub(crate) fn flux_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
@@ -7788,6 +7731,71 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["intervals"][0]["public_ip"], "88.120.0.1");
+    }
+
+    #[tokio::test]
+    async fn the_sla_payload_is_the_same_whether_it_comes_through_http_or_not() {
+        // 🔴 Le rapport du hub (contrat § 23) doit produire EXACTEMENT le
+        // corps que `/sla` rend déjà : c'est le seul endroit de cette tâche où
+        // une régression silencieuse est possible — un champ perdu ne fait
+        // échouer aucune requête, il vide une colonne du classeur remis au
+        // client.
+        //
+        // Ce test compare les deux chemins champ par champ. Il redeviendrait
+        // rouge le jour où quelqu'un « améliore » l'un des deux.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+        heartbeat_from(
+            &h,
+            &probe_id,
+            &token,
+            "203.0.113.10",
+            serde_json::json!({ "public_ip": "88.120.0.1", "gateway": "10.6.8.1" }),
+        )
+        .await;
+
+        let (status, par_http, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{par_http}");
+
+        let query = MetricsQuery {
+            measurement: None,
+            range: Some("24h".into()),
+            start: None,
+            stop: None,
+            max_points: None,
+        };
+        let window = flux_window(&query).expect("la fenêtre doit être lisible");
+        let mut hors_http = crate::sla_payload::build(&h.state, &probe_id, &window, None, None)
+            .await
+            .expect("le rapport doit se construire hors HTTP");
+
+        // ⚠️ Seul `generated_at` est écarté, et pour une raison qui n'est pas
+        // du confort : c'est l'instant de la génération, les deux appels ne
+        // tombent pas dans la même seconde. Il est vérifié présent des deux
+        // côtés plutôt qu'ignoré.
+        let mut par_http = par_http;
+        assert!(par_http["generated_at"].is_i64(), "{par_http}");
+        assert!(hors_http["generated_at"].is_i64(), "{hors_http}");
+        par_http["generated_at"] = serde_json::Value::Null;
+        hors_http["generated_at"] = serde_json::Value::Null;
+
+        assert_eq!(
+            par_http, hors_http,
+            "le rapport doit être le même octet pour octet, `generated_at` mis à part"
+        );
+        assert_eq!(par_http["probe"], "Paris");
+        assert_eq!(par_http["site"], "Durand");
+        assert_eq!(par_http["public_ip_history"][0]["public_ip"], "88.120.0.1");
+        // Les bornes sont rendues TELLES QU'ELLES ONT ÉTÉ DEMANDÉES : `null`
+        // sur une fenêtre glissante, et non recalculées d'après la fenêtre.
+        assert!(par_http["start"].is_null(), "{par_http}");
+        assert!(par_http["stop"].is_null(), "{par_http}");
     }
 
     #[tokio::test]

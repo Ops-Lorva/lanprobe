@@ -15,6 +15,7 @@ pub mod notify;
 pub mod probe;
 pub mod secrets;
 pub mod settings;
+pub mod sla_payload;
 pub mod smtp;
 pub mod tls;
 pub mod passkeys;
