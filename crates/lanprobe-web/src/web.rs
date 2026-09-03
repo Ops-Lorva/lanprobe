@@ -4255,6 +4255,28 @@ fn flux_window(query: &MetricsQuery) -> Result<Window, Response> {
     })
 }
 
+/// La même lecture de fenêtre, pour un appelant qui n'a **pas** de requête
+/// HTTP — la demande de rapport, dont les bornes arrivent dans un corps JSON
+/// (contrat § 23).
+///
+/// ⚠️ Elle passe par [`flux_window`] et ne recalcule rien : un rapport dont la
+/// fenêtre serait construite à part finirait par couvrir une période
+/// légèrement différente de celle que l'écran annonce, et c'est le document
+/// remis au client qui porterait l'écart.
+pub(crate) fn window_of(
+    range: Option<String>,
+    start: Option<i64>,
+    stop: Option<i64>,
+) -> Result<Window, Response> {
+    flux_window(&MetricsQuery {
+        measurement: None,
+        range,
+        start,
+        stop,
+        max_points: None,
+    })
+}
+
 /// Instant avant lequel les intervalles d'adresse ne servent plus à rien : les
 /// mesures qu'ils découpaient sont sorties de la rétention Influx.
 ///

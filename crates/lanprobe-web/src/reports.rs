@@ -11,7 +11,7 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Extension, Json, Router,
@@ -176,7 +176,7 @@ impl Db {
             "INSERT INTO reports
                (report_id, site_id, requested_by, device_id, probe_ids, locale,
                 range_start, range_stop, state, requested_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'preparing', ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?10, ?9)",
             rusqlite::params![
                 report_id,
                 request.site_id,
@@ -187,6 +187,7 @@ impl Db {
                 request.range_start,
                 request.range_stop,
                 crate::db::now(),
+                ReportState::Preparing.as_str(),
             ],
         )?;
         Ok(report_id)
@@ -200,8 +201,8 @@ impl Db {
     pub(crate) fn set_report_step(&self, report_id: &str, step: &str) -> DbResult<()> {
         let conn = self.conn().lock().map_err(|_| poisoned())?;
         conn.execute(
-            "UPDATE reports SET step = ?2 WHERE report_id = ?1 AND state = 'preparing'",
-            rusqlite::params![report_id, step],
+            "UPDATE reports SET step = ?2 WHERE report_id = ?1 AND state = ?3",
+            rusqlite::params![report_id, step, ReportState::Preparing.as_str()],
         )?;
         Ok(())
     }
@@ -219,17 +220,19 @@ impl Db {
         let conn = self.conn().lock().map_err(|_| poisoned())?;
         let touchées = conn.execute(
             "UPDATE reports
-                SET state = 'ready', step = NULL, error = NULL,
+                SET state = ?7, step = NULL, error = NULL,
                     file_name = ?2, file_size = ?3, file_sha256 = ?4,
                     ready_at = ?5, expires_at = ?6
-              WHERE report_id = ?1 AND state = 'preparing'",
+              WHERE report_id = ?1 AND state = ?8",
             rusqlite::params![
                 report_id,
                 file_name,
                 file_size,
                 file_sha256,
                 ready_at,
-                expires_at
+                expires_at,
+                ReportState::Ready.as_str(),
+                ReportState::Preparing.as_str(),
             ],
         )?;
         if touchées == 0 {
@@ -243,9 +246,14 @@ impl Db {
         let conn = self.conn().lock().map_err(|_| poisoned())?;
         conn.execute(
             "UPDATE reports
-                SET state = 'failed', step = NULL, error = ?2
-              WHERE report_id = ?1 AND state = 'preparing'",
-            rusqlite::params![report_id, cause],
+                SET state = ?3, step = NULL, error = ?2
+              WHERE report_id = ?1 AND state = ?4",
+            rusqlite::params![
+                report_id,
+                cause,
+                ReportState::Failed.as_str(),
+                ReportState::Preparing.as_str(),
+            ],
         )?;
         Ok(())
     }
@@ -310,19 +318,26 @@ impl Db {
         let ids: Vec<String> = {
             let mut stmt = tx.prepare(
                 "SELECT report_id FROM reports
-                  WHERE state = 'ready' AND expires_at IS NOT NULL AND expires_at <= ?1",
+                  WHERE state = ?2 AND expires_at IS NOT NULL AND expires_at <= ?1",
             )?;
-            let rows = stmt.query_map(rusqlite::params![now], |r| r.get(0))?;
+            let rows = stmt.query_map(
+                rusqlite::params![now, ReportState::Ready.as_str()],
+                |r| r.get(0),
+            )?;
             rows.collect::<Result<_, _>>()?
         };
         // 🔴 `UPDATE`, jamais `DELETE`. La ligne — qui, quand, quelles sondes,
         // quelle fenêtre — survit à son fichier.
         tx.execute(
             "UPDATE reports
-                SET state = 'purged', purged_at = ?1,
+                SET state = ?2, purged_at = ?1,
                     file_name = NULL, file_size = NULL, file_sha256 = NULL
-              WHERE state = 'ready' AND expires_at IS NOT NULL AND expires_at <= ?1",
-            rusqlite::params![now],
+              WHERE state = ?3 AND expires_at IS NOT NULL AND expires_at <= ?1",
+            rusqlite::params![
+                now,
+                ReportState::Purged.as_str(),
+                ReportState::Ready.as_str(),
+            ],
         )?;
         let mut purgés = Vec::with_capacity(ids.len());
         {
@@ -354,9 +369,13 @@ impl Db {
         let conn = self.conn().lock().map_err(|_| poisoned())?;
         let closes = conn.execute(
             "UPDATE reports
-                SET state = 'failed', step = NULL, error = ?1
-              WHERE state = 'preparing'",
-            rusqlite::params![CAUSE_REDEMARRAGE],
+                SET state = ?2, step = NULL, error = ?1
+              WHERE state = ?3",
+            rusqlite::params![
+                CAUSE_REDEMARRAGE,
+                ReportState::Failed.as_str(),
+                ReportState::Preparing.as_str(),
+            ],
         )?;
         Ok(closes)
     }
@@ -379,7 +398,7 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
         Role::Viewer,
         Router::new().route(
             "/api/sites/{id}/reports",
-            post(not_implemented).get(not_implemented),
+            post(request_report).get(list_site_reports),
         ),
     );
 
@@ -387,23 +406,419 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
         state,
         Role::Viewer,
         Router::new()
-            .route("/api/reports/{id}", get(not_implemented))
-            .route("/api/reports/{id}/file", get(not_implemented)),
+            .route("/api/reports/{id}", get(track_report))
+            .route("/api/reports/{id}/file", get(download_report)),
     );
 
     par_site.merge(par_rapport)
 }
 
-/// ⚠️ `501` et non `404` : une route annoncée mais pas encore écrite ne doit
-/// pas laisser croire à un client mal versionné qu'il s'est trompé de chemin.
-async fn not_implemented() -> axum::response::Response {
-    use axum::response::IntoResponse;
+fn fail(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+// ── Demander un rapport ────────────────────────────────────────────────────
+
+/// Ce que l'app envoie.
+#[derive(serde::Deserialize)]
+struct NewReport {
+    /// ⚠️ **Absent = toutes les sondes du site.** Une liste VIDE, elle, n'est
+    /// pas « toutes » : c'est une demande sans sonde, et elle est refusée. Les
+    /// confondre produirait le classeur du site entier là où l'écran affichait
+    /// zéro case cochée.
+    #[serde(default)]
+    probe_ids: Option<Vec<String>>,
+    #[serde(default)]
+    range: Option<String>,
+    #[serde(default)]
+    start: Option<i64>,
+    #[serde(default)]
+    stop: Option<i64>,
+    /// La langue de l'**opérateur**, figée dans la ligne (contrat § 23).
+    #[serde(default = "locale_par_defaut")]
+    locale: String,
+}
+
+fn locale_par_defaut() -> String {
+    crate::report_i18n::FALLBACK_LOCALE.to_string()
+}
+
+/// `202` : le hub a pris la demande, il n'a pas encore le fichier.
+///
+/// ⚠️ La garde de portée du chemin a déjà refusé un site inconnu ou hors
+/// portée. `probe_ids` n'est donc plus une garde ici mais un contrôle
+/// d'**appartenance** : une sonde d'un autre site dans la liste rendrait un
+/// classeur à deux clients, ce que le générateur ne sait de toute façon pas
+/// produire — il lit le site du premier relevé et suppose qu'il vaut pour tous.
+async fn request_report(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(site_id): Path<String>,
+    Json(body): Json<NewReport>,
+) -> Response {
+    let window = match crate::web::window_of(body.range, body.start, body.stop) {
+        Ok(w) => w,
+        Err(refus) => return refus,
+    };
+
+    let probe_ids = match body.probe_ids {
+        Some(demandées) => {
+            for probe_id in &demandées {
+                // ⚠️ Même code et même message que la garde de portée : une
+                // sonde d'un autre client doit rester indiscernable d'une sonde
+                // qui n'existe pas.
+                match state.db.get_probe(probe_id) {
+                    Ok(p) if p.site_id == site_id => {}
+                    _ => return fail(StatusCode::NOT_FOUND, "sonde inconnue"),
+                }
+            }
+            demandées
+        }
+        None => match state.db.list_probes_scoped(Some(&site_id), &actor.scope, false) {
+            Ok(sondes) => sondes.into_iter().map(|p| p.probe_id).collect(),
+            Err(e) => return crate::web::error_response(e),
+        },
+    };
+    if probe_ids.is_empty() {
+        // Un classeur d'une feuille vide est « techniquement produit » et sans
+        // contenu : sur un document qui part chez un client, c'est pire qu'un
+        // refus.
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "aucune sonde à mettre dans ce rapport",
+        );
+    }
+
+    let demande = ReportRequest {
+        site_id: site_id.clone(),
+        probe_ids,
+        // ⚠️ Les bornes sont **résolues** ici, jamais gardées sous forme
+        // glissante : « les 7 derniers jours » relus à la génération, puis à
+        // une régénération, donneraient trois chiffres différents pour le même
+        // document.
+        range_start: window.from,
+        range_stop: window.to,
+        locale: body.locale,
+        requested_by: actor.username.clone(),
+        device_id: actor.device_id.clone(),
+    };
+    let report_id = match state.db.create_report(&demande) {
+        Ok(id) => id,
+        Err(e) => return crate::web::error_response(e),
+    };
+
+    // Première ligne : la demande, avec son PÉRIMÈTRE. La seconde viendra au
+    // verdict — elles se rejoignent par le `report_id`.
+    crate::web::audit(
+        &state,
+        Some(&actor.username),
+        "report.request",
+        Some(&report_id),
+        Outcome::Success,
+        Some(&format!(
+            "site {} · {} · {} sonde(s){}",
+            demande.site_id,
+            window.label,
+            demande.probe_ids.len(),
+            match &actor.device_id {
+                Some(d) => format!(" · depuis l'appareil {d}"),
+                None => String::new(),
+            }
+        )),
+    );
+
+    lancer_preparation(state.clone(), report_id.clone());
+
     (
-        axum::http::StatusCode::NOT_IMPLEMENTED,
-        axum::Json(serde_json::json!({ "error": "rapports non encore implémentés" })),
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "report_id": report_id,
+            "state": ReportState::Preparing.as_str(),
+        })),
     )
         .into_response()
 }
+
+/// L'ouvrier : **une génération à la fois pour tout le hub**.
+///
+/// 🔴 Trente sondes cochées, c'est trente requêtes Flux et trente séries en
+/// mémoire ; deux techniciens qui demandent en même temps en font soixante. Le
+/// navigateur sérialisait déjà pour cette raison, et un hub auto-hébergé tourne
+/// sur la machine dont on dispose, pas sur celle qu'on aurait choisie.
+///
+/// ⚠️ Le jeton est **global au processus** et non porté par `AppState` : deux
+/// hubs dans un même processus n'existent qu'en test, et deux files séparées ne
+/// protégeraient plus la mémoire, qui est commune.
+fn ouvrier() -> &'static tokio::sync::Semaphore {
+    static OUVRIER: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    OUVRIER.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
+
+fn lancer_preparation(state: AppState, report_id: String) {
+    tokio::spawn(async move {
+        // Le sémaphore n'est jamais fermé : l'attente ne peut pas échouer.
+        let _place = ouvrier().acquire().await;
+        let issue = prepare(&state, &report_id).await;
+        let (outcome, detail) = match &issue {
+            Ok(()) => (Outcome::Success, None),
+            Err(cause) => {
+                // La cause **nommée** part dans la ligne avant le journal :
+                // c'est elle que l'app affiche.
+                if let Err(e) = state.db.set_report_failed(&report_id, cause) {
+                    tracing::error!("échec du rapport {report_id} non consigné : {e}");
+                }
+                (Outcome::Failure, Some(cause.clone()))
+            }
+        };
+        // La seconde ligne d'audit : le verdict.
+        crate::web::audit(
+            &state,
+            None,
+            "report.request",
+            Some(&report_id),
+            outcome,
+            detail.as_deref(),
+        );
+    });
+}
+
+/// Produit le classeur d'un rapport ouvert. `Err` porte la cause **nommée**.
+async fn prepare(state: &AppState, report_id: &str) -> Result<(), String> {
+    let record = state.db.get_report(report_id).map_err(|e| e.to_string())?;
+    let window = crate::web::window_of(None, Some(record.range_start), Some(record.range_stop))
+        .map_err(|_| "la fenêtre du rapport est illisible".to_string())?;
+
+    let total = record.probe_ids.len();
+    let mut payloads = Vec::with_capacity(total);
+    for (rang, probe_id) in record.probe_ids.iter().enumerate() {
+        // ⚠️ Le nom de la sonde, pas son identifiant : l'étape s'affiche à
+        // l'écran d'un technicien, pas dans un journal.
+        let nom = state
+            .db
+            .get_probe(probe_id)
+            .map(|p| p.name)
+            .map_err(|_| format!("la sonde {probe_id} n'existe plus"))?;
+        if let Err(e) = state
+            .db
+            .set_report_step(report_id, &format!("sonde {} sur {total} — {nom}", rang + 1))
+        {
+            tracing::warn!("étape du rapport {report_id} non écrite : {e}");
+        }
+        let payload = crate::sla_payload::build(
+            state,
+            probe_id,
+            &window,
+            Some(record.range_start),
+            Some(record.range_stop),
+        )
+        .await
+        .map_err(|e| format!("relevés de {nom} indisponibles : {e}"))?;
+        payloads.push(payload);
+    }
+
+    let workbook = crate::report_xlsx::Workbook {
+        site_name: record.site_name.clone(),
+        range_start: record.range_start,
+        range_stop: record.range_stop,
+        payloads,
+    };
+    let locale = record.locale.clone();
+    // ⚠️ Le classeur se construit **hors du réacteur** : quelques centaines de
+    // milliers de cellules et un PNG, c'est du calcul pur, et il tiendrait un
+    // fil d'exécution qui doit répondre aux autres requêtes.
+    let built = tokio::task::spawn_blocking(move || {
+        let catalog = crate::report_i18n::Catalog::load(&locale);
+        crate::report_xlsx::build(&workbook, &catalog)
+    })
+    .await
+    .map_err(|e| format!("la préparation s'est arrêtée : {e}"))??;
+
+    let chemin = report_path(&state.config_dir, report_id);
+    if let Some(parent) = chemin.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("le dossier des rapports n'a pas pu être créé : {e}"))?;
+    }
+    tokio::fs::write(&chemin, &built.bytes)
+        .await
+        .map_err(|e| format!("le classeur n'a pas pu être écrit : {e}"))?;
+
+    let ready_at = crate::db::now();
+    // ⚠️ L'échéance est fixée ICI et ne bougera plus, même si le réglage
+    // change : l'app va afficher « disponible jusqu'à… », et une date annoncée
+    // est tenue.
+    let expires_at = ready_at + state.settings.report_days() * 86_400;
+    state
+        .db
+        .set_report_ready(
+            report_id,
+            &built.file_name,
+            built.bytes.len() as i64,
+            &built.sha256,
+            ready_at,
+            expires_at,
+        )
+        .map_err(|e| e.to_string())
+}
+
+// ── Lire ───────────────────────────────────────────────────────────────────
+
+async fn list_site_reports(State(state): State<AppState>, Path(site_id): Path<String>) -> Response {
+    match state.db.list_reports(&site_id) {
+        Ok(reports) => crate::web::ok_json(serde_json::json!({ "reports": reports })),
+        Err(e) => crate::web::error_response(e),
+    }
+}
+
+/// Le rapport, si l'appelant a le droit de le voir.
+///
+/// 🔴 **Le contrôle est écrit à la main parce que le chemin porte un
+/// `report_id`, pas un `site_id`** — la garde de portée ne saurait pas quoi
+/// chercher. C'est le seul motif légitime, et il vaut pour TOUS les comptes :
+/// un rapport inexistant et un rapport hors portée rendent le même 404.
+fn report_in_scope(state: &AppState, actor: &Identity, report_id: &str) -> Result<ReportRecord, Response> {
+    match state.db.get_report(report_id) {
+        Ok(r) if actor.scope.allows(&r.site_id) => Ok(r),
+        _ => Err(fail(StatusCode::NOT_FOUND, "rapport inconnu")),
+    }
+}
+
+async fn track_report(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(report_id): Path<String>,
+) -> Response {
+    match report_in_scope(&state, &actor, &report_id) {
+        Ok(record) => crate::web::ok_json(serde_json::json!(record)),
+        Err(refus) => refus,
+    }
+}
+
+// ── Le fichier ─────────────────────────────────────────────────────────────
+
+/// Type MIME d'un classeur. Écrit en toutes lettres : `mime_guess` rendrait le
+/// même, mais sur le fichier remis à un client on ne devine pas.
+const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/// Sert le classeur, **d'un bloc**.
+///
+/// 🔴 **Le corps est lu en entier avant d'être servi**, et sa longueur est
+/// annoncée. Une réponse construite en flux part volontiers en
+/// `Transfer-Encoding: chunked` : il n'y a alors aucune taille à comparer, et
+/// la garantie contre un fichier tronqué tombe en silence. Un classeur pèse
+/// quelques centaines de kilo-octets.
+async fn download_report(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(report_id): Path<String>,
+) -> Response {
+    let record = match report_in_scope(&state, &actor, &report_id) {
+        Ok(r) => r,
+        Err(refus) => return refus,
+    };
+
+    // ⚠️ **410 et non 404.** L'entrée existe — l'app vient d'en afficher la
+    // ligne — et c'est le fichier qui n'est plus là. La date de purge dit
+    // pourquoi, et l'écran propose alors « Redemander ».
+    if record.state == ReportState::Purged.as_str() {
+        return (
+            StatusCode::GONE,
+            Json(serde_json::json!({
+                "error": "le fichier de ce rapport a été purgé",
+                "state": record.state,
+                "purged_at": record.purged_at,
+            })),
+        )
+            .into_response();
+    }
+    if record.state != ReportState::Ready.as_str() {
+        // Ni un fichier vide, ni un classeur partiel : l'état, tel quel, avec
+        // sa cause nommée quand il y en a une.
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "ce rapport n'a pas de fichier",
+                "state": record.state,
+                "step": record.step,
+                "detail": record.error,
+            })),
+        )
+            .into_response();
+    }
+
+    let chemin = report_path(&state.config_dir, &record.report_id);
+    let octets = match tokio::fs::read(&chemin).await {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!("classeur {report_id} illisible sur le volume : {e}");
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "le fichier de ce rapport est introuvable sur le volume du hub",
+            );
+        }
+    };
+
+    // 🔴 L'empreinte est recalculée **sur les octets qu'on s'apprête à
+    // servir**, et comparée à celle de la production. C'est le seul contrôle
+    // qui attrape une corruption silencieuse du volume — un classeur tronqué
+    // s'ouvre très bien, avec moins de lignes.
+    let empreinte: String = ring::digest::digest(&ring::digest::SHA256, &octets)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if record.file_sha256.as_deref() != Some(empreinte.as_str())
+        || record.file_size != Some(octets.len() as i64)
+    {
+        tracing::error!("classeur {report_id} : les octets ne correspondent plus à son empreinte");
+        return fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "le fichier de ce rapport ne correspond plus à son empreinte — il n'a pas été servi",
+        );
+    }
+
+    if let Err(e) = state.db.record_report_download(&record.report_id) {
+        tracing::warn!("envoi du rapport {report_id} non compté : {e}");
+    }
+    // ⚠️ « le hub a servi le fichier à X », pas « X a téléchargé » : une
+    // connexion qui meurt à 80 % laisse une réponse commencée côté serveur et
+    // rien d'exploitable côté client.
+    crate::web::audit(
+        &state,
+        Some(&actor.username),
+        "report.download",
+        Some(&record.report_id),
+        Outcome::Success,
+        Some(&format!(
+            "le hub a servi le fichier à {} ({} octets)",
+            actor.username,
+            octets.len()
+        )),
+    );
+
+    let nom = record.file_name.unwrap_or_else(|| format!("{report_id}.xlsx"));
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, XLSX.to_string()),
+            // ⚠️ Annoncée explicitement, jamais laissée à la couche de
+            // transport : c'est le nombre que l'app compare aux octets reçus.
+            (header::CONTENT_LENGTH, octets.len().to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{nom}\""),
+            ),
+            (EMPREINTE, empreinte),
+        ],
+        octets,
+    )
+        .into_response()
+}
+
+/// L'empreinte du corps, à comparer côté app. Le message d'échec y dit **les
+/// deux nombres** : « attendu 248 013 o · reçu 91 220 o ».
+const EMPREINTE: axum::http::HeaderName =
+    axum::http::HeaderName::from_static("x-lanprobe-sha256");
 
 #[cfg(test)]
 mod tests {
@@ -569,5 +984,497 @@ mod tests {
         let b = report_path(std::path::Path::new("/vol"), "bbb");
         assert_ne!(a, b);
         assert_eq!(a, std::path::Path::new("/vol/reports/aaa.xlsx"));
+    }
+}
+
+#[cfg(test)]
+mod routes_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use tower::ServiceExt;
+
+    /// Un Influx qui répond « aucune mesure ».
+    ///
+    /// ⚠️ Un rapport sans relevé **est** un rapport : le classeur se produit,
+    /// avec ses feuilles vides. Ce qu'on veut tenir ici n'est pas la richesse
+    /// du contenu mais la chaîne complète — demande, préparation, fichier,
+    /// empreinte.
+    async fn faux_influx() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::<()>::new().fallback(|| async { "" });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Volume jetable, propre à chaque test : les rapports s'écrivent
+    /// réellement sur disque.
+    fn scratch() -> std::path::PathBuf {
+        static COMPTEUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COMPTEUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("lanprobe-reports-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    struct Harness {
+        state: AppState,
+        router: axum::Router,
+    }
+
+    impl Harness {
+        async fn new() -> Self {
+            use std::sync::Arc;
+            let db = Arc::new(Db::open_in_memory().unwrap());
+            db.create_initial_admin("admin", "mot-de-passe-de-test").unwrap();
+            let settings = crate::settings::Settings::new(db.clone());
+            settings
+                .put(crate::settings::keys::INFLUX_URL, &faux_influx().await, false)
+                .unwrap();
+            let secrets = crate::secrets::Secrets::ephemeral(db.clone()).unwrap();
+            let state = AppState {
+                auth: Arc::new(crate::auth::Auth::new(db.clone())),
+                influx: Arc::new(crate::influx::Influx::new(
+                    settings.clone(),
+                    "jeton-operateur-de-test".into(),
+                )),
+                notifier: crate::notify::Notifier::new(db.clone(), secrets.clone(), settings.clone()),
+                ceremonies: Arc::new(crate::passkeys::Ceremonies::new()),
+                db,
+                settings,
+                secrets,
+                tls: false,
+                cert_fingerprint: None,
+                restart_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                config_dir: scratch(),
+                backup_dir: scratch(),
+                influx_cli: "influx-absent-des-tests".into(),
+            };
+            let router = crate::web::build_router(state.clone());
+            Self { state, router }
+        }
+
+        fn session(&self, username: &str) -> String {
+            let token = self.state.auth.start_session(username.to_string()).unwrap();
+            format!("lanprobe_hub_session={token}")
+        }
+
+        async fn brut(&self, req: Request<Body>) -> axum::response::Response {
+            self.router.clone().oneshot(req).await.unwrap()
+        }
+
+        async fn get(&self, path: &str, cookie: &str) -> (StatusCode, serde_json::Value) {
+            let r = self
+                .brut(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await;
+            let status = r.status();
+            let bytes = axum::body::to_bytes(r.into_body(), 1 << 22).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+        }
+
+        async fn post(
+            &self,
+            path: &str,
+            cookie: &str,
+            body: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            let r = self
+                .brut(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header(header::COOKIE, cookie)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await;
+            let status = r.status();
+            let bytes = axum::body::to_bytes(r.into_body(), 1 << 22).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+        }
+
+        /// Un site, une sonde enrôlée.
+        fn site_avec_sonde(&self, site: &str, sonde: &str) -> (String, String) {
+            let site_id = self.state.db.create_site(site).unwrap().site_id;
+            let (probe, _) = self.state.db.enroll_probe(&site_id, sonde).unwrap();
+            (site_id, probe.probe_id)
+        }
+
+        /// Attend la fin de la préparation et rend l'entrée de suivi.
+        async fn attendre(&self, cookie: &str, report_id: &str) -> serde_json::Value {
+            for _ in 0..200 {
+                let (status, body) = self.get(&format!("/api/reports/{report_id}"), cookie).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                if body["state"] != "preparing" {
+                    return body;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("le rapport {report_id} est resté en préparation");
+        }
+    }
+
+    fn fenetre() -> (i64, i64) {
+        let stop = crate::db::now();
+        (stop - 3_600, stop)
+    }
+
+    #[tokio::test]
+    async fn a_report_is_served_with_its_length_and_the_fingerprint_of_the_bytes_sent() {
+        // 🔴 Un fichier tronqué s'ouvre très bien. La longueur annoncée et
+        // l'empreinte sont les deux seuls contrôles qui l'attrapent.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
+        let (start, stop) = fenetre();
+
+        let (status, ouvert) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "fr" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{ouvert}");
+        assert_eq!(ouvert["state"], "preparing");
+        let report_id = ouvert["report_id"].as_str().unwrap().to_string();
+
+        let suivi = h.attendre(&cookie, &report_id).await;
+        assert_eq!(suivi["state"], "ready", "{suivi}");
+
+        let réponse = h
+            .brut(
+                Request::builder()
+                    .uri(format!("/api/reports/{report_id}/file"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(réponse.status(), StatusCode::OK);
+        let entêtes = réponse.headers().clone();
+        let octets = axum::body::to_bytes(réponse.into_body(), 1 << 24).await.unwrap();
+
+        // La longueur est ANNONCÉE, sur une réponse non chunkée : sans elle, il
+        // n'y a rien à comparer côté app.
+        assert_eq!(
+            entêtes.get(header::CONTENT_LENGTH).unwrap().to_str().unwrap(),
+            octets.len().to_string(),
+        );
+        assert!(entêtes.get(header::TRANSFER_ENCODING).is_none());
+        // L'empreinte porte sur les octets SERVIS.
+        let attendu: String = ring::digest::digest(&ring::digest::SHA256, &octets)
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            entêtes.get("x-lanprobe-sha256").unwrap().to_str().unwrap(),
+            attendu
+        );
+        // Et elle est la même que celle gardée en base.
+        assert_eq!(suivi["file_sha256"].as_str().unwrap(), attendu);
+        assert_eq!(suivi["file_size"].as_i64().unwrap(), octets.len() as i64);
+        // Le nom remis au client, pas l'identifiant technique.
+        let disposition = entêtes
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(disposition.contains("durand"), "{disposition}");
+        assert!(!disposition.contains(&report_id), "{disposition}");
+        // Le hub sait qu'il a SERVI le fichier.
+        assert_eq!(
+            h.state.db.get_report(&report_id).unwrap().downloads,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_purged_report_answers_410_with_its_purge_date_and_keeps_its_line() {
+        // ⚠️ 404 dirait « ça n'a jamais existé », sur un rapport dont l'app
+        // vient d'afficher la ligne.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
+        let (start, stop) = fenetre();
+
+        let (_, ouvert) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "fr" }),
+            )
+            .await;
+        let report_id = ouvert["report_id"].as_str().unwrap().to_string();
+        h.attendre(&cookie, &report_id).await;
+
+        let purgés = h.state.db.purge_expired_reports(i64::MAX).unwrap();
+        assert_eq!(purgés.len(), 1);
+        let _ = std::fs::remove_file(report_path(&h.state.config_dir, &report_id));
+
+        let (status, body) = h.get(&format!("/api/reports/{report_id}/file"), &cookie).await;
+        assert_eq!(status, StatusCode::GONE, "{body}");
+        assert_eq!(body["state"], "purged");
+        assert!(body["purged_at"].is_i64(), "{body}");
+
+        // 🔴 L'entrée survit, avec son demandeur : c'est la réponse à « qui a
+        // extrait les données de Durand ».
+        let (status, liste) = h.get(&format!("/api/sites/{site_id}/reports"), &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        let entrée = &liste["reports"][0];
+        assert_eq!(entrée["report_id"], report_id.as_str());
+        assert_eq!(entrée["requested_by"], "admin");
+        assert_eq!(entrée["state"], "purged");
+        assert_eq!(entrée["range_start"], start);
+        assert_eq!(entrée["range_stop"], stop);
+        assert!(entrée["probe_ids"].as_array().unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_no_longer_matches_its_fingerprint_is_never_served() {
+        // Une corruption silencieuse sur le volume du hub ne doit pas partir
+        // chez le client : c'est la valeur plausible et fausse à l'endroit où
+        // elle coûte le plus cher.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
+        let (start, stop) = fenetre();
+        let (_, ouvert) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "fr" }),
+            )
+            .await;
+        let report_id = ouvert["report_id"].as_str().unwrap().to_string();
+        h.attendre(&cookie, &report_id).await;
+
+        // Le fichier est tronqué sur le volume, comme le ferait un disque plein.
+        let chemin = report_path(&h.state.config_dir, &report_id);
+        let octets = std::fs::read(&chemin).unwrap();
+        std::fs::write(&chemin, &octets[..octets.len() / 2]).unwrap();
+
+        let (status, body) = h.get(&format!("/api/reports/{report_id}/file"), &cookie).await;
+        assert_ne!(status, StatusCode::OK, "un classeur tronqué a été servi");
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("empreinte"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_account_that_sees_every_site_cannot_mix_two_clients_in_one_report() {
+        // 🔴 Le test qui manquait trois fois : écrit avec un compte
+        // `Scope::All`, pour qui les gardes de portée ne refusent rien. Ici la
+        // seule chose qui protège est le contrôle d'APPARTENANCE de la sonde.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        assert_eq!(
+            h.state.db.user_scope("admin", crate::db::Role::Admin).unwrap(),
+            crate::db::Scope::All
+        );
+        let (durand, _) = h.site_avec_sonde("Durand", "Lyon");
+        let (_, sonde_martin) = h.site_avec_sonde("Martin", "Paris");
+        let (start, stop) = fenetre();
+
+        let (status, body) = h
+            .post(
+                &format!("/api/sites/{durand}/reports"),
+                &cookie,
+                serde_json::json!({
+                    "probe_ids": [sonde_martin],
+                    "start": start, "stop": stop, "locale": "fr",
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(h.state.db.list_reports(&durand).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_report_is_not_found_even_for_an_account_that_sees_everything() {
+        // Même motif : l'existence se vérifie pour TOUS les comptes.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+
+        let (status, _) = h.get("/api/reports/rapport-qui-nexiste-pas", &cookie).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = h.get("/api/reports/rapport-qui-nexiste-pas/file", &cookie).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = h
+            .post(
+                "/api/sites/site-qui-nexiste-pas/reports",
+                &cookie,
+                serde_json::json!({ "locale": "fr" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_restricted_account_never_learns_that_another_clients_report_exists() {
+        // Le nom d'un client est déjà une information (contrat § 17).
+        let h = Harness::new().await;
+        let admin = h.session("admin");
+        let (durand, _) = h.site_avec_sonde("Durand", "Lyon");
+        let (martin, _) = h.site_avec_sonde("Martin", "Paris");
+        h.state
+            .db
+            .create_user("lecteur", "mot-de-passe-de-test", crate::db::Role::Viewer)
+            .unwrap();
+        h.state.db.set_user_sites("lecteur", &[durand.clone()]).unwrap();
+        let lecteur = h.session("lecteur");
+
+        let (start, stop) = fenetre();
+        let (_, ouvert) = h
+            .post(
+                &format!("/api/sites/{martin}/reports"),
+                &admin,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "fr" }),
+            )
+            .await;
+        let report_id = ouvert["report_id"].as_str().unwrap().to_string();
+
+        // Même code, même message que pour un rapport inexistant.
+        let (status, body) = h.get(&format!("/api/reports/{report_id}"), &lecteur).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let (status, _) = h.get(&format!("/api/reports/{report_id}/file"), &lecteur).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = h.get(&format!("/api/sites/{martin}/reports"), &lecteur).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn omitting_the_probes_takes_every_probe_of_the_site_and_only_those() {
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (durand, lyon) = h.site_avec_sonde("Durand", "Lyon");
+        let (_, marseille) = {
+            let (probe, _) = h.state.db.enroll_probe(&durand, "Marseille").unwrap();
+            (durand.clone(), probe.probe_id)
+        };
+        h.site_avec_sonde("Martin", "Paris");
+        let (start, stop) = fenetre();
+
+        let (status, ouvert) = h
+            .post(
+                &format!("/api/sites/{durand}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "fr" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{ouvert}");
+        let record = h
+            .state
+            .db
+            .get_report(ouvert["report_id"].as_str().unwrap())
+            .unwrap();
+        let mut retenues = record.probe_ids.clone();
+        retenues.sort();
+        let mut attendues = vec![lyon, marseille];
+        attendues.sort();
+        assert_eq!(retenues, attendues);
+    }
+
+    #[tokio::test]
+    async fn a_site_without_probes_says_so_rather_than_producing_an_empty_workbook() {
+        // Un document remis au client ne doit jamais être « techniquement
+        // produit » et sans contenu.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let site_id = h.state.db.create_site("Vide").unwrap().site_id;
+        let (start, stop) = fenetre();
+
+        let (status, body) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "fr" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"].as_str().unwrap_or_default().contains("sonde"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_language_is_the_operators_one_frozen_at_request_time() {
+        // Tranché par Benjamin : l'opérateur relit le document avant de
+        // l'envoyer, et il ne peut relire que ce qu'il lit.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
+        let (start, stop) = fenetre();
+
+        let (_, ouvert) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "es" }),
+            )
+            .await;
+        let report_id = ouvert["report_id"].as_str().unwrap().to_string();
+        assert_eq!(h.state.db.get_report(&report_id).unwrap().locale, "es");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_window_is_a_bad_request_not_a_report_that_fails_later() {
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
+
+        let (status, _) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "range": "la semaine dernière", "locale": "fr" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(h.state.db.list_reports(&site_id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn asking_and_serving_are_two_audit_lines() {
+        // Demander et télécharger ne sont pas le même acte, ni forcément la
+        // même personne.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
+        let (start, stop) = fenetre();
+
+        let (_, ouvert) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "fr" }),
+            )
+            .await;
+        let report_id = ouvert["report_id"].as_str().unwrap().to_string();
+        h.attendre(&cookie, &report_id).await;
+        let (status, _) = h.get(&format!("/api/reports/{report_id}/file"), &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, journal) = h.get("/api/audit?action=report.request", &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{journal}");
+        let demandes = journal["entries"].as_array().unwrap();
+        // Une ligne à la demande, une au verdict.
+        assert_eq!(demandes.len(), 2, "{journal}");
+        assert!(demandes.iter().all(|l| l["target"] == report_id.as_str()));
+
+        let (_, journal) = h.get("/api/audit?action=report.download", &cookie).await;
+        assert_eq!(journal["entries"].as_array().unwrap().len(), 1, "{journal}");
     }
 }
