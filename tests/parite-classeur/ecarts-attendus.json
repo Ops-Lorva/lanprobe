@@ -24,14 +24,6 @@
     "hub": "(vide)"
   },
   {
-    "nature": "defaut",
-    "scenario": "solo",
-    "feuille": "Synthèse",
-    "ou": "D11",
-    "navigateur": "nombre 1.1",
-    "hub": "nombre 1.2"
-  },
-  {
     "nature": "cellule-vide",
     "scenario": "solo",
     "feuille": "Synthèse",
@@ -760,14 +752,6 @@
     "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
   },
   {
-    "nature": "defaut",
-    "scenario": "solo",
-    "feuille": "Débits",
-    "ou": "F7",
-    "navigateur": "nombre 712",
-    "hub": "nombre 712.1"
-  },
-  {
     "nature": "date",
     "scenario": "solo",
     "feuille": "Débits",
@@ -1150,14 +1134,6 @@
     "ou": "J8",
     "navigateur": "texte \"\"",
     "hub": "(vide)"
-  },
-  {
-    "nature": "defaut",
-    "scenario": "multi",
-    "feuille": "Synthèse",
-    "ou": "D10",
-    "navigateur": "nombre 1.1",
-    "hub": "nombre 1.2"
   },
   {
     "nature": "cellule-vide",
@@ -2062,14 +2038,6 @@
     "ou": "B6",
     "navigateur": "texte \"01/09/2026 06:20:00\"",
     "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
-  },
-  {
-    "nature": "defaut",
-    "scenario": "multi",
-    "feuille": "Débits",
-    "ou": "F6",
-    "navigateur": "nombre 712",
-    "hub": "nombre 712.1"
   },
   {
     "nature": "date",

@@ -340,10 +340,41 @@ pub(crate) fn iso_day(epoch_secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Arrondit à `n` décimales, comme `toFixed(n)` côté navigateur.
+/// Arrondit à `n` décimales avec la règle de `Number(v.toFixed(n))`.
+///
+/// 🔴 **Surtout pas `(v * 10^n).round() / 10^n`.** Cette forme naïve arrondit
+/// une valeur que la multiplication a déjà **déplacée** : `712.05` vaut un
+/// cheveu de *moins* que 712,05, mais `712.05 * 10` vaut exactement `7120.5`,
+/// que `.round()` fait monter — 712,1 côté hub contre 712,0 côté navigateur,
+/// sur le classeur qui part chez le client. Les latences LAN (0,15 / 0,35 /
+/// 0,85 / 0,95 ms) tombent toutes dans ce piège.
+///
+/// `toFixed`, lui, arrondit l'expansion décimale **exacte** du double, et c'est
+/// aussi ce que fait le formatage `{:.n$}` de Rust — d'où la forme retenue.
+/// Reste une seule divergence de règle, traitée à part : sur une égalité
+/// parfaite (…5 pile, c'est-à-dire un multiple impair de 2⁻⁽ⁿ⁺¹⁾ comme 0,25 à
+/// une décimale), Rust va au chiffre pair là où `toFixed` monte.
 pub(crate) fn round_to(v: f64, n: u32) -> f64 {
-    let f = 10f64.powi(n as i32);
-    (v * f).round() / f
+    if !v.is_finite() {
+        return v;
+    }
+    let p = n as usize;
+    let mag = v.abs();
+    // Le décalage est une puissance de deux : il est exact, il ne déplace rien.
+    let demi = mag * 2f64.powi(n as i32 + 1);
+    let mag = if demi.is_finite() && demi.fract() == 0.0 && demi % 2.0 == 1.0 {
+        // Égalité parfaite : un seul ULP suffit à passer au-dessus du demi-rang
+        // et donc à forcer la montée, sans jamais atteindre le rang suivant.
+        mag.next_up()
+    } else {
+        mag
+    };
+    let arrondi: f64 = format!("{mag:.p$}").parse().unwrap_or(mag);
+    if v.is_sign_negative() {
+        -arrondi
+    } else {
+        arrondi
+    }
 }
 
 /// Rend un nombre comme le ferait un tableur : sans zéros décimaux inutiles.
@@ -576,6 +607,33 @@ mod tests {
         assert!(!rendu.contains('0'));
         assert_eq!(cat.percent(Some(99.2)), "99.2 %");
         assert_eq!(cat.percent(Some(100.0)), "100 %");
+    }
+
+    /// 🔴 **Le hub doit écrire le chiffre du navigateur, au dixième près.**
+    ///
+    /// Les deux classeurs partent chez le même client : une cellule qui diffère
+    /// d'un dixième se conteste. `round_to` alimente la disponibilité, la
+    /// latence moyenne, les débits et la gigue — les latences LAN tombent pile
+    /// dans la zone où la forme naïve `(v * 10^n).round() / 10^n` dérape.
+    #[test]
+    fn round_to_arrondit_comme_tofixed_pas_apres_multiplication() {
+        // `712.05 * 10` vaut exactement 7120.5 en binaire, alors que `712.05`
+        // vaut un cheveu de MOINS que 712,05 : la multiplication remonte la
+        // valeur au-dessus de la demi-unité et la forme naïve montait à 712,1.
+        assert_eq!(round_to(712.05, 1), 712.0);
+        assert_eq!(round_to(1.15, 1), 1.1);
+        assert_eq!(round_to(0.075, 2), 0.07);
+        for (v, attendu) in [(0.15, 0.1), (0.35, 0.3), (0.85, 0.8), (0.95, 0.9)] {
+            assert_eq!(round_to(v, 1), attendu, "round_to({v}, 1)");
+        }
+        // Égalité parfaite (…5 pile) : `toFixed` monte, il ne va pas au pair.
+        assert_eq!(round_to(0.25, 1), 0.3);
+        assert_eq!(round_to(-0.25, 1), -0.3);
+        assert_eq!(round_to(0.125, 2), 0.13);
+        // Et ce que la forme naïve rendait déjà juste doit le rester.
+        assert_eq!(round_to(99.995, 2), 100.0);
+        assert_eq!(round_to(99.2, 2), 99.2);
+        assert_eq!(round_to(0.0, 1), 0.0);
     }
 
     #[test]
