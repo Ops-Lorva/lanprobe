@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -528,6 +528,112 @@ const MIGRATIONS: &[&str] = &[
       last_change_at INTEGER NOT NULL,
       UNIQUE(probe_id, target)
     );
+    "#,
+    // v21 → v22 : l'appareil appairé (contrat § 22) et le rapport produit par
+    // le hub (§ 23).
+    //
+    // ⚠️ **Les deux tables voyagent dans la MÊME migration**, et ce n'est pas
+    // un raccourci : `reports.device_id` référence `paired_devices`. Deux
+    // migrations séparées, écrites en parallèle par deux mains, auraient pu
+    // être fusionnées dans l'ordre inverse — et `MIGRATIONS` n'a qu'un seul
+    // `SCHEMA_VERSION` : deux bases divergentes selon l'ordre de fusion, un
+    // défaut qui ne se voit qu'en production.
+    //
+    // Migration **additive** : aucune table existante n'est touchée. Une base
+    // en service se hisse en v22 sans perdre une ligne.
+    //
+    // ── `paired_devices` — calquée sur `probes`, délibérément ──
+    //
+    // Condensat argon2id du secret (**jamais le secret en clair**),
+    // `last_seen`, `revoked_at`, et **aucune suppression** : un appareil est à
+    // un compte ce qu'une sonde est à un site. Une base volée ne donne le
+    // droit d'agir au nom d'aucun appareil.
+    //
+    // ⚠️ Le propriétaire est désigné par `username` et non par `users.id` :
+    // c'est déjà la clé qu'emploient `user_sites` (§ 17) et le journal
+    // d'audit. Deux manières de désigner le même compte dans le même schéma
+    // finissent par se désynchroniser.
+    //
+    // ⚠️ **Le secret ne tourne PAS à l'usage** — pas de colonne de rotation
+    // automatique, pas de compteur de rejeu. Faire tourner à chaque
+    // renouvellement perd le secret quand la réponse se perd, c'est-à-dire là
+    // où le réseau est mauvais : exactement là où le technicien travaille. La
+    // rotation est un geste explicite, qui réécrit `secret_hash`.
+    //
+    // `last_ip` est là parce que la révocation est le seul filet : la
+    // dernière vue et la dernière adresse sont ce qui reste pour repérer un
+    // secret copié, faute de détection automatique.
+    //
+    // ── `reports` — DEUX durées de vie dans une seule table ──
+    //
+    // 🔴 La ligne n'est **jamais** supprimée. La purge remplit `purged_at`,
+    // vide `file_name`/`file_size`/`file_sha256` et met `state = 'purged'` :
+    // le fichier s'en va, l'entrée reste, avec son demandeur et sa date. Sans
+    // cette séparation, purger « les rapports » du dimanche emporterait la
+    // réponse à « qui a extrait les données de Durand le 12 août ».
+    //
+    // ⚠️ `device_id` n'est pas du zèle. « Qui a demandé » désigne une
+    // personne ; si un téléphone est perdu et que celui qui le tient sort
+    // trois rapports clients, l'audit dira « benjamin » — ce qui est vrai et
+    // trompeur. NULL veut dire « depuis le hub web », pas « inconnu ».
+    //
+    // ⚠️ `locale` est FIGÉE à la demande. La langue du classeur est celle de
+    // l'opérateur qui le demande ; la relire au moment de produire donnerait
+    // un document dans la langue de qui regarde l'écran cinq minutes plus
+    // tard.
+    //
+    // ⚠️ `expires_at` est fixée à la préparation et ne bouge plus, même si
+    // `report_days` change ensuite : une date annoncée à l'utilisateur est
+    // tenue. Elle est donc STOCKÉE et non calculée à la lecture.
+    //
+    // `error` porte la cause **nommée**, jamais « erreur » : c'est ce que
+    // l'app affiche, et « échec » ne dit pas s'il faut réessayer ou appeler.
+    //
+    // Pas de `ON DELETE CASCADE` sur `site_id` : rien ne supprime un site
+    // dans ce projet (on archive), et une cascade effacerait précisément la
+    // trace d'extraction que cette table existe pour tenir.
+    r#"
+    CREATE TABLE paired_devices (
+      device_id   TEXT PRIMARY KEY,
+      username    TEXT    NOT NULL REFERENCES users(username),
+      name        TEXT    NOT NULL,
+      secret_hash TEXT    NOT NULL,
+      platform    TEXT,
+      app_version TEXT,
+      created_at  INTEGER NOT NULL,
+      last_seen   INTEGER,
+      last_ip     TEXT,
+      revoked_at  INTEGER
+    );
+    CREATE INDEX idx_paired_devices_user ON paired_devices(username);
+
+    CREATE TABLE reports (
+      report_id    TEXT PRIMARY KEY,
+      site_id      TEXT    NOT NULL REFERENCES sites(site_id),
+      requested_by TEXT    NOT NULL REFERENCES users(username),
+      device_id    TEXT    REFERENCES paired_devices(device_id),
+      probe_ids    TEXT    NOT NULL,
+      locale       TEXT    NOT NULL DEFAULT 'fr',
+      range_start  INTEGER NOT NULL,
+      range_stop   INTEGER NOT NULL,
+      state        TEXT    NOT NULL,
+      step         TEXT,
+      error        TEXT,
+      file_name    TEXT,
+      file_size    INTEGER,
+      file_sha256  TEXT,
+      requested_at INTEGER NOT NULL,
+      ready_at     INTEGER,
+      expires_at   INTEGER,
+      purged_at    INTEGER,
+      downloads    INTEGER NOT NULL DEFAULT 0
+    );
+    -- L'historique d'un site, du plus récent au plus ancien : c'est l'unique
+    -- lecture de l'écran (contrat § 23).
+    CREATE INDEX idx_reports_site_requested ON reports(site_id, requested_at DESC);
+    -- La purge balaie par échéance. Sans index, elle relit toute la table à
+    -- chaque passage — et cette table ne se vide jamais.
+    CREATE INDEX idx_reports_expires ON reports(expires_at);
     "#,
 ];
 
@@ -1237,6 +1343,21 @@ impl Db {
         self.conn
             .lock()
             .map_err(|_| DbError::Internal("verrou SQLite empoisonné".into()))
+    }
+
+    /// La connexion, pour les `impl Db` qui vivent **hors de ce fichier**.
+    ///
+    /// ⚠️ Ce n'est pas une ouverture du modèle : `db.rs` fait déjà 5 200
+    /// lignes, et y verser l'appairage puis les rapports (contrat § 22, § 23)
+    /// en ferait le fichier que deux tâches parallèles ne peuvent pas se
+    /// partager. Chaque domaine porte donc son `impl Db` dans son propre
+    /// module, et emprunte la connexion par ici.
+    ///
+    /// ⚠️ **Le verrou reste au sein du crate** : `pub(crate)`, jamais `pub`.
+    /// Le rendre public laisserait n'importe qui contourner les invariants que
+    /// les méthodes tiennent — la portée, l'audit, l'absence de suppression.
+    pub(crate) fn conn(&self) -> &Mutex<Connection> {
+        &self.conn
     }
 
     pub fn user_version(&self) -> DbResult<i64> {
@@ -3534,6 +3655,164 @@ mod tests {
         assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Les colonnes d'une table, dans l'ordre du schéma.
+    fn columns(db: &Db, table: &str) -> Vec<String> {
+        let conn = db.conn().lock().unwrap();
+        conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn migration_v22_lifts_an_existing_v21_database_without_losing_a_row() {
+        // 🔴 Le cas réel : un hub en service depuis des mois, avec son parc,
+        // que l'on met à jour. La migration est ADDITIVE — elle ne touche
+        // aucune table existante — et cette propriété se vérifie en comptant
+        // les lignes d'avant, pas en relisant le SQL.
+        //
+        // ⚠️ Les deux tables voyagent dans la MÊME migration : `reports`
+        // référence `paired_devices`, et deux migrations séparées auraient pu
+        // être fusionnées dans l'ordre inverse.
+        let dir = tmp_dir("v21-to-v22");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..21] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 21").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO probes (probe_id, site_id, name, token_hash, created_at)
+                 VALUES ('p-1', 's-1', 'Paris', 'h', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, created_at)
+                 VALUES ('claire', 'h', 'operator', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+        assert_eq!(db.list_probes(None).unwrap().len(), 1);
+        assert!(db.get_user("claire").is_ok(), "le compte doit survivre");
+
+        // Les deux tables sont là, et les colonnes que les tâches suivantes
+        // vont écrire aussi. On les nomme une à une : une table présente mais
+        // amputée d'une colonne ne se voit qu'à l'INSERT, en production.
+        let devices = columns(&db, "paired_devices");
+        for expected in [
+            "device_id",
+            "username",
+            "name",
+            "secret_hash",
+            "platform",
+            "app_version",
+            "created_at",
+            "last_seen",
+            "last_ip",
+            "revoked_at",
+        ] {
+            assert!(
+                devices.iter().any(|c| c == expected),
+                "colonne {expected} absente de paired_devices : {devices:?}"
+            );
+        }
+
+        let reports = columns(&db, "reports");
+        for expected in [
+            "report_id",
+            "site_id",
+            "requested_by",
+            "device_id",
+            "probe_ids",
+            "locale",
+            "range_start",
+            "range_stop",
+            "state",
+            "step",
+            "error",
+            "file_name",
+            "file_size",
+            "file_sha256",
+            "requested_at",
+            "ready_at",
+            "expires_at",
+            "purged_at",
+            "downloads",
+        ] {
+            assert!(
+                reports.iter().any(|c| c == expected),
+                "colonne {expected} absente de reports : {reports:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_purged_report_keeps_its_requester_and_loses_only_its_file() {
+        // 🔴 C'est la contrainte qui commande la forme de la table : purger
+        // ne doit pas effacer « qui a extrait quoi ». Deux durées de vie dans
+        // une seule ligne — le fichier s'en va, l'entrée reste.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        db.create_user("claire", "password123", Role::Operator).unwrap();
+        let conn = db.conn();
+        let conn = conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO reports (report_id, site_id, requested_by, probe_ids, locale,
+                                  range_start, range_stop, state, file_name, file_size,
+                                  file_sha256, requested_at, ready_at, expires_at)
+             VALUES ('r-1', ?1, 'claire', '[\"p-1\"]', 'fr', 0, 100, 'ready',
+                     'durand.xlsx', 4096, 'abcd', 10, 20, 30)",
+            [&site.site_id],
+        )
+        .unwrap();
+
+        // Ce que fera la purge : vider le fichier, dater, changer d'état.
+        conn.execute(
+            "UPDATE reports
+                SET state = 'purged', purged_at = 40,
+                    file_name = NULL, file_size = NULL, file_sha256 = NULL
+              WHERE report_id = 'r-1'",
+            [],
+        )
+        .unwrap();
+
+        let (state, requester, purged_at, file_name, downloads): (
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT state, requested_by, purged_at, file_name, downloads
+                   FROM reports WHERE report_id = 'r-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "purged");
+        assert_eq!(requester, "claire", "le demandeur survit à la purge");
+        assert_eq!(purged_at, Some(40));
+        assert_eq!(file_name, None, "le fichier, lui, s'en va");
+        assert_eq!(downloads, 0, "le compteur a un défaut, pas un NULL");
     }
 
     #[test]
