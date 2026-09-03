@@ -53,6 +53,16 @@
   // demande, à l'intérieur de `downloadSlaReport`. Le tableau par adresse ne
   // tire donc pas le classeur dans le paquet principal.
   import { byPublicIp, type IpSlaRow, type PublicIpInterval } from '$lib/sla-report';
+  // Le classeur vient du hub (contrat § 23). `sla-report` reste le repli, et
+  // garde les calculs des tableaux affichés ici.
+  import {
+    fetchReportFile,
+    hubLacksReports,
+    pollReport,
+    reportErrorMessage,
+    reportsApi,
+    saveReportFile,
+  } from '$lib/reports';
   import {
     seriesColor,
     normalizeState,
@@ -142,6 +152,10 @@
 
   onDestroy(() => {
     if (timer) clearInterval(timer);
+    // Quitter la fiche arrête le suivi du rapport : le hub continue de le
+    // produire — il reste dans l'historique du site — mais plus personne
+    // n'interroge pour un écran qui n'existe plus.
+    slaAbort.aborted = true;
   });
 
   // ── Renommage en place ───────────────────────────────────────────────────
@@ -774,25 +788,79 @@
   }
 
   // ── Rapport SLA ──────────────────────────────────────────────────────────
+  //
+  // 🔴 **Le classeur est produit par le HUB** (contrat § 23) : un seul
+  // générateur pour un seul document. Le chemin navigateur reste, en repli,
+  // pour un hub plus ancien que la route — on ajoute un chemin, on n'en enlève
+  // pas.
   let slaBusy = $state(false);
   let slaError = $state('');
+  /** Où en est la préparation : « sonde 2 sur 3 — Lyon », puis le téléchargement. */
+  let slaStep = $state('');
+  /** Le classeur vient du navigateur, pas du hub. Se dit, ne se devine pas. */
+  let slaFallback = $state(false);
+  /** Écran quitté : le suivi cesse d'interroger le hub. */
+  let slaAbort = { aborted: false };
 
   async function exportSla() {
+    if (!probe) return;
     slaBusy = true;
     slaError = '';
+    slaFallback = false;
+    slaStep = $_('report.hub_preparing');
+    slaAbort = { aborted: false };
+    // La fenêtre du rapport est celle affichée : on exporte ce qu'on regarde.
+    // ⚠️ Une plage absolue part en bornes exactes, pas en fenêtre glissante :
+    // « les 7 derniers jours » donnerait un chiffre différent à chaque
+    // ouverture du document remis au client.
+    const window = toMetricsWindow(win, Date.now());
     try {
-      // La fenêtre du rapport est celle affichée : on exporte ce qu'on regarde.
-      // ⚠️ Une plage absolue part en bornes exactes, pas en fenêtre glissante :
-      // « les 7 derniers jours » donnerait un chiffre différent à chaque
-      // ouverture du document remis au client.
-      const payload = await api.sla(id, toMetricsWindow(win, Date.now()));
+      const { report_id } = await reportsApi.requestReport(probe.site_id, {
+        probe_ids: [id],
+        window,
+        locale: lang,
+      });
+      const record = await pollReport(report_id, {
+        signal: slaAbort,
+        // ⚠️ Un bouton muet pendant trente secondes se lit comme une panne.
+        // L'étape vient du hub, en clair, et s'affiche telle quelle.
+        onStep: (r) => (slaStep = r.step ?? $_('report.hub_preparing')),
+      });
+      if (record.state !== 'ready') {
+        // La cause est NOMMÉE par le hub : c'est elle qui dit s'il faut
+        // réessayer ou appeler.
+        slaError = $_('report.hub_failed', { values: { cause: record.error ?? '—' } });
+        return;
+      }
+      slaStep = $_('report.hub_download');
+      saveReportFile(await fetchReportFile(record.report_id, record.file_name ?? ''));
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      // Hub plus ancien que la route : le navigateur reprend la main.
+      if (hubLacksReports(e)) return void (await exportSlaInBrowser(window));
+      slaError = reportErrorMessage(e, (k, v) => $_(k, { values: v }), lang);
+    } finally {
+      slaBusy = false;
+      slaStep = '';
+    }
+  }
+
+  /**
+   * Le générateur du navigateur, en repli.
+   *
+   * ⚠️ Il n'est pas mort : `sla-report.ts` porte aussi `byPublicIp`, `outages`
+   * et `stats`, qui alimentent les tableaux de cette fiche. Ce qui bascule,
+   * c'est la PRODUCTION DU FICHIER, pas les calculs affichés.
+   */
+  async function exportSlaInBrowser(window: ReturnType<typeof toMetricsWindow>) {
+    try {
+      const payload = await api.sla(id, window);
       const { downloadSlaReport } = await import('$lib/sla-report');
       await downloadSlaReport(payload, (k, v) => $_(k, { values: v }), lang);
+      slaFallback = true;
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
       slaError = e instanceof ApiError ? e.message : String(e);
-    } finally {
-      slaBusy = false;
     }
   }
 
@@ -1478,6 +1546,12 @@
             <button class="lp-btn ghost sm" onclick={exportSla} disabled={slaBusy}>
               {slaBusy ? $_('sla.exporting') : $_('sla.export')}
             </button>
+            <!-- ⚠️ Le hub prépare le classeur, et il ne prépare qu'un rapport à
+                 la fois pour tout le parc : l'attente peut durer. L'étape vient
+                 de lui, en clair — un bouton muet trente secondes se lit comme
+                 une panne. -->
+            {#if slaBusy && slaStep}<span class="slastep">{slaStep}</span>{/if}
+            {#if slaFallback}<span class="slastep">{$_('report.hub_fallback')}</span>{/if}
             {#if slaError}<span class="slaerr">{slaError}</span>{/if}
           {/if}
         {/snippet}
@@ -3122,6 +3196,13 @@
   .slaerr {
     font-size: 11px;
     color: var(--ep-danger);
+  }
+
+  /* L'avancement du hub : une note, pas une alerte. Rien ne va mal — le
+     classeur se prépare, et le dire évite qu'on reclique. */
+  .slastep {
+    font-size: 11px;
+    color: var(--ep-text-muted);
   }
 
   /* Le pas d'agrégation : une note, pas une alerte — la courbe est juste,
