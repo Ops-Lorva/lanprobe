@@ -987,7 +987,11 @@
     "hub_requested_from_web": "desde el hub web",
     "hub_size": "{size} · {sheets} hojas",
     "hub_empty": "Ningún informe para este sitio.",
-    "hub_truncated": "Descarga incompleta: esperados {expected} B · recibidos {received} B. El archivo no se conservó."
+    "hub_truncated": "Descarga incompleta: esperados {expected} B · recibidos {received} B. El archivo no se conservó.",
+    "hub_corrupted": "El archivo recibido no coincide con su huella: no se conservó. Vuelva a pedir el informe.",
+    "hub_unverifiable": "El hub no anunció ni tamaño ni huella: no se puede verificar el archivo y no se conservó.",
+    "hub_fallback": "Este hub aún no produce informes: el libro lo generó el navegador.",
+    "hub_history": "Informes ya producidos"
   },
   "account": {
     "change": "Cambiar la contraseña",

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api';
 import {
   REPORT_POLL_MS,
+  ReportAborted,
+  ReportIntegrityError,
   exactBytes,
   fetchReportFile,
   hubLacksReports,
@@ -9,6 +11,7 @@ import {
   parseReports,
   pollReport,
   purgedAt,
+  reportErrorMessage,
   reportRows,
   reportsApi,
   type HubReport,
@@ -458,5 +461,61 @@ describe('fetchReportFile', () => {
     });
     await fetchReportFile('r/1');
     expect(spy.mock.calls[0][0]).toBe('/api/reports/r%2F1/file');
+  });
+});
+
+describe('reportErrorMessage', () => {
+  /** Le catalogue rend la clé et ses valeurs : le test lit ce qui sera affiché. */
+  const t = (key: string, values?: Record<string, string | number>) =>
+    values ? `${key} ${JSON.stringify(values)}` : key;
+
+  it('dit LES DEUX nombres sur un fichier tronqué', () => {
+    // 🔴 « erreur réseau » ne permet pas de décider s'il faut réessayer ou
+    // appeler ; « attendu 248 013 o · reçu 91 220 o », si.
+    const msg = reportErrorMessage(
+      new ReportIntegrityError({ kind: 'length', expected: 248_013, received: 91_220 }),
+      t,
+      'en',
+    );
+    expect(msg).toContain('report.hub_truncated');
+    expect(msg).toContain('248,013');
+    expect(msg).toContain('91,220');
+  });
+
+  it('nomme une empreinte qui ne correspond pas, et ce qu’on n’a pas pu vérifier', () => {
+    expect(
+      reportErrorMessage(new ReportIntegrityError({ kind: 'digest', expected: 'a', received: 'b' }), t, 'fr'),
+    ).toBe('report.hub_corrupted');
+    expect(reportErrorMessage(new ReportIntegrityError({ kind: 'unverifiable' }), t, 'fr')).toBe(
+      'report.hub_unverifiable',
+    );
+  });
+
+  it('dit la DATE de purge, pas une erreur générique', () => {
+    // ⚠️ Un rapport purgé n'est pas une panne : la ligne existe, l'écran vient
+    // de l'afficher, et le bon geste est « Redemander ».
+    const msg = reportErrorMessage(
+      new ApiError(410, 'le fichier de ce rapport a été purgé', {
+        state: 'purged',
+        purged_at: 1_701_204_920,
+      }),
+      t,
+      'fr',
+    );
+    expect(msg).toContain('report.hub_purged_hint');
+    expect(msg).toContain('2023');
+  });
+
+  it('ne dit RIEN quand l’écran s’est simplement fermé', () => {
+    // Un abandon n'est pas un échec : afficher un message rouge après une
+    // fermeture volontaire fait chercher une panne qui n'existe pas.
+    expect(reportErrorMessage(new ReportAborted(), t, 'fr')).toBe('');
+  });
+
+  it('reprend le refus du hub tel quel — il nomme la règle', () => {
+    expect(reportErrorMessage(new ApiError(400, 'aucune sonde à mettre dans ce rapport'), t, 'fr')).toBe(
+      'aucune sonde à mettre dans ce rapport',
+    );
+    expect(reportErrorMessage(new Error('boum'), t, 'fr')).toBe('boum');
   });
 });

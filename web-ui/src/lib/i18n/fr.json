@@ -987,7 +987,11 @@
     "hub_requested_from_web": "depuis le hub web",
     "hub_size": "{size} · {sheets} feuilles",
     "hub_empty": "Aucun rapport pour ce site.",
-    "hub_truncated": "Téléchargement incomplet : attendu {expected} o · reçu {received} o. Le fichier n'a pas été conservé."
+    "hub_truncated": "Téléchargement incomplet : attendu {expected} o · reçu {received} o. Le fichier n'a pas été conservé.",
+    "hub_corrupted": "Le fichier reçu ne correspond pas à son empreinte : il n'a pas été conservé. Redemandez le rapport.",
+    "hub_unverifiable": "Le hub n'a annoncé ni taille ni empreinte : impossible de vérifier le fichier, il n'a pas été conservé.",
+    "hub_fallback": "Ce hub ne produit pas encore les rapports : le classeur a été généré par le navigateur.",
+    "hub_history": "Rapports déjà produits"
   },
   "account": {
     "change": "Changer le mot de passe",

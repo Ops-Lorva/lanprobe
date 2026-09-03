@@ -346,6 +346,19 @@ describe('catalogues de traduction', () => {
     'report.hub_size',
     'report.hub_empty',
     'report.hub_truncated',
+    // ⚠️ Un corps de la bonne LONGUEUR dont l'empreinte diffère n'est pas un
+    // téléchargement tronqué : c'est le volume du hub qui a bougé sous le
+    // fichier. Deux causes, deux gestes — réessayer ne sert à rien sur la
+    // seconde.
+    'report.hub_corrupted',
+    // Ni longueur ni empreinte annoncées : il n'y a rien à comparer, et un
+    // classeur dont on ne peut rien affirmer ne s'enregistre pas.
+    'report.hub_unverifiable',
+    // Le hub est plus ancien que la route : le classeur a été produit par le
+    // navigateur. Le dire, sinon deux documents identiques à l'œil sortent de
+    // deux générateurs sans que personne sache lequel.
+    'report.hub_fallback',
+    'report.hub_history',
     'settings.report_days_title',
     'settings.report_days_lead',
     'settings.report_days_label',

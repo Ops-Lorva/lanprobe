@@ -22,6 +22,10 @@
  * lui-même les refus du hub en `ApiError`.
  */
 import { ApiError, request, type MetricsWindow } from './api';
+// La traduction est celle de `sla-report.ts` : le catalogue des rapports est le
+// même des deux côtés, qu'ils naissent ici ou dans le hub.
+import type { Translate } from './sla-report';
+import { absoluteTime } from './time';
 
 /** Les quatre états qu'écrit le hub (`ReportState`, `reports.rs`). */
 export type ReportState = 'preparing' | 'ready' | 'failed' | 'purged';
@@ -396,6 +400,38 @@ function dispositionName(headers: Headers): string {
   const brut = headers.get('Content-Disposition') ?? '';
   const m = /filename="([^"]+)"/.exec(brut) ?? /filename=([^;]+)/.exec(brut);
   return m ? m[1].trim() : '';
+}
+
+/**
+ * Ce que l'écran affiche quand un rapport n'a pas abouti.
+ *
+ * 🔴 **Jamais « erreur ».** Chacun de ces cas appelle un geste différent :
+ * retélécharger, redemander, appeler. Une phrase générique les confond tous, et
+ * la première conséquence est qu'on reclique trois fois sur le même bouton.
+ *
+ * ⚠️ Un abandon rend la chaîne vide : l'écran s'est fermé, il n'y a rien à
+ * signaler. Un message rouge après une fermeture volontaire fait chercher une
+ * panne qui n'existe pas.
+ */
+export function reportErrorMessage(e: unknown, t: Translate, locale: string): string {
+  if (e instanceof ReportAborted) return '';
+  if (e instanceof ReportIntegrityError) {
+    switch (e.fault.kind) {
+      case 'length':
+        return t('report.hub_truncated', {
+          expected: exactBytes(e.fault.expected, locale),
+          received: exactBytes(e.fault.received, locale),
+        });
+      case 'digest':
+        return t('report.hub_corrupted');
+      default:
+        return t('report.hub_unverifiable');
+    }
+  }
+  const purge = purgedAt(e);
+  if (purge != null) return t('report.hub_purged_hint', { date: absoluteTime(purge, locale) });
+  if (e instanceof Error) return e.message;
+  return String(e);
 }
 
 /**
