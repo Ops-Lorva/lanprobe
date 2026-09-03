@@ -336,9 +336,9 @@ pub(crate) fn window_label(range: &str, c: &Catalog) -> String {
         return format!(
             "{} {} {} {}",
             c.t("sla.from", &[]),
-            iso_day(from),
+            c.day(from),
             c.t("sla.to", &[]),
-            iso_day(to)
+            c.day(to)
         );
     }
     let Some(reste) = range.strip_prefix('-') else {
@@ -1641,7 +1641,7 @@ mod tests {
         assert_eq!(window_label("-24h", &fr), "24 dernières heures");
         assert_eq!(
             window_label(&format!("{T0}..{}", T0 + 86_400), &fr),
-            "Du 2026-09-03 au 2026-09-04"
+            "Du 3 sept. 2026 au 4 sept. 2026"
         );
         // Ce qu'on ne sait pas dire, on le recopie plutôt que de l'inventer.
         assert_eq!(window_label("bizarre", &fr), "bizarre");

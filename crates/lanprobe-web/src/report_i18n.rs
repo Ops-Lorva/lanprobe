@@ -134,7 +134,42 @@ pub(crate) const REPORT_KEYS: &[&str] = &[
 /// fuseau, dans un document qui liste des coupures datées, se conteste au
 /// premier décalage horaire — et personne ne saurait dire laquelle des deux
 /// lectures est la bonne.
+///
+/// 🔴 **Pourquoi l'UTC et non le fuseau du demandeur** — tranché avec Benjamin.
+/// Un décalage fixe transmis par le client (`+02:00`) n'est juste qu'à
+/// l'instant de la demande : un rapport du 20 octobre au 20 novembre contient
+/// un changement d'heure, et la moitié des coupures serait datée du mauvais
+/// décalage sans que rien ne le signale. C'est très exactement la valeur
+/// plausible et fausse, sur la liste d'incidents que le client conteste.
+/// Convertir *vraiment* demanderait une base de fuseaux, que le hub n'embarque
+/// pas et n'embarque nulle part ailleurs (voir `backup.rs`). Et le rapport se
+/// retélécharge : préparé lundi depuis Paris, repris jeudi depuis Houston — le
+/// fichier est écrit une fois. Quel que soit le fuseau retenu, c'est la
+/// MENTION qui fait le travail, pas la conversion ; autant que ce soit celui
+/// dans lequel la mesure a été prise.
 const TIME_ZONE: &str = "UTC";
+
+/// Les mois abrégés, par langue.
+///
+/// ⚠️ **Trois tables de douze mots, pas une bibliothèque ICU.** Le classeur a
+/// besoin de nommer un mois, pas de conjuguer un calendrier : tirer un moteur
+/// de formatage complet pour ça serait un poids sans rapport avec le besoin.
+///
+/// 🔴 **Le nom du mois, jamais deux chiffres.** « 03/09/2026 » et « 9/3/26 »
+/// désignent deux jours différents selon la langue du lecteur, et le classeur
+/// part chez quelqu'un qui n'était pas là. C'est aussi pourquoi on ne se
+/// contente pas de traduire la forme numérique du navigateur : elle était
+/// ambiguë, on ne la reprend pas.
+const MOIS_FR: [&str; 12] = [
+    "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.",
+    "déc.",
+];
+const MOIS_EN: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const MOIS_ES: [&str; 12] = [
+    "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic",
+];
 
 /// Le catalogue d'une langue, prêt à traduire.
 pub(crate) struct Catalog {
@@ -205,28 +240,64 @@ impl Catalog {
         interpolate(raw, args)
     }
 
-    /// Formate une date dans la langue du catalogue.
+    /// Formate une date dans la langue du catalogue, suivie de son fuseau.
     ///
-    /// ⚠️ Le fuseau est celui du **hub**, et il est écrit en toutes lettres
-    /// dans le classeur. Une heure sans fuseau, dans un document qui liste des
-    /// coupures datées, se conteste au premier décalage horaire.
-    ///
-    /// ⚠️ **Une seule forme pour les trois langues**, et délibérément : le
-    /// navigateur passait par `Intl.DateTimeFormat`, que le hub n'a pas. En
-    /// imiter la sortie à la main (« 3/9/26 » pour l'espagnol, « 9/3/26 » pour
-    /// l'anglais) donnerait une ressemblance approximative — c'est-à-dire une
-    /// divergence déguisée en parité, sur le document qui part chez le client.
-    /// Une date ISO se lit sans ambiguïté dans les trois langues, se trie, et
-    /// ne confond jamais le jour avec le mois.
+    /// 🔴 **Les deux à la fois, et c'est le point.** La date se lit dans la
+    /// langue de l'opérateur — c'est lui qui relit le classeur avant de
+    /// l'envoyer — et le fuseau est écrit noir sur blanc, parce qu'un relevé
+    /// horodaté sans fuseau se conteste au premier décalage horaire. Le
+    /// navigateur donnait le premier sans le second.
     pub(crate) fn date(&self, epoch_secs: i64) -> String {
-        let (y, m, d, hh, mm, ss) = civil_from_epoch(epoch_secs);
-        format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02} {TIME_ZONE}")
+        let (_, _, _, hh, mm, ss) = civil_from_epoch(epoch_secs);
+        format!(
+            "{}, {} {TIME_ZONE}",
+            self.day(epoch_secs),
+            self.heure(hh, mm, ss)
+        )
     }
 
     /// La date seule, sans heure ni fuseau — pour la fenêtre écrite en tête de
     /// feuille, où l'heure n'apporte rien et alourdit la phrase.
     pub(crate) fn day(&self, epoch_secs: i64) -> String {
-        iso_day(epoch_secs)
+        let (y, _, _, ..) = civil_from_epoch(epoch_secs);
+        match self.locale.as_str() {
+            // L'anglais met le mois devant et sépare l'année par une virgule.
+            "en" => format!("{}, {y}", self.day_month(epoch_secs)),
+            _ => format!("{} {y}", self.day_month(epoch_secs)),
+        }
+    }
+
+    /// Le jour et son mois, sans l'année — pour l'axe du graphique, qui n'a
+    /// pas la place de l'année mais a celle du mois.
+    pub(crate) fn day_month(&self, epoch_secs: i64) -> String {
+        let (_, m, d, ..) = civil_from_epoch(epoch_secs);
+        let mois = match self.locale.as_str() {
+            "en" => MOIS_EN,
+            "es" => MOIS_ES,
+            _ => MOIS_FR,
+        }[(m - 1) as usize];
+        match self.locale.as_str() {
+            "en" => format!("{mois} {d}"),
+            _ => format!("{d} {mois}"),
+        }
+    }
+
+    /// L'heure, à la seconde.
+    ///
+    /// ⚠️ L'anglais compte de 1 à 12 : minuit s'y écrit « 12:00:00 AM » et non
+    /// « 0:00:00 AM ». C'est le genre de détail qu'on ne voit qu'une fois le
+    /// document remis.
+    fn heure(&self, hh: u32, mm: u32, ss: u32) -> String {
+        if self.locale == "en" {
+            let midi = if hh < 12 { "AM" } else { "PM" };
+            let h12 = match hh % 12 {
+                0 => 12,
+                h => h,
+            };
+            format!("{h12}:{mm:02}:{ss:02} {midi}")
+        } else {
+            format!("{hh:02}:{mm:02}:{ss:02}")
+        }
     }
 
     /// Formate une durée (« 3 min 12 s »), comme `duration()` côté navigateur.
@@ -259,6 +330,11 @@ impl Catalog {
 }
 
 /// Une date sans heure, `AAAA-MM-JJ`, en UTC.
+///
+/// ⚠️ **Pour les noms de fichiers, pas pour le contenu du classeur.** Un nom de
+/// fichier se trie dans un dossier de téléchargements et ne doit porter ni
+/// accent, ni point, ni espace ; le document, lui, se lit dans la langue de
+/// l'opérateur (voir [`Catalog::day`]).
 pub(crate) fn iso_day(epoch_secs: i64) -> String {
     let (y, m, d, ..) = civil_from_epoch(epoch_secs);
     format!("{y:04}-{m:02}-{d:02}")
@@ -512,20 +588,88 @@ mod tests {
         assert_eq!(cat.duration(9_000), "2.5 h");
     }
 
-    /// La date porte son fuseau : un classeur qui liste des coupures datées se
-    /// conteste au premier décalage horaire si l'on ne dit pas dans quel
-    /// fuseau elles sont écrites.
+    /// La date se lit dans la langue de l'opérateur : c'est lui qui relit le
+    /// classeur avant de l'envoyer.
     #[test]
-    fn la_date_porte_son_fuseau_et_ne_depend_pas_de_la_langue() {
-        let attendu = "2026-09-03 14:22:31 UTC";
+    fn la_date_se_lit_dans_la_langue_de_loperateur() {
+        assert_eq!(
+            Catalog::load("fr").date(1_788_445_351),
+            "3 sept. 2026, 14:22:31 UTC"
+        );
+        assert_eq!(
+            Catalog::load("en").date(1_788_445_351),
+            "Sep 3, 2026, 2:22:31 PM UTC"
+        );
+        assert_eq!(
+            Catalog::load("es").date(1_788_445_351),
+            "3 sept 2026, 14:22:31 UTC"
+        );
+    }
+
+    /// 🔴 **Aucune langue ne perd le fuseau.** Un classeur qui liste des
+    /// coupures datées se conteste au premier décalage horaire si l'on ne dit
+    /// pas dans quel fuseau elles sont écrites — et c'est la langue la moins
+    /// relue qui le perdrait.
+    #[test]
+    fn aucune_langue_ne_perd_le_fuseau() {
         for locale in LOCALES {
-            assert_eq!(Catalog::load(locale).date(1_788_445_351), attendu);
+            let c = Catalog::load(locale);
+            for instant in [0, 1_788_445_351, 1_709_208_000] {
+                let rendu = c.date(instant);
+                assert!(
+                    rendu.ends_with(" UTC"),
+                    "« {rendu} » ({locale}) ne dit pas son fuseau"
+                );
+            }
         }
-        assert_eq!(Catalog::load("fr").date(0), "1970-01-01 00:00:00 UTC");
-        // Une année bissextile, là où un calendrier naïf dérape.
+    }
+
+    /// ⚠️ L'anglais compte de 1 à 12 : minuit est « 12:00:00 AM », pas
+    /// « 0:00:00 AM ».
+    #[test]
+    fn lheure_anglaise_compte_de_une_a_douze() {
+        let en = Catalog::load("en");
+        assert_eq!(en.date(0), "Jan 1, 1970, 12:00:00 AM UTC");
+        assert_eq!(en.date(43_200), "Jan 1, 1970, 12:00:00 PM UTC");
+        assert_eq!(en.date(46_800), "Jan 1, 1970, 1:00:00 PM UTC");
+        assert_eq!(en.date(82_800), "Jan 1, 1970, 11:00:00 PM UTC");
+    }
+
+    /// Une année bissextile, là où un calendrier naïf dérape.
+    #[test]
+    fn une_annee_bissextile_ne_derape_pas() {
         assert_eq!(
             Catalog::load("fr").date(1_709_208_000),
-            "2024-02-29 12:00:00 UTC"
+            "29 févr. 2024, 12:00:00 UTC"
         );
+        assert_eq!(Catalog::load("fr").date(0), "1 janv. 1970, 00:00:00 UTC");
+    }
+
+    /// 🔴 Le nom du mois, jamais deux chiffres.
+    ///
+    /// « 03/09/2026 » et « 9/3/26 » désignent deux jours différents selon la
+    /// langue du lecteur — et le classeur part chez quelqu'un qui n'était pas
+    /// là. Le nom du mois n'en désigne qu'un.
+    #[test]
+    fn la_date_seule_nomme_son_mois() {
+        assert_eq!(Catalog::load("fr").day(1_788_445_351), "3 sept. 2026");
+        assert_eq!(Catalog::load("en").day(1_788_445_351), "Sep 3, 2026");
+        assert_eq!(Catalog::load("es").day(1_788_445_351), "3 sept 2026");
+    }
+
+    /// L'axe du graphique n'a pas la place de l'année, mais il a celle du mois.
+    #[test]
+    fn le_jour_de_laxe_nomme_aussi_son_mois() {
+        assert_eq!(Catalog::load("fr").day_month(1_788_445_351), "3 sept.");
+        assert_eq!(Catalog::load("en").day_month(1_788_445_351), "Sep 3");
+        assert_eq!(Catalog::load("es").day_month(1_788_445_351), "3 sept");
+    }
+
+    /// ⚠️ Le nom de FICHIER, lui, reste en ISO : il se trie dans un dossier de
+    /// téléchargements et ne doit porter ni accent, ni point, ni espace.
+    #[test]
+    fn le_jour_du_nom_de_fichier_reste_iso() {
+        assert_eq!(iso_day(1_788_445_351), "2026-09-03");
+        assert_eq!(iso_day(0), "1970-01-01");
     }
 }

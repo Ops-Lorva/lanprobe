@@ -148,7 +148,7 @@ pub(crate) fn chart_png(samples: &[Sample], c: &Catalog) -> Option<Vec<u8>> {
             .min((LARGEUR - PAD_DROITE) as f64 - 30.0);
         toile.texte(
             &police,
-            &instant_sur_axe(ts, span),
+            &instant_sur_axe(ts, span, c),
             px,
             (HAUTEUR - 8) as f64,
             Alignement::Centre,
@@ -172,10 +172,14 @@ pub(crate) fn chart_png(samples: &[Sample], c: &Catalog) -> Option<Vec<u8>> {
 ///
 /// ⚠️ La date apparaît dès que la fenêtre dépasse [`SEUIL_DATE_SUR_AXE`] :
 /// au-delà, deux points à 14:00 peuvent être à deux jours d'écart.
-fn instant_sur_axe(epoch_secs: i64, span: i64) -> String {
-    let (_, mois, jour, hh, mm, _) = crate::report_i18n::civil_from_epoch(epoch_secs);
+///
+/// ⚠️ Le mois se **nomme**, comme partout ailleurs dans le classeur : le
+/// « 03/09 » du navigateur se lit « 9 mars » en anglais, et l'axe d'un
+/// graphique n'a aucune légende pour lever le doute.
+fn instant_sur_axe(epoch_secs: i64, span: i64, c: &Catalog) -> String {
+    let (.., hh, mm, _) = crate::report_i18n::civil_from_epoch(epoch_secs);
     if span > SEUIL_DATE_SUR_AXE {
-        format!("{jour:02}/{mois:02} {hh:02}:{mm:02}")
+        format!("{} {hh:02}:{mm:02}", c.day_month(epoch_secs))
     } else {
         format!("{hh:02}:{mm:02}")
     }
@@ -467,10 +471,19 @@ mod tests {
     /// à 14:00 peuvent être à deux jours d'écart.
     #[test]
     fn au_dela_de_trente_six_heures_laxe_porte_la_date() {
-        assert_eq!(instant_sur_axe(1_788_436_800, 3_600), "12:00");
+        let fr = Catalog::load("fr");
+        assert_eq!(instant_sur_axe(1_788_436_800, 3_600, &fr), "12:00");
         assert_eq!(
-            instant_sur_axe(1_788_436_800, 4 * 86_400),
-            "03/09 12:00"
+            instant_sur_axe(1_788_436_800, 4 * 86_400, &fr),
+            "3 sept. 12:00"
+        );
+        // ⚠️ Le mois se nomme là aussi : « 03/09 » se lit « 9 mars » en
+        // anglais, et l'axe d'un graphique n'a pas de légende pour lever le
+        // doute.
+        let en = Catalog::load("en");
+        assert_eq!(
+            instant_sur_axe(1_788_436_800, 4 * 86_400, &en),
+            "Sep 3 12:00"
         );
     }
 }
