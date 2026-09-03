@@ -1,0 +1,105 @@
+{
+  "locale": "fr",
+  "site_name": "Étude Martin & Fils",
+  "range_start": 1788242400,
+  "range_stop": 1788415200,
+  "payloads": [
+    {
+      "probe": "Sonde",
+      "site": "Étude Martin & Fils",
+      "range": "-7d",
+      "generated_at": 1788415500,
+      "internet": [],
+      "targets": [
+        {
+          "ip": "serveur-de-fichiers-du-siege-social.martin.example",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": true,
+              "latency_ms": 3.0
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": false,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243000,
+              "alive": true,
+              "latency_ms": 3.5
+            }
+          ],
+          "coverage": null
+        },
+        {
+          "ip": "serveur-de-fichiers-du-siege-social.martin.exemple",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": true,
+              "latency_ms": 3.0
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": false,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243000,
+              "alive": true,
+              "latency_ms": 3.5
+            }
+          ],
+          "coverage": null
+        },
+        {
+          "ip": "web:prod/eu[1]*?\\bis",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": true,
+              "latency_ms": 3.0
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": false,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243000,
+              "alive": true,
+              "latency_ms": 3.5
+            }
+          ],
+          "coverage": null
+        },
+        {
+          "ip": "répétiteur-numéro-deux-étage-supérieur-côté-cour",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": true,
+              "latency_ms": 3.0
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": false,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243000,
+              "alive": true,
+              "latency_ms": 3.5
+            }
+          ],
+          "coverage": null
+        }
+      ],
+      "speedtests": [],
+      "discovery": null,
+      "ports": null,
+      "public_ip_history": []
+    }
+  ]
+}

@@ -1,0 +1,2970 @@
+[
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "J7",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "J9",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "defaut",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "D11",
+    "navigateur": "nombre 1.1",
+    "hub": "nombre 1.2"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "J11",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "42",
+    "hub": "42.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "22",
+    "hub": "22.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 8)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 9)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 10)",
+    "navigateur": "30",
+    "hub": "30.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A13",
+    "navigateur": "texte \"01/09/2026 06:30:00\"",
+    "hub": "texte \"1 sept. 2026, 06:30:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "B13",
+    "navigateur": "texte \"01/09/2026 06:50:00\"",
+    "hub": "texte \"1 sept. 2026, 06:50:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A14",
+    "navigateur": "texte \"02/09/2026 07:10:00\"",
+    "hub": "texte \"2 sept. 2026, 07:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A20",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "C20",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A21",
+    "navigateur": "texte \"01/09/2026 06:30:00\"",
+    "hub": "texte \"1 sept. 2026, 06:30:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "C21",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A22",
+    "navigateur": "texte \"01/09/2026 06:40:00\"",
+    "hub": "texte \"1 sept. 2026, 06:40:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "C22",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A23",
+    "navigateur": "texte \"01/09/2026 06:50:00\"",
+    "hub": "texte \"1 sept. 2026, 06:50:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A24",
+    "navigateur": "texte \"01/09/2026 07:00:00\"",
+    "hub": "texte \"1 sept. 2026, 07:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A25",
+    "navigateur": "texte \"01/09/2026 19:53:20\"",
+    "hub": "texte \"1 sept. 2026, 19:53:20 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A26",
+    "navigateur": "texte \"02/09/2026 07:00:00\"",
+    "hub": "texte \"2 sept. 2026, 07:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "A27",
+    "navigateur": "texte \"02/09/2026 07:10:00\"",
+    "hub": "texte \"2 sept. 2026, 07:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "C27",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "solo",
+    "feuille": "Accès internet",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A14",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "B14",
+    "navigateur": "texte \"01/09/2026 06:25:00\"",
+    "hub": "texte \"1 sept. 2026, 06:25:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A20",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "C20",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A21",
+    "navigateur": "texte \"01/09/2026 06:15:00\"",
+    "hub": "texte \"1 sept. 2026, 06:15:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "C21",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A22",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "C22",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A23",
+    "navigateur": "texte \"01/09/2026 06:25:00\"",
+    "hub": "texte \"1 sept. 2026, 06:25:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A24",
+    "navigateur": "texte \"01/09/2026 06:30:00\"",
+    "hub": "texte \"1 sept. 2026, 06:30:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "A25",
+    "navigateur": "texte \"01/09/2026 06:35:00\"",
+    "hub": "texte \"1 sept. 2026, 06:35:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "solo",
+    "feuille": "192.168.1.1",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "A20",
+    "navigateur": "texte \"01/09/2026 06:15:00\"",
+    "hub": "texte \"1 sept. 2026, 06:15:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "A21",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "A22",
+    "navigateur": "texte \"01/09/2026 06:25:00\"",
+    "hub": "texte \"1 sept. 2026, 06:25:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "A23",
+    "navigateur": "texte \"01/09/2026 06:30:00\"",
+    "hub": "texte \"1 sept. 2026, 06:30:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "A24",
+    "navigateur": "texte \"01/09/2026 06:35:00\"",
+    "hub": "texte \"1 sept. 2026, 06:35:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "32",
+    "hub": "32.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "solo",
+    "feuille": "8.8.8.8",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "C18",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "C19",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "A20",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "C20",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "A21",
+    "navigateur": "texte \"01/09/2026 06:15:00\"",
+    "hub": "texte \"1 sept. 2026, 06:15:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "C21",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "32",
+    "hub": "32.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "solo",
+    "feuille": "serveur-de-fichiers.siege.duran",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "10.0.0.254",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "10.0.0.254",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "10.0.0.254",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "10.0.0.254",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "32",
+    "hub": "32.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "10.0.0.254",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "10.0.0.254",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "10.0.0.254",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "solo",
+    "feuille": "10.0.0.254",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "B7",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "defaut",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "F7",
+    "navigateur": "nombre 712",
+    "hub": "nombre 712.1"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "B8",
+    "navigateur": "texte \"02/09/2026 06:10:00\"",
+    "hub": "texte \"2 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "12",
+    "hub": "12.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "21",
+    "hub": "21.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "18",
+    "hub": "18.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 8)",
+    "navigateur": "12",
+    "hub": "12.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "B7",
+    "navigateur": "texte \"01/09/2026 06:01:00\"",
+    "hub": "texte \"1 sept. 2026, 06:01:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "B8",
+    "navigateur": "texte \"01/09/2026 06:01:00\"",
+    "hub": "texte \"1 sept. 2026, 06:01:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "12",
+    "hub": "12.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "19",
+    "hub": "19.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "B7",
+    "navigateur": "texte \"01/09/2026 06:02:00\"",
+    "hub": "texte \"1 sept. 2026, 06:02:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "B8",
+    "navigateur": "texte \"01/09/2026 06:02:00\"",
+    "hub": "texte \"1 sept. 2026, 06:02:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "11",
+    "hub": "11.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "E2",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "F2",
+    "navigateur": "texte \"01/09/2026 07:00:00\"",
+    "hub": "texte \"1 sept. 2026, 07:00:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "B3",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "E3",
+    "navigateur": "texte \"02/09/2026 07:00:00\"",
+    "hub": "texte \"2 sept. 2026, 07:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "F3",
+    "navigateur": "texte \"02/09/2026 07:10:00\"",
+    "hub": "texte \"2 sept. 2026, 07:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "B4",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "D4",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "E4",
+    "navigateur": "texte \"01/09/2026 19:53:20\"",
+    "hub": "texte \"1 sept. 2026, 19:53:20 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "F4",
+    "navigateur": "texte \"01/09/2026 19:53:20\"",
+    "hub": "texte \"1 sept. 2026, 19:53:20 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "13",
+    "hub": "13.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "21",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "21",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 8)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "B3",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "J6",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "J8",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "defaut",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "D10",
+    "navigateur": "nombre 1.1",
+    "hub": "nombre 1.2"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "J10",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "J11",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "J12",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "42",
+    "hub": "42.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "22",
+    "hub": "22.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 8)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 9)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 10)",
+    "navigateur": "30",
+    "hub": "30.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A13",
+    "navigateur": "texte \"01/09/2026 06:30:00\"",
+    "hub": "texte \"1 sept. 2026, 06:30:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "B13",
+    "navigateur": "texte \"01/09/2026 06:50:00\"",
+    "hub": "texte \"1 sept. 2026, 06:50:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A14",
+    "navigateur": "texte \"02/09/2026 07:10:00\"",
+    "hub": "texte \"2 sept. 2026, 07:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A20",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "C20",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A21",
+    "navigateur": "texte \"01/09/2026 06:30:00\"",
+    "hub": "texte \"1 sept. 2026, 06:30:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "C21",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A22",
+    "navigateur": "texte \"01/09/2026 06:40:00\"",
+    "hub": "texte \"1 sept. 2026, 06:40:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "C22",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A23",
+    "navigateur": "texte \"01/09/2026 06:50:00\"",
+    "hub": "texte \"1 sept. 2026, 06:50:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A24",
+    "navigateur": "texte \"01/09/2026 07:00:00\"",
+    "hub": "texte \"1 sept. 2026, 07:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A25",
+    "navigateur": "texte \"01/09/2026 19:53:20\"",
+    "hub": "texte \"1 sept. 2026, 19:53:20 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A26",
+    "navigateur": "texte \"02/09/2026 07:00:00\"",
+    "hub": "texte \"2 sept. 2026, 07:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "A27",
+    "navigateur": "texte \"02/09/2026 07:10:00\"",
+    "hub": "texte \"2 sept. 2026, 07:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "C27",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "multi",
+    "feuille": "Sonde bureau Accès internet",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A14",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "B14",
+    "navigateur": "texte \"01/09/2026 06:25:00\"",
+    "hub": "texte \"1 sept. 2026, 06:25:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A20",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "C20",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A21",
+    "navigateur": "texte \"01/09/2026 06:15:00\"",
+    "hub": "texte \"1 sept. 2026, 06:15:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "C21",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A22",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "C22",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A23",
+    "navigateur": "texte \"01/09/2026 06:25:00\"",
+    "hub": "texte \"1 sept. 2026, 06:25:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A24",
+    "navigateur": "texte \"01/09/2026 06:30:00\"",
+    "hub": "texte \"1 sept. 2026, 06:30:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "A25",
+    "navigateur": "texte \"01/09/2026 06:35:00\"",
+    "hub": "texte \"1 sept. 2026, 06:35:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 192.168.1.1",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "A20",
+    "navigateur": "texte \"01/09/2026 06:15:00\"",
+    "hub": "texte \"1 sept. 2026, 06:15:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "A21",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "A22",
+    "navigateur": "texte \"01/09/2026 06:25:00\"",
+    "hub": "texte \"1 sept. 2026, 06:25:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "A23",
+    "navigateur": "texte \"01/09/2026 06:30:00\"",
+    "hub": "texte \"1 sept. 2026, 06:30:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "A24",
+    "navigateur": "texte \"01/09/2026 06:35:00\"",
+    "hub": "texte \"1 sept. 2026, 06:35:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "32",
+    "hub": "32.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 8.8.8.8",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "C18",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "C19",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "A20",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "C20",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "A21",
+    "navigateur": "texte \"01/09/2026 06:15:00\"",
+    "hub": "texte \"1 sept. 2026, 06:15:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "C21",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "32",
+    "hub": "32.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "multi",
+    "feuille": "Sonde bureau serveur-de-fichier",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 10.0.0.254",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 10.0.0.254",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 10.0.0.254",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 10.0.0.254",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "32",
+    "hub": "32.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 10.0.0.254",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 10.0.0.254",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 10.0.0.254",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "multi",
+    "feuille": "Sonde bureau 10.0.0.254",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "A13",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "B13",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "C18",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "multi",
+    "feuille": "Sonde atelier Accès internet",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier 192.168.1.1",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier 192.168.1.1",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Sonde atelier 192.168.1.1",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde atelier 192.168.1.1",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "32",
+    "hub": "32.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde atelier 192.168.1.1",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde atelier 192.168.1.1",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Sonde atelier 192.168.1.1",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "multi",
+    "feuille": "Sonde atelier 192.168.1.1",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "B3",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "B6",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "defaut",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "F6",
+    "navigateur": "nombre 712",
+    "hub": "nombre 712.1"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "B7",
+    "navigateur": "texte \"02/09/2026 06:10:00\"",
+    "hub": "texte \"2 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "12",
+    "hub": "12.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "21",
+    "hub": "21.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "18",
+    "hub": "18.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Débits",
+    "ou": "(largeur colonne 8)",
+    "navigateur": "12",
+    "hub": "12.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "B3",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "B6",
+    "navigateur": "texte \"01/09/2026 06:01:00\"",
+    "hub": "texte \"1 sept. 2026, 06:01:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "B7",
+    "navigateur": "texte \"01/09/2026 06:01:00\"",
+    "hub": "texte \"1 sept. 2026, 06:01:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "12",
+    "hub": "12.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "19",
+    "hub": "19.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Machines découvertes",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "B3",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "B6",
+    "navigateur": "texte \"01/09/2026 06:02:00\"",
+    "hub": "texte \"1 sept. 2026, 06:02:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "B7",
+    "navigateur": "texte \"01/09/2026 06:02:00\"",
+    "hub": "texte \"1 sept. 2026, 06:02:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "33",
+    "hub": "33.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "11",
+    "hub": "11.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "E2",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "F2",
+    "navigateur": "texte \"01/09/2026 07:00:00\"",
+    "hub": "texte \"1 sept. 2026, 07:00:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "B3",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "E3",
+    "navigateur": "texte \"02/09/2026 07:00:00\"",
+    "hub": "texte \"2 sept. 2026, 07:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "F3",
+    "navigateur": "texte \"02/09/2026 07:10:00\"",
+    "hub": "texte \"2 sept. 2026, 07:10:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "B4",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "D4",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "E4",
+    "navigateur": "texte \"01/09/2026 19:53:20\"",
+    "hub": "texte \"1 sept. 2026, 19:53:20 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "F4",
+    "navigateur": "texte \"01/09/2026 19:53:20\"",
+    "hub": "texte \"1 sept. 2026, 19:53:20 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "B5",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "D5",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "E5",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "F5",
+    "navigateur": "texte \"01/09/2026 06:20:00\"",
+    "hub": "texte \"1 sept. 2026, 06:20:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "13",
+    "hub": "13.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "21",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "21",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "SLA par IP publique",
+    "ou": "(largeur colonne 8)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "J7",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "J8",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "J9",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "J10",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "11",
+    "hub": "11.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "46",
+    "hub": "46.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "15",
+    "hub": "15.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "22",
+    "hub": "22.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 5)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 6)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 7)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 8)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 9)",
+    "navigateur": "10",
+    "hub": "10.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "Synthèse",
+    "ou": "(largeur colonne 10)",
+    "navigateur": "12",
+    "hub": "12.71"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "A13",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "B13",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "C18",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "21",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege-so",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "A13",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "B13",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "C18",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "21",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "noms",
+    "feuille": "serveur-de-fichiers-du-siege~2",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "A13",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "B13",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "C18",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "21",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "noms",
+    "feuille": "web-prod-eu-1----bis",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "B4",
+    "navigateur": "texte \"03/09/2026 06:05:00\"",
+    "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "A13",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "B13",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "A17",
+    "navigateur": "texte \"01/09/2026 06:00:00\"",
+    "hub": "texte \"1 sept. 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "A18",
+    "navigateur": "texte \"01/09/2026 06:05:00\"",
+    "hub": "texte \"1 sept. 2026, 06:05:00 UTC\""
+  },
+  {
+    "nature": "cellule-vide",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "C18",
+    "navigateur": "texte \"\"",
+    "hub": "(vide)"
+  },
+  {
+    "nature": "date",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "A19",
+    "navigateur": "texte \"01/09/2026 06:10:00\"",
+    "hub": "texte \"1 sept. 2026, 06:10:00 UTC\""
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "(largeur colonne 1)",
+    "navigateur": "22",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "(largeur colonne 2)",
+    "navigateur": "21",
+    "hub": "28.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "(largeur colonne 3)",
+    "navigateur": "14",
+    "hub": "14.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "graphique",
+    "scenario": "noms",
+    "feuille": "répétiteur-numéro-deux-étage-su",
+    "ou": "(dessins ancrés)",
+    "navigateur": "0",
+    "hub": "1"
+  }
+]

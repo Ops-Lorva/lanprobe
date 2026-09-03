@@ -1,0 +1,349 @@
+{
+  "locale": "fr",
+  "site_name": "Cabinet Durand",
+  "range_start": 1788242400,
+  "range_stop": 1788415200,
+  "payloads": [
+    {
+      "probe": "Sonde bureau",
+      "site": "Cabinet Durand",
+      "range": "1788242400..1788415200",
+      "generated_at": 1788415500,
+      "internet": [
+        {
+          "timestamp": 1788242400,
+          "alive": true,
+          "latency_ms": 12.4,
+          "state": "online"
+        },
+        {
+          "timestamp": 1788243000,
+          "alive": true,
+          "latency_ms": 13.75,
+          "state": "online"
+        },
+        {
+          "timestamp": 1788243600,
+          "alive": null,
+          "latency_ms": null
+        },
+        {
+          "timestamp": 1788244200,
+          "alive": false,
+          "latency_ms": null,
+          "state": "offline"
+        },
+        {
+          "timestamp": 1788244800,
+          "alive": false,
+          "latency_ms": null,
+          "state": "offline"
+        },
+        {
+          "timestamp": 1788245400,
+          "alive": true,
+          "latency_ms": 48.0,
+          "state": "limited"
+        },
+        {
+          "timestamp": 1788246000,
+          "alive": true,
+          "latency_ms": 9.5,
+          "state": "online"
+        },
+        {
+          "timestamp": 1788292400,
+          "alive": true,
+          "latency_ms": 15.0,
+          "state": "online"
+        },
+        {
+          "timestamp": 1788332400,
+          "alive": true,
+          "latency_ms": 11.25,
+          "state": "online"
+        },
+        {
+          "timestamp": 1788333000,
+          "alive": false,
+          "latency_ms": null,
+          "state": "offline"
+        }
+      ],
+      "targets": [
+        {
+          "ip": "192.168.1.1",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": true,
+              "latency_ms": 1.2
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": true,
+              "latency_ms": 1.05
+            },
+            {
+              "timestamp": 1788243000,
+              "alive": false,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243300,
+              "alive": false,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243600,
+              "alive": false,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243900,
+              "alive": true,
+              "latency_ms": 1.4
+            },
+            {
+              "timestamp": 1788244200,
+              "alive": true,
+              "latency_ms": 1045504.0
+            },
+            {
+              "timestamp": 1788244500,
+              "alive": true,
+              "latency_ms": 1.3
+            }
+          ],
+          "coverage": {
+            "window_secs": 172800,
+            "covered_secs": 160000,
+            "gap_secs": 12800
+          }
+        },
+        {
+          "ip": "8.8.8.8",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": true,
+              "latency_ms": 7.0
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": true,
+              "latency_ms": 7.5
+            },
+            {
+              "timestamp": 1788243000,
+              "alive": true,
+              "latency_ms": 8.0
+            },
+            {
+              "timestamp": 1788243300,
+              "alive": true,
+              "latency_ms": 8.5
+            },
+            {
+              "timestamp": 1788243600,
+              "alive": true,
+              "latency_ms": 9.0
+            },
+            {
+              "timestamp": 1788243900,
+              "alive": true,
+              "latency_ms": 9.5
+            },
+            {
+              "timestamp": 1788244200,
+              "alive": true,
+              "latency_ms": 10.0
+            },
+            {
+              "timestamp": 1788244500,
+              "alive": true,
+              "latency_ms": 10.5
+            }
+          ],
+          "coverage": {
+            "window_secs": 172800,
+            "covered_secs": 172800,
+            "gap_secs": 0
+          }
+        },
+        {
+          "ip": "serveur-de-fichiers.siege.durand.example",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": null,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": null,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243000,
+              "alive": null,
+              "latency_ms": null
+            },
+            {
+              "timestamp": 1788243300,
+              "alive": null,
+              "latency_ms": null
+            }
+          ],
+          "coverage": {
+            "window_secs": 0,
+            "covered_secs": 0,
+            "gap_secs": 0
+          }
+        },
+        {
+          "ip": "10.0.0.254",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": true,
+              "latency_ms": 0.05
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": true,
+              "latency_ms": 2.25
+            }
+          ],
+          "coverage": null
+        }
+      ],
+      "speedtests": [
+        {
+          "started_at": 1788243600,
+          "engine": "ookla",
+          "server_name": "Orange — Paris",
+          "download_mbps": 934.4567,
+          "upload_mbps": 712.05,
+          "latency_ms": 4.2,
+          "jitter_ms": 0.8149
+        },
+        {
+          "started_at": 1788329400,
+          "engine": "cloudflare",
+          "server_name": null,
+          "download_mbps": null,
+          "upload_mbps": 688.0,
+          "latency_ms": null,
+          "jitter_ms": null
+        }
+      ],
+      "discovery": {
+        "started_at": 1788242460,
+        "hosts": [
+          {
+            "ip": "192.168.1.1",
+            "hostname": "livebox",
+            "mac": "AA:BB:CC:DD:EE:01",
+            "vendor": "Sagemcom",
+            "latency_ms": 1.2
+          },
+          {
+            "ip": "192.168.1.42",
+            "hostname": null,
+            "mac": null,
+            "vendor": null,
+            "latency_ms": null
+          }
+        ],
+        "ports": []
+      },
+      "ports": {
+        "started_at": 1788242520,
+        "hosts": [],
+        "ports": [
+          {
+            "ip": "192.168.1.1",
+            "port": 443,
+            "proto": "tcp",
+            "service": "https"
+          },
+          {
+            "ip": "192.168.1.42",
+            "port": 22,
+            "proto": "tcp",
+            "service": null
+          }
+        ]
+      },
+      "public_ip_history": [
+        {
+          "public_ip": "88.120.4.17",
+          "interface": "eth0",
+          "gateway": "192.168.1.1",
+          "local_subnet": "192.168.1.0/24",
+          "confirmed_from": 1788242400,
+          "confirmed_until": 1788246000,
+          "label": "Fibre Orange"
+        },
+        {
+          "public_ip": "2.14.88.201",
+          "interface": "eth0",
+          "gateway": "192.168.1.254",
+          "local_subnet": "192.168.1.0/24",
+          "confirmed_from": 1788331400,
+          "confirmed_until": 1788415200,
+          "label": null
+        }
+      ]
+    },
+    {
+      "probe": "Sonde atelier",
+      "site": "Cabinet Durand",
+      "range": "1788242400..1788415200",
+      "generated_at": 1788415500,
+      "internet": [
+        {
+          "timestamp": 1788242400,
+          "alive": true,
+          "latency_ms": 22.0,
+          "state": "online"
+        },
+        {
+          "timestamp": 1788243000,
+          "alive": false,
+          "latency_ms": null,
+          "state": "offline"
+        },
+        {
+          "timestamp": 1788243600,
+          "alive": true,
+          "latency_ms": 21.5,
+          "state": "online"
+        }
+      ],
+      "targets": [
+        {
+          "ip": "192.168.1.1",
+          "samples": [
+            {
+              "timestamp": 1788242400,
+              "alive": true,
+              "latency_ms": 2.0
+            },
+            {
+              "timestamp": 1788242700,
+              "alive": true,
+              "latency_ms": 2.5
+            }
+          ],
+          "coverage": null
+        }
+      ],
+      "speedtests": [],
+      "discovery": null,
+      "ports": null,
+      "public_ip_history": []
+    }
+  ]
+}
