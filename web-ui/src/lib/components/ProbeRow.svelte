@@ -201,14 +201,18 @@
   /* Le temps restant est DANS le repère, pas seulement en infobulle : sur
      tactile il n'y a pas de survol, et « ça tourne encore longtemps ? » est
      exactement la question qui empêche l'oubli. */
+  /* ⚠️ Le bleu de l'armé, FIXE — voir `--lp-armed` dans `web.css`. Il portait
+     l'accent, donc la couleur que l'utilisateur choisit : en palette
+     « emerald » ce fanion prenait le vert de « en ligne », juste à côté du
+     statut. Un état ne se peint pas avec la teinte des liens. */
   .rtflag {
     padding: 1px 5px;
     border-radius: 3px;
     font-size: 9.5px;
     white-space: nowrap;
-    color: var(--ep-accent-bright);
-    border: 1px solid var(--ep-accent);
-    background: var(--ep-accent-dim);
+    color: var(--lp-armed);
+    border: 1px solid var(--lp-armed-line);
+    background: var(--lp-armed-dim);
     cursor: help;
   }
   .pubip,

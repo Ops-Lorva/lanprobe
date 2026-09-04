@@ -2765,10 +2765,13 @@
 
   /* Le bouton allumé prend la couleur d'accent : ce qui tourne doit se voir
      sans lire, y compris du coin de l'œil en revenant sur l'onglet. */
+  /* ⚠️ ARMÉ, donc le bleu fixe de l'état (`--lp-armed`) — pas l'accent. Le
+     bouton au repos reste un bouton ordinaire : c'est l'état qui prend la
+     couleur, pas le contrôle. */
   .rt.on {
-    border-color: var(--ep-accent);
-    background: var(--ep-accent-dim);
-    color: var(--ep-accent-bright);
+    border-color: var(--lp-armed-line);
+    background: var(--lp-armed-dim);
+    color: var(--lp-armed);
     font-weight: 600;
   }
   .rt-note,
@@ -2778,8 +2781,12 @@
     line-height: 1.55;
     max-width: 82ch;
   }
+  /* ⚠️ Le temps restant RESTE écrit ici. « Juste la couleur » est la règle de
+     l'app mobile, qui est sèche ; le hub a droit à un peu plus de texte, et
+     cette phrase porte la minute d'attente avant que la sonde change de
+     cadence. */
   .rt-note {
-    color: var(--ep-accent-bright);
+    color: var(--lp-armed);
   }
   .rt-hint {
     color: var(--ep-text-dim);

@@ -64,6 +64,27 @@ body {
   --lp-chart-surface: var(--ep-bg-secondary);
   --lp-grid: rgba(255, 255, 255, 0.07);
   --lp-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+
+  /* Le mode terrain ARMÉ — fixe, comme les couleurs de séries et pour la même
+     raison. Le temps réel portait `--ep-accent` : en palette « emerald » il
+     prenait le vert de « en ligne », en « rose » le rouge de « hors ligne »,
+     en « amber » l'orange de l'avertissement. Un état repeint par le goût de
+     l'utilisateur ne dit plus rien.
+
+     ⚠️ Et c'est un ÉTAT, pas un lien : l'accent est la teinte de ce qui se
+     clique. La lui laisser faisait ressembler un constat à un contrôle.
+
+     🔴 `#818cf8` est exactement l'éclair de l'app iOS (`Palette.armed`), qui
+     l'avait elle-même pris du hub sous le nom `--ep-accent-bright`. La même
+     valeur des deux côtés, figée : c'est ce qui rend les deux surfaces
+     cohérentes quelle que soit la palette choisie ici.
+
+     Contraste mesuré (`theme-armed.test.ts`, qui refait le calcul sur TOUS les
+     fonds déclarés dans `app.css`) : 5,71 au pire fond sombre, 5,62 au pire
+     fond clair pour `#4f46e5`. `--ep-accent` (#6366f1) plafonnait à 3,81. */
+  --lp-armed: #818cf8;
+  --lp-armed-line: rgba(129, 140, 248, 0.55);
+  --lp-armed-dim: rgba(129, 140, 248, 0.15);
 }
 
 [data-theme='light'] {
@@ -74,6 +95,12 @@ body {
   --lp-series-5: #7e22ce;
   --lp-grid: rgba(15, 18, 32, 0.1);
   --lp-shadow: 0 1px 2px rgba(15, 18, 32, 0.06);
+
+  /* Le même bleu, assombri pour rester lisible sur blanc : `#818cf8` n'y donne
+     que 2,66. La teinte ne change pas, la clarté oui. */
+  --lp-armed: #4f46e5;
+  --lp-armed-line: rgba(79, 70, 229, 0.45);
+  --lp-armed-dim: rgba(79, 70, 229, 0.1);
 }
 
 @media (prefers-color-scheme: light) {
@@ -85,6 +112,9 @@ body {
     --lp-series-5: #7e22ce;
     --lp-grid: rgba(15, 18, 32, 0.1);
     --lp-shadow: 0 1px 2px rgba(15, 18, 32, 0.06);
+    --lp-armed: #4f46e5;
+    --lp-armed-line: rgba(79, 70, 229, 0.45);
+    --lp-armed-dim: rgba(79, 70, 229, 0.1);
   }
 }
 
