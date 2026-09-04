@@ -24,14 +24,38 @@ function stored(): Lang | null {
   }
 }
 
+/** Une valeur d'où qu'elle vienne, ramenée à une des trois langues — ou rien. */
+function known(candidate: string | null | undefined): Lang | null {
+  // On ne compare que le sous-tag de langue : la valeur peut arriver en
+  // « fr-CA » ou « es-419 », et seul « fr » exact serait reconnu.
+  const tag = candidate?.toLowerCase().split('-')[0];
+  return LANGS.find((l) => l === tag) ?? null;
+}
+
+/**
+ * Quelle langue afficher, entre les trois sources — dans cet ordre.
+ *
+ * 🔴 **La base fait foi.** Le réglage du compte (`GET /api/me` → `lang`) prime
+ * sur tout : c'est ce qui fait qu'un changement de navigateur ne ramène plus
+ * l'anglais. `localStorage` n'est qu'un **cache local**, gardé pour éviter un
+ * éclair de langue au chargement avant que `/api/me` n'ait répondu.
+ *
+ * ⚠️ `null` côté hub veut dire « rien de réglé », **pas** « anglais » : un
+ * défaut inventé côté serveur imposerait une langue à tous les comptes déjà en
+ * service. On retombe alors sur le comportement d'avant — cache, puis
+ * navigateur, puis anglais.
+ */
+export function langToApply(
+  server: Lang | null | undefined,
+  cached: Lang | null,
+  browserTag: string | undefined,
+): Lang {
+  return known(server) ?? known(cached) ?? known(browserTag) ?? 'en';
+}
+
 /** Préférence explicite, sinon langue du navigateur, sinon anglais. */
 export function preferredLang(): Lang {
-  const explicit = stored();
-  if (explicit) return explicit;
-  // `navigator.language` vaut « fr-CA », « es-419 »… : on ne compare que le
-  // sous-tag de langue, sinon seul « fr » exact serait reconnu.
-  const tag = navigator.language?.toLowerCase().split('-')[0];
-  return LANGS.find((l) => l === tag) ?? 'en';
+  return langToApply(null, stored(), navigator.language);
 }
 
 export function initI18n() {
@@ -40,7 +64,29 @@ export function initI18n() {
   document.documentElement.setAttribute('lang', lang);
 }
 
-export function setLang(lang: Lang) {
+/**
+ * Applique ce que le compte a réglé, une fois `/api/me` revenu.
+ *
+ * ⚠️ Le cache local est **réaligné** au passage : sinon le prochain chargement
+ * repartirait sur l'ancienne valeur, et l'éclair de langue qu'on cherche à
+ * éviter se produirait à chaque fois.
+ */
+export function applyServerLang(server: Lang | null | undefined): Lang {
+  const lang = langToApply(server, stored(), navigator.language);
+  setLang(lang);
+  return lang;
+}
+
+/**
+ * Le sélecteur : on applique **tout de suite** en local, et l'enregistrement
+ * côté compte suit.
+ *
+ * ⚠️ `save` est facultatif et son échec ne bloque rien : le sélecteur de
+ * langue s'affiche aussi sur l'écran de connexion, où il n'y a pas encore de
+ * compte à qui l'attacher. Une interface qui refuserait de changer de langue
+ * parce que le hub a répondu `401` serait pire que le défaut corrigé.
+ */
+export function setLang(lang: Lang, save?: (l: Lang) => Promise<unknown>) {
   try {
     localStorage.setItem(KEY, lang);
   } catch {
@@ -48,4 +94,7 @@ export function setLang(lang: Lang) {
   }
   document.documentElement.setAttribute('lang', lang);
   locale.set(lang);
+  void save?.(lang).catch(() => {
+    /* la langue est appliquée ; l'enregistrer est un bonus */
+  });
 }

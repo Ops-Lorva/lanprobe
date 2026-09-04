@@ -431,16 +431,18 @@ function duration(seconds: number, t: Translate): string {
 /**
  * Construit le classeur et déclenche son téléchargement.
  *
- * `t` est la fonction de traduction : le rapport est rédigé dans la langue de
- * l'OPÉRATEUR — celle de son interface —, pas dans celle du code.
+ * `t` est la fonction de traduction, `locale` le formatage des dates.
  *
- * ⚠️ Ce commentaire disait l'inverse (« il doit être dans SA langue », celle du
- * client) alors que le code y passait déjà la locale de l'interface. Un
- * commentaire qui contredit son propre code est pire qu'aucun commentaire : le
- * suivant l'applique. Tranché par Benjamin, et écrit au contrat § 23 — le
- * parcours est « télécharger → ouvrir → vérifier → envoyer », et on ne peut
- * relire que ce qu'on lit. Un classeur produit dans une langue que le demandeur
- * ne parle pas ne serait vérifié par personne.
+ * 🔴 **Le classeur doit être dans la langue du CLIENT** (contrat § 23) : il
+ * part chez lui, et un même client doit toujours le recevoir dans la même
+ * langue quel que soit l'opérateur qui appuie sur le bouton. Le générateur du
+ * HUB lit pour cela `sites.report_locale`.
+ *
+ * ⚠️ **Ce générateur-ci, lui, ne l'applique PAS encore** : c'est le repli pour
+ * un hub plus ancien que la route `/reports`, et ses appelants lui passent
+ * `$_` — la fonction de traduction de l'interface — donc la langue de
+ * l'opérateur. Le dire ici plutôt que le taire : un commentaire qui contredit
+ * son propre code est pire qu'aucun commentaire.
  */
 export async function downloadSlaReport(
   payload: SlaPayload,

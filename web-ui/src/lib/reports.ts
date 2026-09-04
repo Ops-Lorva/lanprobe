@@ -262,8 +262,14 @@ export interface NewReport {
   probe_ids?: string[];
   /** Résolue en bornes exactes en amont : un rapport porte sur une période convenue. */
   window: MetricsWindow;
-  /** La langue de l'opérateur, figée dans la ligne par le hub. */
-  locale: string;
+  // 🔴 **Pas de `locale` ici, et c'est le correctif.** La langue du classeur
+  // est celle du SITE (`sites.report_locale`) : le document part chez un
+  // client, sa langue est une propriété du client et pas de l'employé qui
+  // appuie sur le bouton. Le hub la lit lui-même et la fige dans la ligne.
+  //
+  // ⚠️ Le hub **tolère encore** le champ sur le fil — l'app iOS l'envoie en
+  // dur — mais ne l'écoute plus. L'envoyer d'ici ferait croire au suivant
+  // qu'il décide quelque chose.
 }
 
 const enc = encodeURIComponent;
@@ -283,7 +289,6 @@ export const reportsApi = {
         ...(body.window.start != null && body.window.stop != null
           ? { start: body.window.start, stop: body.window.stop }
           : { range: body.window.range ?? '-24h' }),
-        locale: body.locale,
       }),
     }),
 

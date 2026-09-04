@@ -7,7 +7,8 @@
   import { fleet } from '$lib/fleet';
   import { flash } from '$lib/flash';
   import { absoluteTime, humanBytes, now, relativeTime } from '$lib/time';
-  import { api, ApiError, type MetricsWindow, type Probe } from '$lib/api';
+  import { api, ApiError, type MetricsWindow, type Probe, type Site } from '$lib/api';
+  import { LANGS, type Lang } from '$lib/i18n';
   // Le classeur vient du hub (contrat § 23). `sla-report` reste le repli.
   import {
     fetchReportFile,
@@ -267,12 +268,23 @@
 
   let renameTarget = $state<{ id: string; name: string } | null>(null);
   let renameName = $state('');
+  /**
+   * 🔴 **La langue des rapports de ce client**, réglée là où on nomme le site
+   * (contrat § 23). `''` = défaut du hub, pas une absence de choix impossible
+   * à exprimer : un site doit pouvoir revenir au défaut.
+   *
+   * ⚠️ Ce n'est PAS la langue de l'interface — celle-là est dans la barre et
+   * suit le compte. Les confondre laissait le même client recevoir deux
+   * rapports dans deux langues selon qui avait cliqué.
+   */
+  let renameLocale = $state<Lang | ''>('');
   let renameBusy = $state(false);
   let renameError = $state('');
 
-  function openRename(id: string, name: string) {
-    renameTarget = { id, name };
-    renameName = name;
+  function openRename(site: Site) {
+    renameTarget = { id: site.site_id, name: site.name };
+    renameName = site.name;
+    renameLocale = site.report_locale ?? '';
     renameError = '';
   }
 
@@ -283,7 +295,10 @@
     renameBusy = true;
     renameError = '';
     try {
-      await api.renameSite(renameTarget.id, name);
+      // Le champ est TOUJOURS envoyé ici : l'écran vient de montrer sa valeur
+      // courante, et `null` veut dire « défaut du hub ». Les autres appelants
+      // l'omettent pour ne pas y toucher.
+      await api.renameSite(renameTarget.id, name, renameLocale === '' ? null : renameLocale);
       fleet.renameSiteLocal(renameTarget.id, name);
       renameTarget = null;
       await fleet.load(onExpired, { quiet: true });
@@ -437,7 +452,6 @@
         // même dans le classeur remis au client.
         probe_ids: chosen.map((p) => p.probe_id),
         window,
-        locale: lang,
       });
       const record = await pollReport(report_id, {
         signal: slaAbort,
@@ -739,7 +753,7 @@
             ...manual,
             [g.site.site_id]: !isExpanded(g.site.site_id, g.probes, groups.length),
           })}
-        onrename={() => openRename(g.site.site_id, g.site.name)}
+        onrename={() => openRename(g.site)}
         onalerts={() => openAlerts(g.site.site_id, g.site.name)}
         archived={!!g.site.archived_at}
         onarchive={() =>
@@ -983,7 +997,7 @@
 
 <Modal
   open={!!renameTarget}
-  title={$_('site.rename_title', { values: { name: renameTarget?.name ?? '' } })}
+  title={$_('site.settings_title', { values: { name: renameTarget?.name ?? '' } })}
   onclose={() => (renameTarget = null)}
 >
   <label class="lp-field">
@@ -994,6 +1008,20 @@
       onkeydown={(e) => e.key === 'Enter' && submitRename()}
     />
   </label>
+
+  <!-- 🔴 La langue du classeur appartient au CLIENT, pas à l'opérateur : c'est
+       ce qui garantit qu'un même client reçoive toujours ses rapports dans la
+       même langue, quel que soit celui qui appuie sur le bouton. -->
+  <label class="lp-field">
+    {$_('site.report_locale_label')}
+    <select class="lp-input" bind:value={renameLocale}>
+      <option value="">{$_('site.report_locale_default')}</option>
+      {#each LANGS as l (l)}
+        <option value={l}>{$_(`common.lang_${l}`)}</option>
+      {/each}
+    </select>
+  </label>
+  <p class="slalead">{$_('site.report_locale_hint')}</p>
 
   <!-- Le détail qui génère un ticket si on le tait : les points déjà écrits
        gardent l'ancienne étiquette dans Grafana. -->
@@ -1006,7 +1034,7 @@
   {#snippet footer()}
     <button class="lp-btn" onclick={() => (renameTarget = null)}>{$_('common.cancel')}</button>
     <button class="lp-btn primary" onclick={submitRename} disabled={renameBusy}>
-      {renameBusy ? $_('site.renaming') : $_('site.rename_submit')}
+      {renameBusy ? $_('site.settings_saving') : $_('site.settings_submit')}
     </button>
   {/snippet}
 </Modal>

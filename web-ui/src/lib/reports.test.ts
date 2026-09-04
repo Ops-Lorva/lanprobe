@@ -261,17 +261,19 @@ describe('reportsApi', () => {
     await reportsApi.requestReport('site/1', {
       probe_ids: ['p1', 'p2'],
       window: { start: 1_700_000_000, stop: 1_700_600_000 },
-      locale: 'fr',
     });
     const [url, init] = spy.mock.calls[0];
     if (!init) throw new Error('aucune option de requête');
     expect(url).toBe('/api/sites/site%2F1/reports');
     expect(init.method).toBe('POST');
+    // 🔴 **Plus de `locale` dans la demande.** La langue du classeur est celle
+    // du SITE (`sites.report_locale`), lue par le hub : le document part chez
+    // un client, et deux opérateurs ne doivent pas lui envoyer deux langues.
+    // Continuer à l'envoyer ferait croire au suivant qu'elle décide encore.
     expect(JSON.parse(String(init.body))).toEqual({
       probe_ids: ['p1', 'p2'],
       start: 1_700_000_000,
       stop: 1_700_600_000,
-      locale: 'fr',
     });
   });
 
@@ -280,7 +282,7 @@ describe('reportsApi', () => {
     // refusée par le hub. Les confondre produirait le classeur du site entier
     // là où l'écran affichait zéro case cochée.
     const spy = captureFetch({ report_id: 'r9', state: 'preparing' }, 202);
-    await reportsApi.requestReport('s1', { window: { range: '-7d' }, locale: 'fr' });
+    await reportsApi.requestReport('s1', { window: { range: '-7d' } });
     const [, init] = spy.mock.calls[0];
     const envoyé = JSON.parse(String(init?.body));
     expect('probe_ids' in envoyé).toBe(false);
@@ -294,7 +296,7 @@ describe('reportsApi', () => {
     // phrase qui nomme la règle.
     const spy = captureFetch({ error: 'aucune sonde à mettre dans ce rapport' }, 400);
     await reportsApi
-      .requestReport('s1', { probe_ids: [], window: { range: '-7d' }, locale: 'fr' })
+      .requestReport('s1', { probe_ids: [], window: { range: '-7d' } })
       .catch(() => {});
     const [, init] = spy.mock.calls[0];
     expect(JSON.parse(String(init?.body)).probe_ids).toEqual([]);
@@ -317,7 +319,7 @@ describe('reportsApi', () => {
   it('laisse remonter le refus du hub, message compris', async () => {
     captureFetch({ error: 'aucune sonde à mettre dans ce rapport' }, 400);
     await expect(
-      reportsApi.requestReport('s1', { probe_ids: ['p1'], window: { range: '-7d' }, locale: 'fr' }),
+      reportsApi.requestReport('s1', { probe_ids: ['p1'], window: { range: '-7d' } }),
     ).rejects.toMatchObject({ status: 400, message: 'aucune sonde à mettre dans ce rapport' });
   });
 });

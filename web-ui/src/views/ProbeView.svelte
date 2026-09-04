@@ -818,7 +818,6 @@
       const { report_id } = await reportsApi.requestReport(probe.site_id, {
         probe_ids: [id],
         window,
-        locale: lang,
       });
       const record = await pollReport(report_id, {
         signal: slaAbort,

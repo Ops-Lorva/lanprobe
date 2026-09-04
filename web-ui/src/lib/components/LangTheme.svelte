@@ -1,6 +1,7 @@
 <script lang="ts">
   import { _, locale } from 'svelte-i18n';
   import { setLang, LANGS, type Lang } from '$lib/i18n';
+  import { api } from '$lib/api';
   import { theme, type Theme } from '$lib/theme';
 
   interface Props {
@@ -28,7 +29,7 @@
     {/if}
     <select
       value={($locale as Lang) ?? 'en'}
-      onchange={(e) => setLang(e.currentTarget.value as Lang)}
+      onchange={(e) => setLang(e.currentTarget.value as Lang, (l) => api.setUiLang(l))}
       aria-label={$_('common.language')}
     >
       {#each LANGS as l (l)}

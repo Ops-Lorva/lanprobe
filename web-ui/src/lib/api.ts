@@ -5,6 +5,10 @@
  * aucune route n'est supposée au-delà du contrat.
  */
 
+// Type seul : les trois langues sont définies une fois, avec les catalogues.
+// Deux listes finiraient par diverger d'une langue.
+import type { Lang } from './i18n';
+
 export type ProbeStatus = 'online' | 'stale' | 'offline';
 
 export interface Site {
@@ -13,6 +17,15 @@ export interface Site {
   probe_count: number;
   /** Retiré du parc sans être supprimé. `null` = actif. */
   archived_at?: number | null;
+  /**
+   * 🔴 **La langue des rapports de CE client** (contrat § 23). `null` = rien
+   * de réglé, donc le défaut du hub.
+   *
+   * ⚠️ Ce n'est pas la langue de l'interface : le classeur part chez un
+   * client, sa langue est une propriété du client et pas de l'employé qui
+   * appuie sur le bouton.
+   */
+  report_locale?: Lang | null;
 }
 
 export interface Probe {
@@ -375,6 +388,14 @@ export type Role = 'admin' | 'operator' | 'viewer';
 export interface Identity {
   username: string;
   role: Role;
+  /**
+   * La langue d'**interface** choisie par ce compte. `null` = rien de réglé,
+   * et c'est alors au navigateur de décider.
+   *
+   * 🔴 Elle suit le COMPTE, pas le navigateur : le sélecteur n'écrivait que
+   * dans `localStorage`, et changer de poste ramenait l'anglais.
+   */
+  lang?: Lang | null;
 }
 
 /** Du plus puissant au moins puissant : c'est l'ordre dans lequel on choisit. */
@@ -534,6 +555,9 @@ export const AUDIT_ACTIONS: readonly string[] = [
   'user.enable',
   'site.create',
   'site.rename',
+  // Ce réglage change ce qu'un CLIENT reçoit : il laisse une trace, au même
+  // titre que le renommage.
+  'site.report_locale',
   'site.delete',
   'enroll.code',
   'probe.enroll',
@@ -916,10 +940,31 @@ export const api = {
   createSite: (name: string) =>
     request<Site>('/api/sites', { method: 'POST', body: JSON.stringify({ name }) }),
 
-  renameSite: (id: string, name: string) =>
+  /**
+   * Les réglages du site : son nom, et la langue de ses rapports.
+   *
+   * ⚠️ **Trois états pour `reportLocale`.** `undefined` (omis) laisse le
+   * réglage intact — `JSON.stringify` retire la clé —, `null` rend le site au
+   * défaut du hub. Envoyer `null` par défaut effacerait la langue d'un client
+   * à chaque renommage, en silence.
+   */
+  renameSite: (id: string, name: string, reportLocale?: Lang | null) =>
     request<Site | null>(`/api/sites/${encodeURIComponent(id)}`, {
       method: 'PATCH',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, report_locale: reportLocale }),
+    }),
+
+  /**
+   * La langue d'interface du compte connecté. `null` la retire.
+   *
+   * 🔴 La base fait foi : `localStorage` reste un cache local pour éviter un
+   * éclair au chargement, mais c'est cette route qui rend la préférence
+   * portable d'un navigateur à l'autre.
+   */
+  setUiLang: (lang: Lang | null) =>
+    request<{ ok: boolean; lang: Lang | null }>('/api/me/lang', {
+      method: 'POST',
+      body: JSON.stringify({ lang }),
     }),
 
   /** `siteId` absent = tout le parc ; sinon le hub filtre côté serveur. */

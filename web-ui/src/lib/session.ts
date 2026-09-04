@@ -1,5 +1,6 @@
 import { derived, writable } from 'svelte/store';
 import type { Identity, Role } from './api';
+import { applyServerLang } from './i18n';
 
 /**
  * Qui est connecté, et avec quel rôle.
@@ -36,8 +37,15 @@ export const canOperate = derived(
   ($i) => $i?.role === 'admin' || $i?.role === 'operator',
 );
 
+/**
+ * ⚠️ **C'est ici que la langue du compte s'applique**, et pas dans une des
+ * vues : `setIdentity` est le seul passage obligé des deux chemins d'entrée —
+ * le démarrage et la connexion. Le faire dans l'un des deux seulement laissait
+ * l'autre en anglais, et le défaut ne se serait vu qu'à l'usage.
+ */
 export function setIdentity(who: Identity) {
   identity.set(who);
+  applyServerLang(who.lang);
 }
 
 /** À la déconnexion : le compte suivant n'hérite de rien. */
