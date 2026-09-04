@@ -148,7 +148,18 @@ qu'un champ libre — c'est ce qui évite qu'un « Durnad » se glisse dans le p
 ```
 
 ### `POST /api/sites` — `{ "name": "Durand" }` → `201`. `409` si le nom existe déjà.
-### `PATCH /api/sites/{id}` — renommage. Les mesures passées gardent l'ancien tag `site` mais restent jointes par `site_id`.
+### `PATCH /api/sites/{id}` — les réglages du site : `{ "name": "…", "report_locale": "fr" | "en" | "es" | null }`
+Renommage : les mesures passées gardent l'ancien tag `site` mais restent jointes par `site_id`.
+⚠️ **`report_locale` a trois états.** Champ **absent** = on n'y touche pas — un
+renommage seul n'efface pas la langue d'un client. `null` = retour au défaut du
+hub. Une valeur hors des trois langues rend `400`, **avant** le renommage : un
+refus ne laisse pas un site à moitié modifié. Le changement écrit une ligne
+d'audit `site.report_locale` — il change ce qu'un client reçoit.
+
+### `POST /api/me/lang` — `{ "lang": "fr" | "en" | "es" | null }`, rôle `viewer`
+La langue de l'**interface**, par compte, rendue par `GET /api/me` dans `lang`.
+`null` retire le réglage. Ouvert au rôle le plus bas : c'est une préférence
+personnelle, comme le mot de passe de son propre compte.
 
 ### `POST /api/enroll-codes` — authentification : session
 Génère un **code d'enrôlement court** (8 caractères, valable 15 minutes, à usage
@@ -752,13 +763,15 @@ CREATE TABLE users (
   username      TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,          -- argon2id
   role          TEXT NOT NULL DEFAULT 'admin',
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  ui_locale     TEXT                    -- langue de l'INTERFACE. NULL = au navigateur de décider
 );
 
 CREATE TABLE sites (
-  site_id    TEXT PRIMARY KEY,          -- UUIDv4
-  name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  created_at INTEGER NOT NULL
+  site_id       TEXT PRIMARY KEY,       -- UUIDv4
+  name          TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  created_at    INTEGER NOT NULL,
+  report_locale TEXT                    -- langue des RAPPORTS de ce client. NULL = défaut du hub
 );
 
 CREATE TABLE probes (
@@ -784,6 +797,27 @@ CREATE TABLE settings (
   updated_at INTEGER NOT NULL
 );
 ```
+
+### 🔴 Deux colonnes de langue, parce que ce sont deux questions
+
+Les confondre laisse le défaut entier. `users.ui_locale` est une **préférence
+d'affichage** : elle suit le compte, pas le navigateur — sans elle, changer de
+poste ramenait l'anglais et deux personnes sur le même hub le voyaient chacune
+dans sa langue. `sites.report_locale` est une **propriété du client** : le
+classeur part chez lui, sa langue n'appartient pas à l'employé qui appuie sur le
+bouton — sans elle, le même client recevait deux rapports dans deux langues
+selon qui avait cliqué.
+
+⚠️ **Les deux sont NULLables, et `NULL` n'est pas une erreur** : c'est « rien de
+réglé », donc le comportement d'avant — langue du navigateur pour l'interface,
+`fr` pour le classeur. Un hub en service ne change pas de comportement en se
+mettant à jour, et aucune migration n'impose une langue à un parc existant.
+
+⚠️ **Aucune contrainte ne restreint la valeur en base.** La lecture pardonne
+(`report_i18n::resolve_locale` : inconnu, vide ou absent → `fr`) parce qu'un
+rapport ne doit jamais échouer sur un réglage illisible. L'écriture, elle,
+refuse en `400` tout ce qui n'est pas exactement `fr`, `en` ou `es` : un réglage
+accepté puis jamais appliqué se découvrirait sur le document remis au client.
 
 `COLLATE NOCASE` sur les noms : « Durand » et « durand » sont le même site.
 Sans ça, un doublon de casse crée deux parcs distincts et personne ne comprend
@@ -2685,7 +2719,7 @@ CREATE TABLE reports (
   requested_by TEXT NOT NULL REFERENCES users(username),
   device_id    TEXT REFERENCES paired_devices(device_id),  -- NULL = demandé depuis le hub web
   probe_ids    TEXT NOT NULL,                 -- JSON : les sondes retenues
-  locale       TEXT NOT NULL,                 -- la langue de l'opérateur au moment de la demande
+  locale       TEXT NOT NULL,                 -- la langue du SITE, résolue au moment de la demande
   range_start  INTEGER NOT NULL,
   range_stop   INTEGER NOT NULL,
   state        TEXT NOT NULL,                 -- preparing | ready | failed | purged
@@ -2714,14 +2748,14 @@ l'audit dira « benjamin » — ce qui est vrai et trompeur. L'appareil restrein
 réponse. `NULL` veut dire « depuis le hub web », pas « inconnu ».
 
 ⚠️ **`locale` est écrite dans la ligne, pas relue à la génération.** La langue est
-celle de l'opérateur **au moment où il demande** (voir plus bas) ; la relire au
-moment de produire donnerait un classeur dans la langue de qui regarde l'écran
-cinq minutes plus tard.
+celle du SITE **au moment de la demande** (voir plus bas) ; la relire au moment
+de produire donnerait un classeur dans la langue réglée cinq minutes plus tard,
+et une régénération ne rendrait plus le même document.
 
 ### Les quatre routes
 
 ```
-POST /api/sites/{id}/reports   { probe_ids?: [...], range | start/stop, locale }
+POST /api/sites/{id}/reports   { probe_ids?: [...], range | start/stop }
                                → 202 { report_id, state: "preparing" }
 GET  /api/sites/{id}/reports   l'historique du site
 GET  /api/reports/{id}         le suivi — state, step, error, file_size, expires_at
@@ -2783,21 +2817,32 @@ afficherait un rapport dont elle vient d'afficher la ligne. L'écran propose alo
 *Redemander*. Jamais un fichier de zéro octet, jamais un classeur partiel. Le
 retéléchargement subit **exactement** les mêmes contrôles que le premier.
 
-### La langue du rapport est celle de l'OPÉRATEUR
+### 🔴 La langue du rapport est celle du SITE, pas celle de l'opérateur
 
-Tranché par Benjamin. Le classeur est rédigé dans la langue de celui qui le
-demande, transmise en `locale` et figée dans la ligne.
+**Décision révisée.** Le classeur part chez **un client** : sa langue est une
+propriété du client, pas de l'employé qui appuie sur le bouton. C'est ce qui
+garantit qu'un même client reçoive **toujours** ses rapports dans la même
+langue, quel que soit l'opérateur — sans quoi deux techniciens du même hub lui
+envoyaient deux documents différents, et personne ne s'en apercevait avant lui.
 
-⚠️ **Le commentaire de `web-ui/src/lib/sla-report.ts` disait l'inverse** — « le
-rapport part chez un client, il doit être dans SA langue » — alors que le code y
-passait déjà la locale de l'interface, c'est-à-dire celle de l'opérateur. Un
-commentaire qui contredit son propre code est pire qu'aucun commentaire : le
-suivant l'applique. Corrigé.
+Le générateur lit `sites.report_locale` (§ 4) et fige le résultat dans
+`reports.locale`. Un site sans langue choisie garde le défaut du hub, `fr`.
 
-Ce n'est pas un renoncement : l'opérateur relit le document avant de l'envoyer
-(*télécharger → ouvrir → vérifier → envoyer*), et il ne peut relire que ce qu'il
-lit. Un classeur produit dans une langue que le demandeur ne parle pas ne serait
-vérifié par personne.
+⚠️ **Le champ `locale` du corps n'est plus écouté.** Il reste **accepté sur le
+fil** — l'app iOS l'envoie en dur et une app déjà installée doit continuer
+d'obtenir ses rapports plutôt qu'un `400` —, mais il ne décide plus rien. Le hub
+web a cessé de l'envoyer : un champ qui ne fait rien finit par être cru.
+
+⚠️ **Ne pas confondre avec `users.ui_locale`**, la langue de l'INTERFACE. Ce
+sont deux questions ; les confondre était le défaut. L'argument qui tenait ici —
+« l'opérateur relit le document avant de l'envoyer, il ne peut relire que ce
+qu'il lit » — décrit une **relecture**, pas le destinataire ; il ne justifie pas
+d'imposer au client la langue de qui a cliqué.
+
+⚠️ **Écart connu** : le générateur de repli du navigateur
+(`web-ui/src/lib/sla-report.ts`, employé quand le hub est plus ancien que la
+route `/reports`) rédige toujours dans la langue de l'interface — ses appelants
+lui passent `$_`. Il faudrait y charger le catalogue du site pour l'aligner.
 
 ### La purge
 

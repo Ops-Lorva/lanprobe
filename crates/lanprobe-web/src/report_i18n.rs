@@ -272,10 +272,10 @@ impl Catalog {
     /// Formate une date dans la langue du catalogue, suivie de son fuseau.
     ///
     /// 🔴 **Les deux à la fois, et c'est le point.** La date se lit dans la
-    /// langue de l'opérateur — c'est lui qui relit le classeur avant de
-    /// l'envoyer — et le fuseau est écrit noir sur blanc, parce qu'un relevé
-    /// horodaté sans fuseau se conteste au premier décalage horaire. Le
-    /// navigateur donnait le premier sans le second.
+    /// langue du classeur — donc celle du client à qui il est remis — et le
+    /// fuseau est écrit noir sur blanc, parce qu'un relevé horodaté sans
+    /// fuseau se conteste au premier décalage horaire. Le navigateur donnait
+    /// le premier sans le second.
     pub(crate) fn date(&self, epoch_secs: i64) -> String {
         let (_, _, _, hh, mm, ss) = civil_from_epoch(epoch_secs);
         format!(
@@ -704,10 +704,10 @@ mod tests {
         assert_eq!(cat.duration(9_000), "2.5 h");
     }
 
-    /// La date se lit dans la langue de l'opérateur : c'est lui qui relit le
-    /// classeur avant de l'envoyer.
+    /// La date se lit dans la langue du classeur, comme le reste : un document
+    /// dont le corps est espagnol et les dates françaises se lit mal.
     #[test]
-    fn la_date_se_lit_dans_la_langue_de_loperateur() {
+    fn la_date_se_lit_dans_la_langue_du_classeur() {
         assert_eq!(
             Catalog::load("fr").date(1_788_445_351),
             "3 sept. 2026, 14:22:31 UTC"
