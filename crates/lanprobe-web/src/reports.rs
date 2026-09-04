@@ -434,13 +434,15 @@ struct NewReport {
     start: Option<i64>,
     #[serde(default)]
     stop: Option<i64>,
-    /// La langue de l'**opérateur**, figée dans la ligne (contrat § 23).
-    #[serde(default = "locale_par_defaut")]
-    locale: String,
-}
-
-fn locale_par_defaut() -> String {
-    crate::report_i18n::FALLBACK_LOCALE.to_string()
+    // 🔴 **Pas de `locale` ici, et c'est le correctif.** La langue du classeur
+    // est celle du SITE (`sites.report_locale`), pas celle du demandeur : le
+    // document part chez un client, et deux opérateurs ne doivent pas lui
+    // envoyer deux langues.
+    //
+    // ⚠️ L'app iOS envoie encore `locale: "fr"` en dur. Le champ reste
+    // **accepté sur le fil** — serde ignore ce qu'il ne connaît pas — pour
+    // qu'une app déjà installée continue d'obtenir ses rapports plutôt qu'un
+    // `400`. Il n'est simplement plus écouté.
 }
 
 /// `202` : le hub a pris la demande, il n'a pas encore le fichier.
@@ -498,7 +500,19 @@ async fn request_report(
         // document.
         range_start: window.from,
         range_stop: window.to,
-        locale: body.locale,
+        // 🔴 La langue du CLIENT, résolue ici et figée dans la ligne. Le site
+        // du chemin est garanti existant par la garde de portée ; une lecture
+        // en échec ou une valeur illisible retombent sur le défaut plutôt que
+        // de refuser un rapport pour un réglage.
+        locale: crate::report_i18n::resolve_locale(
+            state
+                .db
+                .get_site(&site_id)
+                .ok()
+                .and_then(|s| s.report_locale)
+                .as_deref(),
+        )
+        .to_string(),
         requested_by: actor.username.clone(),
         device_id: actor.device_id.clone(),
     };
@@ -1490,9 +1504,40 @@ mod routes_tests {
     }
 
     #[tokio::test]
-    async fn the_language_is_the_operators_one_frozen_at_request_time() {
-        // Tranché par Benjamin : l'opérateur relit le document avant de
-        // l'envoyer, et il ne peut relire que ce qu'il lit.
+    async fn la_langue_du_rapport_est_celle_du_site_pas_celle_du_demandeur() {
+        // 🔴 Le classeur part chez UN client. Sa langue est une propriété du
+        // client, pas de l'employé qui appuie sur le bouton : c'est ce qui
+        // garantit qu'un même client reçoive TOUJOURS ses rapports dans la
+        // même langue, quel que soit l'opérateur.
+        //
+        // ⚠️ Le corps porte encore `locale` — l'app iOS l'envoie en dur. Il
+        // est reçu et **ignoré** : c'est le site qui décide.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
+        h.state
+            .db
+            .set_site_report_locale(&site_id, Some("es"))
+            .unwrap();
+        let (start, stop) = fenetre();
+
+        let (status, ouvert) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop, "locale": "fr" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{ouvert}");
+        let report_id = ouvert["report_id"].as_str().unwrap().to_string();
+        assert_eq!(h.state.db.get_report(&report_id).unwrap().locale, "es");
+    }
+
+    #[tokio::test]
+    async fn un_site_sans_langue_choisie_garde_le_defaut_du_hub() {
+        // ⚠️ Ne pas casser les hubs existants : aucun site n'a de langue le
+        // jour de la migration, et tous doivent continuer à produire ce
+        // qu'ils produisaient.
         let h = Harness::new().await;
         let cookie = h.session("admin");
         let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
@@ -1506,7 +1551,43 @@ mod routes_tests {
             )
             .await;
         let report_id = ouvert["report_id"].as_str().unwrap().to_string();
-        assert_eq!(h.state.db.get_report(&report_id).unwrap().locale, "es");
+        assert_eq!(
+            h.state.db.get_report(&report_id).unwrap().locale,
+            crate::report_i18n::FALLBACK_LOCALE
+        );
+    }
+
+    #[tokio::test]
+    async fn une_langue_illisible_en_base_ne_fait_pas_echouer_le_rapport() {
+        // 🔴 La colonne est libre : une valeur écrite à la main, ou une langue
+        // retirée du produit, retombe sur le défaut. Un rapport qui échoue
+        // parce qu'un réglage est illisible est le pire des deux mondes.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, _) = h.site_avec_sonde("Durand", "Lyon");
+        h.state
+            .db
+            .set_site_report_locale(&site_id, Some("klingon"))
+            .unwrap();
+        let (start, stop) = fenetre();
+
+        let (status, ouvert) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{ouvert}");
+        let report_id = ouvert["report_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            h.state.db.get_report(&report_id).unwrap().locale,
+            crate::report_i18n::FALLBACK_LOCALE
+        );
+
+        // Et il va au bout : le repli n'est pas seulement écrit en base.
+        let suivi = h.attendre(&cookie, &report_id).await;
+        assert_eq!(suivi["state"], "ready", "{suivi}");
     }
 
     #[tokio::test]

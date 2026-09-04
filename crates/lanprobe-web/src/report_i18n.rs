@@ -1,15 +1,22 @@
-//! Les libellés du classeur SLA, dans la langue de l'opérateur (contrat § 23).
+//! Les libellés du classeur SLA, dans la langue du SITE (contrat § 23).
 //!
-//! 🔴 **La langue est celle de l'OPÉRATEUR, pas celle du client.** Tranché par
-//! Benjamin. Le parcours est *télécharger → ouvrir → vérifier → envoyer* : on
-//! ne peut relire que ce qu'on lit, et un classeur produit dans une langue que
-//! le demandeur ne parle pas ne serait vérifié par personne. Le commentaire de
-//! `web-ui/src/lib/sla-report.ts` disait l'inverse alors que le code y passait
-//! déjà la locale de l'interface ; il a été corrigé.
+//! 🔴 **La langue est celle du CLIENT, pas celle de l'opérateur.** Le classeur
+//! part chez un client : sa langue est une propriété du client, pas de
+//! l'employé qui appuie sur le bouton. C'est ce qui garantit qu'un même client
+//! reçoive **toujours** ses rapports dans la même langue, quel qu'ait été
+//! l'opérateur — sans quoi deux techniciens sur le même compte produisaient
+//! deux documents différents pour le même destinataire.
 //!
-//! ⚠️ **La locale est celle de la DEMANDE**, figée dans `reports.locale` : la
-//! relire au moment de produire donnerait un document dans la langue de qui
-//! regarde l'écran cinq minutes plus tard.
+//! ⚠️ **Le réglage vit sur le site** (`sites.report_locale`, v24), pas dans le
+//! corps de la requête. Le champ `locale` que l'app envoie encore est reçu et
+//! **ignoré** : le laisser décider ramènerait exactement le défaut corrigé.
+//! Une langue de l'opérateur existe aussi, pour l'INTERFACE
+//! (`users.ui_locale`) — ce sont deux questions, et les confondre était le
+//! défaut.
+//!
+//! ⚠️ **La locale reste figée dans `reports.locale` à la demande** : la relire
+//! au moment de produire donnerait un document dans la langue réglée cinq
+//! minutes plus tard, et une régénération ne rendrait plus le même document.
 //!
 //! ⚠️ **Les clés sont les mêmes que celles du navigateur** — le préfixe `sla.`
 //! et `report.` de `web-ui/src/lib/i18n/*.json`. C'est ce qui garantit que le
@@ -200,17 +207,39 @@ fn lookup<'a>(root: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     node.as_str()
 }
 
+/// La langue effectivement retenue pour un réglage, avec repli.
+///
+/// 🔴 **Ne rend jamais d'erreur.** `sites.report_locale` est une colonne libre
+/// (v24) : une valeur écrite à la main, ou une langue retirée du produit un
+/// jour, ne doit pas faire échouer le rapport d'un client. `None`, vide ou
+/// inconnu retombent tous sur [`FALLBACK_LOCALE`], c'est-à-dire sur le
+/// comportement d'avant le réglage.
+///
+/// ⚠️ On ne compare que le sous-tag de langue : le réglage peut arriver en
+/// « fr-CA » ou « es-419 », et seul « fr » exact serait reconnu.
+pub(crate) fn resolve_locale(candidate: Option<&str>) -> &'static str {
+    let brut = candidate.unwrap_or_default();
+    let tag = brut.split(['-', '_']).next().unwrap_or("").to_lowercase();
+    LOCALES
+        .iter()
+        .find(|l| **l == tag)
+        .copied()
+        .unwrap_or(FALLBACK_LOCALE)
+}
+
+/// La langue est-elle **exactement** une des trois du produit ?
+///
+/// ⚠️ Strict là où [`resolve_locale`] pardonne, et c'est voulu : à la lecture
+/// on ne peut pas se permettre d'échouer, à l'écriture on ne peut pas se
+/// permettre d'accepter en silence un réglage qu'on n'appliquera pas.
+pub(crate) fn is_supported(locale: &str) -> bool {
+    LOCALES.contains(&locale)
+}
+
 impl Catalog {
     /// Charge le catalogue d'une locale, avec repli sur [`FALLBACK_LOCALE`].
     pub(crate) fn load(locale: &str) -> Self {
-        // ⚠️ On ne compare que le sous-tag de langue : la demande peut arriver
-        // en « fr-CA » ou « es-419 », et seul « fr » exact serait reconnu.
-        let tag = locale.split(['-', '_']).next().unwrap_or("").to_lowercase();
-        let retenue = LOCALES
-            .iter()
-            .find(|l| **l == tag)
-            .copied()
-            .unwrap_or(FALLBACK_LOCALE);
+        let retenue = resolve_locale(Some(locale));
         Self {
             locale: retenue.to_string(),
             messages: parse(retenue),
@@ -551,6 +580,35 @@ mod tests {
             // sans quoi le test au-dessus applaudirait un catalogue vide.
             assert!(!cat.has("sla.cle_qui_nexiste_pas"));
         }
+    }
+
+    #[test]
+    fn une_langue_absente_ou_inconnue_retombe_sur_le_defaut_sans_echouer() {
+        // 🔴 `sites.report_locale` est libre en base : une valeur écrite à la
+        // main, ou une langue retirée du produit, ne doit JAMAIS faire échouer
+        // un rapport. Elle retombe sur le défaut, silencieusement mais
+        // délibérément.
+        assert_eq!(resolve_locale(None), FALLBACK_LOCALE);
+        assert_eq!(resolve_locale(Some("")), FALLBACK_LOCALE);
+        assert_eq!(resolve_locale(Some("de")), FALLBACK_LOCALE);
+        assert_eq!(resolve_locale(Some("klingon")), FALLBACK_LOCALE);
+        // Les trois du produit passent, et le sous-tag régional est toléré.
+        assert_eq!(resolve_locale(Some("es")), "es");
+        assert_eq!(resolve_locale(Some("es-419")), "es");
+        assert_eq!(resolve_locale(Some("EN")), "en");
+    }
+
+    #[test]
+    fn le_selecteur_lui_refuse_ce_que_la_base_tolere() {
+        // ⚠️ Deux exigences opposées, exprès : la LECTURE pardonne (un
+        // rapport ne doit pas échouer), l'ÉCRITURE refuse (un réglage
+        // silencieusement ignoré est pire qu'un refus).
+        for l in LOCALES {
+            assert!(is_supported(l));
+        }
+        assert!(!is_supported("de"));
+        assert!(!is_supported("es-419"));
+        assert!(!is_supported(""));
     }
 
     #[test]

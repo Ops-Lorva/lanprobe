@@ -152,6 +152,7 @@ pub fn build_router(state: AppState) -> Router {
         Router::new()
             .route("/api/me", get(me))
             .route("/api/me/password", post(change_own_password))
+            .route("/api/me/lang", post(set_own_lang))
             .route("/api/me/totp", get(totp_status).delete(disable_own_totp))
             .route("/api/me/totp/start", post(start_own_totp))
             .route("/api/me/totp/confirm", post(confirm_own_totp))
@@ -1166,8 +1167,48 @@ fn base64_url(bytes: &[u8]) -> String {
 /// rôle en se prenant un refus, ce qui écrit une ligne d'audit à chaque
 /// ouverture de session — précisément le bruit qui empêche de repérer, dans
 /// ce même journal, la série de refus qui compte.
-async fn me(Extension(identity): Extension<Identity>) -> Response {
-    ok_json(json!({ "username": identity.username, "role": identity.role.as_str() }))
+/// ⚠️ `lang` peut être `null` : « rien de réglé », et c'est alors au
+/// navigateur de choisir — le comportement d'avant le réglage. Un défaut
+/// inventé côté hub imposerait une langue à tous les comptes existants.
+async fn me(State(state): State<AppState>, Extension(identity): Extension<Identity>) -> Response {
+    let lang = state.db.user_ui_locale(&identity.username).unwrap_or(None);
+    ok_json(json!({
+        "username": identity.username,
+        "role": identity.role.as_str(),
+        "lang": lang,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct OwnLangBody {
+    /// `null` retire le réglage et rend le compte au choix du navigateur.
+    lang: Option<String>,
+}
+
+/// La langue de l'INTERFACE, par compte.
+///
+/// 🔴 **Elle suit le compte, pas le navigateur.** Le sélecteur n'écrivait que
+/// dans `localStorage` : changer de poste ramenait l'anglais. `localStorage`
+/// reste un cache local — il évite un éclair au chargement — mais la base fait
+/// foi.
+///
+/// ⚠️ Ce n'est **pas** la langue des rapports : celle-là appartient au site
+/// (§ 23). Les confondre laisserait le même client recevoir deux langues.
+async fn set_own_lang(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(body): Json<OwnLangBody>,
+) -> Response {
+    if let Some(refus) = refus_si_langue_inconnue(body.lang.as_deref()) {
+        return refus;
+    }
+    match state
+        .db
+        .set_user_ui_locale(&identity.username, body.lang.as_deref())
+    {
+        Ok(()) => ok_json(json!({ "ok": true, "lang": body.lang })),
+        Err(e) => error_response(e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -2184,6 +2225,41 @@ async fn list_sites(
 #[derive(Deserialize)]
 struct SiteBody {
     name: String,
+    /// 🔴 **La langue des rapports de ce client** (contrat § 23), réglée là où
+    /// on nomme le site parce que c'est une propriété du client.
+    ///
+    /// ⚠️ **Trois états, pas deux.** `Option<Option<_>>` distingue « absent »
+    /// (un renommage qui ne touche pas au réglage) de `null` (« remets le
+    /// défaut du hub »). Une simple `Option` aurait fait effacer la langue
+    /// d'un client à chaque renommage, en silence.
+    #[serde(default, deserialize_with = "champ_present_meme_a_null")]
+    report_locale: Option<Option<String>>,
+}
+
+/// Rend `Some(_)` dès que la clé est **présente**, `Some(None)` sur `null`.
+/// Absente, `#[serde(default)]` donne `None` sans passer par ici.
+fn champ_present_meme_a_null<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(Some(Option::<String>::deserialize(d)?))
+}
+
+/// Refus commun aux deux réglages de langue.
+///
+/// ⚠️ Strict — exactement `fr`, `en` ou `es`. La lecture, elle, pardonne
+/// (`report_i18n::resolve_locale`) : un rapport ne doit jamais échouer sur un
+/// réglage illisible, mais un réglage accepté puis jamais appliqué se
+/// découvrirait sur le document remis au client.
+fn refus_si_langue_inconnue(lang: Option<&str>) -> Option<Response> {
+    match lang {
+        Some(l) if !crate::report_i18n::is_supported(l) => Some(fail(
+            StatusCode::BAD_REQUEST,
+            &format!("langue inconnue : « {l} »"),
+        )),
+        _ => None,
+    }
 }
 
 async fn create_site(
@@ -2263,6 +2339,8 @@ async fn archive_probe(
     }
 }
 
+/// Les réglages du site : son nom, et la langue de ses rapports.
+///
 /// ⚠️ Site du chemin garanti existant et dans la portée par
 /// `site_scope_guard`.
 async fn rename_site(
@@ -2271,12 +2349,41 @@ async fn rename_site(
     Path(id): Path<String>,
     Json(body): Json<SiteBody>,
 ) -> Response {
-    match audited(
+    // ⚠️ Le refus vient AVANT le renommage : un `400` sur la langue ne doit
+    // pas laisser derrière lui un site à moitié renommé.
+    if let Some(refus) = refus_si_langue_inconnue(
+        body.report_locale
+            .as_ref()
+            .and_then(|l| l.as_deref()),
+    ) {
+        return refus;
+    }
+
+    let site = match audited(
         &state,
         Some(&actor.username),
         "site.rename",
         Some(&id),
         state.db.rename_site(&id, &body.name),
+    ) {
+        Ok(site) => site,
+        Err(e) => return error_response(e),
+    };
+
+    // Absent = « on n'y touche pas ». C'est ce qui permet à un renommage seul
+    // de laisser le réglage du client intact.
+    let Some(demandée) = body.report_locale else {
+        return ok_json(serde_json::to_value(site).unwrap_or(serde_json::Value::Null));
+    };
+
+    // Ce réglage change ce qu'un CLIENT reçoit : il laisse une trace, au même
+    // titre que le renommage.
+    match audited(
+        &state,
+        Some(&actor.username),
+        "site.report_locale",
+        Some(&id),
+        state.db.set_site_report_locale(&id, demandée.as_deref()),
     ) {
         Ok(site) => ok_json(serde_json::to_value(site).unwrap_or(serde_json::Value::Null)),
         Err(e) => error_response(e),
@@ -9967,6 +10074,140 @@ mod tests {
         // Sans session : refusé, pas d'erreur interne.
         let (status, _, _) = h.call(empty_request("GET", "/api/me")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn la_langue_de_linterface_suit_le_compte_pas_le_navigateur() {
+        // 🔴 Le défaut : le sélecteur n'écrivait que dans `localStorage`.
+        // Changer de navigateur ramenait l'anglais, et deux personnes sur le
+        // même hub le voyaient chacune dans sa langue. La base fait foi.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        // Rien de réglé : `null`, et le navigateur décide — comme avant.
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/me"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["lang"].is_null(), "{body}");
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/me/lang", json!({ "lang": "es" })),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // Une session TOUTE NEUVE — donc un autre navigateur — la retrouve.
+        let autre = h.login().await;
+        let (_, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/me"), &autre))
+            .await;
+        assert_eq!(body["lang"], "es", "{body}");
+
+        // Et on peut revenir au défaut : c'est un réglage, pas un aller simple.
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/me/lang", json!({ "lang": null })),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/me"), &session))
+            .await;
+        assert!(body["lang"].is_null(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn une_langue_que_le_produit_ne_parle_pas_est_refusee_a_lecriture() {
+        // ⚠️ Strict à l'ÉCRITURE, tolérant à la lecture : un réglage accepté
+        // puis jamais appliqué est pire qu'un refus — il se découvre sur le
+        // document remis au client.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let id = h.state.db.create_site("Durand").unwrap().site_id;
+
+        for (uri, corps) in [
+            ("/api/me/lang", json!({ "lang": "de" })),
+            (
+                "/api/me/lang",
+                json!({ "lang": "es-419" }),
+            ),
+        ] {
+            let (status, body, _) = h
+                .call(with_cookie(json_request("POST", uri, corps), &session))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body["error"].as_str().unwrap_or_default().contains("langue"),
+                "{body}"
+            );
+        }
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PATCH",
+                    &format!("/api/sites/{id}"),
+                    json!({ "name": "Durand", "report_locale": "de" }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        // Et rien n'a été écrit : un refus partiel serait pire que tout.
+        assert_eq!(h.state.db.get_site(&id).unwrap().report_locale, None);
+    }
+
+    #[tokio::test]
+    async fn la_langue_des_rapports_se_regle_la_ou_on_nomme_le_site() {
+        // 🔴 Le classeur part chez UN client : sa langue est une propriété du
+        // client. Elle se règle donc dans les réglages du site, avec son nom —
+        // pas dans « Mon compte ».
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let id = h.state.db.create_site("Durand").unwrap().site_id;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PATCH",
+                    &format!("/api/sites/{id}"),
+                    json!({ "name": "Durand SA", "report_locale": "es" }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["name"], "Durand SA", "{body}");
+        assert_eq!(body["report_locale"], "es", "{body}");
+
+        // ⚠️ Un renommage seul ne doit PAS effacer la langue : le champ absent
+        // veut dire « on n'y touche pas », pas « remets le défaut ».
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("PATCH", &format!("/api/sites/{id}"), json!({ "name": "Durand" })),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["report_locale"], "es", "{body}");
+
+        // `null` explicite, lui, rend le site au défaut du hub.
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PATCH",
+                    &format!("/api/sites/{id}"),
+                    json!({ "name": "Durand", "report_locale": null }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["report_locale"].is_null(), "{body}");
     }
 
     // ── Écriture des mesures ───────────────────────────────────────────────
