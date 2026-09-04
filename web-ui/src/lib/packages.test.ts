@@ -80,6 +80,24 @@ describe('paquets de la sonde', () => {
       expect(rows[3].state).toBe('unsigned');
     });
 
+    // 🔴 Ce que la correction de la CI ne rattrapera PAS : les versions déjà
+    // publiées n'ont pas de `.sig` pour le paquet sans interface. L'écran doit
+    // donc rester vrai pour elles — pas de bouton mort, et un renvoi.
+    //
+    // Un état « non signé » n'existe que si le hub a LU la release : il y a
+    // donc toujours une page vers laquelle renvoyer. Sans cet invariant, la
+    // ligne dirait « prenez-le ailleurs » sans dire où.
+    it('a toujours une page de version vers laquelle renvoyer quand il refuse', () => {
+      const p = payload();
+      const rows = packageRows(p, null);
+      const refuses = rows.filter((r) => r.state === 'unsigned' || r.state === 'absent');
+      expect(refuses.length).toBeGreaterThan(0);
+      expect(p.notes_url).not.toBe(null);
+      // Et aucun de ces états ne doit se confondre avec « à récupérer » : c'est
+      // ce qui garantit qu'aucun bouton d'action ne leur est offert.
+      expect(refuses.every((r) => r.state !== 'fetchable')).toBe(true);
+    });
+
     it('nomme un paquet absent de la release', () => {
       const p = payload();
       p.packages[1] = { ...p.packages[1], publishable: false };

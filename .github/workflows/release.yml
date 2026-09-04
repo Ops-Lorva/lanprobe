@@ -177,11 +177,35 @@ jobs:
           cp "$DEB" "$DEST"
           echo "deb=$DEST" >> "$GITHUB_OUTPUT"
 
+      # 🔴 SANS CETTE ÉTAPE, LE HUB REFUSE DE DISTRIBUER LE PAQUET.
+      #
+      # Le hub web est un point de distribution (contrat § 24) : il tire
+      # l'asset depuis cette release, vérifie sa signature minisign avec la clé
+      # publique de LanProbe, et ne le sert QUE si elle est valide. Il lit la
+      # présence de `<asset>.sig` dans la liste des assets de la release — sans
+      # elle, l'écran affiche « non signé » et renvoie vers GitHub, parce que
+      # servir un binaire non vérifié depuis son propre serveur serait moins
+      # sûr que le lien qu'il remplace.
+      #
+      # ⚠️ TOUT NOUVEAU PAQUET PUBLIÉ ICI DOIT ÊTRE SIGNÉ, sans quoi il sera
+      # publié mais indistribuable par les hubs. Ce job-ci est resté sans
+      # signature pendant que les trois autres en avaient une, et personne ne
+      # l'a vu jusqu'à ce que le hub s'en plaigne.
+      #
+      # Génère lanprobe-server_<TAG>_amd64.deb.sig.
+      - name: Sign artifact (minisign)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri signer sign "${{ steps.artifacts.outputs.deb }}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: linux-server
-          path: ${{ steps.artifacts.outputs.deb }}
+          path: |
+            ${{ steps.artifacts.outputs.deb }}
+            ${{ steps.artifacts.outputs.deb }}.sig
           retention-days: 1
 
   build-windows:

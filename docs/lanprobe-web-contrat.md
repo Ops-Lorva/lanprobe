@@ -2882,18 +2882,27 @@ affiche son code d'enrôlement comme d'habitude ; l'indisponibilité des paquets
 | `macos` | `lanprobe_vX.Y.Z_universal.pkg` | oui |
 | `windows` | `lanprobe_vX.Y.Z_x64-setup.exe` | oui |
 | `debian` | `lanprobe_vX.Y.Z_amd64.deb` | oui |
-| `debian-headless` | `lanprobe-server_vX.Y.Z_amd64.deb` | **non — voir ci-dessous** |
+| `debian-headless` | `lanprobe-server_vX.Y.Z_amd64.deb` | oui — **à partir de la première release suivant le 03/09/2026** |
 
 🔴 **Le `.dmg` n'est pas distribué** : la CI ne le signe pas (elle publie un
 `.sha256` à côté, sur la même release — une empreinte publiée au même endroit
 que le fichier ne prouve rien contre une release compromise). Le `.pkg`, lui,
 est signé, notarisé et stapled : c'est celui que le hub sert.
 
-🔴 **Le `.deb` headless n'a aujourd'hui aucun `.sig` publié.** Son job de CI ne
-comporte pas d'étape de signature, contrairement aux trois autres. Le hub ne le
-sert donc pas, et **le dit avant le clic** — la présence de `<asset>.sig` dans
-la liste des assets de la release se lit sans rien télécharger. Le jour où la CI
-le signe, rien à changer côté hub : il devient distribuable tout seul.
+🔴 **Le `.deb` headless n'était pas signé** : son job de CI ne comportait pas
+d'étape de signature, contrairement aux trois autres, et personne ne l'avait vu
+avant que le hub ne s'en plaigne. L'étape est ajoutée
+(`.github/workflows/release.yml`, job `build-linux-server`).
+
+⚠️ **La correction ne vaut que pour les versions à venir** — les releases déjà
+publiées n'ont pas de `.sig` pour ce paquet, et on n'y touche pas. L'écran reste
+donc vrai pour elles : la ligne dit « non signé », **n'offre aucun bouton**, et
+renvoie vers la page de la version. Un état « non signé » n'existe que si le hub
+a lu la release : il y a donc toujours une page vers laquelle renvoyer.
+
+🔴 **Tout paquet ajouté à la release doit être signé**, sans quoi il sera publié
+mais indistribuable par les hubs. Le commentaire du job le dit en toutes lettres,
+à l'endroit où quelqu'un ajoutera le quatrième.
 
 ### Le cache
 
