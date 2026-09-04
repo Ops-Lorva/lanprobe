@@ -108,6 +108,11 @@ pub(crate) struct PairedDevice {
     /// d'un secret copié, puisque le secret ne tourne pas à l'usage.
     pub last_ip: Option<String>,
     pub revoked_at: Option<i64>,
+    /// Masqué de la liste — **jamais supprimé**. ⚠️ Ne peut être posé que sur
+    /// un appareil déjà révoqué : masquer un appareil actif le sortirait de la
+    /// seule liste où l'on peut s'apercevoir qu'un téléphone perdu s'en sert
+    /// encore, sans rien lui retirer.
+    pub archived_at: Option<i64>,
 }
 
 /// Un code d'appairage fraîchement émis, tel que le hub web l'affiche.
@@ -144,7 +149,7 @@ pub(crate) struct PairCode {
 /// Une seule liste : deux `SELECT` qui divergent d'une colonne se paient en
 /// panique au premier appel de la seule route qui l'emploie.
 const DEVICE_COLUMNS: &str = "device_id, username, name, platform, app_version, \
-                              created_at, last_seen, last_ip, revoked_at";
+                              created_at, last_seen, last_ip, revoked_at, archived_at";
 
 fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairedDevice> {
     Ok(PairedDevice {
@@ -157,6 +162,7 @@ fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairedDevice> {
         last_seen: row.get(6)?,
         last_ip: row.get(7)?,
         revoked_at: row.get(8)?,
+        archived_at: row.get(9)?,
     })
 }
 
@@ -349,19 +355,61 @@ impl Db {
     }
 
     /// Les appareils d'un compte, ou de tous quand `username` est `None`.
-    /// Les révoqués **en font partie** : la ligne reste, l'audit la nomme.
+    ///
+    /// Les révoqués **en font partie** : la ligne reste, l'audit la nomme. Les
+    /// **masqués**, non — sauf demande explicite, exactement comme les sites
+    /// archivés (§ 17). Un paramètre plutôt qu'une seconde route : c'est la
+    /// même liste avec une ligne de plus, et deux routes finiraient par
+    /// diverger sur le tri ou les champs rendus.
     pub(crate) fn list_paired_devices(
         &self,
         username: Option<&str>,
+        archived: bool,
     ) -> DbResult<Vec<PairedDevice>> {
         let conn = self.conn().lock().map_err(|_| poisoned())?;
         let mut stmt = conn.prepare(&format!(
             "SELECT {DEVICE_COLUMNS} FROM paired_devices
              WHERE (?1 IS NULL OR username = ?1)
+               AND (?2 OR archived_at IS NULL)
              ORDER BY created_at DESC, device_id"
         ))?;
-        let rows = stmt.query_map([username], device_from_row)?;
+        let rows = stmt.query_map(rusqlite::params![username, archived], device_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Masque un appareil révoqué — ou le remet dans la liste.
+    ///
+    /// 🔴 **Rien n'est supprimé.** La ligne porte le lien `device_id ↔ nom`
+    /// que le journal d'audit ne garde pas : `device.pair` y inscrit le nom,
+    /// `device.revoke` l'identifiant, et rien ne les rejoint ailleurs. Elle
+    /// porte aussi la dernière vue et la dernière adresse, seul détecteur d'un
+    /// secret copié. La faire disparaître rendrait illisible chaque ligne
+    /// d'audit qui la vise.
+    ///
+    /// 🔴 **Un appareil ACTIF ne se masque pas.** Il continuerait de
+    /// fonctionner — son identité n'expire pas — hors de la seule liste où
+    /// l'on peut s'apercevoir qu'un téléphone perdu s'en sert encore. Ce serait
+    /// l'exact inverse du but de cet écran.
+    pub(crate) fn set_paired_device_archived(
+        &self,
+        device_id: &str,
+        archived: bool,
+    ) -> DbResult<()> {
+        let device = self.get_paired_device(device_id)?;
+        if archived && device.revoked_at.is_none() {
+            return Err(DbError::Conflict(
+                "cet appareil est actif : révoquez-le avant de le masquer, sinon il continuerait \
+                 d'accéder au hub hors de cette liste"
+                    .into(),
+            ));
+        }
+        let stamp = archived.then(crate::db::now);
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        conn.execute(
+            "UPDATE paired_devices SET archived_at = ?2 WHERE device_id = ?1",
+            rusqlite::params![device_id, stamp],
+        )?;
+        Ok(())
     }
 
     /// « iPhone » et « iPhone » ne se distinguent pas, et on ne révoque pas au
@@ -566,7 +614,8 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
             .route("/api/me/pair-codes", post(create_pair_code))
             .route("/api/me/devices", get(list_my_devices))
             .route("/api/me/devices/{id}", patch(rename_my_device))
-            .route("/api/me/devices/{id}/revoke", post(revoke_my_device)),
+            .route("/api/me/devices/{id}/revoke", post(revoke_my_device))
+            .route("/api/me/devices/{id}/archive", post(archive_my_device)),
     );
 
     // Ceux de tous les comptes : un opérateur parti de l'entreprise ne se
@@ -577,7 +626,8 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
         Router::new()
             .route("/api/devices", get(list_all_devices))
             .route("/api/devices/{id}/revoke", post(revoke_any_device))
-            .route("/api/devices/{id}/rotate", post(rotate_any_device)),
+            .route("/api/devices/{id}/rotate", post(rotate_any_device))
+            .route("/api/devices/{id}/archive", post(archive_any_device)),
     );
 
     ouvert.merge(les_siens).merge(ceux_de_tous)
@@ -920,8 +970,12 @@ fn devices_json(devices: Vec<PairedDevice>) -> Response {
 async fn list_my_devices(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
+    Query(filter): Query<DeviceFilter>,
 ) -> Response {
-    match state.db.list_paired_devices(Some(&actor.username)) {
+    match state
+        .db
+        .list_paired_devices(Some(&actor.username), filter.archived)
+    {
         Ok(devices) => devices_json(devices),
         Err(e) => crate::web::error_response(e),
     }
@@ -931,13 +985,20 @@ async fn list_my_devices(
 struct DeviceFilter {
     #[serde(default)]
     user: Option<String>,
+    /// Inclure les appareils masqués. Absent = non, comme pour les sites
+    /// archivés (§ 17).
+    #[serde(default)]
+    archived: bool,
 }
 
 async fn list_all_devices(
     State(state): State<AppState>,
     Query(filter): Query<DeviceFilter>,
 ) -> Response {
-    match state.db.list_paired_devices(filter.user.as_deref()) {
+    match state
+        .db
+        .list_paired_devices(filter.user.as_deref(), filter.archived)
+    {
         Ok(devices) => devices_json(devices),
         Err(e) => crate::web::error_response(e),
     }
@@ -1018,6 +1079,62 @@ fn revoke(state: &AppState, actor: &Identity, device_id: &str) -> Response {
         Ok(()) => crate::web::ok_json(serde_json::json!({ "ok": true })),
         Err(e) => crate::web::error_response(e),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct ArchiveBody {
+    /// `true` masque, `false` remet dans la liste. Explicite dans les deux
+    /// sens, comme pour un site : une bascule implicite se trompe dès que deux
+    /// onglets sont ouverts sur le même appareil.
+    archived: bool,
+}
+
+/// Retire un appareil révoqué de la liste — ou l'y remet — **sans rien
+/// supprimer**.
+///
+/// 🔴 C'est la réponse à « le téléphone ne reprend pas la place, je fais quoi
+/// de la ligne ». La supprimer rendrait illisible chaque ligne d'audit qui la
+/// vise : le journal inscrit le NOM à l'appairage et l'IDENTIFIANT à la
+/// révocation, et rien ne les rejoint ailleurs que dans cette ligne. La
+/// dernière vue et la dernière adresse — seul détecteur d'un secret copié —
+/// n'existent nulle part ailleurs non plus.
+///
+/// ⚠️ Le refus d'un appareil actif est **dans la couche de stockage**, pas
+/// seulement dans l'écran : la route s'appelle à la main.
+fn archive(state: &AppState, actor: &Identity, device_id: &str, archived: bool) -> Response {
+    let action = if archived { "device.archive" } else { "device.unarchive" };
+    match crate::web::audited(
+        state,
+        Some(&actor.username),
+        action,
+        Some(device_id),
+        state.db.set_paired_device_archived(device_id, archived),
+    ) {
+        Ok(()) => crate::web::ok_json(serde_json::json!({ "ok": true })),
+        Err(e) => crate::web::error_response(e),
+    }
+}
+
+async fn archive_my_device(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<ArchiveBody>,
+) -> Response {
+    let device = match mine(&state, &actor, &id) {
+        Ok(device) => device,
+        Err(refus) => return refus,
+    };
+    archive(&state, &actor, &device.device_id, body.archived)
+}
+
+async fn archive_any_device(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<ArchiveBody>,
+) -> Response {
+    archive(&state, &actor, &id, body.archived)
 }
 
 /// Fait tourner le secret — **sur ce geste, et sur lui seul**.
@@ -1215,7 +1332,7 @@ mod tests {
         );
         // La ligne reste : le journal d'audit la nomme, et une ligne d'audit
         // qui pointe une cible disparue ne prouve rien.
-        let restant = db.list_paired_devices(Some("admin")).unwrap();
+        let restant = db.list_paired_devices(Some("admin"), false).unwrap();
         assert_eq!(restant.len(), 1);
         assert!(restant[0].revoked_at.is_some());
     }
@@ -1267,7 +1384,7 @@ mod tests {
         db.touch_paired_device(&device.device_id, 1_700_000_000, Some("10.0.0.42"))
             .unwrap();
 
-        let vu = &db.list_paired_devices(Some("admin")).unwrap()[0];
+        let vu = &db.list_paired_devices(Some("admin"), false).unwrap()[0];
         assert_eq!(vu.last_seen, Some(1_700_000_000));
         assert_eq!(vu.last_ip.as_deref(), Some("10.0.0.42"));
     }
@@ -1280,8 +1397,61 @@ mod tests {
         db.pair_device("admin", "iPhone d'admin", None, None).unwrap();
         db.pair_device("dupont", "iPhone de Dupont", None, None).unwrap();
 
-        assert_eq!(db.list_paired_devices(Some("dupont")).unwrap().len(), 1);
-        assert_eq!(db.list_paired_devices(None).unwrap().len(), 2);
+        assert_eq!(db.list_paired_devices(Some("dupont"), false).unwrap().len(), 1);
+        assert_eq!(db.list_paired_devices(None, false).unwrap().len(), 2);
+    }
+
+    /// 🔴 Masquer un appareil ACTIF le ferait disparaître de la surveillance
+    /// tout en le laissant fonctionner — l'exact inverse du but de cet écran.
+    /// L'accès de cet appareil n'expire pas : cette liste est le seul endroit
+    /// où l'on peut s'apercevoir qu'un téléphone perdu s'en sert encore.
+    #[test]
+    fn an_active_device_cannot_be_hidden_from_the_list() {
+        let db = db_with_admin();
+        let (device, _) = db.pair_device("admin", "iPhone", None, None).unwrap();
+
+        assert!(
+            matches!(
+                db.set_paired_device_archived(&device.device_id, true),
+                Err(DbError::Conflict(_))
+            ),
+            "un appareil actif ne se masque pas"
+        );
+        assert_eq!(db.list_paired_devices(Some("admin"), false).unwrap().len(), 1);
+    }
+
+    /// Un appareil révoqué encombre une liste qu'on relit pour y chercher un
+    /// intrus. Il en sort — **il n'est pas supprimé** : la ligne porte le lien
+    /// `device_id ↔ nom` que le journal d'audit ne garde pas, ainsi que la
+    /// dernière vue et la dernière adresse.
+    #[test]
+    fn a_revoked_device_leaves_the_list_without_leaving_the_base() {
+        let db = db_with_admin();
+        let (device, _) = db.pair_device("admin", "iPhone", None, None).unwrap();
+        db.revoke_paired_device(&device.device_id).unwrap();
+
+        db.set_paired_device_archived(&device.device_id, true).unwrap();
+
+        assert!(db.list_paired_devices(Some("admin"), false).unwrap().is_empty());
+        let avec = db.list_paired_devices(Some("admin"), true).unwrap();
+        assert_eq!(avec.len(), 1, "la ligne est masquée, pas supprimée");
+        assert!(avec[0].archived_at.is_some());
+        // Ce que le journal ne garde pas est toujours là.
+        assert_eq!(avec[0].name, "iPhone");
+        assert!(avec[0].revoked_at.is_some());
+    }
+
+    /// L'opération se défait, comme l'archivage d'un site.
+    #[test]
+    fn hiding_a_device_is_undone() {
+        let db = db_with_admin();
+        let (device, _) = db.pair_device("admin", "iPhone", None, None).unwrap();
+        db.revoke_paired_device(&device.device_id).unwrap();
+        db.set_paired_device_archived(&device.device_id, true).unwrap();
+
+        db.set_paired_device_archived(&device.device_id, false).unwrap();
+
+        assert_eq!(db.list_paired_devices(Some("admin"), false).unwrap().len(), 1);
     }
 
     #[test]
@@ -1295,7 +1465,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            db.list_paired_devices(Some("admin")).unwrap()[0].name,
+            db.list_paired_devices(Some("admin"), false).unwrap()[0].name,
             "iPhone — atelier"
         );
     }
@@ -1721,7 +1891,7 @@ mod routes_tests {
 
         assert_eq!(second.0, StatusCode::UNAUTHORIZED, "{}", second.1);
         assert_eq!(
-            h.state.db.list_paired_devices(None).unwrap().len(),
+            h.state.db.list_paired_devices(None, false).unwrap().len(),
             1,
             "le second essai a créé un appareil"
         );
@@ -1799,6 +1969,70 @@ mod routes_tests {
         assert_eq!(refus["reason"], "revoked", "{refus}");
         assert!(h.audit_actions().contains(&"device.revoke".to_string()));
         assert!(h.audit_actions().contains(&"device.refused".to_string()));
+    }
+
+    #[tokio::test]
+    async fn only_a_revoked_device_can_be_hidden_and_the_hub_says_no() {
+        // 🔴 Le refus est côté hub, pas seulement côté écran : la route
+        // s'appelle à la main. Masquer un appareil actif le sortirait de la
+        // seule liste où l'on peut s'apercevoir qu'un téléphone perdu s'en
+        // sert encore, sans rien lui retirer.
+        let h = Harness::new();
+        let (device_id, _, _) = h.pair("admin").await;
+        let cookie = h.session("admin");
+
+        let (status, corps) = h
+            .post(
+                &format!("/api/me/devices/{device_id}/archive"),
+                &cookie,
+                serde_json::json!({ "archived": true }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{corps}");
+
+        let (_, liste) = h.get("/api/me/devices", &cookie).await;
+        assert_eq!(liste["devices"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_hidden_device_leaves_the_list_and_comes_back_on_demand() {
+        let h = Harness::new();
+        let (device_id, _, _) = h.pair("admin").await;
+        let cookie = h.session("admin");
+        h.post(
+            &format!("/api/me/devices/{device_id}/revoke"),
+            &cookie,
+            serde_json::json!({}),
+        )
+        .await;
+
+        let (status, corps) = h
+            .post(
+                &format!("/api/me/devices/{device_id}/archive"),
+                &cookie,
+                serde_json::json!({ "archived": true }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{corps}");
+
+        let (_, sans) = h.get("/api/me/devices", &cookie).await;
+        assert!(sans["devices"].as_array().unwrap().is_empty());
+        let (_, avec) = h.get("/api/me/devices?archived=true", &cookie).await;
+        assert_eq!(avec["devices"].as_array().unwrap().len(), 1);
+        assert!(h.audit_actions().contains(&"device.archive".to_string()));
+
+        // La bascule se défait, et le journal le dit avec son propre mot.
+        let (status, _) = h
+            .post(
+                &format!("/api/me/devices/{device_id}/archive"),
+                &cookie,
+                serde_json::json!({ "archived": false }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, revenu) = h.get("/api/me/devices", &cookie).await;
+        assert_eq!(revenu["devices"].as_array().unwrap().len(), 1);
+        assert!(h.audit_actions().contains(&"device.unarchive".to_string()));
     }
 
     #[tokio::test]

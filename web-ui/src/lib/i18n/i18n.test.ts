@@ -310,6 +310,31 @@ describe('catalogues de traduction', () => {
     });
   }
 
+  // Un appareil révoqué se MASQUE — il ne se supprime pas (contrat § 22).
+  //
+  // 🔴 `devices_hide_hint` dit ce que le geste ne fait PAS : rien n'est
+  // supprimé. Sans elle, « Masquer » se lit comme un euphémisme pour
+  // « Supprimer », et on n'ose plus cliquer — ou on clique en croyant effacer.
+  //
+  // ⚠️ `devices_show_hidden` ne disparaît jamais, même à zéro masqué : sans ce
+  // chemin, on masque son dernier appareil révoqué puis on cherche comment le
+  // faire revenir.
+  const REQUISES_APPAREILS_MASQUES = [
+    'account.devices_hide',
+    'account.devices_hide_hint',
+    'account.devices_unhide',
+    'account.devices_unhide_hint',
+    'account.devices_show_hidden',
+    'account.devices_hide_hidden',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des appareils masqués`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_APPAREILS_MASQUES.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
+
   // Paquets de la sonde servis par le hub (contrat § 24).
   //
   // 🔴 `packages.unsigned` et `packages.absent` ne sont pas décoratives : un

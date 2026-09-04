@@ -28,6 +28,7 @@
   import { validateRealtime, type RealtimeIssue } from '$lib/realtime-settings';
   import {
     ageLabel,
+    deviceCounts,
     deviceRows,
     devicesApi,
     pairingAddress,
@@ -529,6 +530,15 @@
   let pairError = $state('');
   let revokeDevice = $state<PairedDevice | null>(null);
   let revokeDeviceBusy = $state(false);
+  /**
+   * La bascule « masqués », sur le modèle des sites archivés.
+   *
+   * ⚠️ Le filtre est appliqué par le HUB, pas ici : trier après coup ferait
+   * quand même voyager ces lignes sur le réseau, et le décompte de la section
+   * viendrait d'une liste que l'interface a raccourcie elle-même.
+   */
+  let showArchivedDevices = $state(false);
+  let archiveDeviceBusy = $state('');
 
   /** Secondes restantes au code affiché. `0` = expiré, et l'écran le dit. */
   const pairLeft = $derived(pairCode ? secondsLeft(pairCode.expires_at, $now) : 0);
@@ -544,7 +554,7 @@
 
   async function loadDevices() {
     try {
-      devices = deviceRows(parseDevices(await devicesApi.myDevices()));
+      devices = deviceRows(parseDevices(await devicesApi.myDevices(showArchivedDevices)));
       devicesError = '';
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
@@ -569,6 +579,27 @@
       pairError = e instanceof ApiError ? e.message : String(e);
     } finally {
       pairBusy = false;
+    }
+  }
+
+  /**
+   * Masque un appareil **révoqué**, ou le remet dans la liste.
+   *
+   * 🔴 Masquer, pas supprimer : la ligne porte le lien `device_id ↔ nom` que
+   * le journal d'audit ne garde pas, et la dernière adresse — seul détecteur
+   * d'un secret copié. Le geste se défait.
+   */
+  async function archiveDevice(row: DeviceRow) {
+    archiveDeviceBusy = row.device.device_id;
+    devicesError = '';
+    try {
+      await devicesApi.archiveMyDevice(row.device.device_id, !row.archived);
+      await loadDevices();
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      devicesError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      archiveDeviceBusy = '';
     }
   }
 
@@ -633,8 +664,10 @@
       passkeys: { count: passkeys.length, failed: pkError !== '' },
       devices: {
         loaded: devicesLoaded,
-        active: devices.filter((r) => !r.revoked).length,
-        revoked: devices.filter((r) => r.revoked).length,
+        // 🔴 Compté sur les lignes RENDUES : annoncer « 2 appareils » en
+        // cachant trois révoqués serait un mensonge tranquille, dans la
+        // section même qu'on lit pour repérer un appareil inconnu.
+        ...deviceCounts(devices),
         // ⚠️ Un code expiré ne compte pas : il n'y a plus de compte à rebours
         // à surveiller, seulement une phrase qui dit de le régénérer.
         codeLive: pairCode != null && pairLeft > 0,
@@ -1221,7 +1254,31 @@
                  qu'elles ne sont pas écrites côté hub : sans cette ligne, la carte
                  resterait vide et on chercherait la panne ailleurs. -->
             <p class="err" role="alert">{devicesError}</p>
-          {:else if devices.length > 0}
+          {:else if devicesLoaded}
+            <!-- ⚠️ Le chemin vers les masqués ne disparaît JAMAIS, même à zéro
+                 masqué : sans lui, on masque son dernier appareil révoqué puis
+                 on cherche comment le faire revenir. Le filtre est appliqué par
+                 le hub, comme pour les sites archivés. -->
+            <div class="row-btns hidden-toggle">
+              <button
+                class="lp-btn ghost sm"
+                class:on={showArchivedDevices}
+                aria-pressed={showArchivedDevices}
+                onclick={() => {
+                  showArchivedDevices = !showArchivedDevices;
+                  void loadDevices();
+                }}
+              >
+                {showArchivedDevices
+                  ? $_('account.devices_hide_hidden')
+                  : $_('account.devices_show_hidden')}
+              </button>
+            </div>
+
+            {#if devices.length === 0}
+              <!-- Sa phrase, jamais un tableau vide sans explication. -->
+              <p class="muted">{$_('account.devices_empty')}</p>
+            {:else}
             <!-- Même grille que la table des jetons : les deux listes se lisent de
                  la même façon, une seconde mise en forme n'apporterait rien. -->
             <table class="tok-table dev-table">
@@ -1237,7 +1294,7 @@
               </thead>
               <tbody>
                 {#each devices as row (row.device.device_id)}
-                  <tr class:revoked={row.revoked}>
+                  <tr class:revoked={row.revoked} class:hidden-row={row.archived}>
                     <td>{row.device.name}</td>
                     <td>{row.device.platform || '—'}</td>
                     <td class="lp-mono">{dateOnly(row.device.created_at, lang)}</td>
@@ -1262,6 +1319,25 @@
                             values: { date: dateOnly(row.device.revoked_at, lang) },
                           })}
                         </span>
+                        <!-- 🔴 « Masquer », jamais « Supprimer ». La ligne
+                             porte le lien identifiant ↔ nom que le journal
+                             d'audit ne garde pas, et la dernière adresse —
+                             seul détecteur d'un secret copié. Le geste se
+                             défait, et il n'existe QUE sur un appareil
+                             révoqué : masquer un appareil actif le sortirait
+                             de cette liste sans rien lui retirer. -->
+                        <button
+                          class="lp-btn ghost sm"
+                          onclick={() => void archiveDevice(row)}
+                          disabled={archiveDeviceBusy !== ''}
+                          title={row.archived
+                            ? $_('account.devices_unhide_hint')
+                            : $_('account.devices_hide_hint')}
+                        >
+                          {row.archived
+                            ? $_('account.devices_unhide')
+                            : $_('account.devices_hide')}
+                        </button>
                       {:else}
                         <button class="lp-btn danger sm" onclick={() => (revokeDevice = row.device)}>
                           {$_('account.devices_revoke')}
@@ -1272,9 +1348,7 @@
                 {/each}
               </tbody>
             </table>
-          {:else if devicesLoaded}
-            <!-- Sa phrase, jamais un tableau vide sans explication. -->
-            <p class="muted">{$_('account.devices_empty')}</p>
+            {/if}
           {/if}
         {/if}
       </AccountSection>
@@ -2293,6 +2367,16 @@
      n'est plus la question : il s'efface visuellement, pas de la liste. */
   .dev-table tr.revoked td {
     color: var(--ep-text-dim);
+  }
+  /* Masquée : rendue seulement sur demande, et signalée au trait pour qu'on
+     ne la confonde pas avec une ligne que la liste montre d'elle-même. */
+  .dev-table tr.hidden-row td:first-child {
+    border-left: 2px dashed var(--ep-border-strong);
+    padding-left: 8px;
+  }
+  .hidden-toggle {
+    justify-content: flex-end;
+    margin-bottom: 6px;
   }
   .secret {
     margin: 4px 0 10px;

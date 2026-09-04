@@ -3,6 +3,7 @@ import { ApiError } from './api';
 import {
   PAIR_CODE_TTL_SECS,
   ageLabel,
+  deviceCounts,
   deviceRows,
   devicesApi,
   pairingAddress,
@@ -33,6 +34,7 @@ function device(over: Partial<PairedDevice> = {}): PairedDevice {
     last_seen: null,
     last_ip: null,
     revoked_at: null,
+    archived_at: null,
     ...over,
   };
 }
@@ -101,6 +103,55 @@ describe('deviceRows', () => {
       'jamais_vu_recent',
       'vu_il_y_a_longtemps',
     ]);
+  });
+
+  it('marque masqué ce que `archived_at` date', () => {
+    const rows = deviceRows([device({ revoked_at: 1_700_000_500, archived_at: 1_700_000_600 })]);
+    expect(rows[0].archived).toBe(true);
+    expect(deviceRows([device()])[0].archived).toBe(false);
+  });
+
+  // Les masqués n'apparaissent que sur demande explicite. Quand ils sont là,
+  // ils sont EN DERNIER : on vient de demander à les revoir, pas à les mêler
+  // aux lignes qui comptent.
+  it('range les masqués après les révoqués visibles', () => {
+    const rows = deviceRows([
+      device({ device_id: 'range', revoked_at: 1_700_000_900, archived_at: 1_700_000_950 }),
+      device({ device_id: 'mort', revoked_at: 1_700_000_800 }),
+      device({ device_id: 'vif' }),
+    ]);
+    expect(rows.map((r) => r.device.device_id)).toEqual(['vif', 'mort', 'range']);
+  });
+});
+
+/**
+ * 🔴 Le compteur de la section « Appareils » compte ce qu'il MONTRE.
+ * Annoncer « 2 appareils » en cachant trois révoqués serait un mensonge
+ * tranquille — et cette section est précisément celle qu'on lit pour repérer
+ * un appareil qu'on ne reconnaît pas.
+ */
+describe('deviceCounts', () => {
+  it('compte les lignes rendues, jamais autre chose', () => {
+    const rows = deviceRows([
+      device({ device_id: 'vif' }),
+      device({ device_id: 'autre' }),
+      device({ device_id: 'mort', revoked_at: 1_700_000_800 }),
+    ]);
+    expect(deviceCounts(rows)).toEqual({ active: 2, revoked: 1 });
+  });
+
+  it('compte les masqués parmi les révoqués DÈS QU’ILS SONT À L’ÉCRAN', () => {
+    // La bascule ouverte, ils sont affichés : les taire ferait mentir le
+    // compteur dans l'autre sens.
+    const rows = deviceRows([
+      device({ device_id: 'vif' }),
+      device({ device_id: 'range', revoked_at: 1_700_000_900, archived_at: 1_700_000_950 }),
+    ]);
+    expect(deviceCounts(rows)).toEqual({ active: 1, revoked: 1 });
+  });
+
+  it('ne compte rien sur une liste vide', () => {
+    expect(deviceCounts([])).toEqual({ active: 0, revoked: 0 });
   });
 });
 

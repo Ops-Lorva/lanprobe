@@ -54,6 +54,15 @@ export interface PairedDevice {
   /** Avec `last_seen`, le seul détecteur d'un secret copié : il ne tourne pas. */
   last_ip: string | null;
   revoked_at: number | null;
+  /**
+   * Masqué de la liste — **jamais supprimé**.
+   *
+   * ⚠️ Ne peut être posé que sur un appareil déjà révoqué : masquer un
+   * appareil actif le sortirait de la seule liste où l'on peut s'apercevoir
+   * qu'un téléphone perdu s'en sert encore, sans rien lui retirer. Le hub
+   * refuse, l'écran n'offre même pas le geste.
+   */
+  archived_at?: number | null;
 }
 
 /** Un code d'appairage fraîchement émis (`PairCode`, `pairing.rs`). */
@@ -84,6 +93,8 @@ export interface DeviceRow {
   device: PairedDevice;
   /** La ligne reste après révocation — aucune route ne supprime un appareil. */
   revoked: boolean;
+  /** Sorti de la liste par défaut. La ligne est en base, l'audit la nomme. */
+  archived: boolean;
 }
 
 /**
@@ -119,11 +130,34 @@ function lastActivity(d: PairedDevice): number {
  */
 export function deviceRows(devices: PairedDevice[]): DeviceRow[] {
   return devices
-    .map((device) => ({ device, revoked: device.revoked_at != null }))
+    .map((device) => ({
+      device,
+      revoked: device.revoked_at != null,
+      archived: device.archived_at != null,
+    }))
     .sort((a, b) => {
+      // Les masqués en dernier : on vient de demander à les revoir, pas à les
+      // mêler aux lignes qui comptent.
+      if (a.archived !== b.archived) return a.archived ? 1 : -1;
       if (a.revoked !== b.revoked) return a.revoked ? 1 : -1;
       return lastActivity(b.device) - lastActivity(a.device);
     });
+}
+
+/**
+ * Ce que la section « Appareils » annonce **fermée**.
+ *
+ * 🔴 Compté sur les lignes RENDUES, jamais sur autre chose. Annoncer
+ * « 2 appareils » en cachant trois révoqués serait un mensonge tranquille — et
+ * cette section est précisément celle qu'on lit pour repérer un appareil qu'on
+ * ne reconnaît pas. Ouvrir la bascule fait monter le nombre : c'est cohérent
+ * avec ce qu'on a sous les yeux.
+ */
+export function deviceCounts(rows: DeviceRow[]): { active: number; revoked: number } {
+  return {
+    active: rows.filter((r) => !r.revoked).length,
+    revoked: rows.filter((r) => r.revoked).length,
+  };
 }
 
 /**
@@ -191,7 +225,9 @@ export const devicesApi = {
   /** Un code court, 15 minutes, usage unique. On en réémet un, c'est gratuit. */
   createPairCode: () => request<PairCode>('/api/me/pair-codes', { method: 'POST' }),
 
-  myDevices: () => request<unknown>('/api/me/devices'),
+  /** ⚠️ Les masqués sont exclus sauf demande, comme les sites archivés. */
+  myDevices: (archived = false) =>
+    request<unknown>(archived ? '/api/me/devices?archived=true' : '/api/me/devices'),
 
   /**
    * ⚠️ `POST …/revoke`, jamais `DELETE`. Aucune route ne supprime un appareil :
@@ -200,4 +236,22 @@ export const devicesApi = {
    */
   revokeMyDevice: (deviceId: string) =>
     request<unknown>(`/api/me/devices/${encodeURIComponent(deviceId)}/revoke`, { method: 'POST' }),
+
+  /**
+   * Sort un appareil **révoqué** de la liste, ou l'y remet.
+   *
+   * 🔴 `archive`, pas `delete`. La ligne porte le lien `device_id ↔ nom` que
+   * le journal d'audit ne garde pas — il inscrit le nom à l'appairage et
+   * l'identifiant à la révocation — ainsi que la dernière vue et la dernière
+   * adresse, seul détecteur d'un secret copié. La supprimer rendrait illisible
+   * chaque ligne d'audit qui la vise.
+   *
+   * ⚠️ Explicite dans les deux sens : une bascule implicite se trompe dès que
+   * deux onglets sont ouverts sur le même appareil.
+   */
+  archiveMyDevice: (deviceId: string, archived: boolean) =>
+    request<unknown>(`/api/me/devices/${encodeURIComponent(deviceId)}/archive`, {
+      method: 'POST',
+      body: JSON.stringify({ archived }),
+    }),
 };

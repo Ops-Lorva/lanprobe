@@ -732,8 +732,8 @@ du hub, et un lecteur qui parcourt le §3 doit savoir qu'elles existent.
 | Route | Détaillée en |
 |---|---|
 | `POST /api/me/pair-codes`, `POST /api/pair`, `POST /api/devices/token` | §22 |
-| `GET`/`PATCH /api/me/devices[/{id}]`, `POST /api/me/devices/{id}/revoke` | §22 |
-| `GET /api/devices[?user=]`, `POST /api/devices/{id}/revoke` | §22 |
+| `GET`/`PATCH /api/me/devices[/{id}]`, `POST /api/me/devices/{id}/{revoke,archive}` | §22 |
+| `GET /api/devices[?user=][&archived=]`, `POST /api/devices/{id}/{revoke,archive}` | §22 |
 | `POST`/`GET /api/sites/{id}/reports`, `GET /api/reports/{id}`, `GET /api/reports/{id}/file` | §23 |
 | `GET /api/packages`, `POST /api/packages/{platform}/fetch`, `GET /api/packages/{platform}/file` | §24 |
 
@@ -1285,6 +1285,7 @@ Actions journalisées : `auth.setup`, `auth.login`, `auth.logout`,
 `site.unarchive`, `user.scope`, `user.password_reset_cli`, `backup.create`,
 `backup.restore`, `backup.retention`, `device.pair_code`, `device.pair`,
 `device.rename`, `device.revoke`, `device.rotate`, `device.refused`,
+`device.archive`, `device.unarchive`,
 `report.request`, `report.download`, `report.purge`, `package.fetch`,
 `package.download`.
 
@@ -2488,8 +2489,8 @@ manières de désigner le même compte dans le même schéma, et une jointure de
 | `POST /api/me/pair-codes` | session | `viewer` | calque de `/api/enroll-codes`. Chacun agit sur **son** compte (§19) |
 | `POST /api/pair` — `{ code, name, platform, app_version }` | le **code** | — | → `201 { device_id, device_secret, user, role, scope }`. Le secret n'est rendu **qu'ici, une fois** |
 | `POST /api/devices/token` | `Bearer <device_secret>` | — | → `200 { access_token, expires_in: 900 }` |
-| `GET /api/me/devices` · `PATCH /api/me/devices/{id}` · `POST /api/me/devices/{id}/revoke` | session | `viewer` | **les siens**. Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir le révoquer seul |
-| `GET /api/devices[?user=]` · `POST /api/devices/{id}/revoke` · `POST /api/devices/{id}/rotate` | session | `admin` | ceux de **tous** les comptes : un opérateur parti de l'entreprise ne se révoque pas lui-même |
+| `GET /api/me/devices[?archived=true]` · `PATCH /api/me/devices/{id}` · `POST /api/me/devices/{id}/revoke` · `POST /api/me/devices/{id}/archive` | session | `viewer` | **les siens**. Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir le révoquer seul |
+| `GET /api/devices[?user=][&archived=true]` · `POST /api/devices/{id}/revoke` · `POST /api/devices/{id}/rotate` · `POST /api/devices/{id}/archive` | session | `admin` | ceux de **tous** les comptes : un opérateur parti de l'entreprise ne se révoque pas lui-même |
 
 ### Ce que le QR transporte
 
@@ -2523,6 +2524,37 @@ remplacer. Même raison que les quatre routes à jeton de sonde (§17).
 **Aucune route ne supprime un appareil**, comme aucune ne supprime un compte ni
 une sonde. On révoque : la ligne reste, parce que le journal d'audit la nomme, et
 une ligne d'audit qui pointe une cible disparue ne prouve rien.
+
+### Un appareil révoqué se MASQUE — il ne se supprime pas
+
+Un appareil révoqué encombrait une liste qu'on relit pour y chercher un intrus.
+`POST /api/{me/,}devices/{id}/archive` avec `{ "archived": true }` le sort de la
+liste ; `GET …/devices?archived=true` le ramène. Même colonne, même mot et même
+forme que l'archivage d'un site (§17) : inventer un troisième vocabulaire pour
+le même geste aurait donné deux manières de ranger dans le même produit.
+
+🔴 **Pourquoi masquer et non supprimer — la vérification faite avant d'écrire.**
+La ligne porte de l'information qu'**aucun journal ne garde** :
+
+| Information | Où elle vit | Dans l'audit ? |
+|---|---|---|
+| `device_id` ↔ `name` | la ligne | **non** — `device.pair` inscrit le *nom*, `device.revoke` l'*identifiant*, rien ne les rejoint |
+| `last_seen`, `last_ip` | la ligne | **non** — et c'est le seul détecteur d'un secret copié, le secret ne tournant pas à l'usage |
+| `platform`, `app_version` | la ligne | non |
+
+Supprimer la ligne rendrait donc illisible chaque ligne d'audit qui la vise :
+`device.revoke` sur `0c1e…` ne se rattacherait plus à aucun téléphone.
+
+🔴 **Seul un appareil DÉJÀ RÉVOQUÉ peut être masqué**, et le refus est dans la
+couche de stockage, pas seulement à l'écran — la route s'appelle à la main.
+Masquer un appareil actif le sortirait de la seule liste où l'on peut
+s'apercevoir qu'un téléphone perdu s'en sert encore, **sans rien lui retirer** :
+son identité n'expire pas. Ce serait l'exact inverse du but de cet écran.
+
+⚠️ **Le compteur de la section ne compte que ce qu'il montre.** Annoncer
+« 2 appareils » en cachant trois révoqués serait un mensonge tranquille. Les
+nombres affichés sont ceux des lignes rendues : ouvrir la bascule les fait
+monter, et c'est cohérent avec ce qu'on a sous les yeux.
 
 ### Ce qui ne coupe PAS l'accès
 

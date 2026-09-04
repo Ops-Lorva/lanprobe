@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -662,6 +662,27 @@ const MIGRATIONS: &[&str] = &[
     -- La purge balaie par échéance. Sans index, elle relit toute la table à
     -- chaque passage — et cette table ne se vide jamais.
     CREATE INDEX idx_reports_expires ON reports(expires_at);
+    "#,
+    // v22 → v23 : un appareil révoqué peut sortir de la liste.
+    //
+    // 🔴 **Masquer, pas supprimer**, et la colonne le dit : `archived_at` est
+    // une date, pas une absence de ligne. La ligne porte le lien
+    // `device_id ↔ nom` que le journal d'audit ne garde PAS — `device.pair` y
+    // inscrit le nom, `device.revoke` l'identifiant, et rien ne les rejoint
+    // ailleurs. Elle porte aussi `last_seen` et `last_ip`, seul détecteur d'un
+    // secret copié puisque le secret ne tourne pas à l'usage. Supprimer la
+    // ligne rendrait illisible chaque ligne d'audit qui la vise.
+    //
+    // Le même mot et la même forme que l'archivage d'un site (v16 → v17) :
+    // une colonne `archived_at`, un filtre exclu par défaut, une bascule pour
+    // les revoir. Inventer un troisième vocabulaire pour le même geste aurait
+    // donné deux manières de ranger dans le même produit.
+    //
+    // ⚠️ **Seul un appareil déjà révoqué peut être masqué** — la règle est
+    // dans `set_paired_device_archived`, pas ici : SQLite ne sait pas exprimer
+    // « archived_at non nul implique revoked_at non nul » en ALTER TABLE.
+    r#"
+    ALTER TABLE paired_devices ADD COLUMN archived_at INTEGER;
     "#,
 ];
 
