@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -684,6 +684,34 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE paired_devices ADD COLUMN archived_at INTEGER;
     "#,
+    // v23 → v24 : la langue cesse de vivre dans `localStorage`.
+    //
+    // 🔴 **Deux colonnes parce que ce sont deux questions**, et une seule
+    // migration parce qu'elles répondent au même défaut. Les confondre
+    // laisserait le défaut entier :
+    //
+    // - `users.ui_locale` — la langue de l'INTERFACE. C'est une préférence
+    //   d'affichage : elle doit suivre le compte, pas le navigateur. Sans
+    //   elle, changer de poste ramenait l'anglais et deux personnes sur le
+    //   même hub le voyaient chacune dans sa langue.
+    // - `sites.report_locale` — la langue du RAPPORT. Le classeur part chez
+    //   **un client** : sa langue est une propriété du client, pas de
+    //   l'employé qui appuie sur le bouton. Sans elle, le même client
+    //   recevait deux rapports dans deux langues selon qui avait cliqué.
+    //
+    // ⚠️ **Les deux naissent NULL, et NULL n'est pas une erreur** : c'est
+    // « rien de réglé », donc le comportement d'aujourd'hui — langue du
+    // navigateur pour l'interface, `FALLBACK_LOCALE` pour le classeur. Un hub
+    // en service ne change pas de comportement en se mettant à jour.
+    //
+    // ⚠️ Aucune contrainte ne restreint la valeur : SQLite ne sait pas
+    // exprimer « une des trois langues » de façon extensible, et surtout une
+    // valeur inconnue ne doit JAMAIS faire échouer un rapport. Le repli est
+    // dans `report_i18n::resolve_locale`, à la lecture.
+    r#"
+    ALTER TABLE users ADD COLUMN ui_locale     TEXT;
+    ALTER TABLE sites ADD COLUMN report_locale TEXT;
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
@@ -1086,6 +1114,10 @@ pub struct Site {
     pub probe_count: i64,
     /// Retiré du parc sans être supprimé. `None` = actif.
     pub archived_at: Option<i64>,
+    /// 🔴 **La langue des rapports de CE client** (contrat § 23). `None` =
+    /// rien de réglé, donc `report_i18n::FALLBACK_LOCALE` — jamais une
+    /// erreur, et jamais la langue de l'opérateur qui a cliqué.
+    pub report_locale: Option<String>,
 }
 
 /// `probe_count` ne compte que les sondes actives : une sonde révoquée reste
@@ -1095,7 +1127,7 @@ const SITE_COLUMNS: &str = "s.site_id, s.name, s.created_at, \
                             (SELECT COUNT(*) FROM probes p \
                               WHERE p.site_id = s.site_id AND p.revoked_at IS NULL \
                                 AND p.archived_at IS NULL), \
-                            s.archived_at";
+                            s.archived_at, s.report_locale";
 
 fn site_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
     Ok(Site {
@@ -1104,6 +1136,7 @@ fn site_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
         created_at: r.get(2)?,
         probe_count: r.get(3)?,
         archived_at: r.get(4)?,
+        report_locale: r.get(5)?,
     })
 }
 
@@ -1663,6 +1696,36 @@ impl Db {
         .ok_or_else(|| DbError::NotFound("compte inconnu".into()))
     }
 
+    /// La langue d'interface choisie par ce compte. `None` = rien de réglé,
+    /// et c'est alors au navigateur de décider — le comportement d'avant.
+    pub fn user_ui_locale(&self, username: &str) -> DbResult<Option<String>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT ui_locale FROM users WHERE username = ?1",
+            [username],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .ok_or_else(|| DbError::NotFound("compte inconnu".into()))
+    }
+
+    /// Enregistre la langue d'interface du compte. `None` la retire.
+    ///
+    /// ⚠️ Un compte inconnu est une **erreur**, pas un `UPDATE` sans effet :
+    /// sinon le sélecteur annoncerait « enregistré » et reviendrait au défaut
+    /// au rechargement, sans que rien ne l'explique.
+    pub fn set_user_ui_locale(&self, username: &str, locale: Option<&str>) -> DbResult<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE users SET ui_locale = ?2 WHERE username = ?1",
+            rusqlite::params![username, locale],
+        )?;
+        if changed == 0 {
+            return Err(DbError::NotFound("compte inconnu".into()));
+        }
+        Ok(())
+    }
+
     /// Ce compte exige-t-il un second facteur ?
     ///
     /// ⚠️ Lu en clair, exprès : voir la migration v15. L'état doit survivre à
@@ -2197,6 +2260,9 @@ impl Db {
             created_at,
             probe_count: 0,
             archived_at: None,
+            // Un site neuf n'impose rien : le défaut du hub jusqu'à ce qu'on
+            // choisisse dans ses réglages.
+            report_locale: None,
         })
     }
 
@@ -2254,6 +2320,29 @@ impl Db {
                     rusqlite::params![site_id, name],
                 )
                 .map_err(|e| conflict_on_constraint(e, format!("le site « {name} » existe déjà")))?;
+            if changed == 0 {
+                return Err(DbError::NotFound("site inconnu".into()));
+            }
+        }
+        self.get_site(site_id)
+    }
+
+    /// La langue dans laquelle les rapports de ce client sont rédigés.
+    ///
+    /// 🔴 `None` **efface** le réglage et rend le site au défaut du hub. Ce
+    /// n'est pas un aller simple : le réglage se retire comme il se pose.
+    ///
+    /// ⚠️ La valeur n'est pas validée ici — c'est le handler qui refuse une
+    /// langue que le produit ne parle pas. En base, une valeur inconnue
+    /// retombe sur le défaut à la lecture plutôt que de faire échouer un
+    /// rapport.
+    pub fn set_site_report_locale(&self, site_id: &str, locale: Option<&str>) -> DbResult<Site> {
+        {
+            let conn = self.lock()?;
+            let changed = conn.execute(
+                "UPDATE sites SET report_locale = ?2 WHERE site_id = ?1",
+                rusqlite::params![site_id, locale],
+            )?;
             if changed == 0 {
                 return Err(DbError::NotFound("site inconnu".into()));
             }
@@ -3839,6 +3928,109 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_v24_ajoute_les_deux_langues_sans_toucher_aux_lignes() {
+        // 🔴 Deux réglages, deux questions — et **une seule** migration : la
+        // langue de l'interface suit le COMPTE, celle du rapport suit le
+        // SITE. Les séparer en deux migrations aurait laissé un ordre de
+        // fusion produire deux bases divergentes.
+        //
+        // ⚠️ Additive : un hub en service depuis des mois garde son parc, et
+        // les deux colonnes naissent NULL — « rien de réglé », c'est-à-dire
+        // le comportement d'aujourd'hui.
+        let dir = tmp_dir("v23-to-v24");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..23] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 23").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, created_at)
+                 VALUES ('claire', 'h', 'operator', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(db.list_sites().unwrap().len(), 1, "le parc doit survivre");
+        assert!(db.get_user("claire").is_ok(), "le compte doit survivre");
+
+        assert!(
+            columns(&db, "users").iter().any(|c| c == "ui_locale"),
+            "colonne ui_locale absente de users"
+        );
+        assert!(
+            columns(&db, "sites").iter().any(|c| c == "report_locale"),
+            "colonne report_locale absente de sites"
+        );
+
+        // Rien de réglé : le défaut d'aujourd'hui, pas une erreur.
+        assert_eq!(db.user_ui_locale("claire").unwrap(), None);
+        assert_eq!(db.get_site("s-1").unwrap().report_locale, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn la_langue_du_rapport_se_regle_sur_le_site() {
+        // Le classeur part chez UN client : sa langue est une propriété du
+        // client, pas de l'employé qui appuie sur le bouton.
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        assert_eq!(site.report_locale, None, "un site neuf n'impose rien");
+
+        db.set_site_report_locale(&site.site_id, Some("es")).unwrap();
+        assert_eq!(
+            db.get_site(&site.site_id).unwrap().report_locale.as_deref(),
+            Some("es")
+        );
+        // La liste la porte aussi : l'écran des réglages la relit de là.
+        assert_eq!(
+            db.list_sites().unwrap()[0].report_locale.as_deref(),
+            Some("es")
+        );
+
+        // On peut revenir au défaut du hub — c'est un réglage, pas un aller
+        // simple.
+        db.set_site_report_locale(&site.site_id, None).unwrap();
+        assert_eq!(db.get_site(&site.site_id).unwrap().report_locale, None);
+    }
+
+    #[test]
+    fn la_langue_de_l_interface_suit_le_compte() {
+        // Changer de navigateur ne doit plus ramener l'anglais : la base fait
+        // foi, `localStorage` n'est qu'un cache.
+        let db = open_memory();
+        db.create_user("claire", "password123", Role::Operator)
+            .unwrap();
+        assert_eq!(db.user_ui_locale("claire").unwrap(), None);
+
+        db.set_user_ui_locale("claire", Some("fr")).unwrap();
+        assert_eq!(db.user_ui_locale("claire").unwrap().as_deref(), Some("fr"));
+
+        db.set_user_ui_locale("claire", None).unwrap();
+        assert_eq!(db.user_ui_locale("claire").unwrap(), None);
+    }
+
+    #[test]
+    fn regler_la_langue_d_un_compte_inconnu_ne_passe_pas_en_silence() {
+        // Un `UPDATE` qui ne touche aucune ligne rend `Ok` : sans ce test, une
+        // faute de frappe dans le nom du compte s'enregistrerait « avec
+        // succès » et le sélecteur reviendrait au défaut au rechargement.
+        let db = open_memory();
+        assert!(db.set_user_ui_locale("personne", Some("fr")).is_err());
+        assert!(db.set_site_report_locale("site-inconnu", Some("fr")).is_err());
     }
 
     #[test]
