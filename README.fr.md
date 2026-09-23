@@ -242,6 +242,32 @@ en avance sur ce binaire, et les migrations ne reviennent pas en arrière.
 
 ---
 
+## 🩺 Dépannage
+
+### 🔀 Derrière Traefik (ou tout reverse proxy)
+
+Derrière un reverse proxy le hub ne termine pas le TLS lui-même, et il **ne fait jamais confiance aux en-têtes transmis par défaut**. Deux symptômes en découlent, tous deux réglés dans *Réglages → Général*, sans redémarrage.
+
+**1. Le téléphone refuse l'appairage : « App Transport Security policy requires the use of a secure connection ».**
+Le QR d'appairage portait `hub=http://…`. Tant que le hub ne connaît pas son adresse publique, il compose l'invitation depuis l'en-tête `Host` et son propre schéma — `http` en clair derrière un proxy. iOS le refuse.
+→ Renseignez **URL publique du hub** (`hub_public_url`) avec l'adresse tapée dans le navigateur, par exemple `https://lanprobe.exemple.fr`, puis générez un **nouveau** code d'appairage : une invitation déjà affichée garde l'ancien schéma.
+Ce réglage décide aussi de l'adresse où les sondes écrivent leurs mesures (même hôte, port d'InfluxDB), sauf si `LANPROBE_WEB_INFLUX_ADVERTISE_URL` est posé — derrière un seul proxy sur le même hôte, c'est ce qu'on veut.
+
+**2. Tous les appareils appairés (et toutes les sondes) affichent l'adresse du proxy, par exemple `172.32.0.3`, au lieu de leur IP publique.**
+`X-Forwarded-For` est un en-tête écrit par le client : le hub ne le lit que depuis les proxies listés dans **Proxies de confiance** (`trusted_proxies`), et la liste est vide à l'installation — le hub note donc l'autre bout de la socket, votre proxy.
+→ Ajoutez le réseau du proxy en CIDR, séparés par des virgules s'il y en a plusieurs : pour Traefik sous Docker, le réseau Docker qu'il partage avec le hub, par exemple `172.32.0.0/16`. Les adresses se mettent à jour à la prochaine vue de chaque appareil.
+⚠️ Ne faites confiance qu'à ce que vous contrôlez. Traefik lui-même ne doit faire confiance qu'à son amont (pour Cloudflare, `entryPoints.<ep>.forwardedHeaders.trustedIPs` avec les plages Cloudflare), sinon n'importe qui forge l'adresse que le hub enregistre.
+
+Étiquettes Traefik minimales pour le conteneur du hub (TLS sur Traefik, HTTP en clair vers le hub) :
+
+```yaml
+labels:
+  - "traefik.http.routers.lanprobe.rule=Host(`lanprobe.exemple.fr`)"
+  - "traefik.http.routers.lanprobe.entrypoints=websecure"
+  - "traefik.http.routers.lanprobe.tls.certresolver=letsencrypt"
+  - "traefik.http.services.lanprobe.loadbalancer.server.port=8080"
+```
+
 ## 🔧 Compiler depuis les sources
 
 **Prérequis**

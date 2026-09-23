@@ -263,6 +263,32 @@ this binary, and migrations do not run backwards.
 
 ---
 
+## 🩺 Troubleshooting
+
+### 🔀 Behind Traefik (or any reverse proxy)
+
+The hub does not terminate TLS itself when it sits behind a reverse proxy, and it **never trusts forwarded headers by default**. Two symptoms follow from that, both fixed in *Settings → General* — no restart needed.
+
+**1. The phone refuses to pair: "App Transport Security policy requires the use of a secure connection".**
+The pairing QR carried `hub=http://…`. When the hub is not told its public address, it builds the pairing invite from the `Host` header and its own scheme — plain `http` behind a proxy. iOS rejects that.
+→ Set **Public hub URL** (`hub_public_url`) to the address users type in their browser, e.g. `https://lanprobe.example.com`, then generate a **new** pairing code: an invite already displayed keeps the old scheme.
+The setting also decides where probes write their measurements (same host, InfluxDB port), unless `LANPROBE_WEB_INFLUX_ADVERTISE_URL` is set — behind a single proxy on the same host, that is what you want.
+
+**2. Every paired device (and every probe) shows the proxy's address, e.g. `172.32.0.3`, instead of its public IP.**
+`X-Forwarded-For` is a client-written header: the hub only reads it from proxies listed in **Trusted proxies** (`trusted_proxies`), and the list is empty on a fresh install, so the hub records the socket peer — your proxy.
+→ Add the proxy's network in CIDR, comma-separated if several: for Traefik in Docker, the Docker network it shares with the hub, e.g. `172.32.0.0/16`. Addresses update at each device's next check-in.
+⚠️ Only trust what you control. Traefik itself should trust only its upstream (for Cloudflare, `entryPoints.<ep>.forwardedHeaders.trustedIPs` with the Cloudflare ranges), otherwise anyone can forge the address the hub records.
+
+Minimal Traefik labels for the hub container (TLS on Traefik, plain HTTP to the hub):
+
+```yaml
+labels:
+  - "traefik.http.routers.lanprobe.rule=Host(`lanprobe.example.com`)"
+  - "traefik.http.routers.lanprobe.entrypoints=websecure"
+  - "traefik.http.routers.lanprobe.tls.certresolver=letsencrypt"
+  - "traefik.http.services.lanprobe.loadbalancer.server.port=8080"
+```
+
 ## 🔧 Building from source
 
 **Prerequisites**
