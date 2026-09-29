@@ -87,6 +87,11 @@ pub fn start_from_hub(state: &AppState, ip: &str) {
         let mut map = state.ping_stop.lock().unwrap_or_else(|p| p.into_inner());
         map.insert(ip.to_string(), false);
     }
+    // ⚠️ La fenêtre n'apprend l'état des surveillances que par les événements :
+    // sans celui-ci, une cible ajoutée depuis le hub n'apparaissait qu'au
+    // redémarrage de l'app. Émis ici et pas plus haut : la sortie anticipée
+    // ci-dessus veut dire « rien n'a changé », et un événement l'annoncerait.
+    state.emit("monitor:started", serde_json::json!({ "ip": ip }));
     let state = state.clone();
     let ip = ip.to_string();
     tokio::spawn(async move {
@@ -146,6 +151,12 @@ pub fn stop_from_hub(state: &AppState, ip: &str) {
         map.insert(ip.to_string(), true);
     }
     state.monitoring.clear_ip(ip);
+    // 🔴 Purger l'historique ne suffit PAS à faire partir la ligne : la
+    // fenêtre garde en mémoire ce qu'elle a déjà reçu, et ne relit
+    // l'instantané qu'au démarrage. Constaté le 29/09 — une cible retirée
+    // depuis le téléphone n'était plus pinguée, mais restait affichée avec ses
+    // derniers chiffres jusqu'au redémarrage de l'app.
+    state.emit("monitor:stopped", serde_json::json!({ "ip": ip }));
 }
 
 #[cfg(test)]
@@ -164,6 +175,54 @@ mod tests {
                 std::process::id()
             )),
         )))
+    }
+
+    /// Les événements vus depuis l'abonnement, sous la forme `(nom, ip)`.
+    fn drained(rx: &mut tokio::sync::broadcast::Receiver<crate::state::BroadcastEvent>) -> Vec<(String, String)> {
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push((
+                event.event.clone(),
+                event.payload["ip"].as_str().unwrap_or_default().to_string(),
+            ));
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn a_removal_decided_by_the_hub_is_announced_to_the_window() {
+        // 🔴 Le défaut que ça corrige, constaté le 29/09 sur le Mac de
+        // Benjamin : une cible retirée depuis le téléphone cessait bien d'être
+        // pinguée — la sonde l'annonçait au hub — mais sa ligne RESTAIT à
+        // l'écran avec ses derniers chiffres, jusqu'au redémarrage de l'app.
+        // La fenêtre n'apprend l'état des surveillances que par ces
+        // événements ; sans celui-ci, elle affichait une mesure qui n'existait
+        // plus.
+        let state = state("retrait-du-hub");
+        let mut events = state.events.subscribe();
+        // 192.0.2.0/24 est le réseau de documentation : aucun paquet n'a de
+        // destinataire, et la boucle n'a rien à mesurer.
+        start_from_hub(&state, "192.0.2.7");
+        stop_from_hub(&state, "192.0.2.7");
+        let seen = drained(&mut events);
+        assert!(
+            seen.contains(&("monitor:stopped".to_string(), "192.0.2.7".to_string())),
+            "le retrait n'a rien annoncé : {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_addition_decided_by_the_hub_is_announced_to_the_window() {
+        // Le même défaut, à l'envers : une cible ajoutée depuis le téléphone
+        // n'apparaissait dans la fenêtre qu'au redémarrage.
+        let state = state("ajout-du-hub");
+        let mut events = state.events.subscribe();
+        start_from_hub(&state, "192.0.2.8");
+        let seen = drained(&mut events);
+        assert!(
+            seen.contains(&("monitor:started".to_string(), "192.0.2.8".to_string())),
+            "l'ajout n'a rien annoncé : {seen:?}"
+        );
     }
 
     #[tokio::test]

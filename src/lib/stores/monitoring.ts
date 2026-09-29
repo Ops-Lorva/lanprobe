@@ -22,6 +22,8 @@ function createMonitoringStore() {
   // les ticks en arrière-plan n'arrivaient plus jamais si on quittait la page.
   let initPromise: Promise<void> | null = null;
   let tickUnlisten: UnlistenFn | null = null;
+  let startedUnlisten: UnlistenFn | null = null;
+  let stoppedUnlisten: UnlistenFn | null = null;
 
   // Hôtes récemment supprimés : on ignore les ticks « en vol » qui arrivent
   // juste après le stop (le backend peut émettre un dernier tick si le stop
@@ -50,12 +52,37 @@ function createMonitoringStore() {
     });
   };
 
+  const addHost = (ip: string) => update(map => {
+    tombstones.delete(ip); // (ré)ajout explicite → on lève le tombstone
+    if (!map.has(ip)) map.set(ip, { ip, current: null, history: [] });
+    return new Map(map);
+  });
+
+  const removeHost = (ip: string) => update(map => {
+    tombstones.set(ip, Date.now() + TOMBSTONE_MS);
+    map.delete(ip);
+    return new Map(map);
+  });
+
   async function init() {
     if (initPromise) return initPromise;
     initPromise = (async () => {
       tickUnlisten = await listen<{ ip: string; alive: boolean; latency_ms: number | null; timestamp: number }>(
         'ping:tick',
         ({ payload: p }) => record(p.ip, p.alive, p.latency_ms, p.timestamp)
+      );
+      // 🔴 Les surveillances décidées AILLEURS — depuis le hub, donc depuis le
+      // téléphone. Sans ces deux écoutes, une cible retirée restait affichée
+      // avec ses derniers chiffres jusqu'au redémarrage de l'app : la sonde ne
+      // la pinguait plus, l'écran disait encore le contraire. Constaté le
+      // 29/09. Une cible ajoutée, elle, n'apparaissait pas du tout.
+      startedUnlisten = await listen<{ ip: string }>(
+        'monitor:started',
+        ({ payload: p }) => addHost(p.ip)
+      );
+      stoppedUnlisten = await listen<{ ip: string }>(
+        'monitor:stopped',
+        ({ payload: p }) => removeHost(p.ip)
       );
       // Hydratation : on récupère l'historique déjà en place côté backend
       // (pour le cas d'un client web qui se connecte alors que des
@@ -93,21 +120,17 @@ function createMonitoringStore() {
   return {
     subscribe,
     init,
-    addHost: (ip: string) => update(map => {
-      tombstones.delete(ip); // (ré)ajout explicite → on lève le tombstone
-      if (!map.has(ip)) map.set(ip, { ip, current: null, history: [] });
-      return new Map(map);
-    }),
-    removeHost: (ip: string) => update(map => {
-      tombstones.set(ip, Date.now() + TOMBSTONE_MS);
-      map.delete(ip);
-      return new Map(map);
-    }),
+    addHost,
+    removeHost,
     record,
     // Pour le hot reload dev seulement — jamais appelé en prod.
     _teardown: () => {
       tickUnlisten?.();
+      startedUnlisten?.();
+      stoppedUnlisten?.();
       tickUnlisten = null;
+      startedUnlisten = null;
+      stoppedUnlisten = null;
       initPromise = null;
     },
   };
