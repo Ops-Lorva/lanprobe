@@ -114,7 +114,9 @@
     "ctx": {
       "scan_ports": "🔍 Escanear puertos (TCP + UDP)",
       "add_ping": "📡 Añadir al Monitor Ping"
-    }
+    },
+    "search": "Dirección, nombre, MAC…",
+    "no_match": "Ninguna máquina coincide."
   },
   "profiles": {
     "title": "Perfiles de red",

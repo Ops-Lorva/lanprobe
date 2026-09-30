@@ -11,10 +11,13 @@
   import { monitoring } from '../stores/monitoring';
   import { selectedInterface } from '../stores/selectedInterface';
   import SchedulerControl from './SchedulerControl.svelte';
+  import { matchingHosts } from '../discovery-search';
 
   // L'état vit dans le store — persiste pendant toute la session même si on change de page
   let cidr = $state('');
   let detecting = $state(false);
+  /** Ce qu'on cherche dans la liste déjà trouvée. Aucun paquet n'en part. */
+  let search = $state('');
 
   const found = $derived(
     Array.from($discoveryStore.results.values()).sort((a, b) => {
@@ -22,6 +25,9 @@
       return toNum(a.ip) - toNum(b.ip);
     })
   );
+
+  /** La liste réduite à ce qu'on cherche — IP, nom, MAC (ponctuation ignorée) ou constructeur. */
+  const shown = $derived(matchingHosts(found, search));
 
   let unlistenHost: (() => void) | null = null;
   let unlistenLatency: (() => void) | null = null;
@@ -175,6 +181,16 @@
       {/if}
       <SchedulerControl field="discovery_interval_min" />
     </div>
+    {#if found.length > 0}
+      <div class="scan-row">
+        <input
+          class="cidr-input"
+          bind:value={search}
+          placeholder={$_('discovery.search')}
+          aria-label={$_('discovery.search')}
+        />
+      </div>
+    {/if}
   </div>
 
   {#if $discoveryStore.error}
@@ -187,7 +203,7 @@
         <tr><th>{$_('discovery.table.ip')}</th><th>{$_('discovery.table.hostname')}</th><th>{$_('discovery.table.mac')}</th><th>{$_('discovery.table.latency')}</th><th class="col-actions">{$_('discovery.table.actions')}</th></tr>
       </thead>
       <tbody>
-        {#each found as h (h.ip)}
+        {#each shown as h (h.ip)}
           <tr class="host-row" oncontextmenu={(e) => openContextMenu(e, h.ip)}>
             <td class="mono">{h.ip}</td>
             <td class="secondary">{h.hostname ?? '—'}</td>
@@ -210,6 +226,11 @@
         {/each}
       </tbody>
     </table>
+    {#if shown.length === 0}
+      <!-- ⚠️ « Rien ne correspond » n'est pas « rien trouvé » : le scan, lui,
+           a vu des machines. Les confondre ferait relancer un balayage. -->
+      <div class="secondary">{$_('discovery.no_match')}</div>
+    {/if}
   {:else if !$discoveryStore.scanning}
     <div class="placeholder">{$_('discovery.empty')}</div>
   {/if}
