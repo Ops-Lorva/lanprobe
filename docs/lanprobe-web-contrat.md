@@ -2972,3 +2972,157 @@ périme et devient un mensonge.
 ⚠️ **Aucun lien vers l'App Store tant qu'elle n'y est pas.** Un lien mort est
 pire que pas de lien : il envoie chercher une application qui n'existe pas et
 fait douter du reste de l'écran.
+
+## 25. Profils de scan de ports partagés
+
+Spécification d'origine : `docs/specs/2026-10-01-profils-de-scan-partages.md`,
+qui porte les décisions et les raisons. Cette section ne dit que ce qui est
+**branché**, et c'est elle qui fait foi pour qui écrit du code.
+
+Avant : **quatre profils en dur** dans l'interface du hub, aucune base, aucun
+écran d'édition — et de vrais profils modifiables côté sonde, invisibles du hub.
+
+### Le hub fait autorité, et la suppression est un FAIT daté
+
+⚠️ Même règle qu'au § 20 : **une suppression est écrite, jamais déduite d'une
+absence**. Sans `deleted_at`, la première sonde qui n'a pas encore battu
+recréerait le profil au battement suivant.
+
+```sql
+CREATE TABLE portscan_profiles (
+  profile_id   TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  ports        TEXT NOT NULL,   -- JSON [22,80,443]. Vide = la sonde garde sa liste
+  origin_probe TEXT REFERENCES probes(probe_id),  -- NULL = créé sur le hub
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  deleted_at   INTEGER,
+  rev          INTEGER NOT NULL  -- révision qui a produit cette ligne
+);
+-- + probes.last_profiles_rev / last_profiles_rev_at : ce que chaque sonde a appliqué
+```
+
+⚠️ `ports` vide **n'est pas** une liste vide envoyée à la sonde : c'est « la
+sonde garde la sienne ». La sonde traite déjà `[]` comme une absence, et
+confondre les deux ferait un **scan complet** là où on croyait restreindre.
+
+⚠️ `origin_probe` est une **trace**, pas un droit : la sonde qui a créé un
+profil n'a aucune autorité dessus.
+
+### Routes
+
+| Route | Rôle | Effet |
+|---|---|---|
+| `GET /api/portscan-profiles` | `viewer` | la liste, supprimés exclus |
+| `POST /api/portscan-profiles` | `operator` | crée — `409` si le nom existe |
+| `PATCH /api/portscan-profiles/{id}` | `operator` | renomme / change les ports |
+| `DELETE /api/portscan-profiles/{id}` | `operator` | pose `deleted_at`, **ne supprime aucune ligne** |
+
+Portée : **le hub entier** (décision 4). Un profil de scan n'est pas privé,
+contrairement au profil RÉSEAU, qui décrit un site et reste sur la sonde — ces
+routes ne passent donc par aucune garde de portée.
+
+Les ports sont **triés et dédoublonnés** à l'écriture : le nombre de ports
+annoncé à l'écran serait faux sinon, et deux profils identiques à l'ordre près
+se liraient comme deux profils différents.
+
+### Au battement : une révision, pas une liste
+
+Le hub tient un **compteur de révision**, incrémenté à chaque création,
+modification ou suppression. La sonde annonce `profiles_rev` — la dernière
+révision qu'elle a **appliquée** — et le hub répond :
+
+| Cas | Réponse |
+|---|---|
+| à jour | **le champ est omis**, et ça ne coûte rien |
+| en retard | `portscan_profiles` = le **delta**, pierres tombales comprises, + `portscan_profiles_rev` |
+| révision inconnue, trop ancienne, ou **supérieure à celle du hub** | la liste complète + `portscan_profiles_replace: true` |
+
+```json
+"portscan_profiles": [
+  { "profile_id": "web", "name": "Web", "ports": [80,443], "deleted_at": null },
+  { "profile_id": "x7", "name": "Caméras", "ports": [554], "deleted_at": 1790000000 }
+],
+"portscan_profiles_rev": 12,
+"portscan_profiles_replace": false
+```
+
+🔴 **Le numéro de révision n'est PAS une date.** Il vient du hub, la sonde le
+range et le rend tel quel : aucune horloge n'entre dans l'affaire. C'est la même
+raison qu'au § 20, où la file voyage en **ancienneté** et non en horodatage —
+les deux machines ne partageront jamais la même heure.
+
+⚠️ **La sonde ne range la révision qu'APRÈS avoir écrit la liste.** Dans l'autre
+ordre, une écriture ratée laisserait une sonde qui se croit à jour : le hub ne
+lui enverrait plus jamais ce delta, et sa liste gèlerait sans que rien ne le
+dise.
+
+⚠️ Une sonde qui ne reçoit **pas** le champ ne touche à rien — hub plus ancien,
+ou simplement « tu es à jour ». **Pas de champ ≠ liste vide**, sinon la première
+sonde à parler à un vieux hub perdrait tous ses profils.
+
+⚠️ Et elle ne supprime **jamais** un profil au motif qu'il est absent de la
+liste reçue : c'est peut-être celui qu'elle vient de créer, parti au même
+battement et pas encore ingéré. Sans cette règle, tout profil créé localement
+disparaîtrait une minute après sa création.
+
+### Montée depuis les sondes
+
+La configuration remontée (§ 16) porte déjà les profils. Le hub **ignore** ceux
+qu'il connaît — il fait autorité — **ignore** ceux qu'il a supprimés, sinon la
+suppression se ferait annuler par la première sonde qui n'a pas encore battu, et
+**ingère** les inconnus avec `origin_probe` = cette sonde.
+
+⚠️ **Le hub ne modélise pas les ports UDP**, la sonde si. Un profil ingéré garde
+donc ses ports TCP dans `ports`, et la sonde **conserve sa liste UDP** quand le
+hub lui réécrit un profil. C'est le seul écart assumé au « elle l'écrit tel
+quel » : le hub ne peut pas faire autorité sur un champ qu'il n'a pas, et
+l'écraser détruirait un réglage que rien ne pourrait reconstituer.
+
+### Quand une pierre tombale peut partir
+
+Le hub connaît la révision de **chaque** sonde : une suppression dont la
+révision est inférieure à la **plus petite du parc** n'a plus rien à apprendre à
+personne, et la ligne s'en va.
+
+⚠️ Les sondes **révoquées ou archivées** ne comptent pas dans ce minimum : une
+machine partie à la benne bloquerait le nettoyage pour toujours.
+
+⚠️ Une sonde simplement **éteinte** compte, et c'est voulu : le jour où elle
+revient, elle doit apprendre les suppressions. Garde-fou : une révision plus
+vieille que **90 jours** cesse de retenir le nettoyage, et la sonde qui revient
+après ça reçoit la **liste complète** plutôt qu'un delta incomplet. Le hub
+retient pour ça le **seuil de purge** (`portscan_purged_below_rev`) : une sonde
+qui annonce moins que lui ne peut plus recevoir de delta honnête.
+
+### 🔴 Le risque n'est pas le débordement, c'est le RECUL
+
+`INTEGER` SQLite est signé sur 64 bits : un changement par seconde pendant un
+siècle en consomme trois milliardièmes. **Aucune remise à zéro à écrire** — ce
+serait elle, le danger.
+
+Une base **restaurée** revient en arrière alors que les sondes ont gardé leur
+révision. Une sonde à 42 face à un hub revenu à 38 n'apprendrait plus jamais
+rien : le hub lui répondrait « tu es à jour » pour toujours. Deux gardes :
+
+1. **au démarrage**, le compteur est relevé à `max(compteur, plus grande
+   révision en table)` ;
+2. une sonde qui annonce une révision **supérieure** à celle du hub est traitée
+   comme inconnue et reçoit la liste complète. Le cas se répare de lui-même au
+   premier battement.
+
+### Migration des quatre profils en dur
+
+`common` (ports vides), `web`, `infra`, `db` deviennent les quatre premières
+lignes, posées **au premier démarrage de cette version** et jamais reposées
+ensuite — les reposer ressusciterait un profil supprimé exprès. ⚠️ `infra`
+répétait `161` dans le code du hub : la ligne posée en base est triée et
+dédoublonnée.
+
+### Côté sonde, sans hub
+
+L'écran de scan de ports de la sonde continue de marcher **seul** : ses profils
+de base sont dans son code, ils ne montent pas et ne descendent pas. Un profil
+venu du hub est marqué comme tel et l'écran **le dit** — l'éditer localement
+tiendrait jusqu'au battement suivant, et laisser croire le contraire serait un
+mensonge d'interface (§ 18).
