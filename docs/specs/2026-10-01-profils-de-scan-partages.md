@@ -119,6 +119,49 @@ Faire porter la suppression par la **liste elle-même** (`deleted_at` présent d
 la réponse) supprime la question : la sonde n'a aucune date à tenir, aucune
 dérive à subir, et le même battement rejoué deux fois donne le même résultat.
 
+## Alléger le battement : une révision, pas une liste
+
+Objection de Benjamin (30/09) : « on ne va pas faire voyager 40 profils
+supprimés à chaque fois ». Exact — et une pierre tombale qui vit pour toujours
+est une fuite lente.
+
+Le hub tient un **compteur de révision**, incrémenté à chaque création,
+modification ou suppression de profil. Chaque ligne porte la révision qui l'a
+produite.
+
+```sql
+ALTER TABLE portscan_profiles ADD COLUMN rev INTEGER NOT NULL;   -- révision de ce changement
+-- + une ligne par sonde : last_profiles_rev, écrite quand elle accuse
+```
+
+Au battement, la sonde envoie la dernière révision qu'elle a appliquée
+(`profiles_rev`) ; le hub répond :
+
+| Cas | Réponse |
+|---|---|
+| à jour | **rien** — c'est le cas courant, et il ne coûte rien |
+| en retard, historique encore là | **le delta** : seulement les lignes de révision supérieure, pierres tombales comprises |
+| révision inconnue ou trop ancienne | **la liste complète**, avec un drapeau « remplace tout » |
+
+🔴 **Le numéro de révision n'est PAS une date.** Il vient du hub, la sonde le
+range et le rend tel quel : aucune horloge n'entre dans l'affaire, et deux
+machines qui ne seront jamais d'accord sur l'heure n'ont rien à arbitrer.
+
+### Quand une pierre tombale peut partir
+
+Le hub connaît la révision de **chaque** sonde : il peut donc effacer pour de
+bon une suppression dont la révision est inférieure à la **plus petite révision
+du parc**. Plus personne n'a besoin de l'apprendre, elle n'a plus rien à dire.
+
+⚠️ Les sondes **révoquées ou archivées** ne comptent pas dans ce minimum : une
+machine partie à la benne bloquerait le nettoyage pour toujours.
+
+⚠️ Une sonde simplement éteinte depuis des mois, elle, compte — et c'est voulu :
+le jour où elle revient, elle doit apprendre les suppressions. Garde-fou : une
+révision plus vieille que **90 jours** cesse de retenir le nettoyage, et la
+sonde qui revient après ça reçoit la **liste complète** plutôt qu'un delta. Elle
+repart juste.
+
 ## Migration
 
 Les quatre profils en dur deviennent les quatre premières lignes, posées au
