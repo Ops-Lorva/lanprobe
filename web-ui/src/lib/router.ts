@@ -24,6 +24,11 @@ export const SETTINGS_TABS = [
   'realtime',
   'alerts',
   'storage',
+  // Les profils de scan de ports, partagés par tout le hub (contrat § 25).
+  // Ils vivent dans les Réglages et non sur la fiche d'une sonde : ils ne sont
+  // à aucune sonde en particulier, et les éditer depuis l'une d'elles ferait
+  // croire le contraire.
+  'portscan',
   'backups',
   'accounts',
 ] as const;

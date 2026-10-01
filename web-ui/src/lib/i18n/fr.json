@@ -23,6 +23,23 @@
     "saving": "Enregistrement…",
     "forbidden_title": "Réservé à l'administrateur"
   },
+  "portscan": {
+    "title": "Profils de scan de ports",
+    "intro": "Partagés par tout le hub : ce ne sont que des listes de ports, rien n'y appartient à un client. Les sondes les reçoivent à leur prochain battement.",
+    "name": "Nom",
+    "ports": "Ports",
+    "ports_placeholder": "80, 443, 8080",
+    "probe_default": "Liste de la sonde",
+    "count": "{n, plural, one {# port} other {# ports}}",
+    "add": "Ajouter",
+    "edit": "Modifier",
+    "delete": "Supprimer",
+    "empty": "Aucun profil. Un scan lancé sans profil emploie la liste de la sonde.",
+    "load_error": "Les profils n'ont pas pu être chargés",
+    "from_probe": "Venu d'une sonde",
+    "from_probe_hint": "Créé sur une sonde, puis remonté. La sonde n'a aucune autorité dessus : c'est le hub qui décide.",
+    "applies_next_beat": "Écrit côté hub. Chaque sonde s'aligne à son prochain battement — le hub ne les contacte jamais."
+  },
   "settings": {
     "title": "Réglages",
     "loading": "Lecture des réglages…",
@@ -128,6 +145,7 @@
     "tab_storage": "Stockage",
     "tab_measures": "Mesures",
     "tab_backups": "Sauvegardes",
+    "tab_portscan": "Profils de scan",
     "tab_dirty": "Modifications non enregistrées dans cet onglet.",
     "destructive_zone": "Zone destructive",
     "retention_lead": "Combien de temps InfluxDB garde les mesures avant de les effacer. C'est le seul réglage de cet écran qui supprime des données.",

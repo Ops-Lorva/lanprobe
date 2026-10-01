@@ -23,6 +23,23 @@
     "saving": "Saving…",
     "forbidden_title": "Administrators only"
   },
+  "portscan": {
+    "title": "Port scan profiles",
+    "intro": "Shared across the whole hub: these are only lists of ports, nothing here belongs to one customer. Probes receive them at their next heartbeat.",
+    "name": "Name",
+    "ports": "Ports",
+    "ports_placeholder": "80, 443, 8080",
+    "probe_default": "Probe's own list",
+    "count": "{n, plural, one {# port} other {# ports}}",
+    "add": "Add",
+    "edit": "Edit",
+    "delete": "Delete",
+    "empty": "No profile. A scan started without one uses the probe's own list.",
+    "load_error": "Profiles could not be loaded",
+    "from_probe": "From a probe",
+    "from_probe_hint": "Created on a probe, then reported. The probe has no authority over it: the hub decides.",
+    "applies_next_beat": "Written on the hub. Each probe aligns at its next heartbeat — the hub never contacts them."
+  },
   "settings": {
     "title": "Settings",
     "loading": "Reading settings…",
@@ -128,6 +145,7 @@
     "tab_storage": "Storage",
     "tab_measures": "Measurements",
     "tab_backups": "Backups",
+    "tab_portscan": "Scan profiles",
     "tab_dirty": "Unsaved changes in this tab.",
     "destructive_zone": "Destructive zone",
     "retention_lead": "How long InfluxDB keeps measurements before erasing them. It is the only setting on this screen that deletes data.",

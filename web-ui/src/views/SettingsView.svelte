@@ -19,6 +19,7 @@
   import LangTheme from '$lib/components/LangTheme.svelte';
   import BackupPanel from '$lib/components/BackupPanel.svelte';
   import RestoreCard from '$lib/components/RestoreCard.svelte';
+  import PortscanProfilesPanel from '$lib/components/PortscanProfilesPanel.svelte';
   import AccountsView from './AccountsView.svelte';
   import NotificationsView from './NotificationsView.svelte';
   import { go, route, type SettingsTab } from '$lib/router';
@@ -715,6 +716,9 @@
     // Deux onglets et non deux cartes : la base de mesures et la politique
     // d'archivage ne se consultent ni au même moment ni pour la même raison.
     { id: 'storage', key: 'settings.tab_measures' },
+    // Partagés par tout le hub, donc ici et pas sur la fiche d'une sonde : les
+    // éditer depuis l'une d'elles ferait croire qu'ils lui appartiennent.
+    { id: 'portscan', key: 'settings.tab_portscan' },
     { id: 'backups', key: 'settings.tab_backups', admin: true },
     { id: 'accounts', key: 'settings.tab_accounts', admin: true },
   ];
@@ -769,6 +773,7 @@
     // Chaque geste s'y applique seul, rien n'y attend « Enregistrer ».
     alerts: false,
     accounts: false,
+    portscan: false,
   });
 
   /**
@@ -1575,6 +1580,12 @@
   {:else if tab === 'accounts'}
   <div class="cards" role="tabpanel" id="panel-accounts" aria-labelledby="tab-accounts" tabindex="-1">
     <AccountsView {onExpired} />
+  </div>
+  {:else if tab === 'portscan'}
+  <div class="cards" role="tabpanel" id="panel-portscan" aria-labelledby="tab-portscan" tabindex="-1">
+    <!-- La liste se lit dès `viewer`, l'édition est réservée à `operator` :
+         le panneau s'en charge lui-même, comme celui des alertes. -->
+    <PortscanProfilesPanel {onExpired} />
   </div>
   {:else if tab === 'storage'}
   <div class="cards" role="tabpanel" id="panel-storage" aria-labelledby="tab-storage" tabindex="-1">

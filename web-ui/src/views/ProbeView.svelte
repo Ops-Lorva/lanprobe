@@ -20,10 +20,12 @@
   import {
     api,
     ApiError,
+    type PortscanProfile,
     type ProbeCommand,
     type Scan,
     type SpeedtestRow,
   } from '$lib/api';
+  import { portScanArgs, profileLabel } from '$lib/portscan-profiles';
   import {
     MEASUREMENT,
     MetricsShapeError,
@@ -717,7 +719,12 @@
     const current = tab;
     void id;
     untrack(() => {
-      if (current === 'ports') void loadInventory('ports');
+      if (current === 'ports') {
+        void loadInventory('ports');
+        // Rechargés à l'ouverture de l'onglet : un profil créé depuis l'écran
+        // d'administration doit apparaître sans recharger la page.
+        void loadPortProfiles();
+      }
       else if (current === 'discovery') void loadInventory('discovery');
       else if (current === 'speedtest') void loadInventory('speedtest');
       if (current === 'commands') void loadCommands();
@@ -864,20 +871,38 @@
   }
 
   /**
-   * Profils de scan, résolus ICI et envoyés en liste de ports.
+   * Profils de scan, **tenus par le hub** et partagés par tout le parc
+   * (contrat § 25). Ils étaient quatre, en dur, dans ce fichier : ni base, ni
+   * écran d'édition, et la sonde avait les siens de son côté sans que personne
+   * ne les voie.
    *
-   * ⚠️ La sonde ne connaît pas les noms de profils : lui faire connaître
-   * « common » ou « web » obligerait à la mettre à jour pour en ajouter un.
-   * Elle reçoit des ports, l'interface décide lesquels.
+   * ⚠️ La sonde ne connaît toujours AUCUN nom de profil : lui faire connaître
+   * « web » obligerait à mettre à jour toutes les sondes pour en ajouter un.
+   * Elle reçoit des ports, l'interface décide lesquels — `portScanArgs`, qui
+   * porte la règle du profil sans ports et ses tests.
    */
-  const PORT_PROFILES: Record<string, number[] | null> = {
-    // `null` = la liste par défaut de la sonde.
-    common: null,
-    web: [80, 443, 8080, 8443, 8000, 8888, 3000, 5000],
-    infra: [22, 23, 53, 123, 161, 389, 636, 3389, 5900, 161],
-    db: [1433, 1521, 3306, 5432, 6379, 9200, 27017, 5984],
-  };
-  let portProfile = $state<keyof typeof PORT_PROFILES>('common');
+  let portProfiles = $state<PortscanProfile[]>([]);
+  let portProfile = $state('');
+  const activeProfile = $derived(
+    portProfiles.find((p) => p.profile_id === portProfile) ?? portProfiles[0],
+  );
+
+  async function loadPortProfiles() {
+    try {
+      portProfiles = (await api.portscanProfiles()).profiles;
+      // Le premier par défaut : la liste est triée par nom et ne peut pas
+      // être vide en pratique. Un profil disparu — supprimé par un collègue —
+      // ne doit pas laisser une sélection fantôme.
+      if (!portProfiles.some((p) => p.profile_id === portProfile)) {
+        portProfile = portProfiles[0]?.profile_id ?? '';
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      // ⚠️ Muet, et le bouton de scan reste : sans profil, la commande part
+      // sans liste de ports, et la sonde emploie la sienne. Un écran bloqué
+      // parce qu'une liste de confort n'a pas chargé serait pire.
+    }
+  }
 
   /** IP dont les ports sont dépliés. Une seule à la fois : la liste est longue. */
   let openHost = $state('');
@@ -2328,18 +2353,15 @@
                   autocomplete="off"
                 />
                 <select class="lp-input narrow" bind:value={portProfile}>
-                  {#each Object.keys(PORT_PROFILES) as p (p)}
-                    <option value={p}>{$_(`probe.profile_${p}`)}</option>
+                  {#each portProfiles as p (p.profile_id)}
+                    <option value={p.profile_id}>{profileLabel(p, $_)}</option>
                   {/each}
                 </select>
                 {#if newTarget.trim()}
                   <CommandButton
                     probeId={id}
                     kind="port_scan"
-                    args={{
-                      ip: newTarget.trim(),
-                      ...(PORT_PROFILES[portProfile] ? { ports: PORT_PROFILES[portProfile] } : {}),
-                    }}
+                    args={portScanArgs(newTarget.trim(), activeProfile)}
                     label={$_('probe.ports_run')}
                     allowed={$canOperate}
                     onsent={afterCommand}

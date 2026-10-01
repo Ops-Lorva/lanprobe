@@ -23,6 +23,23 @@
     "saving": "Guardando…",
     "forbidden_title": "Solo administradores"
   },
+  "portscan": {
+    "title": "Perfiles de escaneo de puertos",
+    "intro": "Compartidos por todo el hub: solo son listas de puertos, nada de lo que llevan pertenece a un cliente. Las sondas los reciben en su próximo latido.",
+    "name": "Nombre",
+    "ports": "Puertos",
+    "ports_placeholder": "80, 443, 8080",
+    "probe_default": "Lista de la sonda",
+    "count": "{n, plural, one {# puerto} other {# puertos}}",
+    "add": "Añadir",
+    "edit": "Editar",
+    "delete": "Eliminar",
+    "empty": "Ningún perfil. Un escaneo lanzado sin perfil usa la lista de la sonda.",
+    "load_error": "No se pudieron cargar los perfiles",
+    "from_probe": "Viene de una sonda",
+    "from_probe_hint": "Creado en una sonda y luego reportado. La sonda no tiene autoridad sobre él: decide el hub.",
+    "applies_next_beat": "Escrito en el hub. Cada sonda se alinea en su próximo latido — el hub nunca las contacta."
+  },
   "settings": {
     "title": "Ajustes",
     "loading": "Leyendo los ajustes…",
@@ -128,6 +145,7 @@
     "tab_storage": "Almacenamiento",
     "tab_measures": "Mediciones",
     "tab_backups": "Copias de seguridad",
+    "tab_portscan": "Perfiles de escaneo",
     "tab_dirty": "Cambios sin guardar en esta pestaña.",
     "destructive_zone": "Zona destructiva",
     "retention_lead": "Cuánto tiempo conserva InfluxDB las mediciones antes de borrarlas. Es el único ajuste de esta pantalla que borra datos.",

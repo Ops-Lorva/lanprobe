@@ -483,4 +483,39 @@ describe('catalogues de traduction', () => {
       expect(REQUISES_RAPPORTS_HUB.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+  // Profils de scan de ports partagés (contrat § 25). L'écran d'administration
+  // les crée, les renomme et les supprime ; l'onglet « Ports » d'une fiche les
+  // emploie.
+  //
+  // ⚠️ `portscan.probe_default` n'est pas décoratif : c'est lui qui dit qu'un
+  // profil SANS ports laisse la sonde employer la sienne. Afficher « 0 port »
+  // ferait croire à un profil qui ne scanne rien, et on chercherait longtemps
+  // pourquoi le scan en remonte trois cents.
+  const REQUISES_PROFILS_DE_SCAN = [
+    'settings.tab_portscan',
+    'portscan.title',
+    'portscan.intro',
+    'portscan.name',
+    'portscan.ports',
+    'portscan.ports_placeholder',
+    'portscan.probe_default',
+    'portscan.count',
+    'portscan.add',
+    'portscan.edit',
+    'portscan.delete',
+    'portscan.empty',
+    'portscan.load_error',
+    'portscan.from_probe',
+    'portscan.from_probe_hint',
+    // ⚠️ Le hub ne joint JAMAIS une sonde : l'écran dit « c'est écrit, les
+    // sondes suivront », jamais « c'est appliqué ».
+    'portscan.applies_next_beat',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés des profils de scan`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_PROFILS_DE_SCAN.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });

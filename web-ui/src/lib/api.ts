@@ -508,6 +508,33 @@ export interface MonitorEntry {
   last_change_at: number;
 }
 
+/**
+ * Un profil de scan de ports partagé par tout le hub (contrat § 25).
+ *
+ * ⚠️ **`ports` vide n'est pas une liste vide envoyée à la sonde** : c'est « la
+ * sonde garde la sienne ». La sonde traite une liste vide comme une absence de
+ * restriction, et confondre les deux ferait un scan complet là où on croyait
+ * restreindre. `portScanArgs` est le seul endroit qui construit la commande.
+ */
+export interface PortscanProfile {
+  profile_id: string;
+  name: string;
+  ports: number[];
+  /**
+   * La sonde qui l'a créé, `null` quand il vient du hub.
+   *
+   * ⚠️ Une **trace**, pas un droit : elle répond « d'où sort celui-là » et ne
+   * donne aucune autorité à la sonde.
+   */
+  origin_probe: string | null;
+  created_at: number;
+  updated_at: number;
+  /** Non nul = supprimé. La liste de cette route les exclut déjà. */
+  deleted_at: number | null;
+  /** La révision qui a produit la ligne — un compteur du hub, pas une date. */
+  rev: number;
+}
+
 export interface ScanHost {
   ip: string;
   hostname?: string | null;
@@ -1078,6 +1105,48 @@ export const api = {
       `/api/probes/${encodeURIComponent(id)}/monitors/remove`,
       { method: 'POST', body: JSON.stringify({ target }) },
     ),
+
+  // ── Profils de scan de ports (contrat § 25) ────────────────────────────
+
+  /**
+   * La liste partagée par tout le hub, supprimés exclus.
+   *
+   * ⚠️ Elle n'est **pas** par site : un profil de scan est une liste de ports,
+   * rien de ce qu'il porte n'appartient à un client. C'est le profil RÉSEAU,
+   * lui, qui décrit un site et reste sur la sonde.
+   */
+  portscanProfiles: () =>
+    request<{ profiles: PortscanProfile[]; rev: number }>('/api/portscan-profiles'),
+
+  /** `ports` vide = « la sonde garde sa liste ». */
+  createPortscanProfile: (name: string, ports: number[]) =>
+    request<PortscanProfile>('/api/portscan-profiles', {
+      method: 'POST',
+      body: JSON.stringify({ name, ports }),
+    }),
+
+  /**
+   * ⚠️ **Un champ omis n'est pas modifié.** `JSON.stringify` retire les clés
+   * `undefined` : renommer n'efface donc pas les ports au passage.
+   */
+  updatePortscanProfile: (id: string, name?: string, ports?: number[]) =>
+    request<PortscanProfile>(`/api/portscan-profiles/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name, ports }),
+    }),
+
+  /**
+   * Pose une date de suppression. **Aucune ligne n'est retirée** : c'est elle
+   * qui dira aux sondes de retirer le profil, et sans elle « supprimé » serait
+   * indiscernable de « jamais connu ».
+   *
+   * ⚠️ Le hub ne joint jamais la sonde : elle s'alignera à son prochain
+   * battement. L'écran doit le formuler ainsi.
+   */
+  deletePortscanProfile: (id: string) =>
+    request<{ ok: boolean }>(`/api/portscan-profiles/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 
   /**
    * Réactive une surveillance retirée. **Réactiver, c'est effacer la
