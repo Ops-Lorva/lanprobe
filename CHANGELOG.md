@@ -6,6 +6,50 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.3] - 2026-10-01
+
+### English
+
+- **Fixed: a target added or removed from the hub now appears — and
+  disappears — in the window.** The probe did apply the change: it stopped
+  pinging the target and told the hub so. But the row stayed on screen with
+  its last figures until the app was restarted, so the screen said the
+  opposite of what the probe was doing, and nothing said which one to
+  believe. The window only learns about monitoring through events, and
+  aligning on the hub emitted none. ⚠️ Purging the history was not enough:
+  the display keeps what it has already received and only re-reads the
+  snapshot at startup.
+- **Added: search a discovery by address, name, MAC or vendor.** On a
+  well-filled /24 the list runs past a hundred rows. ⚠️ The MAC is matched
+  **without punctuation** — `94:2a:6f` and `942a6f` find the same machine,
+  the way you read it off a rack label. The search filters what is already
+  displayed: no packet is sent while you type.
+- ⚠️ "No machine found on this range" and "no machine matches" stay two
+  different sentences: the scan did see machines. Confusing them would send
+  someone sweeping a client network again for nothing.
+
+### Français
+
+- **Corrigé : une cible ajoutée ou retirée depuis le hub apparaît — et
+  disparaît — dans la fenêtre.** La sonde appliquait bien le changement :
+  elle cessait de pinguer la cible et l'annonçait au hub. Mais la ligne
+  restait affichée avec ses derniers chiffres jusqu'au redémarrage de
+  l'app : l'écran disait le contraire de ce que faisait la sonde, et rien
+  ne disait lequel croire. La fenêtre n'apprend l'état des surveillances
+  que par les événements, et l'alignement sur le hub n'en émettait aucun.
+  ⚠️ Purger l'historique ne suffisait pas : l'affichage garde ce qu'il a
+  déjà reçu et ne relit l'instantané qu'au démarrage.
+- **Ajouté : chercher dans une découverte par adresse, nom, MAC ou
+  constructeur.** Sur un /24 bien rempli, la liste dépasse la centaine.
+  ⚠️ La MAC se compare **sans ponctuation** — « 94:2a:6f » et « 942a6f »
+  trouvent la même machine, telle qu'on la lit sur une étiquette de baie.
+  La recherche filtre ce qui est déjà affiché : aucun paquet ne part
+  pendant qu'on tape.
+- ⚠️ « Aucune machine trouvée sur cette plage » et « aucune machine ne
+  correspond » restent deux phrases différentes : le scan, lui, a vu des
+  machines. Les confondre ferait relancer un balayage chez un client pour
+  rien.
+
 ## [2.4.2] - 2026-09-02
 
 ### English
