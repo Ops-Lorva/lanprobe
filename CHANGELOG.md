@@ -6,6 +6,42 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.4] - 2026-10-01
+
+### English
+
+- **Fixed: a scan started from the probe's own window is now sent to the
+  hub.** Only scans ordered by the hub or run by the scheduler were
+  published, so the phone showed a two-hour-old inventory while the probe's
+  screen showed the fresh one — and nothing explained the gap. Both
+  discovery and port scans were affected.
+- **Changed: applying a network profile starts from scratch.** Every running
+  monitor stops, then exactly the ones of the new profile start. A target
+  kept across the switch would mix two unrelated networks in one history,
+  and the switching minutes would read as an outage of the new site.
+  ⚠️ The removal is written, not just dropped from the screen: otherwise the
+  hub re-applies it at the next heartbeat and the target comes back on its
+  own.
+- ⚠️ Only OPEN ports are published: the thousands of closed ports of a full
+  scan would inflate the inventory without teaching anything.
+
+### Français
+
+- **Corrigé : un scan lancé depuis la fenêtre de la sonde part enfin vers le
+  hub.** Seuls ceux commandés par le hub ou lancés par l'ordonnanceur
+  étaient publiés : le téléphone montrait un inventaire vieux de deux heures
+  pendant que l'écran de la sonde affichait le bon, et rien n'expliquait
+  l'écart. La découverte et le scan de ports étaient tous deux concernés.
+- **Changé : appliquer un profil réseau repart de zéro.** Toutes les
+  surveillances en cours s'arrêtent, puis exactement celles du nouveau
+  profil démarrent. Une cible gardée en traversant la bascule mélangerait
+  dans un même historique deux réseaux qui n'ont rien à voir, et les minutes
+  de bascule s'y liraient comme une panne du nouveau site.
+  ⚠️ Le retrait est écrit, pas seulement enlevé de l'écran : sinon le hub le
+  réapplique au battement suivant et la cible revient toute seule.
+- ⚠️ Seuls les ports OUVERTS sont publiés : les milliers de ports fermés
+  d'un scan complet gonfleraient l'inventaire sans rien apprendre.
+
 ## [2.4.3] - 2026-10-01
 
 ### English
