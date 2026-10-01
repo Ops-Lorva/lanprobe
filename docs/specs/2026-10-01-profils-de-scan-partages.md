@@ -162,6 +162,29 @@ révision plus vieille que **90 jours** cesse de retenir le nettoyage, et la
 sonde qui revient après ça reçoit la **liste complète** plutôt qu'un delta. Elle
 repart juste.
 
+### Le compteur peut-il déborder ?
+
+Non. `INTEGER` en SQLite est un entier signé 64 bits : à **un changement par
+seconde pendant un siècle**, on aurait consommé trois milliardièmes de la
+plage. Aucun rebouclage à prévoir, et surtout **aucune remise à zéro à écrire** :
+c'est elle qui serait dangereuse.
+
+🔴 **Le vrai risque n'est pas le débordement, c'est le RECUL.** Une base
+restaurée depuis une sauvegarde revient à une révision plus ancienne, alors que
+les sondes, elles, ont gardé la leur. Une sonde qui annonce 42 à un hub revenu à
+38 n'aurait plus jamais rien à apprendre : le hub lui répondrait « tu es à jour »
+pour toujours, et sa liste de profils gèlerait sans que rien ne le dise.
+
+Deux gardes, et elles coûtent trois lignes :
+
+1. **au démarrage**, le compteur du hub est remis à `max(compteur, plus grande
+   révision présente dans la table)` — une restauration partielle ne peut pas le
+   faire reculer sous ses propres lignes ;
+2. **une sonde qui annonce une révision SUPÉRIEURE à celle du hub est traitée
+   comme inconnue** : elle reçoit la liste complète avec le drapeau « remplace
+   tout ». C'est exactement le cas « hub restauré », et il se répare tout seul au
+   premier battement.
+
 ## Migration
 
 Les quatre profils en dur deviennent les quatre premières lignes, posées au
