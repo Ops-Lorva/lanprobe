@@ -577,6 +577,65 @@ pub(crate) fn align_monitors(state: &AppState, acks: &[String], monitors: &[HubM
     // c'est elle qui laisse un hub antérieur à ce mécanisme sans effet de bord.
 }
 
+// ── Profils de scan de ports partagés (contrat § 25) ─────────────────────────
+
+/// La dernière révision de profils que la sonde a appliquée. `0` tant qu'elle
+/// n'a rien appliqué — et elle recevra alors tout.
+pub fn applied_profiles_rev(state: &AppState) -> i64 {
+    state
+        .config
+        .get()
+        .get(crate::portscan_profiles::PROFILES_REV_KEY)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+}
+
+/// Aligne les profils de scan locaux sur ce que le hub vient de dire.
+///
+/// ⚠️ **Un hub qui ne dit rien ne fait rien changer.** Pas de champ ≠ liste
+/// vide : c'est soit un hub antérieur au mécanisme, soit un hub qui nous sait
+/// à jour. Dans les deux cas, toucher à la liste serait une perte.
+pub(crate) fn align_portscan_profiles(state: &AppState, response: &HeartbeatResponse) {
+    let Some(incoming) = response.portscan_profiles.as_ref() else {
+        return;
+    };
+    let mut root = state.config.get();
+    let Some(map) = root.as_object_mut() else {
+        return;
+    };
+    let local: Vec<crate::portscan_profiles::LocalProfile> = map
+        .get(crate::portscan_profiles::PROFILES_KEY)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let merged = crate::portscan_profiles::merge(
+        local,
+        incoming,
+        response.portscan_profiles_replace,
+    );
+    let Ok(value) = serde_json::to_value(&merged) else {
+        return tracing::warn!("profils de scan illisibles : liste non écrite");
+    };
+    map.insert(crate::portscan_profiles::PROFILES_KEY.to_string(), value);
+
+    // 🔴 **La révision n'est rangée qu'AVEC la liste, et dans la même
+    // écriture.** La ranger d'abord laisserait, si l'écriture échoue, une
+    // sonde qui se croit à jour : le hub ne lui renverrait plus jamais ce
+    // delta, et sa liste gèlerait sans que rien ne le dise.
+    if let Some(rev) = response.portscan_profiles_rev {
+        map.insert(
+            crate::portscan_profiles::PROFILES_REV_KEY.to_string(),
+            serde_json::json!(rev),
+        );
+    }
+    match state.config.put(root.clone()) {
+        // L'interface de la sonde écoute `config:update` : c'est ce qui fait
+        // apparaître un profil venu du hub sans recharger la fenêtre.
+        Ok(()) => state.emit("config:update", root),
+        Err(e) => tracing::warn!("profils de scan non persistés : {e}"),
+    }
+}
+
 // ── Dialogue avec le hub ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -666,6 +725,24 @@ pub struct HeartbeatResponse {
     /// (contrat § 14).
     #[serde(default)]
     pub monitor_acks: Vec<String>,
+    /// Les profils de scan de ports que la sonde a à apprendre — le delta, ou
+    /// la liste complète avec [`Self::portscan_profiles_replace`] (§ 25).
+    ///
+    /// 🔴 **`None` n'est PAS une liste vide.** Un hub antérieur au mécanisme
+    /// n'envoie rien, et un hub à jour n'envoie rien non plus quand la sonde
+    /// est à jour. Dans les deux cas : on ne touche à rien. Lire l'absence
+    /// comme « le hub n'a aucun profil » ferait perdre tous les siens à la
+    /// première sonde qui parle à un vieux hub.
+    #[serde(default)]
+    pub portscan_profiles: Option<Vec<crate::portscan_profiles::HubProfile>>,
+    /// La révision à ranger **une fois la liste écrite**. Ce n'est pas une
+    /// date : elle vient du hub et repart telle quelle.
+    #[serde(default)]
+    pub portscan_profiles_rev: Option<i64>,
+    /// « Ce n'est pas un delta, c'est l'état du hub » — révision inconnue,
+    /// trop ancienne, ou en avance (hub restauré).
+    #[serde(default)]
+    pub portscan_profiles_replace: bool,
 }
 
 
@@ -727,6 +804,16 @@ struct HeartbeatRequest<'a> {
     /// est exactement le défaut corrigé ici.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     monitor_changes: Vec<MonitorChange>,
+    /// Dernière révision de profils de scan **appliquée** (contrat § 25).
+    ///
+    /// 🔴 Émis **toujours**, même à zéro : c'est un état, et c'est lui qui dit
+    /// au hub « je connais le mécanisme ». Une sonde qui ne l'envoie pas est
+    /// une sonde antérieure, et le hub ne lui parle alors pas de profils du
+    /// tout — elle ne saurait ni quoi en faire ni quelle révision ranger.
+    ///
+    /// ⚠️ Ce n'est pas une date. Elle vient du hub, on la range, on la rend.
+    /// Aucune horloge n'entre dans l'affaire.
+    profiles_rev: i64,
 }
 
 /// Une cible surveillée, telle que la sonde la voit maintenant.
@@ -1300,6 +1387,7 @@ async fn beat(
             command_acks,
             monitors: monitor_states(state),
             monitor_changes: outgoing_monitor_changes(state),
+            profiles_rev: applied_profiles_rev(state),
             internet_state: internet_state(state),
             public_ip: public_ip.value(),
             interface: identity.interface.clone(),
@@ -1358,6 +1446,9 @@ fn apply(
     // faire sauter l'alignement des surveillances, ni faire réémettre
     // indéfiniment des gestes que le hub a pourtant accusés.
     align_monitors(state, &response.monitor_acks, &response.monitors);
+    // Même esprit que ci-dessus, et sans `?` pour la même raison : une clé
+    // illisible plus bas ne doit pas faire sauter l'alignement des profils.
+    align_portscan_profiles(state, &response);
 
     let mut next = current.clone();
     let mut changed = false;
@@ -1528,6 +1619,7 @@ mod tests {
             internet_state: None,
             monitors: Vec::new(),
             monitor_changes: Vec::new(),
+            profiles_rev: 0,
         }
     }
 
@@ -1947,6 +2039,7 @@ mod tests {
             internet_state: None,
             monitors: Vec::new(),
             monitor_changes: Vec::new(),
+            profiles_rev: 0,
             public_ip: None,
             interface: None,
             local_ips: Vec::new(),
@@ -1972,6 +2065,7 @@ mod tests {
             internet_state: None,
             monitors: Vec::new(),
             monitor_changes: Vec::new(),
+            profiles_rev: 0,
             public_ip: Some("88.120.0.1".into()),
             interface: Some("en0".into()),
             local_ips: vec!["10.6.8.42/24".into()],
@@ -2183,6 +2277,104 @@ mod tests {
         assert_eq!(r.monitors[0].removed_at, Some(200));
         assert_eq!(r.monitors[1].removed_at, None);
         assert_eq!(r.monitor_acks, vec!["8.8.8.8".to_string()]);
+    }
+
+
+    // ── Profils de scan de ports partagés (contrat § 25) ──────────────────
+
+    #[test]
+    fn la_revision_appliquee_part_a_chaque_battement_meme_a_zero() {
+        // 🔴 C'est un ÉTAT, pas un acte : il doit être émis même à zéro, parce
+        // que c'est lui qui dit au hub « je connais le mécanisme ». Omis, la
+        // sonde serait prise pour une version antérieure et ne recevrait
+        // jamais un seul profil.
+        let json = serde_json::to_value(heartbeat_sans_surveillance()).unwrap();
+        assert_eq!(json["profiles_rev"], 0, "{json}");
+    }
+
+    #[test]
+    fn un_hub_qui_ne_dit_rien_des_profils_ne_touche_a_rien() {
+        // 🔴 Pas de champ ≠ liste vide. C'est soit un hub antérieur au
+        // mécanisme, soit un hub qui nous sait à jour — dans les deux cas,
+        // écraser la liste locale ferait perdre tous ses profils à la sonde.
+        let state = state("profils-muet");
+        let mut root = state.config.get();
+        // Volontairement SANS `udp_ports` : la liste doit ressortir au mot
+        // près. Une réécriture « inoffensive » la normaliserait, et ce serait
+        // déjà le signe que l'absence a été traitée comme une liste vide — à
+        // un `replace` près, la même ligne effacerait tout.
+        let telle_quelle =
+            serde_json::json!([{ "id": "cams", "name": "Caméras", "tcp_ports": [554] }]);
+        root.as_object_mut().unwrap().insert(
+            crate::portscan_profiles::PROFILES_KEY.into(),
+            telle_quelle.clone(),
+        );
+        state.config.put(root).unwrap();
+
+        let muet: HeartbeatResponse = serde_json::from_str("{}").unwrap();
+        assert!(muet.portscan_profiles.is_none(), "un hub ancien n'en parle pas");
+        align_portscan_profiles(&state, &muet);
+
+        let apres = state.config.get();
+        assert_eq!(
+            apres[crate::portscan_profiles::PROFILES_KEY], telle_quelle,
+            "rien n'est lu, rien n'est réécrit : {apres}"
+        );
+    }
+
+    #[test]
+    fn la_liste_et_sa_revision_sont_rangees_ensemble_puis_reparties_au_battement() {
+        // ⚠️ La révision n'a de sens qu'avec la liste qu'elle numérote : rangée
+        // seule, une écriture ratée laisserait une sonde qui se croit à jour —
+        // le hub ne lui renverrait plus jamais ce delta, et sa liste gèlerait
+        // sans que rien ne le dise.
+        let state = state("profils-rev");
+        let response: HeartbeatResponse = serde_json::from_str(
+            r#"{"portscan_profiles":[{"profile_id":"web","name":"Web","ports":[80,443],"deleted_at":null}],
+                "portscan_profiles_rev":12,
+                "portscan_profiles_replace":false}"#,
+        )
+        .unwrap();
+
+        align_portscan_profiles(&state, &response);
+
+        let apres = state.config.get();
+        let liste = apres[crate::portscan_profiles::PROFILES_KEY].as_array().unwrap();
+        assert_eq!(liste.len(), 1, "{apres}");
+        assert_eq!(liste[0]["name"], "Web");
+        assert_eq!(liste[0]["from_hub"], true, "l'écran doit pouvoir le dire");
+        // C'est elle qui repartira au battement suivant : c'est l'accusé.
+        assert_eq!(applied_profiles_rev(&state), 12);
+    }
+
+    #[test]
+    fn une_pierre_tombale_recue_retire_le_profil_de_la_sonde() {
+        // 🔴 Le cœur du mécanisme : sans la pierre tombale, la sonde ne
+        // distinguerait pas « le hub ne connaît pas ce profil » de « le hub l'a
+        // supprimé », et le recréerait en le remontant au battement suivant.
+        let state = state("profils-tombale");
+        let mut root = state.config.get();
+        root.as_object_mut().unwrap().insert(
+            crate::portscan_profiles::PROFILES_KEY.into(),
+            serde_json::json!([{ "id": "web", "name": "Web", "tcp_ports": [80], "from_hub": true }]),
+        );
+        state.config.put(root).unwrap();
+
+        let response: HeartbeatResponse = serde_json::from_str(
+            r#"{"portscan_profiles":[{"profile_id":"web","name":"Web","ports":[80],"deleted_at":1790000000}],
+                "portscan_profiles_rev":13}"#,
+        )
+        .unwrap();
+        align_portscan_profiles(&state, &response);
+
+        let apres = state.config.get();
+        assert!(
+            apres[crate::portscan_profiles::PROFILES_KEY]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{apres}"
+        );
     }
 
     #[test]
