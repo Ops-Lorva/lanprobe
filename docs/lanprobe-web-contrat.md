@@ -3126,3 +3126,107 @@ de base sont dans son code, ils ne montent pas et ne descendent pas. Un profil
 venu du hub est marqué comme tel et l'écran **le dit** — l'éditer localement
 tiendrait jusqu'au battement suivant, et laisser croire le contraire serait un
 mensonge d'interface (§ 18).
+
+## 26. D'où vient une commande ✅ implémenté
+
+La file du §14 ne portait que le genre, les arguments et **le nom du compte**
+(`created_by`). Or le même compte sert au navigateur du hub **et** à l'app sur
+le téléphone du technicien (§22) : « claire » répond à « qui », jamais à
+« depuis où ». Devant un scan de ports qu'on n'a pas lancé, les deux questions
+se posent.
+
+L'écran « Commandes » porte donc **deux colonnes** : « Par » (le compte) et
+« Depuis » (l'origine). Pas une seule : les fondre en « claire (iPhone) »
+rendrait illisibles les lignes qui n'ont pas d'origine, et ce sont justement
+celles qu'il ne faut pas confondre avec le hub.
+
+### Trois réponses, pas deux
+
+| Affiché | En base (`probe_commands`) | Ce que ça veut dire |
+|---|---|---|
+| `Hub` | `origin = 'hub'` | lancée depuis une session de navigateur |
+| le nom de l'appareil | `origin = 'device'` | lancée depuis un appareil appairé (§22) |
+| `Inconnue` | `origin IS NULL` | **empilée avant cette version** |
+
+```
+GET /api/probes/{id}/commands
+    → { "commands": [
+        { "id": 44, "kind": "port_scan", …, "created_by": "claire",
+          "origin": "device",
+          "origin_device_id": "7f3c…", "origin_device_name": "iPhone de Claire" },
+        { "id": 43, "kind": "speedtest", …, "created_by": "claire",
+          "origin": "hub", "origin_device_id": null, "origin_device_name": null },
+        { "id": 12, "kind": "discovery", …, "created_by": "claire",
+          "origin": null, "origin_device_id": null, "origin_device_name": null }
+      ]}
+```
+
+### 🔴 Une commande d'avant n'a PAS d'origine, et surtout pas « hub »
+
+La migration v25 → v26 ajoute les trois colonnes **sans `DEFAULT`**. Une
+commande empilée avant cette version garde donc `origin IS NULL`, et l'écran
+écrit « Inconnue ».
+
+Un `DEFAULT 'hub'` aurait été une ligne de SQL plus courte et un mensonge
+permanent : il affirmerait qu'une commande de juillet est partie du navigateur
+du bureau alors que personne ne le sait — sur la seule trace qui réponde, des
+mois après, à « qui a lancé ce scan sur le réseau de Durand ». **Inventer une
+provenance est pire que de n'en donner aucune.** Une colonne vide se lit ; une
+colonne qui ment ne se rattrape pas.
+
+Même règle côté interface : une valeur d'`origin` que la version chargée ne
+connaît pas (un hub plus récent, un onglet resté ouvert pendant une mise à
+jour) est rendue **inconnue**, jamais affichée brute et jamais prise pour
+« hub ».
+
+### Appareil renommé, appareil révoqué : le nom D'ALORS
+
+`origin_device_name` porte le nom que l'appareil avait **à l'instant de
+l'empilement**, figé dans la ligne. Il n'est **jamais** joint à
+`paired_devices` à la lecture, et c'est le même arbitrage que
+`reports.device_id` (§23).
+
+Pourquoi le nom d'alors plutôt que celui d'aujourd'hui : un téléphone change de
+main, et on le renomme en même temps. Afficher le nom courant attribuerait à
+son nouveau porteur un scan lancé par l'ancien — exactement le défaut que
+l'origine existe pour corriger. L'historique doit se lire comme il était vrai.
+
+`origin_device_id` répond à l'autre question — « lequel, exactement » — et
+**survit au renommage comme à la révocation** : il retrouve l'appareil dans
+l'écran « Appareils » (§22), y compris révoqué et masqué, puisque rien n'y est
+supprimé. Les deux colonnes, ou l'une des deux questions reste sans réponse.
+
+⚠️ La révocation **ne change rien à l'affichage** : la ligne continue de porter
+le nom d'alors. Un appareil révoqué n'est pas un appareil effacé, et la trace
+d'un ordre lancé depuis lui est précisément ce qu'on vient relire après une
+révocation.
+
+### Aucune clé étrangère vers `paired_devices`
+
+`origin_device_id` est un `TEXT` nu — comme `created_by`, juste à côté dans la
+même table, qui ne référence pas `users`. Ce sont des **traces**, pas des
+relations vivantes.
+
+Les clés étrangères sont actives (`PRAGMA foreign_keys = ON`) : une référence
+contrainte ferait **échouer l'INSERT** pour un identifiant que la base ne
+retrouve pas, c'est-à-dire ferait échouer **la commande** pour un défaut de
+journal. On perdrait l'ordre *et* sa provenance, dans le cas anormal où l'on
+veut les deux. Et la contrainte n'achèterait rien : rien ne supprime un
+appareil dans ce projet — on révoque, puis on masque (§22).
+
+Conséquence assumée : si la ligne de l'appareil ne se relit pas à
+l'empilement, l'origine reste `device` avec son identifiant seul, sans nom.
+L'écran affiche alors l'identifiant. Retomber sur `hub` parce qu'un nom manque
+affirmerait une provenance fausse ; « inconnue » effacerait ce qu'on sait.
+
+### Ce qui n'est pas couvert
+
+- **L'app iOS n'affiche pas l'origine.** Elle ne lit pas la file des commandes
+  d'une sonde ; la colonne vit dans le hub web, là où les commandes se lisent
+  déjà.
+- **L'origine ne voyage pas jusqu'à la sonde.** `take_pending_commands` rend
+  `{id, kind, args}` et rien d'autre : la sonde n'a pas à savoir qui a demandé
+  pour exécuter, et le lui dire lui donnerait une donnée à journaliser sans
+  usage.
+- **Aucune ligne d'audit de plus.** `probe.command` nomme déjà le geste et son
+  auteur ; deux entrées pour un seul clic feraient lire deux gestes.
