@@ -346,7 +346,8 @@
     "realtime_help": "Esta sonda late cada 5 s en lugar de su cadencia normal. El modo se apaga solo dentro de {left}: no hace falta volver a detenerlo.",
     "show_archived": "Archivos",
     "show_archived_n": "Archivos ({n})",
-    "hide_archived": "Ocultar los archivos"
+    "hide_archived": "Ocultar los archivos",
+    "version_behind": "Más antigua que el resto del parque ({version})"
   },
   "status": {
     "online": "En línea",

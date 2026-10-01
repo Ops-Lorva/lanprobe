@@ -346,7 +346,8 @@
     "realtime_help": "Cette sonde bat toutes les 5 s au lieu de sa cadence normale. Le mode s'éteint tout seul dans {left} : inutile de revenir l'arrêter.",
     "show_archived": "Archives",
     "show_archived_n": "Archives ({n})",
-    "hide_archived": "Masquer les archives"
+    "hide_archived": "Masquer les archives",
+    "version_behind": "Version plus ancienne que le reste du parc ({version})"
   },
   "status": {
     "online": "En ligne",

@@ -5,6 +5,7 @@
   import BufferBadge from './BufferBadge.svelte';
   import { relativeTime, absoluteTime, secondsLeft, countdown } from '$lib/time';
   import { probeLiveness } from '$lib/probe-liveness';
+  import { isBehind } from '$lib/probe-version';
   import type { Probe } from '$lib/api';
 
   interface Props {
@@ -13,8 +14,21 @@
     now: number;
     /** Affiche le site sous le nom — utile hors du regroupement par site. */
     showSite?: boolean;
+    /**
+     * La version la plus récente du parc, pour signaler celles qui traînent.
+     *
+     * ⚠️ La plus récente DU PARC, pas celle publiée sur GitHub : un hub
+     * auto-hébergé tourne souvent sans accès sortant, et une couleur qui
+     * dépendrait d'un appel externe serait fausse là où on en a besoin.
+     */
+    newest?: string | null;
   }
-  let { probe, now, showSite = false }: Props = $props();
+  let { probe, now, showSite = false, newest = null }: Props = $props();
+
+  /** 🔴 Ni une version illisible ni une sonde EN AVANCE ne sont « en retard » :
+      colorer sur un doute enverrait mettre à jour une machine qui n'en a pas
+      besoin — et sur un parc de client, c'est un déplacement. */
+  const behind = $derived(isBehind(probe.version, newest));
 
   const lang = $derived($locale ?? 'en');
   const seen = $derived(relativeTime(probe.last_seen, lang, now));
@@ -100,7 +114,11 @@
 
   <span class="pubip lp-mono" title={probe.public_ip ?? ''}>{probe.public_ip || '—'}</span>
   <span class="platform lp-mono">{platformLabel(probe.platform, $_('common.none'))}</span>
-  <span class="version lp-mono">{probe.version || $_('common.none')}</span>
+  <span
+    class="version lp-mono"
+    class:behind
+    title={behind ? $_('fleet.version_behind', { values: { version: newest } }) : undefined}
+  >{probe.version || $_('common.none')}</span>
   <span class="buffer"><BufferBadge points={probe.buffered_points} live={live.state === 'online'} /></span>
 
   <span class="chev" aria-hidden="true">
@@ -227,6 +245,13 @@
   .platform,
   .version {
     color: var(--ep-text-muted);
+  }
+  /* ⚠️ Même ambre que le reste des avertissements de cette ligne. Ce n'est pas
+     une panne — la sonde mesure — donc surtout pas le rouge, qui enverrait
+     quelqu'un sur site. */
+  .version.behind {
+    color: var(--ep-warning, #f59e0b);
+    cursor: help;
   }
   .offline .seen {
     color: var(--ep-danger);

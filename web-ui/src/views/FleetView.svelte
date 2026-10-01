@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { newestVersion } from '$lib/probe-version';
   import { canOperate } from '$lib/session';
   import { SvelteSet } from 'svelte/reactivity';
   import { RANGES, type Range } from '$lib/metrics';
@@ -122,6 +123,8 @@
   // vers « silencieuse » entre deux chargements du parc. Sans elle, le bandeau
   // resterait figé sur le verdict du dernier rafraîchissement.
   const totals = $derived(fleetTotals($fleet.probes, $now));
+  /** La version la plus récente du parc : la référence de « pas à jour ». */
+  const newestVersionSeen = $derived(newestVersion($fleet.probes.map((p) => p.version)));
 
   const bufferingCount = $derived($fleet.probes.filter((p) => p.buffered_points > 0).length);
   const hasFilter = $derived(search.trim() !== '' || statusFilter !== 'all');
@@ -745,6 +748,7 @@
         siteId={g.site.site_id}
         siteName={g.site.name}
         probes={g.probes}
+        newest={newestVersionSeen}
         pending={pendingBySite.get(g.site.site_id) ?? []}
         now={$now}
         expanded={isExpanded(g.site.site_id, g.probes, groups.length)}

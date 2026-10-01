@@ -346,7 +346,8 @@
     "realtime_help": "This probe beats every 5 s instead of its normal interval. The mode switches itself off in {left} — no need to come back and stop it.",
     "show_archived": "Archives",
     "show_archived_n": "Archives ({n})",
-    "hide_archived": "Hide archives"
+    "hide_archived": "Hide archives",
+    "version_behind": "Older than the rest of the fleet ({version})"
   },
   "status": {
     "online": "Online",
@@ -481,7 +482,7 @@
     "monitoring_remove": "Remove",
     "monitoring_remove_title": "Stop monitoring {target}?",
     "monitoring_remove_body": "The probe will stop pinging this target. It finds out at its next heartbeat — the hub never calls it. If the probe is switched off, the removal is written right away and takes effect when it comes back.",
-    "monitoring_remove_reversible": "Reversible: the target moves to \u201cRemoved\u201d with its date, and one click brings it back. No past measurement is erased.",
+    "monitoring_remove_reversible": "Reversible: the target moves to “Removed” with its date, and one click brings it back. No past measurement is erased.",
     "monitoring_remove_confirm": "Remove target",
     "monitoring_remove_working": "Removing…",
     "monitoring_remove_done": "{target} removed. The probe will stop pinging it at its next heartbeat.",

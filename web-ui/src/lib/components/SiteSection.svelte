@@ -13,6 +13,8 @@
     siteId: string;
     siteName: string;
     probes: Probe[];
+    /** La version la plus récente du parc — pour griser celles qui traînent. */
+    newest?: string | null;
     /** Emplacements réservés de ce site : codes d'enrôlement encore ouverts. */
     pending: PendingRow[];
     now: number;
@@ -46,6 +48,7 @@
     siteId,
     siteName,
     probes,
+    newest = null,
     pending,
     now,
     expanded,
@@ -233,7 +236,7 @@
           <span></span>
         </div>
         {#each probes as p (p.probe_id)}
-          <ProbeRow probe={p} {now} />
+          <ProbeRow probe={p} {now} {newest} />
         {/each}
       {/if}
     </div>
