@@ -523,6 +523,9 @@ async fn cmd_scan_ports(ip: String, ports: Option<Vec<u16>>, profile_id: Option<
     let now = now_secs();
     let entry = state.portscan.set_tcp(&ip, results.clone(), now, profile_id);
     state.emit("portscan:update", serde_json::to_value(&entry).unwrap_or(serde_json::json!({})));
+    // 🔴 Le hub apprend aussi les scans lancés d'ici — même défaut que la
+    // découverte, même correction.
+    lanprobe_server::scheduler::publish_ports(state.inner(), &ip).await;
     Ok(results)
 }
 
@@ -533,6 +536,9 @@ async fn cmd_scan_udp_ports(ip: String, ports: Option<Vec<u16>>, state: tauri::S
     let now = now_secs();
     let entry = state.portscan.set_udp(&ip, results.clone(), now);
     state.emit("portscan:update", serde_json::to_value(&entry).unwrap_or(serde_json::json!({})));
+    // ⚠️ L'UDP republie la machine entière, TCP compris : le rapport porte
+    // l'état complet d'une machine, pas un delta.
+    lanprobe_server::scheduler::publish_ports(state.inner(), &ip).await;
     Ok(results)
 }
 

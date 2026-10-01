@@ -176,6 +176,52 @@ pub async fn publish_discovery(state: &AppState, cidr: &str) {
     .await;
 }
 
+/// Envoie au hub les ports ouverts d'une machine.
+///
+/// 🔴 **Appelée par les deux chemins**, comme `publish_discovery` : un scan
+/// lancé depuis la fenêtre de la sonde ne partait nulle part, et le hub — donc
+/// le téléphone — montrait l'inventaire précédent sans dire qu'il était vieux.
+///
+/// ⚠️ Seuls les ports OUVERTS partent : publier les milliers de ports fermés
+/// d'un scan complet gonflerait l'inventaire sans rien apprendre.
+///
+/// ⚠️ Sans clé de scellement, il n'y a pas de hub à qui parler.
+pub async fn publish_ports(state: &AppState, ip: &str) {
+    let Some(key) = sealing_key(state) else { return };
+    let Some(entry) = state.portscan.snapshot().into_iter().find(|e| e.ip == ip) else { return };
+    let ports = entry
+        .tcp
+        .iter()
+        .chain(entry.udp.iter())
+        .filter(|p| p.open)
+        .map(|p| crate::inventory::ScanPort {
+            ip: ip.to_string(),
+            port: p.port,
+            proto: p.proto.clone(),
+            service: (!p.service.is_empty()).then(|| p.service.clone()),
+        })
+        .collect();
+    crate::inventory::publish(
+        state,
+        &key,
+        crate::inventory::ScanReport {
+            kind: "ports".into(),
+            started_at: crate::inventory::now(),
+            cidr: None,
+            hosts: vec![crate::inventory::ScanHost {
+                ip: ip.to_string(),
+                hostname: None,
+                mac: None,
+                vendor: None,
+                latency_ms: None,
+            }],
+            ports,
+            speedtest: None,
+        },
+    )
+    .await;
+}
+
 fn sealing_key(state: &AppState) -> Option<crate::secrets::SecretKey> {
     crate::secrets::load_or_create_key(&state.config.dir()).ok()
 }
@@ -560,41 +606,8 @@ pub async fn portscan_with(
     });
     tracing::info!("scan de ports terminé sur {ip} — {} TCP ouverts", entry.tcp.len());
 
-    if let Some(key) = sealing_key(state) {
-        // Seuls les ports OUVERTS partent : publier les milliers de ports
-        // fermés d'un scan complet gonflerait l'inventaire sans rien apprendre.
-        let ports = entry
-            .tcp
-            .iter()
-            .chain(entry.udp.iter())
-            .filter(|p| p.open)
-            .map(|p| crate::inventory::ScanPort {
-                ip: ip.to_string(),
-                port: p.port,
-                proto: p.proto.clone(),
-                service: (!p.service.is_empty()).then(|| p.service.clone()),
-            })
-            .collect();
-        crate::inventory::publish(
-            state,
-            &key,
-            crate::inventory::ScanReport {
-                kind: "ports".into(),
-                started_at: crate::inventory::now(),
-                cidr: None,
-                hosts: vec![crate::inventory::ScanHost {
-                    ip: ip.to_string(),
-                    hostname: None,
-                    mac: None,
-                    vendor: None,
-                    latency_ms: None,
-                }],
-                ports,
-                speedtest: None,
-            },
-        )
-        .await;
-    }
+    publish_ports(state, ip).await;
+
     Ok(entry.tcp.len())
 }
 
