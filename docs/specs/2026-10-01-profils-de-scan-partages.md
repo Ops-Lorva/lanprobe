@@ -87,6 +87,38 @@ La configuration remontée (§ 16) contient déjà les profils. Le hub :
   se ferait annuler par la première sonde qui n'a pas encore battu ;
 - **ingère** les inconnus, avec `origin_probe` = cette sonde.
 
+## Ce que la sonde fait, à chaque battement
+
+Benjamin, 30/09 : « si c'est la sonde qui contacte le hub, elle a juste à voir
+ce que le hub a et se mettre à jour ». C'est exactement ça, et dans cet ordre :
+
+1. elle **envoie** sa configuration, profils compris (déjà fait, § 16) ;
+2. elle **lit** `portscan_profiles` dans la réponse ;
+3. pour chaque profil reçu : `deleted_at` non nul → elle le retire de chez elle ;
+   sinon → elle l'écrit tel quel (le hub fait autorité, il n'y a rien à
+   arbitrer) ;
+4. ce qu'elle a et que le hub ne mentionne pas est un profil **qu'elle vient de
+   créer** : il est déjà parti à l'étape 1, le hub l'ingérera, et il reviendra
+   au battement suivant. ⚠️ **Elle ne le supprime pas** au motif qu'il n'est pas
+   dans la liste — sinon tout profil créé localement disparaîtrait une minute
+   après sa création.
+
+Délai d'un bout à l'autre : **un battement**, soit 60 s au réglage actuel du hub.
+
+### 🔴 Pourquoi aucune DATE n'est comparée côté sonde
+
+L'idée naturelle — « la sonde retient la date de sa dernière synchronisation et
+regarde ce qui a changé depuis » — bute sur un fait du produit : **la sonde et le
+hub ne partagent pas d'horloge**. C'est déjà la raison pour laquelle la file des
+changements de surveillance voyage en **ancienneté** (`age_secs`) et non en
+horodatage, et pourquoi la reprise après redémarrage préfère sous-estimer un âge
+plutôt que d'utiliser une horloge murale, qui saute au réveil de veille et se
+fait corriger par NTP.
+
+Faire porter la suppression par la **liste elle-même** (`deleted_at` présent dans
+la réponse) supprime la question : la sonde n'a aucune date à tenir, aucune
+dérive à subir, et le même battement rejoué deux fois donne le même résultat.
+
 ## Migration
 
 Les quatre profils en dur deviennent les quatre premières lignes, posées au
