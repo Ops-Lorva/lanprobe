@@ -301,6 +301,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::pairing::routes(&state))
         .merge(crate::reports::routes(&state))
         .merge(crate::packages::routes(&state))
+        .merge(crate::portscan::routes(&state))
         .with_state(state)
         // L'interface web est servie en dernier : toute requête qui n'a
         // trouvé aucune route d'API tombe ici.
@@ -2831,6 +2832,20 @@ struct HeartbeatBody {
     /// effaçait en silence ce qu'on avait ajouté depuis le hub.
     #[serde(default)]
     monitor_changes: Vec<MonitorChange>,
+    /// Dernière révision de profils de scan que la sonde a **appliquée**
+    /// (contrat § 25).
+    ///
+    /// 🔴 Ce n'est pas une date : le numéro vient du hub, la sonde le range et
+    /// le rend tel quel. Aucune horloge n'entre dans l'affaire — les deux
+    /// machines ne seront jamais d'accord sur l'heure.
+    ///
+    /// ⚠️ `Option` : **absent** veut dire « cette sonde ignore les profils
+    /// partagés ». Elle ne saurait pas quoi faire de la liste, ni quelle
+    /// révision ranger ; lui en envoyer une ne ferait que gonfler chaque
+    /// battement. `0` est différent — c'est une sonde qui n'a encore rien
+    /// appliqué, et qui doit donc tout recevoir.
+    #[serde(default)]
+    profiles_rev: Option<i64>,
     /// Identité réseau du site (contrat, section 15). Chaque champ est
     /// facultatif : une sonde sans accès internet bat **sans** IP publique
     /// plutôt que d'échouer, et un champ absent n'efface jamais ce que le hub
@@ -3167,6 +3182,40 @@ async fn heartbeat(
         // accusé. Sans lui, un battement perdu perdrait le retrait avec.
         "monitor_acks": monitor_acks,
     });
+
+    // ── Profils de scan de ports partagés (contrat § 25) ──────────────────
+    //
+    // ⚠️ L'ordre est celui de la spec : la sonde annonce la révision qu'elle a
+    // appliquée — c'est son accusé —, le hub la range, puis il lui donne la
+    // suite. Ranger après aurait fait répondre deux fois le même delta.
+    //
+    // ⚠️ **Le champ est omis quand il n'y a rien à dire**, et c'est tout
+    // l'intérêt du compteur : le cas courant — une sonde à jour — ne fait
+    // voyager ni la liste ni les pierres tombales. Côté sonde, pas de champ
+    // veut dire « ne touche à rien », jamais « liste vide ».
+    if let Some(announced) = body.profiles_rev {
+        if let Err(e) = state.db.note_portscan_rev(&id, announced, crate::db::now()) {
+            tracing::warn!("révision de profils non rangée pour {id} : {e}");
+        }
+        // Nettoyage ICI et nulle part ailleurs : c'est le seul moment où la
+        // plus petite révision du parc peut avoir bougé, et il n'y a donc
+        // aucune tâche de fond à rater. Un échec ne fait rien échouer — une
+        // pierre tombale de trop ne gêne personne, un battement refusé fait
+        // passer une sonde saine pour hors ligne.
+        if let Err(e) = state.db.prune_portscan_tombstones(crate::db::now()) {
+            tracing::warn!("pierres tombales de profils non nettoyées : {e}");
+        }
+        match state.db.portscan_profiles_since(announced) {
+            Ok(Some(update)) => {
+                response["portscan_profiles"] =
+                    serde_json::to_value(&update.profiles).unwrap_or(json!([]));
+                response["portscan_profiles_rev"] = json!(update.rev);
+                response["portscan_profiles_replace"] = json!(update.replace);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("profils de scan illisibles pour {id} : {e}"),
+        }
+    }
 
     // Relecture : la rotation vient peut-être d'être accusée.
     let probe = match state.db.get_probe(&id) {
@@ -3505,6 +3554,22 @@ async fn store_probe_config(
     let serialised = body.to_string();
     if serialised.len() > 1024 * 1024 {
         return fail(StatusCode::PAYLOAD_TOO_LARGE, "configuration trop volumineuse");
+    }
+    // ⚠️ **Une exception à « le hub ne la lit pas », et une seule** : les
+    // profils de scan de ports y montent (contrat § 25). Ceux que le hub
+    // connaît déjà sont ignorés — il fait autorité —, ceux qu'il a supprimés
+    // aussi — sinon la suppression se ferait annuler par la première sonde qui
+    // n'a pas encore battu —, et les inconnus rejoignent la liste commune.
+    //
+    // Un échec de lecture ne fait pas échouer le dépôt : la sauvegarde de la
+    // configuration est le service rendu ici, l'ingestion est un bonus.
+    let montants = crate::portscan::profiles_from_probe_config(&body);
+    if !montants.is_empty() {
+        match state.db.ingest_probe_profiles(&id, &montants) {
+            Ok(n) if n > 0 => tracing::info!("{n} profil(s) de scan ingéré(s) depuis {id}"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("profils de scan de {id} non ingérés : {e}"),
+        }
     }
     match state.db.store_probe_config(&id, &serialised) {
         Ok(()) => ok_json(json!({ "ok": true })),

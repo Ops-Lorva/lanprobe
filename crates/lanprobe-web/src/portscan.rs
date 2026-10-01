@@ -21,9 +21,17 @@
 //! l'appairage et les rapports avant lui : chaque domaine porte son `impl Db`
 //! et emprunte la connexion.
 
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{delete, get, patch, post},
+    Extension, Json, Router,
+};
 use rusqlite::OptionalExtension;
 
-use crate::db::{Db, DbError, DbResult};
+use crate::db::{Db, DbError, DbResult, Role};
+use crate::web::{audited, error_response, guarded, ok_json, AppState, Identity};
 
 /// Compteur de révision du hub. Incrémenté à **chaque** création,
 /// modification ou suppression ; chaque ligne porte la révision qui l'a
@@ -130,6 +138,44 @@ pub(crate) fn normalize_ports(ports: &[i64]) -> Vec<i64> {
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// Les profils de scan présents dans la configuration qu'une sonde dépose
+/// (§ 16). Une configuration sans profils rend une liste vide.
+///
+/// ⚠️ **Les profils de BASE de la sonde sont écartés** (`builtin`). Décision 3 :
+/// une sonde garde les siens, seuls ceux qu'elle crée en plus montent. Les
+/// faire monter poserait cinq lignes « Common », « Web »… dans la liste
+/// commune de tout le parc, en doublon de celles du hub.
+///
+/// ⚠️ **`udp_ports` ne monte pas** : le hub ne modélise pas l'UDP. Ce n'est pas
+/// un oubli, c'est la raison pour laquelle la sonde conserve sa liste UDP quand
+/// le hub lui réécrit un profil (contrat § 25).
+pub(crate) fn profiles_from_probe_config(config: &serde_json::Value) -> Vec<IncomingProfile> {
+    let Some(entries) = config.get("portscan_profiles").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|entry| entry.get("builtin").and_then(|v| v.as_bool()) != Some(true))
+        .filter_map(|entry| {
+            let profile_id = entry.get("id")?.as_str()?.trim().to_string();
+            if profile_id.is_empty() || profile_id.starts_with("builtin:") {
+                return None;
+            }
+            let name = entry.get("name")?.as_str()?.trim().to_string();
+            let ports = entry
+                .get("tcp_ports")
+                .and_then(|v| v.as_array())
+                .map(|list| list.iter().filter_map(|p| p.as_i64()).collect())
+                .unwrap_or_default();
+            Some(IncomingProfile {
+                profile_id,
+                name,
+                ports,
+            })
+        })
+        .collect()
 }
 
 fn poisoned() -> DbError {
@@ -510,6 +556,135 @@ impl Db {
     }
 }
 
+// ── Routes (contrat § 25) ─────────────────────────────────────────────────
+
+/// Les quatre routes de l'écran d'administration.
+///
+/// ⚠️ **Aucune garde de portée**, et c'est voulu : la portée d'un profil de
+/// scan est le hub ENTIER (décision 4). Contrairement au profil RÉSEAU, qui
+/// décrit un site et reste sur la sonde, un profil de scan est une liste de
+/// ports — rien de ce qu'il porte n'appartient à un client.
+pub(crate) fn routes(state: &AppState) -> Router<AppState> {
+    // La liste ne porte aucun secret : ouverte au rôle le plus bas, comme le
+    // reste de la consultation.
+    let lecture = guarded(
+        state,
+        Role::Viewer,
+        Router::new().route("/api/portscan-profiles", get(list_profiles)),
+    );
+
+    // ⚠️ `operator`, comme tout ce qui touche une sonde : un profil décide de
+    // ce qui sera frappé sur le réseau d'un client, ce n'est pas une
+    // consultation.
+    let ecriture = guarded(
+        state,
+        Role::Operator,
+        Router::new()
+            .route("/api/portscan-profiles", post(create_profile))
+            .route("/api/portscan-profiles/{id}", patch(update_profile))
+            .route("/api/portscan-profiles/{id}", delete(delete_profile)),
+    );
+
+    lecture.merge(ecriture)
+}
+
+fn fail(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+async fn list_profiles(State(state): State<AppState>) -> Response {
+    match (state.db.list_portscan_profiles(), state.db.portscan_rev()) {
+        // La révision accompagne la liste : l'app mobile et le hub web peuvent
+        // ainsi savoir qu'ils regardent la même version, sans la deviner.
+        (Ok(profiles), Ok(rev)) => ok_json(serde_json::json!({
+            "profiles": profiles,
+            "rev": rev,
+        })),
+        (Err(e), _) | (_, Err(e)) => error_response(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ProfileBody {
+    #[serde(default)]
+    name: Option<String>,
+    /// ⚠️ `Option`, pas `Vec`. Absent veut dire « ne touche pas aux ports » —
+    /// renommer un profil ne doit pas vider sa liste au passage. Un tableau
+    /// explicitement vide, lui, dit « la sonde garde la sienne ».
+    #[serde(default)]
+    ports: Option<Vec<i64>>,
+}
+
+async fn create_profile(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Json(body): Json<ProfileBody>,
+) -> Response {
+    let name = body.name.unwrap_or_default();
+    match audited(
+        &state,
+        Some(&actor.username),
+        "portscan_profile.create",
+        Some(name.trim()),
+        state
+            .db
+            .create_portscan_profile(&name, &body.ports.unwrap_or_default(), None),
+    ) {
+        Ok(profile) => (
+            StatusCode::CREATED,
+            Json(serde_json::to_value(profile).unwrap_or(serde_json::Value::Null)),
+        )
+            .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+async fn update_profile(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+    Json(body): Json<ProfileBody>,
+) -> Response {
+    if body.name.is_none() && body.ports.is_none() {
+        // Rien à écrire : accepter ferait avancer la révision pour un
+        // changement qui n'existe pas, donc voyager un delta vide dans tout le
+        // parc.
+        return fail(StatusCode::BAD_REQUEST, "rien à modifier");
+    }
+    match audited(
+        &state,
+        Some(&actor.username),
+        "portscan_profile.update",
+        Some(&id),
+        state
+            .db
+            .update_portscan_profile(&id, body.name.as_deref(), body.ports.as_deref()),
+    ) {
+        Ok(profile) => ok_json(serde_json::to_value(profile).unwrap_or(serde_json::Value::Null)),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Pose `deleted_at`. **Ne supprime aucune ligne** — c'est elle qui dira aux
+/// sondes de retirer le profil, et sans elle « supprimé » serait indiscernable
+/// de « jamais connu ».
+async fn delete_profile(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Response {
+    match audited(
+        &state,
+        Some(&actor.username),
+        "portscan_profile.delete",
+        Some(&id),
+        state.db.delete_portscan_profile(&id),
+    ) {
+        Ok(()) => ok_json(serde_json::json!({ "ok": true })),
+        Err(e) => error_response(e),
+    }
+}
+
 /// Identifiant stable, généré par qui crée. Le même alphabet que les autres
 /// identifiants du hub n'est pas requis : celui-ci n'est jamais dicté.
 fn new_profile_id() -> String {
@@ -523,7 +698,7 @@ mod tests {
     use super::*;
     use crate::db::now;
 
-    fn open_memory() -> Db {
+    pub(super) fn open_memory() -> Db {
         Db::open_in_memory().unwrap()
     }
 
@@ -551,7 +726,7 @@ mod tests {
         dir
     }
 
-    fn profile<'a>(list: &'a [PortscanProfile], id: &str) -> &'a PortscanProfile {
+    pub(super) fn profile<'a>(list: &'a [PortscanProfile], id: &str) -> &'a PortscanProfile {
         list.iter()
             .find(|p| p.profile_id == id)
             .unwrap_or_else(|| panic!("profil {id} absent de {list:?}"))
@@ -790,6 +965,32 @@ mod tests {
     }
 
     #[test]
+    fn les_profils_de_base_de_la_sonde_ne_montent_pas() {
+        // Décision 3 : une sonde garde ses profils de base, seuls ceux qu'elle
+        // crée en plus montent. Les faire monter poserait « Common », « Web »…
+        // dans la liste commune de tout le parc, en doublon de ceux du hub —
+        // et chaque sonde en ajouterait sa version.
+        let montants = profiles_from_probe_config(&serde_json::json!({
+            "portscan_profiles": [
+                { "id": "builtin:common", "name": "Common", "tcp_ports": [22] },
+                { "id": "local-1", "name": "Caméras", "tcp_ports": [554], "udp_ports": [5353] },
+                { "id": "local-2", "name": "Vieux", "tcp_ports": [23], "builtin": true }
+            ]
+        }));
+        let ids: Vec<&str> = montants.iter().map(|p| p.profile_id.as_str()).collect();
+        assert_eq!(ids, vec!["local-1"], "{montants:?}");
+        // ⚠️ L'UDP ne monte pas : le hub ne le modélise pas. C'est la raison
+        // pour laquelle la sonde conserve le sien quand le hub lui réécrit un
+        // profil, et pas un oubli.
+        assert_eq!(montants[0].ports, vec![554]);
+    }
+
+    #[test]
+    fn une_configuration_sans_profils_ne_fait_rien_monter() {
+        assert!(profiles_from_probe_config(&serde_json::json!({ "profiles": [] })).is_empty());
+    }
+
+    #[test]
     fn le_hub_ignore_ce_qu_il_connait_et_ce_qu_il_a_supprime_mais_ingere_l_inconnu() {
         // ⚠️ Le hub fait autorité : un profil qu'il connaît ne se laisse pas
         // réécrire par la sonde, et un profil qu'il a supprimé ne se laisse pas
@@ -830,5 +1031,301 @@ mod tests {
         // `origin_probe` est une TRACE, pas un droit : elle répond « d'où sort
         // celui-là », elle ne donne aucune autorité à la sonde.
         assert_eq!(cams.origin_probe.as_deref(), Some(probe_id.as_str()));
+    }
+}
+
+#[cfg(test)]
+mod routes_tests {
+    use super::tests::{open_memory, profile};
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    const MOT_DE_PASSE: &str = "mot-de-passe-de-test";
+
+    struct Harness {
+        state: AppState,
+        router: axum::Router,
+    }
+
+    impl Harness {
+        /// Un hub installé, **sans Influx** : les profils n'en touchent aucun.
+        fn new() -> Self {
+            use std::sync::Arc;
+            let db = Arc::new(open_memory());
+            db.create_initial_admin("admin", MOT_DE_PASSE).unwrap();
+            let settings = crate::settings::Settings::new(db.clone());
+            let secrets = crate::secrets::Secrets::ephemeral(db.clone()).unwrap();
+            let state = AppState {
+                auth: Arc::new(crate::auth::Auth::new(db.clone())),
+                influx: Arc::new(crate::influx::Influx::new(
+                    settings.clone(),
+                    "jeton-operateur-de-test".into(),
+                )),
+                notifier: crate::notify::Notifier::new(db.clone(), secrets.clone(), settings.clone()),
+                ceremonies: Arc::new(crate::passkeys::Ceremonies::new()),
+                db,
+                settings,
+                secrets,
+                tls: false,
+                cert_fingerprint: None,
+                restart_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                config_dir: std::env::temp_dir().join("lanprobe-portscan-tests"),
+                backup_dir: std::env::temp_dir().join("lanprobe-portscan-tests"),
+                influx_cli: "influx-absent-des-tests".into(),
+            };
+            let router = crate::web::build_router(state.clone());
+            Self { state, router }
+        }
+
+        async fn call(&self, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+            let response = self.router.clone().oneshot(req).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, body)
+        }
+
+        /// Un compte d'un rôle donné, et son cookie de session.
+        fn session(&self, username: &str, role: crate::db::Role) -> String {
+            if username != "admin" {
+                self.state
+                    .db
+                    .create_user(username, MOT_DE_PASSE, role)
+                    .unwrap();
+            }
+            let token = self.state.auth.start_session(username.to_string()).unwrap();
+            format!("lanprobe_hub_session={token}")
+        }
+
+        async fn send(
+            &self,
+            method: &str,
+            path: &str,
+            cookie: &str,
+            body: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            self.call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+        }
+
+        /// Une sonde enrôlée, avec son jeton en clair.
+        fn probe(&self) -> (String, String) {
+            let site = self.state.db.create_site("Durand").unwrap();
+            let (probe, token) = self.state.db.enroll_probe(&site.site_id, "Paris").unwrap();
+            (probe.probe_id, token)
+        }
+
+        async fn heartbeat(&self, id: &str, token: &str, body: serde_json::Value) -> serde_json::Value {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri(format!("/api/probes/{id}/heartbeat"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            req.extensions_mut().insert(axum::extract::ConnectInfo(
+                "203.0.113.10:41000".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            self.call(req).await.1
+        }
+    }
+
+    #[tokio::test]
+    async fn la_liste_se_lit_en_viewer_et_ne_s_ecrit_qu_en_operateur() {
+        // La portée est le hub ENTIER (décision 4) : un profil de scan n'est
+        // pas privé, contrairement au profil réseau qui décrit un site.
+        let h = Harness::new();
+        let lecteur = h.session("lea", crate::db::Role::Viewer);
+
+        let (status, body) = h.send("GET", "/api/portscan-profiles", &lecteur, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["profiles"].as_array().unwrap().len(), 4);
+
+        // Lancer un scan change ce qui frappe le réseau d'un client : ce n'est
+        // pas une consultation.
+        let (status, _) = h
+            .send(
+                "POST",
+                "/api/portscan-profiles",
+                &lecteur,
+                json!({ "name": "Caméras", "ports": [554] }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let operateur = h.session("olivier", crate::db::Role::Operator);
+        let (status, created) = h
+            .send(
+                "POST",
+                "/api/portscan-profiles",
+                &operateur,
+                json!({ "name": "Caméras", "ports": [554, 80, 554] }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["ports"], json!([80, 554]), "triés et dédoublonnés");
+    }
+
+    #[tokio::test]
+    async fn supprimer_par_l_api_pose_une_date_sans_retirer_la_ligne() {
+        let h = Harness::new();
+        let operateur = h.session("olivier", crate::db::Role::Operator);
+
+        let (status, _) = h
+            .send("DELETE", "/api/portscan-profiles/db", &operateur, json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, body) = h
+            .send("GET", "/api/portscan-profiles", &operateur, json!({}))
+            .await;
+        let ids: Vec<&str> = body["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["profile_id"].as_str().unwrap())
+            .collect();
+        assert!(!ids.contains(&"db"), "{ids:?}");
+
+        // 🔴 La ligne reste : c'est elle qui dira aux sondes de retirer le
+        // profil. La supprimer rendrait « supprimé » indiscernable de « jamais
+        // connu », et la première sonde le recréerait en le remontant.
+        let all = h.state.db.portscan_profiles_with_tombstones().unwrap();
+        assert!(profile(&all, "db").deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn le_battement_d_une_sonde_a_jour_ne_porte_aucun_champ_de_profils() {
+        // ⚠️ Et c'est tout l'intérêt du compteur : le cas courant ne fait
+        // voyager NI la liste, NI les pierres tombales.
+        let h = Harness::new();
+        let (id, token) = h.probe();
+        let rev = h.state.db.portscan_rev().unwrap();
+
+        let response = h.heartbeat(&id, &token, json!({ "profiles_rev": rev })).await;
+        assert!(
+            response.get("portscan_profiles").is_none(),
+            "à jour : rien à dire — {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_hub_ne_parle_pas_de_profils_a_une_sonde_qui_les_ignore() {
+        // ⚠️ Une sonde antérieure au mécanisme n'annonce aucune révision : elle
+        // ne saurait pas quoi faire de la liste, et surtout pas quelle révision
+        // ranger. Lui en envoyer une ne ferait que gonfler chaque battement.
+        let h = Harness::new();
+        let (id, token) = h.probe();
+
+        let response = h.heartbeat(&id, &token, json!({})).await;
+        assert!(response.get("portscan_profiles").is_none(), "{response}");
+    }
+
+    #[tokio::test]
+    async fn une_sonde_en_retard_recoit_le_delta_et_la_revision_a_ranger() {
+        let h = Harness::new();
+        let (id, token) = h.probe();
+        let depart = h.state.db.portscan_rev().unwrap();
+        h.state.db.delete_portscan_profile("db").unwrap();
+
+        let response = h.heartbeat(&id, &token, json!({ "profiles_rev": depart })).await;
+        let liste = response["portscan_profiles"].as_array().unwrap();
+        assert_eq!(liste.len(), 1, "{response}");
+        assert_eq!(liste[0]["profile_id"], "db");
+        assert!(liste[0]["deleted_at"].is_i64(), "la pierre tombale voyage");
+        assert_eq!(
+            response["portscan_profiles_rev"],
+            json!(h.state.db.portscan_rev().unwrap()),
+            "la sonde doit savoir quoi ranger"
+        );
+        assert_eq!(response["portscan_profiles_replace"], json!(false));
+
+        // L'annonce de la révision EST l'accusé : le hub la range.
+        let suivant = h.heartbeat(&id, &token, json!({
+            "profiles_rev": h.state.db.portscan_rev().unwrap()
+        }))
+        .await;
+        assert!(suivant.get("portscan_profiles").is_none(), "{suivant}");
+    }
+
+    #[tokio::test]
+    async fn une_sonde_en_avance_recoit_la_liste_complete_avec_le_drapeau() {
+        // 🔴 Le cas « hub restauré », et il se répare tout seul au premier
+        // battement. Sans lui, le hub répondrait « tu es à jour » pour toujours
+        // à une sonde dont la liste ne bougerait plus jamais.
+        let h = Harness::new();
+        let (id, token) = h.probe();
+        let avance = h.state.db.portscan_rev().unwrap() + 7;
+
+        let response = h.heartbeat(&id, &token, json!({ "profiles_rev": avance })).await;
+        assert_eq!(response["portscan_profiles_replace"], json!(true), "{response}");
+        assert_eq!(response["portscan_profiles"].as_array().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn la_configuration_remontee_fait_monter_les_profils_inconnus() {
+        // Décision 3 : une sonde garde ses profils de base, et ceux qu'elle
+        // crée en plus montent et rejoignent la liste commune.
+        let h = Harness::new();
+        let (id, token) = h.probe();
+
+        let (status, _) = h
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/probes/{id}/config"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "portscan_profiles": [
+                                { "id": "cams", "name": "Caméras", "tcp_ports": [554, 80], "udp_ports": [5353] }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let list = h.state.db.list_portscan_profiles().unwrap();
+        let cams = profile(&list, "cams");
+        assert_eq!(cams.ports, vec![80, 554]);
+        assert_eq!(cams.origin_probe.as_deref(), Some(id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn le_parc_qui_rattrape_sa_revision_laisse_partir_les_pierres_tombales() {
+        // ⚠️ Nettoyer au battement et nulle part ailleurs : c'est le seul
+        // moment où la plus petite révision du parc peut avoir bougé, et il n'y
+        // a aucune tâche de fond à rater.
+        let h = Harness::new();
+        let (id, token) = h.probe();
+        h.state.db.delete_portscan_profile("db").unwrap();
+        let rev = h.state.db.portscan_rev().unwrap();
+
+        h.heartbeat(&id, &token, json!({ "profiles_rev": rev })).await;
+
+        assert!(
+            !h.state
+                .db
+                .portscan_profiles_with_tombstones()
+                .unwrap()
+                .iter()
+                .any(|p| p.profile_id == "db"),
+            "toute le parc l'a apprise : elle n'a plus rien à dire"
+        );
     }
 }
