@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 26;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -761,6 +761,51 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE probes ADD COLUMN last_profiles_rev    INTEGER;
     ALTER TABLE probes ADD COLUMN last_profiles_rev_at INTEGER;
     "#,
+    // v25 → v26 : d'où vient une commande (contrat § 26).
+    //
+    // 🔴 **Aucun `DEFAULT`, et c'est tout l'arbitrage.** Les commandes déjà
+    // en base naissent avec `origin IS NULL`, c'est-à-dire « origine
+    // inconnue ». Un `DEFAULT 'hub'` aurait affirmé qu'une commande de
+    // juillet venait du navigateur du bureau alors que personne ne le sait —
+    // sur la SEULE trace qui réponde à « qui a lancé ce scan sur le réseau de
+    // Durand » des mois après. Inventer une provenance est pire que de n'en
+    // donner aucune.
+    //
+    // ⚠️ `created_by` ne suffisait pas et ne pouvait pas suffire : le même
+    // compte sert au navigateur du hub et à l'app sur le téléphone du
+    // technicien (§ 22). « claire » répond à « qui », jamais à « depuis où ».
+    //
+    // ── Pourquoi DEUX colonnes pour l'appareil ──
+    //
+    // `origin_device_name` porte le nom **à l'instant de l'empilement**, figé.
+    // C'est le même raisonnement que `reports.device_id` (§ 23) : un téléphone
+    // change de main et se fait renommer, et afficher le nom d'aujourd'hui
+    // attribuerait à son nouveau porteur un scan lancé par l'ancien. Le nom
+    // est donc STOCKÉ, jamais joint à la lecture.
+    //
+    // `origin_device_id` répond à l'autre question — « lequel, exactement » —
+    // et survit au renommage comme à la révocation. Sans lui, un appareil
+    // renommé serait introuvable depuis l'historique ; sans le nom, la ligne
+    // n'afficherait qu'un UUID. Les deux, ou aucune des deux questions n'a de
+    // réponse.
+    //
+    // 🔴 **Aucune clé étrangère vers `paired_devices`, et c'est délibéré.**
+    // `created_by`, juste à côté dans la même table, ne référence pas
+    // `users` pour la même raison : ces colonnes sont des TRACES, pas des
+    // relations vivantes. Une trace sous contrainte peut être REFUSÉE — les
+    // clés étrangères sont actives ici (`PRAGMA foreign_keys = ON` dans
+    // `from_connection`), donc un identifiant d'appareil que la base ne
+    // retrouve pas ferait échouer l'INSERT, c'est-à-dire ferait échouer la
+    // COMMANDE pour un défaut de journal. On perdrait l'ordre et sa
+    // provenance, exactement dans le cas anormal où l'on veut les deux.
+    //
+    // La contrainte n'achèterait d'ailleurs rien : rien ne supprime un
+    // appareil dans ce projet — on révoque, puis on masque (v22 → v23).
+    r#"
+    ALTER TABLE probe_commands ADD COLUMN origin             TEXT;
+    ALTER TABLE probe_commands ADD COLUMN origin_device_id   TEXT;
+    ALTER TABLE probe_commands ADD COLUMN origin_device_name TEXT;
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
@@ -902,6 +947,41 @@ pub struct PendingCommand {
     pub args: serde_json::Value,
 }
 
+/// D'où part une commande (contrat § 26).
+///
+/// 🔴 **Il n'y a pas de variante « inconnue », et c'est voulu.** Celui qui
+/// empile sait toujours d'où il empile ; l'inconnu n'existe que pour les
+/// lignes empilées AVANT le § 26, où il se lit comme `origin IS NULL` en base.
+/// Une variante `Unknown` ici aurait offert à un futur appelant de déclarer
+/// qu'il ne sait pas — ce qu'aucun appelant ne peut honnêtement dire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOrigin<'a> {
+    /// Une session de navigateur sur le hub.
+    Hub,
+    /// Un appareil appairé (§ 22).
+    Device {
+        device_id: &'a str,
+        /// Son nom **à l'instant de l'empilement**, figé dans la ligne.
+        ///
+        /// ⚠️ `None` quand la ligne de l'appareil ne s'est pas relue. On
+        /// n'invente alors rien : l'origine reste « appareil », avec son
+        /// identifiant. Retomber sur [`CommandOrigin::Hub`] parce qu'un nom
+        /// manque affirmerait une provenance fausse.
+        name: Option<&'a str>,
+    },
+}
+
+impl CommandOrigin<'_> {
+    /// Ce qui part en base dans `origin`. Valeurs stables : elles sont lues
+    /// par l'interface et par le contrat.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hub => "hub",
+            Self::Device { .. } => "device",
+        }
+    }
+}
+
 /// Commande telle qu'elle est montrée dans l'interface.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CommandRow {
@@ -912,6 +992,22 @@ pub struct CommandRow {
     pub state: String,
     pub created_at: i64,
     pub created_by: Option<String>,
+    /// `hub` | `device`, et **`None` = inconnue**, jamais « hub ».
+    ///
+    /// 🔴 `None` ne veut pas dire « depuis le hub » : il désigne les commandes
+    /// empilées avant le § 26, dont la provenance n'a jamais été enregistrée.
+    /// Les afficher comme venant du hub inventerait une réponse à la seule
+    /// question que cette colonne existe pour trancher.
+    pub origin: Option<String>,
+    /// L'appareil, quand `origin` vaut `device`. Survit au renommage et à la
+    /// révocation : c'est lui qui permet de retrouver le téléphone.
+    pub origin_device_id: Option<String>,
+    /// Son nom **tel qu'il était à l'empilement**, jamais relu.
+    ///
+    /// ⚠️ C'est délibérément le nom d'ALORS. Un téléphone qui change de main
+    /// se fait renommer, et afficher le nom d'aujourd'hui attribuerait à son
+    /// nouveau porteur un scan lancé par l'ancien (même raison qu'au § 23).
+    pub origin_device_name: Option<String>,
     pub delivered_count: i64,
     pub settled_at: Option<i64>,
     pub error: Option<String>,
@@ -3298,12 +3394,19 @@ impl Db {
     // ── File de commandes (contrat § 14) ───────────────────────────────────
 
     /// Empile une commande pour une sonde. Rend son identifiant.
+    ///
+    /// ⚠️ `actor` répond à « qui » (le compte), `origin` à « depuis où »
+    /// (§ 26). Les deux sont demandés et aucun ne remplace l'autre : le même
+    /// compte sert au navigateur du hub et à l'app sur le téléphone, donc
+    /// `actor` seul ne distingue pas un clic au bureau d'un ordre lancé en
+    /// haut d'une échelle.
     pub fn enqueue_command(
         &self,
         probe_id: &str,
         kind: &str,
         args: &serde_json::Value,
         actor: &str,
+        origin: CommandOrigin<'_>,
     ) -> DbResult<i64> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         // La sonde doit exister : une commande orpheline attendrait pour
@@ -3316,10 +3419,27 @@ impl Db {
         if exists == 0 {
             return Err(DbError::NotFound("sonde inconnue ou révoquée".into()));
         }
+        // L'origine est **figée ici**, pas calculée à la lecture : c'est ce
+        // qui fait que renommer l'appareil plus tard ne réécrit pas le passé.
+        let (device_id, device_name) = match origin {
+            CommandOrigin::Hub => (None, None),
+            CommandOrigin::Device { device_id, name } => (Some(device_id), name),
+        };
         conn.execute(
-            "INSERT INTO probe_commands (probe_id, kind, args, created_at, created_by)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![probe_id, kind, args.to_string(), now(), actor],
+            "INSERT INTO probe_commands
+               (probe_id, kind, args, created_at, created_by,
+                origin, origin_device_id, origin_device_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                probe_id,
+                kind,
+                args.to_string(),
+                now(),
+                actor,
+                origin.as_str(),
+                device_id,
+                device_name,
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -3570,8 +3690,12 @@ impl Db {
     pub fn list_commands(&self, probe_id: &str, limit: i64) -> DbResult<Vec<CommandRow>> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
+            // ⚠️ `origin_device_name` est LU en base, jamais joint à
+            // `paired_devices` : la jointure rendrait le nom d'aujourd'hui, et
+            // l'historique doit porter celui d'alors (§ 26).
             "SELECT id, kind, args, state, created_at, created_by,
-                    delivered_count, settled_at, error
+                    delivered_count, settled_at, error,
+                    origin, origin_device_id, origin_device_name
                FROM probe_commands
               WHERE probe_id = ?1
               ORDER BY id DESC
@@ -3589,6 +3713,9 @@ impl Db {
                 delivered_count: r.get(6)?,
                 settled_at: r.get(7)?,
                 error: r.get(8)?,
+                origin: r.get(9)?,
+                origin_device_id: r.get(10)?,
+                origin_device_name: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -3655,7 +3782,13 @@ mod tests {
     fn a_command_is_delivered_once_then_settled() {
         let (db, probe_id) = db_with_probe();
         let id = db
-            .enqueue_command(&probe_id, "speedtest", &serde_json::json!({}), "claire")
+            .enqueue_command(
+                &probe_id,
+                "speedtest",
+                &serde_json::json!({}),
+                "claire",
+                CommandOrigin::Hub,
+            )
             .unwrap();
 
         let first = db.take_pending_commands(&probe_id).unwrap();
@@ -3679,7 +3812,13 @@ mod tests {
         // repartirait à chaque redémarrage, et la sonde ne se relèverait
         // jamais. Trois remises, puis on abandonne.
         let (db, probe_id) = db_with_probe();
-        db.enqueue_command(&probe_id, "port_scan", &serde_json::json!({"ip": "10.0.0.1"}), "claire")
+        db.enqueue_command(
+            &probe_id,
+            "port_scan",
+            &serde_json::json!({"ip": "10.0.0.1"}),
+            "claire",
+            CommandOrigin::Hub,
+        )
             .unwrap();
 
         for beat in 1..=MAX_DELIVERIES {
@@ -3704,7 +3843,13 @@ mod tests {
         // verdict effacerait l'erreur qui explique l'échec.
         let (db, probe_id) = db_with_probe();
         let id = db
-            .enqueue_command(&probe_id, "discovery", &serde_json::json!({}), "claire")
+            .enqueue_command(
+                &probe_id,
+                "discovery",
+                &serde_json::json!({}),
+                "claire",
+                CommandOrigin::Hub,
+            )
             .unwrap();
         db.take_pending_commands(&probe_id).unwrap();
         db.settle_command(&probe_id, id, false, Some("interface absente")).unwrap();
@@ -3721,7 +3866,13 @@ mod tests {
         // viendra jamais, et l'interface la montrerait « en attente ».
         let db = open_memory();
         assert!(matches!(
-            db.enqueue_command("inconnue", "speedtest", &serde_json::json!({}), "claire"),
+            db.enqueue_command(
+                "inconnue",
+                "speedtest",
+                &serde_json::json!({}),
+                "claire",
+                CommandOrigin::Hub
+            ),
             Err(DbError::NotFound(_))
         ));
     }
@@ -3731,7 +3882,13 @@ mod tests {
         let (db, probe_id) = db_with_probe();
         db.revoke_probe(&probe_id).unwrap();
         assert!(matches!(
-            db.enqueue_command(&probe_id, "speedtest", &serde_json::json!({}), "claire"),
+            db.enqueue_command(
+                &probe_id,
+                "speedtest",
+                &serde_json::json!({}),
+                "claire",
+                CommandOrigin::Hub
+            ),
             Err(DbError::NotFound(_))
         ));
     }
@@ -3741,9 +3898,138 @@ mod tests {
         let (db, first) = db_with_probe();
         let site = db.create_site("Martin").unwrap();
         let (other, _) = db.enroll_probe(&site.site_id, "Lyon").unwrap();
-        db.enqueue_command(&first, "speedtest", &serde_json::json!({}), "claire")
+        db.enqueue_command(
+            &first,
+            "speedtest",
+            &serde_json::json!({}),
+            "claire",
+            CommandOrigin::Hub,
+        )
             .unwrap();
         assert!(db.take_pending_commands(&other.probe_id).unwrap().is_empty());
+    }
+
+    // ── Origine d'une commande (contrat § 26) ──────────────────────────────
+
+    /// Un appareil appairé pour le compte `claire`, prêt à empiler.
+    ///
+    /// ⚠️ Passe par `pair_device` plutôt que par un `INSERT` à la main : c'est
+    /// la seule fabrique d'appareil, et un test qui écrirait la ligne lui-même
+    /// ne verrait pas une colonne qui changerait de nom.
+    fn db_with_probe_and_device() -> (Db, String, String) {
+        let (db, probe_id) = db_with_probe();
+        db.create_initial_admin("claire", "mot-de-passe-de-test").unwrap();
+        let (device, _secret) = db
+            .pair_device("claire", "iPhone de Claire", None, None)
+            .unwrap();
+        (db, probe_id, device.device_id)
+    }
+
+    #[test]
+    fn a_command_from_a_browser_session_names_the_hub_as_its_origin() {
+        // « hub » est une origine AFFIRMÉE, pas un défaut : c'est ce qui
+        // distingue une commande cliquée dans le navigateur du hub d'une
+        // commande dont on ne sait rien (voir le test des commandes d'avant).
+        let (db, probe_id) = db_with_probe();
+        db.enqueue_command(
+            &probe_id,
+            "speedtest",
+            &serde_json::json!({}),
+            "claire",
+            CommandOrigin::Hub,
+        )
+        .unwrap();
+
+        let row = &db.list_commands(&probe_id, 10).unwrap()[0];
+        assert_eq!(row.origin.as_deref(), Some("hub"));
+        assert_eq!(row.origin_device_id, None, "le hub n'est pas un appareil");
+        assert_eq!(row.origin_device_name, None);
+    }
+
+    #[test]
+    fn a_command_from_a_paired_device_keeps_its_name_and_its_identifier() {
+        // Le nom est ce que l'écran montre ; l'identifiant est ce qui permet
+        // de retrouver l'appareil même renommé ou révoqué depuis. Garder
+        // seulement l'un des deux rend l'autre question sans réponse.
+        let (db, probe_id, device_id) = db_with_probe_and_device();
+        db.enqueue_command(
+            &probe_id,
+            "port_scan",
+            &serde_json::json!({ "ip": "10.0.0.1" }),
+            "claire",
+            CommandOrigin::Device {
+                device_id: &device_id,
+                name: Some("iPhone de Claire"),
+            },
+        )
+        .unwrap();
+
+        let row = &db.list_commands(&probe_id, 10).unwrap()[0];
+        assert_eq!(row.origin.as_deref(), Some("device"));
+        assert_eq!(row.origin_device_id.as_deref(), Some(device_id.as_str()));
+        assert_eq!(row.origin_device_name.as_deref(), Some("iPhone de Claire"));
+    }
+
+    #[test]
+    fn renaming_a_device_does_not_rewrite_the_origin_of_a_past_command() {
+        // 🔴 L'historique porte le nom D'ALORS, figé à l'empilement.
+        //
+        // Un téléphone change de main et se fait renommer : afficher le nom
+        // d'aujourd'hui attribuerait à son nouveau porteur un scan lancé par
+        // l'ancien. C'est exactement le défaut que `reports.device_id`
+        // documente (§ 23) — « l'audit dira benjamin, ce qui est vrai et
+        // trompeur ». Le nom est donc STOCKÉ, jamais joint à la lecture.
+        let (db, probe_id, device_id) = db_with_probe_and_device();
+        db.enqueue_command(
+            &probe_id,
+            "discovery",
+            &serde_json::json!({}),
+            "claire",
+            CommandOrigin::Device {
+                device_id: &device_id,
+                name: Some("iPhone de Claire"),
+            },
+        )
+        .unwrap();
+
+        db.rename_paired_device(&device_id, "iPhone de Marc").unwrap();
+        db.revoke_paired_device(&device_id).unwrap();
+
+        let row = &db.list_commands(&probe_id, 10).unwrap()[0];
+        assert_eq!(
+            row.origin_device_name.as_deref(),
+            Some("iPhone de Claire"),
+            "le renommage ne réécrit pas le passé"
+        );
+        assert_eq!(
+            row.origin_device_id.as_deref(),
+            Some(device_id.as_str()),
+            "et l'identifiant retrouve l'appareil, renommé ou révoqué"
+        );
+    }
+
+    #[test]
+    fn a_device_whose_name_is_unreadable_keeps_its_identifier_and_never_becomes_the_hub() {
+        // ⚠️ Le cas où la ligne de l'appareil ne se relit pas à l'empilement.
+        // Retomber sur `Hub` inventerait une origine fausse : on sait que la
+        // commande vient d'un appareil, et lequel. Seul le nom manque.
+        let (db, probe_id) = db_with_probe();
+        db.enqueue_command(
+            &probe_id,
+            "speedtest",
+            &serde_json::json!({}),
+            "claire",
+            CommandOrigin::Device {
+                device_id: "appareil-1",
+                name: None,
+            },
+        )
+        .unwrap();
+
+        let row = &db.list_commands(&probe_id, 10).unwrap()[0];
+        assert_eq!(row.origin.as_deref(), Some("device"));
+        assert_eq!(row.origin_device_id.as_deref(), Some("appareil-1"));
+        assert_eq!(row.origin_device_name, None);
     }
 
     #[test]
@@ -3981,6 +4267,68 @@ mod tests {
             assert!(
                 reports.iter().any(|c| c == expected),
                 "colonne {expected} absente de reports : {reports:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_v26_laisse_sans_origine_les_commandes_deja_empilees() {
+        // 🔴 Le cas qui compte le plus dans le § 26 : un hub en service, sa
+        // file de commandes déjà remplie, qu'on met à jour.
+        //
+        // ⚠️ Ces lignes-là doivent rester SANS origine — `NULL`, c'est-à-dire
+        // « inconnue ». Un `DEFAULT 'hub'` dans l'ALTER TABLE aurait affirmé
+        // qu'une commande de juillet venait du navigateur alors que personne
+        // ne le sait : inventer une origine est pire que de ne rien dire, et
+        // c'est précisément une origine qu'on consulte pour savoir qui a lancé
+        // un scan sur le réseau d'un client.
+        let dir = tmp_dir("v25-to-v26");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..25] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 25").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO probes (probe_id, site_id, name, token_hash, created_at)
+                 VALUES ('p-1', 's-1', 'Paris', 'h', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO probe_commands (probe_id, kind, args, created_at, created_by)
+                 VALUES ('p-1', 'speedtest', '{}', 1000, 'claire')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+
+        let rows = db.list_commands("p-1", 10).unwrap();
+        assert_eq!(rows.len(), 1, "la commande d'avant doit survivre");
+        assert_eq!(rows[0].created_by.as_deref(), Some("claire"));
+        assert_eq!(
+            rows[0].origin, None,
+            "une commande d'avant le § 26 n'a PAS d'origine, et surtout pas « hub »"
+        );
+        assert_eq!(rows[0].origin_device_id, None);
+        assert_eq!(rows[0].origin_device_name, None);
+
+        let commands = columns(&db, "probe_commands");
+        for expected in ["origin", "origin_device_id", "origin_device_name"] {
+            assert!(
+                commands.iter().any(|c| c == expected),
+                "colonne {expected} absente de probe_commands : {commands:?}"
             );
         }
 

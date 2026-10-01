@@ -4181,7 +4181,32 @@ async fn create_command(
         Ok(probe) => probe,
         Err(e) => return error_response(e),
     };
-    let command_id = match state.db.enqueue_command(&id, kind, &args, &actor.username) {
+    // 🔴 L'origine est résolue ICI, à l'empilement, et figée dans la ligne
+    // (contrat § 26). `created_by` ne répond qu'à « qui » : le même compte
+    // sert au navigateur du hub et à l'app sur le téléphone du technicien
+    // (§ 22). Devant un scan de ports qu'on n'a pas lancé, « claire » ne dit
+    // pas s'il est parti du bureau ou d'un appareil appairé.
+    //
+    // ⚠️ Le NOM est lu maintenant et stocké, jamais joint à la lecture : un
+    // téléphone qui change de main se fait renommer, et afficher le nom
+    // d'aujourd'hui attribuerait à son nouveau porteur un ordre lancé par
+    // l'ancien. C'est le même raisonnement que `reports.device_id` (§ 23).
+    //
+    // ⚠️ Si la ligne de l'appareil ne se relit pas, on garde `Device` avec son
+    // identifiant seul. Retomber sur `Hub` parce qu'un nom manque inventerait
+    // une provenance fausse, ce qui est pire que de ne pas savoir la nommer.
+    let device = actor
+        .device_id
+        .as_deref()
+        .map(|device_id| (device_id, state.db.get_paired_device(device_id).ok()));
+    let origin = match &device {
+        Some((device_id, device)) => crate::db::CommandOrigin::Device {
+            device_id,
+            name: device.as_ref().map(|d| d.name.as_str()),
+        },
+        None => crate::db::CommandOrigin::Hub,
+    };
+    let command_id = match state.db.enqueue_command(&id, kind, &args, &actor.username, origin) {
         Ok(command_id) => command_id,
         Err(e) => return error_response(e),
     };
@@ -8327,6 +8352,91 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["commands"].as_array().map(|c| c.len()), Some(0), "{body}");
+    }
+
+    // ── D'où vient une commande (contrat § 26) ─────────────────────────────
+
+    #[tokio::test]
+    async fn a_command_clicked_in_the_hub_says_it_came_from_the_hub() {
+        // La file ne portait que le genre, les arguments et le nom du compte.
+        // « claire » ne dit pas si la commande a été cliquée au bureau ou
+        // lancée depuis un téléphone en haut d'une échelle — et c'est la
+        // seconde question qu'on se pose devant un scan qu'on n'a pas lancé.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    json!({ "kind": "discovery" }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/commands")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = &body["commands"][0];
+        assert_eq!(row["origin"], "hub", "{row}");
+        assert!(row["origin_device_id"].is_null(), "{row}");
+        assert!(row["origin_device_name"].is_null(), "{row}");
+    }
+
+    #[tokio::test]
+    async fn a_command_sent_from_a_paired_device_names_the_phone() {
+        // 🔴 Le cas qui motive le § 26 : la commande part du téléphone d'un
+        // technicien. Le compte est le même que celui du navigateur, donc
+        // `created_by` ne les distingue pas. L'appareil, lui, le fait.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (device, _secret) = h
+            .state
+            .db
+            .pair_device("admin", "iPhone de Claire", Some("ios"), Some("1.0"))
+            .expect("l'appairage doit réussir");
+        let access = crate::pairing::issue_access_token(&h.state, &device)
+            .expect("le jeton d'accès doit s'émettre");
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/commands"),
+                    json!({ "kind": "speedtest" }),
+                ),
+                &access,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/commands")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = &body["commands"][0];
+        assert_eq!(row["origin"], "device", "{row}");
+        assert_eq!(row["origin_device_id"], device.device_id, "{row}");
+        assert_eq!(
+            row["origin_device_name"], "iPhone de Claire",
+            "le nom d'alors, figé : {row}"
+        );
+        // ⚠️ Le compte reste celui du propriétaire — l'appareil ne porte aucun
+        // droit propre. L'origine s'ajoute à l'acteur, elle ne le remplace pas.
+        assert_eq!(row["created_by"], "admin", "{row}");
     }
 
     #[tokio::test]
