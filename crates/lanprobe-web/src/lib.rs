@@ -14,6 +14,7 @@ pub mod influx;
 pub mod notify;
 pub mod packages;
 pub mod pairing;
+pub mod portscan;
 pub mod probe;
 pub mod report_chart;
 pub mod report_i18n;

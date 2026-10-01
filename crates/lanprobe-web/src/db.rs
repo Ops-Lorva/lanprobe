@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -712,6 +712,55 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE users ADD COLUMN ui_locale     TEXT;
     ALTER TABLE sites ADD COLUMN report_locale TEXT;
     "#,
+    // v24 → v25 : les profils de scan de ports deviennent partagés (§ 25).
+    //
+    // ⚠️ **`deleted_at` non nul EST la suppression** : un fait explicite, daté,
+    // qu'on conserve — même leçon que `removed_at` au § 20. Sans la ligne, la
+    // sonde ne distingue pas « le hub ne connaît pas ce profil » de « le hub
+    // l'a supprimé », et le recrée au battement suivant en le remontant.
+    //
+    // ⚠️ `ports` est du JSON et **vide n'est pas une liste vide** envoyée à la
+    // sonde : c'est « la sonde garde la sienne ». La sonde traite déjà `[]`
+    // comme une absence de restriction, et confondre les deux ferait un scan
+    // complet là où on croyait restreindre.
+    //
+    // ⚠️ `origin_probe` est une **trace**, pas un droit : elle répond « d'où
+    // sort celui-là » et ne donne aucune autorité à la sonde qui l'a créé.
+    // Elle reste `REFERENCES probes` sans cascade — rien ne supprime une sonde
+    // dans ce projet, on la révoque ou on l'archive.
+    //
+    // `rev` porte la révision qui a produit la ligne. C'est elle qui fait
+    // voyager un **delta** au battement plutôt que quarante pierres tombales à
+    // chaque fois, et ce n'est **pas une date** : les deux machines ne
+    // partagent pas d'horloge, exactement comme au § 20.
+    //
+    // ⚠️ L'unicité du nom est **partielle** : elle ne porte que sur les
+    // profils vivants. Sans le `WHERE`, un nom supprimé resterait pris pour
+    // toujours et on ne pourrait pas recréer « Caméras » après l'avoir retiré,
+    // sans qu'aucun message ne dise pourquoi.
+    //
+    // `last_profiles_rev` sur la sonde est son accusé de réception ;
+    // `last_profiles_rev_at` est ce qui permet au garde-fou de 90 jours de
+    // cesser de retenir le nettoyage pour une machine oubliée dans un placard.
+    r#"
+    CREATE TABLE portscan_profiles (
+      profile_id   TEXT PRIMARY KEY,
+      name         TEXT    NOT NULL,
+      ports        TEXT    NOT NULL,
+      origin_probe TEXT    REFERENCES probes(probe_id),
+      created_at   INTEGER NOT NULL,
+      updated_at   INTEGER NOT NULL,
+      deleted_at   INTEGER,
+      rev          INTEGER NOT NULL
+    );
+
+    CREATE UNIQUE INDEX portscan_profiles_name
+      ON portscan_profiles(name COLLATE NOCASE) WHERE deleted_at IS NULL;
+    CREATE INDEX portscan_profiles_rev ON portscan_profiles(rev);
+
+    ALTER TABLE probes ADD COLUMN last_profiles_rev    INTEGER;
+    ALTER TABLE probes ADD COLUMN last_profiles_rev_at INTEGER;
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
@@ -1383,7 +1432,7 @@ fn check_password_length(password: &str) -> DbResult<()> {
 
 /// Traduit une violation de contrainte SQLite en `Conflict`. Sans ça, un nom
 /// déjà pris ressortirait en 500 et l'utilisateur ne saurait pas quoi corriger.
-fn conflict_on_constraint(e: rusqlite::Error, message: String) -> DbError {
+pub(crate) fn conflict_on_constraint(e: rusqlite::Error, message: String) -> DbError {
     match e {
         rusqlite::Error::SqliteFailure(err, _)
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -1418,7 +1467,15 @@ impl Db {
         // orphelines pointant vers un site inexistant.
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         migrate(&conn)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        let db = Self { conn: Mutex::new(conn) };
+        // Les quatre profils en dur deviennent des lignes au PREMIER démarrage
+        // de cette version, et jamais ensuite (contrat § 25).
+        db.seed_portscan_profiles()?;
+        // 🔴 Et le compteur de révision est relevé sous ses propres lignes :
+        // une base restaurée depuis une sauvegarde ne doit pas resservir des
+        // numéros déjà émis. C'est le RECUL, pas le débordement, qui menace.
+        db.lift_portscan_rev()?;
+        Ok(db)
     }
 
     fn lock(&self) -> DbResult<std::sync::MutexGuard<'_, Connection>> {

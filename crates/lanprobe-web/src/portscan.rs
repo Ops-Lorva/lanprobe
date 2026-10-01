@@ -1,0 +1,834 @@
+//! Profils de scan de ports partagés — contrat § 25.
+//!
+//! Avant : **quatre profils en dur** dans l'interface du hub, aucune base,
+//! aucun écran d'édition — et de vrais profils modifiables côté sonde, que le
+//! hub ne voyait pas. Ici, le hub fait autorité pour tout le parc.
+//!
+//! ## Les trois règles que personne ne doit « simplifier »
+//!
+//! - **Une suppression est un FAIT daté** (`deleted_at`), jamais une absence.
+//!   Même leçon que `removed_at` au § 20 : sans la ligne, la sonde ne
+//!   distingue pas « le hub ne connaît pas ce profil » de « le hub l'a
+//!   supprimé », et le recrée au battement suivant en le remontant.
+//! - **Le transport se fait par compteur de révision, jamais par dates.** La
+//!   sonde et le hub ne partagent pas d'horloge — c'est déjà pourquoi la file
+//!   des surveillances voyage en ancienneté et non en horodatage.
+//! - **`ports` vide n'est pas une liste vide** envoyée à la sonde : c'est « la
+//!   sonde garde la sienne ». Les confondre ferait un scan complet là où on
+//!   croyait restreindre.
+//!
+//! Le module vit hors de `db.rs` — qui fait déjà 5 700 lignes — comme
+//! l'appairage et les rapports avant lui : chaque domaine porte son `impl Db`
+//! et emprunte la connexion.
+
+use rusqlite::OptionalExtension;
+
+use crate::db::{Db, DbError, DbResult};
+
+/// Compteur de révision du hub. Incrémenté à **chaque** création,
+/// modification ou suppression ; chaque ligne porte la révision qui l'a
+/// produite.
+///
+/// 🔴 Ce n'est PAS une date. Il vient du hub, la sonde le range et le rend tel
+/// quel : aucune horloge n'entre dans l'affaire, et deux machines qui ne seront
+/// jamais d'accord sur l'heure n'ont rien à arbitrer.
+pub(crate) const PORTSCAN_REV_KEY: &str = "portscan_profiles_rev";
+
+/// Révision en dessous de laquelle les pierres tombales ont été effacées.
+///
+/// ⚠️ Sans ce seuil, une sonde qui revient après le nettoyage recevrait un
+/// delta **amputé** des suppressions effacées : elle garderait des profils que
+/// le hub a retirés, et les remonterait. Elle reçoit donc la liste complète.
+pub(crate) const PORTSCAN_PURGED_KEY: &str = "portscan_purged_below_rev";
+
+/// Les quatre profils en dur ont-ils déjà été posés ?
+///
+/// 🔴 Les reposer à chaque démarrage ressusciterait celui qu'on vient de
+/// supprimer exprès — une suppression qui se défait toute seule au prochain
+/// redémarrage du conteneur.
+const PORTSCAN_SEEDED_KEY: &str = "portscan_profiles_seeded";
+
+/// Au-delà, une sonde cesse de retenir le nettoyage des pierres tombales.
+///
+/// ⚠️ Une sonde simplement **éteinte** compte, et c'est voulu : le jour où elle
+/// revient, elle doit apprendre les suppressions. Mais pas pour l'éternité —
+/// une machine oubliée dans un placard figerait la table pour toujours.
+const TOMBSTONE_GRACE_SECS: i64 = 90 * 86_400;
+
+/// Les quatre profils de l'interface du hub, repris **verbatim** de
+/// `PORT_PROFILES` (`web-ui/src/views/ProbeView.svelte`).
+///
+/// ⚠️ Le doublon de `161` dans `infra` est celui du code d'origine, laissé ici
+/// exprès : c'est [`normalize_ports`] qui le retire, et le test le vérifie. Le
+/// corriger ici ferait passer le test sans que la règle soit tenue — et la
+/// prochaine liste saisie à la main repasserait, doublon compris.
+///
+/// `common` a des ports **vides** : il voulait déjà dire « la liste par défaut
+/// de la sonde » (`null` dans le code d'origine).
+const SEEDED_PROFILES: &[(&str, &str, &[i64])] = &[
+    ("common", "Common", &[]),
+    ("web", "Web", &[80, 443, 8080, 8443, 8000, 8888, 3000, 5000]),
+    ("infra", "Infra", &[22, 23, 53, 123, 161, 389, 636, 3389, 5900, 161]),
+    ("db", "Databases", &[1433, 1521, 3306, 5432, 6379, 9200, 27017, 5984]),
+];
+
+/// Un profil tel que le hub le tient — supprimé compris, avec sa date.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct PortscanProfile {
+    pub profile_id: String,
+    pub name: String,
+    /// ⚠️ **Vide veut dire « la sonde garde sa liste »**, pas « ne scanne
+    /// rien » : la sonde traite déjà `[]` comme une absence de restriction.
+    pub ports: Vec<i64>,
+    /// D'où sort ce profil. `None` = créé sur le hub.
+    ///
+    /// ⚠️ C'est une **trace**, pas un droit : elle ne donne aucune autorité à
+    /// la sonde qui l'a créé.
+    pub origin_probe: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// Non nul = supprimé, et c'est un fait daté qu'on conserve.
+    pub deleted_at: Option<i64>,
+    /// La révision qui a produit cette ligne.
+    pub rev: i64,
+}
+
+/// Un profil annoncé par une sonde dans sa configuration (§ 16).
+///
+/// ⚠️ Pas de `ports` UDP : le hub ne les modélise pas. La sonde, elle, les
+/// garde — voir [`PortscanProfile::ports`] et le § 25 du contrat.
+#[derive(Debug, Clone)]
+pub(crate) struct IncomingProfile {
+    pub profile_id: String,
+    pub name: String,
+    pub ports: Vec<i64>,
+}
+
+/// Ce que le hub a à apprendre à une sonde en retard.
+#[derive(Debug, Clone)]
+pub(crate) struct ProfilesUpdate {
+    /// Le delta, ou la liste complète si [`Self::replace`]. Pierres tombales
+    /// comprises — c'est le cœur du mécanisme.
+    pub profiles: Vec<PortscanProfile>,
+    /// La révision à ranger **après** avoir écrit la liste.
+    pub rev: i64,
+    /// « Remplace tout » : ce n'est pas un delta, c'est l'état du hub.
+    pub replace: bool,
+}
+
+/// Trie, dédoublonne, et jette ce qui n'est pas un port.
+///
+/// ⚠️ Les trois à la fois, et au MÊME endroit : `infra` répétait `161` dans le
+/// code du hub, ce qui faisait annoncer « 10 ports » pour neuf. Et deux listes
+/// identiques à l'ordre près se liraient comme deux profils différents.
+pub(crate) fn normalize_ports(ports: &[i64]) -> Vec<i64> {
+    let mut out: Vec<i64> = ports
+        .iter()
+        .copied()
+        .filter(|p| (1..=65_535).contains(p))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn poisoned() -> DbError {
+    DbError::Internal("verrou SQLite empoisonné".into())
+}
+
+/// Colonnes de `portscan_profiles`, dans l'ordre où [`profile_from_row`] les
+/// lit. Une seule liste : deux `SELECT` qui divergent d'une colonne se paient
+/// en panique au premier appel.
+const COLUMNS: &str =
+    "profile_id, name, ports, origin_probe, created_at, updated_at, deleted_at, rev";
+
+fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PortscanProfile> {
+    let raw: String = row.get(2)?;
+    Ok(PortscanProfile {
+        profile_id: row.get(0)?,
+        name: row.get(1)?,
+        // Une liste illisible vaut « vide », donc « la sonde garde la sienne » :
+        // c'est le seul repli qui ne fait pas scanner plus que demandé.
+        ports: serde_json::from_str(&raw).unwrap_or_default(),
+        origin_probe: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        deleted_at: row.get(6)?,
+        rev: row.get(7)?,
+    })
+}
+
+impl Db {
+    /// La révision courante du hub.
+    pub(crate) fn portscan_rev(&self) -> DbResult<i64> {
+        Ok(self
+            .get_setting(PORTSCAN_REV_KEY)?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// Relève le compteur sous ses propres lignes. Appelé **au démarrage**.
+    ///
+    /// 🔴 Le vrai risque n'est pas le débordement — 64 bits signés —, c'est le
+    /// RECUL. Une base restaurée revient à une révision plus ancienne alors que
+    /// les sondes ont gardé la leur, et une restauration partielle referait
+    /// servir des numéros déjà émis : deux changements différents sous le même
+    /// numéro, et une sonde qui en ignore un.
+    pub(crate) fn lift_portscan_rev(&self) -> DbResult<()> {
+        let highest: i64 = {
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.query_row(
+                "SELECT COALESCE(MAX(rev), 0) FROM portscan_profiles",
+                [],
+                |r| r.get(0),
+            )?
+        };
+        if highest > self.portscan_rev()? {
+            self.set_setting(PORTSCAN_REV_KEY, &highest.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Fait avancer le compteur et rend la révision du changement en cours.
+    fn bump_portscan_rev(&self) -> DbResult<i64> {
+        let next = self.portscan_rev()? + 1;
+        self.set_setting(PORTSCAN_REV_KEY, &next.to_string())?;
+        Ok(next)
+    }
+
+    /// Pose les quatre profils en dur, **une seule fois dans la vie de la
+    /// base**. Sans effet s'ils l'ont déjà été.
+    pub(crate) fn seed_portscan_profiles(&self) -> DbResult<()> {
+        if self.get_setting(PORTSCAN_SEEDED_KEY)?.is_some() {
+            return Ok(());
+        }
+        for (id, name, ports) in SEEDED_PROFILES {
+            let rev = self.bump_portscan_rev()?;
+            let now = crate::db::now();
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.execute(
+                "INSERT INTO portscan_profiles
+                   (profile_id, name, ports, origin_probe, created_at, updated_at, rev)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?4, ?5)",
+                rusqlite::params![
+                    id,
+                    name,
+                    serde_json::to_string(&normalize_ports(ports)).unwrap_or_else(|_| "[]".into()),
+                    now,
+                    rev
+                ],
+            )?;
+        }
+        self.set_setting(PORTSCAN_SEEDED_KEY, "1")?;
+        Ok(())
+    }
+
+    /// La liste de l'interface : **supprimés exclus**, par nom.
+    pub(crate) fn list_portscan_profiles(&self) -> DbResult<Vec<PortscanProfile>> {
+        self.query_portscan_profiles("deleted_at IS NULL", [])
+    }
+
+    /// Tout ce que la table porte, pierres tombales comprises. Sert au
+    /// battement et à l'inspection.
+    pub(crate) fn portscan_profiles_with_tombstones(&self) -> DbResult<Vec<PortscanProfile>> {
+        self.query_portscan_profiles("1 = 1", [])
+    }
+
+    fn query_portscan_profiles<P: rusqlite::Params>(
+        &self,
+        predicate: &str,
+        params: P,
+    ) -> DbResult<Vec<PortscanProfile>> {
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM portscan_profiles
+              WHERE {predicate}
+              ORDER BY name COLLATE NOCASE"
+        ))?;
+        let rows = stmt.query_map(params, profile_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    fn get_portscan_profile(&self, profile_id: &str) -> DbResult<PortscanProfile> {
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        conn.query_row(
+            &format!("SELECT {COLUMNS} FROM portscan_profiles WHERE profile_id = ?1"),
+            [profile_id],
+            profile_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| DbError::NotFound("profil inconnu".into()))
+    }
+
+    /// Crée un profil. `origin_probe` à `None` = créé sur le hub.
+    pub(crate) fn create_portscan_profile(
+        &self,
+        name: &str,
+        ports: &[i64],
+        origin_probe: Option<&str>,
+    ) -> DbResult<PortscanProfile> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(DbError::Conflict("le nom du profil est requis".into()));
+        }
+        let profile_id = new_profile_id();
+        self.insert_portscan_profile(&profile_id, name, ports, origin_probe)
+    }
+
+    fn insert_portscan_profile(
+        &self,
+        profile_id: &str,
+        name: &str,
+        ports: &[i64],
+        origin_probe: Option<&str>,
+    ) -> DbResult<PortscanProfile> {
+        let rev = self.bump_portscan_rev()?;
+        let now = crate::db::now();
+        {
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.execute(
+                "INSERT INTO portscan_profiles
+                   (profile_id, name, ports, origin_probe, created_at, updated_at, rev)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                rusqlite::params![
+                    profile_id,
+                    name,
+                    serde_json::to_string(&normalize_ports(ports)).unwrap_or_else(|_| "[]".into()),
+                    origin_probe,
+                    now,
+                    rev
+                ],
+            )
+            .map_err(|e| {
+                crate::db::conflict_on_constraint(e, format!("le profil « {name} » existe déjà"))
+            })?;
+        }
+        self.get_portscan_profile(profile_id)
+    }
+
+    /// Renomme et/ou change les ports. `None` laisse le champ intact —
+    /// renommer ne doit pas effacer les ports au passage.
+    pub(crate) fn update_portscan_profile(
+        &self,
+        profile_id: &str,
+        name: Option<&str>,
+        ports: Option<&[i64]>,
+    ) -> DbResult<PortscanProfile> {
+        let existing = self.get_portscan_profile(profile_id)?;
+        // ⚠️ Un profil supprimé ne se modifie pas : ce serait une résurrection
+        // déguisée, et la sonde recevrait une ligne vivante pour une
+        // suppression qu'elle a déjà appliquée.
+        if existing.deleted_at.is_some() {
+            return Err(DbError::NotFound("profil inconnu".into()));
+        }
+        let name = match name.map(str::trim) {
+            Some("") => return Err(DbError::Conflict("le nom du profil est requis".into())),
+            Some(n) => n.to_string(),
+            None => existing.name.clone(),
+        };
+        let ports = match ports {
+            Some(p) => normalize_ports(p),
+            None => existing.ports.clone(),
+        };
+        let rev = self.bump_portscan_rev()?;
+        {
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.execute(
+                "UPDATE portscan_profiles
+                    SET name = ?2, ports = ?3, updated_at = ?4, rev = ?5
+                  WHERE profile_id = ?1",
+                rusqlite::params![
+                    profile_id,
+                    name,
+                    serde_json::to_string(&ports).unwrap_or_else(|_| "[]".into()),
+                    crate::db::now(),
+                    rev
+                ],
+            )
+            .map_err(|e| {
+                crate::db::conflict_on_constraint(e, format!("le profil « {name} » existe déjà"))
+            })?;
+        }
+        self.get_portscan_profile(profile_id)
+    }
+
+    /// Supprime — c'est-à-dire **pose une date**. Aucune ligne ne part.
+    ///
+    /// ⚠️ Rejouer la suppression ne refait pas avancer le compteur : un
+    /// deuxième clic ferait sinon voyager un delta qui n'apprend rien à
+    /// personne.
+    pub(crate) fn delete_portscan_profile(&self, profile_id: &str) -> DbResult<()> {
+        let existing = self.get_portscan_profile(profile_id)?;
+        if existing.deleted_at.is_some() {
+            return Ok(());
+        }
+        let rev = self.bump_portscan_rev()?;
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        conn.execute(
+            "UPDATE portscan_profiles SET deleted_at = ?2, updated_at = ?2, rev = ?3
+              WHERE profile_id = ?1",
+            rusqlite::params![profile_id, crate::db::now(), rev],
+        )?;
+        Ok(())
+    }
+
+    /// Ingère les profils qu'une sonde annonce. Rend le nombre de nouveaux.
+    ///
+    /// Le hub **ignore** ceux qu'il connaît — il fait autorité, la sonde ne
+    /// modifie rien — et **ignore** ceux qu'il a supprimés : sinon la
+    /// suppression se ferait annuler par la première sonde qui n'a pas encore
+    /// battu. Les inconnus entrent, avec `origin_probe` = cette sonde.
+    pub(crate) fn ingest_probe_profiles(
+        &self,
+        probe_id: &str,
+        profiles: &[IncomingProfile],
+    ) -> DbResult<usize> {
+        let mut ingested = 0;
+        for incoming in profiles {
+            let id = incoming.profile_id.trim();
+            let name = incoming.name.trim();
+            if id.is_empty() || name.is_empty() {
+                continue;
+            }
+            // Connu ou supprimé : dans les deux cas, rien à faire. La
+            // distinction n'a pas à être faite ici, et c'est précisément ce
+            // qui rend la suppression increvable.
+            if self.get_portscan_profile(id).is_ok() {
+                continue;
+            }
+            // ⚠️ Un nom déjà pris n'est PAS une erreur du battement : la sonde
+            // a pu créer « Caméras » pendant qu'on en créait un sur le hub. Le
+            // hub garde le sien et le battement aboutit — faire échouer le
+            // battement ferait passer une sonde saine pour hors ligne.
+            match self.insert_portscan_profile(id, name, &incoming.ports, Some(probe_id)) {
+                Ok(_) => ingested += 1,
+                Err(DbError::Conflict(e)) => {
+                    tracing::debug!("profil {id} de {probe_id} non ingéré : {e}")
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(ingested)
+    }
+
+    /// Ce que la sonde a à apprendre, sachant la révision qu'elle annonce.
+    /// `None` = elle est à jour, et le battement ne porte alors **aucun**
+    /// champ de profils.
+    pub(crate) fn portscan_profiles_since(&self, announced: i64) -> DbResult<Option<ProfilesUpdate>> {
+        let current = self.portscan_rev()?;
+        if announced == current {
+            return Ok(None);
+        }
+        let purged_below: i64 = self
+            .get_setting(PORTSCAN_PURGED_KEY)?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        // 🔴 Deux cas donnent la liste complète, et ils se répareraient mal
+        // autrement :
+        //   • `announced > current` — le hub a été restauré et la sonde a gardé
+        //     sa révision. Lui répondre « tu es à jour » gèlerait sa liste pour
+        //     toujours, sans que rien ne le dise.
+        //   • `announced < purged_below` — les pierres tombales qu'elle n'a pas
+        //     vues ont été effacées : le delta serait honnêtement incomplet.
+        let replace = announced > current || announced < purged_below;
+        let profiles = if replace {
+            self.portscan_profiles_with_tombstones()?
+        } else {
+            self.query_portscan_profiles("rev > ?1", [announced])?
+        };
+        Ok(Some(ProfilesUpdate {
+            profiles,
+            rev: current,
+            replace,
+        }))
+    }
+
+    /// Range la révision qu'une sonde vient d'appliquer. C'est l'accusé de
+    /// réception, et c'est lui qui autorise le nettoyage des pierres tombales.
+    ///
+    /// ⚠️ Plafonnée à la révision du hub : une sonde qui en annonce une plus
+    /// grande (hub restauré) ne doit pas faire croire au parc qu'il a appris
+    /// des suppressions qui n'existent pas encore.
+    pub(crate) fn note_portscan_rev(&self, probe_id: &str, rev: i64, at: i64) -> DbResult<()> {
+        let rev = rev.clamp(0, self.portscan_rev()?);
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        conn.execute(
+            "UPDATE probes SET last_profiles_rev = ?2, last_profiles_rev_at = ?3
+              WHERE probe_id = ?1",
+            rusqlite::params![probe_id, rev, at],
+        )?;
+        Ok(())
+    }
+
+    /// Efface pour de bon les suppressions que **tout le parc** a apprises.
+    /// Rend le nombre de lignes parties.
+    ///
+    /// ⚠️ Les sondes **révoquées ou archivées** ne comptent pas : une machine
+    /// partie à la benne n'accusera plus jamais rien et bloquerait le nettoyage
+    /// pour toujours. Une sonde simplement éteinte, elle, compte — jusqu'à
+    /// [`TOMBSTONE_GRACE_SECS`].
+    ///
+    /// ⚠️ **C'est la seule suppression de ligne du module**, et elle ne porte
+    /// que sur des pierres tombales dont plus personne n'a besoin.
+    pub(crate) fn prune_portscan_tombstones(&self, now: i64) -> DbResult<usize> {
+        let floor: Option<i64> = {
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.query_row(
+                "SELECT MIN(COALESCE(last_profiles_rev, 0)) FROM probes
+                  WHERE revoked_at IS NULL
+                    AND archived_at IS NULL
+                    AND COALESCE(last_profiles_rev_at, created_at) > ?1",
+                [now - TOMBSTONE_GRACE_SECS],
+                |r| r.get(0),
+            )?
+        };
+        // Aucune sonde à ménager : tout ce qui est supprimé peut partir. La
+        // sonde qui s'enrôlerait ensuite part de zéro et reçoit la liste
+        // complète, pierres tombales ou pas.
+        let floor = floor.unwrap_or_else(|| self.portscan_rev().unwrap_or(0));
+
+        let removed = {
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.execute(
+                "DELETE FROM portscan_profiles WHERE deleted_at IS NOT NULL AND rev <= ?1",
+                [floor],
+            )?
+        };
+        if removed > 0 {
+            // Le seuil monte avec le nettoyage : une sonde en dessous ne peut
+            // plus recevoir de delta honnête, elle recevra la liste complète.
+            let known: i64 = self
+                .get_setting(PORTSCAN_PURGED_KEY)?
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if floor + 1 > known {
+                self.set_setting(PORTSCAN_PURGED_KEY, &(floor + 1).to_string())?;
+            }
+        }
+        Ok(removed)
+    }
+}
+
+/// Identifiant stable, généré par qui crée. Le même alphabet que les autres
+/// identifiants du hub n'est pas requis : celui-ci n'est jamais dicté.
+fn new_profile_id() -> String {
+    let mut bytes = [0u8; 8];
+    getrandom::getrandom(&mut bytes).expect("getrandom failed");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::now;
+
+    fn open_memory() -> Db {
+        Db::open_in_memory().unwrap()
+    }
+
+    fn db_with_probe() -> (Db, String) {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (probe, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        (db, probe.probe_id)
+    }
+
+    /// Deux sondes dans le même site : le minimum du parc n'a de sens qu'à
+    /// plusieurs.
+    fn db_with_two_probes() -> (Db, String, String) {
+        let db = open_memory();
+        let site = db.create_site("Durand").unwrap();
+        let (a, _) = db.enroll_probe(&site.site_id, "Paris").unwrap();
+        let (b, _) = db.enroll_probe(&site.site_id, "Lyon").unwrap();
+        (db, a.probe_id, b.probe_id)
+    }
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lanprobe-portscan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn profile<'a>(list: &'a [PortscanProfile], id: &str) -> &'a PortscanProfile {
+        list.iter()
+            .find(|p| p.profile_id == id)
+            .unwrap_or_else(|| panic!("profil {id} absent de {list:?}"))
+    }
+
+    #[test]
+    fn les_quatre_profils_en_dur_sont_poses_tries_et_dedoublonnes() {
+        // ⚠️ `infra` répétait `161` dans le code du hub. Posée telle quelle, la
+        // ligne ferait annoncer « 10 ports » pour neuf, et deux listes
+        // identiques à l'ordre près se liraient comme deux profils différents.
+        let db = open_memory();
+        let posed = db.list_portscan_profiles().unwrap();
+        assert_eq!(posed.len(), 4, "{posed:?}");
+
+        let infra = profile(&posed, "infra");
+        assert_eq!(infra.ports, vec![22, 23, 53, 123, 161, 389, 636, 3389, 5900]);
+
+        // ⚠️ `common` a des ports VIDES, et ce n'est pas une liste vide envoyée
+        // à la sonde : c'est « la sonde garde la sienne ». Les confondre ferait
+        // un scan complet là où on croyait restreindre.
+        assert!(profile(&posed, "common").ports.is_empty());
+    }
+
+    #[test]
+    fn un_profil_supprime_ne_revient_pas_au_demarrage_suivant() {
+        // 🔴 Reposer les quatre profils à chaque démarrage ressusciterait celui
+        // qu'on vient de supprimer exprès — une suppression qui se défait toute
+        // seule au prochain redémarrage du conteneur.
+        let dir = tmp_dir("seed");
+        let path = dir.join("hub.db");
+        {
+            let db = Db::open(&path).unwrap();
+            db.delete_portscan_profile("web").unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let ids: Vec<String> = db
+            .list_portscan_profiles()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.profile_id)
+            .collect();
+        assert!(!ids.contains(&"web".to_string()), "{ids:?}");
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn supprimer_un_profil_pose_une_date_et_ne_retire_aucune_ligne() {
+        // Même règle que `removed_at` au § 20 : la suppression est un FAIT
+        // daté. Sans la ligne, la sonde ne distingue pas « le hub ne connaît
+        // pas ce profil » de « le hub l'a supprimé », et le recrée au battement
+        // suivant en le remontant.
+        let db = open_memory();
+        db.delete_portscan_profile("db").unwrap();
+
+        assert!(
+            !db.list_portscan_profiles()
+                .unwrap()
+                .iter()
+                .any(|p| p.profile_id == "db"),
+            "la liste de l'interface exclut les supprimés"
+        );
+        let all = db.portscan_profiles_with_tombstones().unwrap();
+        assert!(profile(&all, "db").deleted_at.is_some(), "{all:?}");
+    }
+
+    #[test]
+    fn deux_profils_de_meme_nom_ne_coexistent_pas() {
+        let db = open_memory();
+        let err = db.create_portscan_profile("Web", &[80], None).unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
+
+        // ⚠️ Un nom libéré par une suppression se réemploie : refuser ici
+        // interdirait de recréer « Caméras » après l'avoir retiré, sans jamais
+        // dire pourquoi.
+        db.delete_portscan_profile("web").unwrap();
+        db.create_portscan_profile("Web", &[80], None).unwrap();
+    }
+
+    #[test]
+    fn chaque_changement_fait_avancer_la_revision() {
+        let db = open_memory();
+        let start = db.portscan_rev().unwrap();
+
+        let created = db.create_portscan_profile("Caméras", &[554], None).unwrap();
+        assert!(created.rev > start, "une création avance le compteur");
+
+        let renamed = db
+            .update_portscan_profile(&created.profile_id, Some("Caméras IP"), None)
+            .unwrap();
+        assert!(renamed.rev > created.rev, "une modification aussi");
+        assert_eq!(renamed.ports, vec![554], "renommer ne touche pas aux ports");
+
+        db.delete_portscan_profile(&created.profile_id).unwrap();
+        assert!(
+            db.portscan_rev().unwrap() > renamed.rev,
+            "et une suppression — sinon la sonde ne l'apprendrait jamais"
+        );
+    }
+
+    #[test]
+    fn une_sonde_a_jour_n_apprend_rien() {
+        // Le cas courant, et il ne doit rien coûter : pas de champ dans la
+        // réponse, donc pas 40 pierres tombales à chaque battement.
+        let db = open_memory();
+        let rev = db.portscan_rev().unwrap();
+        assert!(db.portscan_profiles_since(rev).unwrap().is_none());
+    }
+
+    #[test]
+    fn une_sonde_en_retard_recoit_le_delta_pierres_tombales_comprises() {
+        let db = open_memory();
+        let rev = db.portscan_rev().unwrap();
+        let created = db.create_portscan_profile("Caméras", &[554], None).unwrap();
+        db.delete_portscan_profile("db").unwrap();
+
+        let update = db.portscan_profiles_since(rev).unwrap().unwrap();
+        assert!(!update.replace, "un delta ne remplace pas la liste");
+        assert_eq!(update.rev, db.portscan_rev().unwrap());
+        let ids: Vec<&str> = update
+            .profiles
+            .iter()
+            .map(|p| p.profile_id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 2, "seules les lignes plus récentes : {ids:?}");
+        assert!(ids.contains(&created.profile_id.as_str()));
+        // 🔴 La pierre tombale EN FAIT PARTIE : c'est le cœur du mécanisme.
+        assert!(profile(&update.profiles, "db").deleted_at.is_some());
+    }
+
+    #[test]
+    fn une_sonde_en_avance_recoit_la_liste_complete() {
+        // 🔴 Le cas « hub restauré » : la base revient à 38, la sonde a gardé
+        // 42. Sans cette garde le hub lui répondrait « tu es à jour » pour
+        // toujours, et sa liste de profils gèlerait sans que rien ne le dise.
+        let db = open_memory();
+        let update = db
+            .portscan_profiles_since(db.portscan_rev().unwrap() + 4)
+            .unwrap()
+            .unwrap();
+        assert!(update.replace, "elle doit tout remplacer");
+        assert_eq!(update.profiles.len(), 4, "la liste complète");
+    }
+
+    #[test]
+    fn le_compteur_est_releve_a_la_plus_grande_revision_au_demarrage() {
+        // 🔴 Une restauration partielle — la table rendue, le compteur perdu —
+        // referait servir des révisions déjà émises : deux changements
+        // différents sous le même numéro, et une sonde qui en ignore un.
+        let dir = tmp_dir("recul");
+        let path = dir.join("hub.db");
+        let high = {
+            let db = Db::open(&path).unwrap();
+            let p = db.create_portscan_profile("Caméras", &[554], None).unwrap();
+            // Ce que fait une sauvegarde restaurée : le compteur recule sous
+            // ses propres lignes.
+            db.set_setting(PORTSCAN_REV_KEY, "0").unwrap();
+            p.rev
+        };
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.portscan_rev().unwrap(), high, "relevé au démarrage");
+    }
+
+    #[test]
+    fn une_pierre_tombale_ne_part_qu_apres_la_plus_petite_revision_du_parc() {
+        // ⚠️ Une pierre tombale qui vit pour toujours est une fuite lente ;
+        // une pierre tombale partie trop tôt est une suppression que la sonde
+        // en retard n'apprendra jamais — et qu'elle recréera en la remontant.
+        let (db, en_avance, en_retard) = db_with_two_probes();
+        db.delete_portscan_profile("db").unwrap();
+        let rev = db.portscan_rev().unwrap();
+
+        db.note_portscan_rev(&en_avance, rev, now()).unwrap();
+        db.note_portscan_rev(&en_retard, rev - 1, now()).unwrap();
+        assert_eq!(
+            db.prune_portscan_tombstones(now()).unwrap(),
+            0,
+            "une sonde du parc ne l'a pas encore apprise"
+        );
+
+        db.note_portscan_rev(&en_retard, rev, now()).unwrap();
+        assert_eq!(db.prune_portscan_tombstones(now()).unwrap(), 1);
+        assert!(
+            !db.portscan_profiles_with_tombstones()
+                .unwrap()
+                .iter()
+                .any(|p| p.profile_id == "db"),
+            "plus personne n'avait besoin de l'apprendre"
+        );
+    }
+
+    #[test]
+    fn une_sonde_revoquee_ou_archivee_ne_retient_plus_le_nettoyage() {
+        // ⚠️ Une machine partie à la benne bloquerait le nettoyage pour
+        // toujours : elle n'accusera jamais rien.
+        let (db, vivante, benne) = db_with_two_probes();
+        db.delete_portscan_profile("db").unwrap();
+        db.note_portscan_rev(&vivante, db.portscan_rev().unwrap(), now())
+            .unwrap();
+
+        db.set_probe_archived(&benne, true).unwrap();
+        assert_eq!(db.prune_portscan_tombstones(now()).unwrap(), 1);
+
+        db.delete_portscan_profile("web").unwrap();
+        db.note_portscan_rev(&vivante, db.portscan_rev().unwrap(), now())
+            .unwrap();
+        db.set_probe_archived(&benne, false).unwrap();
+        db.revoke_probe(&benne).unwrap();
+        assert_eq!(db.prune_portscan_tombstones(now()).unwrap(), 1);
+    }
+
+    #[test]
+    fn une_sonde_eteinte_retient_le_nettoyage_jusqu_a_quatre_vingt_dix_jours() {
+        // ⚠️ Une sonde simplement éteinte COMPTE : le jour où elle revient, elle
+        // doit apprendre les suppressions. Mais pas pour l'éternité — d'où le
+        // garde-fou, et la liste complète pour celle qui revient après.
+        let (db, vivante, eteinte) = db_with_two_probes();
+        db.delete_portscan_profile("db").unwrap();
+        let rev = db.portscan_rev().unwrap();
+        db.note_portscan_rev(&vivante, rev, now()).unwrap();
+        db.note_portscan_rev(&eteinte, rev - 1, now()).unwrap();
+
+        assert_eq!(
+            db.prune_portscan_tombstones(now() + 89 * 86_400).unwrap(),
+            0,
+            "89 jours : elle compte encore"
+        );
+        assert_eq!(
+            db.prune_portscan_tombstones(now() + 91 * 86_400).unwrap(),
+            1
+        );
+
+        // Et celle qui revient ne reçoit pas un delta amputé de la pierre
+        // tombale qu'on vient d'effacer : elle reçoit tout.
+        let update = db.portscan_profiles_since(rev - 1).unwrap().unwrap();
+        assert!(update.replace, "{update:?}");
+    }
+
+    #[test]
+    fn le_hub_ignore_ce_qu_il_connait_et_ce_qu_il_a_supprime_mais_ingere_l_inconnu() {
+        // ⚠️ Le hub fait autorité : un profil qu'il connaît ne se laisse pas
+        // réécrire par la sonde, et un profil qu'il a supprimé ne se laisse pas
+        // ressusciter par la première sonde qui n'a pas encore battu.
+        let (db, probe_id) = db_with_probe();
+        db.delete_portscan_profile("db").unwrap();
+
+        let ingested = db
+            .ingest_probe_profiles(
+                &probe_id,
+                &[
+                    IncomingProfile {
+                        profile_id: "web".into(),
+                        name: "Web renommé par la sonde".into(),
+                        ports: vec![1234],
+                    },
+                    IncomingProfile {
+                        profile_id: "db".into(),
+                        name: "Bases".into(),
+                        ports: vec![3306],
+                    },
+                    IncomingProfile {
+                        profile_id: "cams".into(),
+                        name: "Caméras".into(),
+                        ports: vec![554, 80, 554],
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(ingested, 1, "seul l'inconnu entre");
+
+        let list = db.list_portscan_profiles().unwrap();
+        assert_eq!(profile(&list, "web").name, "Web", "le hub garde le sien");
+        assert!(!list.iter().any(|p| p.profile_id == "db"), "{list:?}");
+
+        let cams = profile(&list, "cams");
+        assert_eq!(cams.ports, vec![80, 554], "triés et dédoublonnés");
+        // `origin_probe` est une TRACE, pas un droit : elle répond « d'où sort
+        // celui-là », elle ne donne aucune autorité à la sonde.
+        assert_eq!(cams.origin_probe.as_deref(), Some(probe_id.as_str()));
+    }
+}
