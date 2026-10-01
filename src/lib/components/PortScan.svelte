@@ -264,11 +264,23 @@
           </div>
         {:else}
           <div class="profile-list">
+            {#if $portscanProfiles.some(p => p.from_hub)}
+              <p class="hub-note">{$_('port_scan.from_hub_hint')}</p>
+            {/if}
             {#each $portscanProfiles as p (p.id)}
               <div class="profile-row">
                 <div class="profile-meta">
                   <div class="profile-name">{p.builtin ? p.name : `★ ${p.name}`}</div>
-                  <div class="profile-sub">{p.tcp_ports.length} TCP · {p.udp_ports.length} UDP</div>
+                  <div class="profile-sub">
+                    {p.tcp_ports.length} TCP · {p.udp_ports.length} UDP
+                    <!-- ⚠️ Le hub fait autorité sur ce profil : l'éditer ici
+                         tiendrait jusqu'au prochain battement, pas au-delà. Le
+                         dire vaut mieux que laisser découvrir que la
+                         modification a disparu toute seule. -->
+                    {#if p.from_hub}
+                      <span class="from-hub">· {$_('port_scan.from_hub')}</span>
+                    {/if}
+                  </div>
                 </div>
                 <div class="profile-actions">
                   {#if !p.builtin}
@@ -391,6 +403,8 @@
   .profile-row:hover { border-color: var(--ep-glass-border-strong); }
   .profile-name { font-size: 13px; font-weight: 700; }
   .profile-sub { font-size: 11px; color: var(--ep-text-muted); margin-top: 2px; }
+  .from-hub { color: var(--ep-accent); }
+  .hub-note { font-size: 11px; color: var(--ep-text-muted); line-height: 1.5; margin-bottom: 4px; }
   .profile-actions { display: flex; gap: 4px; }
   .new-profile { margin-top: 6px; }
   .editor { padding: 14px 20px 18px; display: flex; flex-direction: column; gap: 12px; }

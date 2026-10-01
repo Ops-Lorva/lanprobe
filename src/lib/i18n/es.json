@@ -250,6 +250,8 @@
     "rescan_with": "Reescanear con",
     "just_now": "ahora",
     "manage_profiles": "Perfiles de escaneo",
+    "from_hub": "viene del hub",
+    "from_hub_hint": "Los perfiles marcados \u00ab viene del hub \u00bb los mantiene el hub: un cambio hecho aqu\u00ed se reescribe en su pr\u00f3ximo latido. Los dem\u00e1s se quedan en esta m\u00e1quina y suben al hub.",
     "profile_name": "Nombre",
     "tcp_ports": "Puertos TCP",
     "udp_ports": "Puertos UDP",

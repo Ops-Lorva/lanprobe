@@ -250,6 +250,8 @@
     "rescan_with": "Re-scanner avec",
     "just_now": "à l'instant",
     "manage_profiles": "Profils de scan",
+    "from_hub": "venu du hub",
+    "from_hub_hint": "Les profils marqués « venu du hub » sont tenus par le hub : une modification faite ici sera réécrite à son prochain battement. Les autres restent sur cette machine et montent vers le hub.",
     "profile_name": "Nom",
     "tcp_ports": "Ports TCP",
     "udp_ports": "Ports UDP",

@@ -8,6 +8,18 @@ export interface PortScanProfile {
   tcp_ports: number[];
   udp_ports: number[];
   builtin?: boolean;
+  /**
+   * Posé par le backend quand le profil vient du HUB (contrat § 25).
+   *
+   * ⚠️ L'écran doit le dire : le hub fait autorité, et une modification locale
+   * sera réécrite au prochain battement. Laisser croire à une édition qui
+   * tiendra serait un mensonge d'interface.
+   *
+   * ⚠️ Ces profils se persistent comme les autres — ils ne sont pas `builtin`.
+   * Les filtrer à l'écriture les ferait disparaître du fichier, et la sonde
+   * les redemanderait au hub à chaque démarrage.
+   */
+  from_hub?: boolean;
 }
 
 const STORE_KEY = 'portscan_profiles';

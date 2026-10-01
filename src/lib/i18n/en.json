@@ -250,6 +250,8 @@
     "rescan_with": "Rescan with",
     "just_now": "just now",
     "manage_profiles": "Scan profiles",
+    "from_hub": "from the hub",
+    "from_hub_hint": "Profiles marked \u00ab from the hub \u00bb are owned by the hub: a change made here is overwritten at its next heartbeat. The others stay on this machine and are reported to the hub.",
     "profile_name": "Name",
     "tcp_ports": "TCP ports",
     "udp_ports": "UDP ports",
