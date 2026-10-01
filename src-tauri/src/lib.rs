@@ -492,6 +492,13 @@ async fn cmd_scan_network(
         }
 
         shared.emit("discovery:done", serde_json::Value::Null);
+        // 🔴 **Le hub apprend aussi les balayages lancés d'ici.** Sans cette
+        // ligne, un scan fait depuis cette fenêtre ne partait nulle part :
+        // seuls ceux venus d'un ordre du hub ou de l'ordonnanceur étaient
+        // publiés. On voyait donc, depuis le téléphone, un inventaire vieux de
+        // deux heures pendant que cet écran affichait le bon — et rien
+        // n'expliquait l'écart. Constaté le 30/09.
+        lanprobe_server::scheduler::publish_discovery(&shared, &cidr).await;
         // Remettre scan_cancel à true (idle) : le scan est terminé normalement.
         shared.scan_cancel.store(true, Ordering::SeqCst);
     });

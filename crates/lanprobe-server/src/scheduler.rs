@@ -136,6 +136,46 @@ fn start_sub_tasks(cfg: &SchedulerConfig, state: &AppState) -> Vec<tokio::task::
 ///
 /// Relue à chaque scan plutôt que gardée : les scans sont rares, et une clé
 /// tenue en mémoire pour la durée du processus survivrait à un ré-enrôlement.
+/// Envoie au hub la découverte qui vient de se terminer.
+///
+/// 🔴 **Appelée par les DEUX chemins, et c'est tout l'objet de cette
+/// fonction.** Un balayage lancé depuis l'interface de la sonde ne partait
+/// nulle part : seuls ceux venus d'un ordre du hub ou de l'ordonnanceur étaient
+/// publiés. On voyait donc, depuis le téléphone, un inventaire vieux de deux
+/// heures pendant que l'écran de la sonde affichait le bon — sans rien qui
+/// explique l'écart. Constaté le 30/09.
+///
+/// ⚠️ Sans clé de scellement, il n'y a pas de hub à qui parler : la sonde
+/// travaille alors seule, et ce n'est pas une erreur.
+pub async fn publish_discovery(state: &AppState, cidr: &str) {
+    let Some(key) = sealing_key(state) else { return };
+    let hosts = state
+        .discovery
+        .snapshot()
+        .into_iter()
+        .map(|h| crate::inventory::ScanHost {
+            ip: h.ip,
+            hostname: h.hostname,
+            mac: h.mac,
+            vendor: h.vendor,
+            latency_ms: h.latency_ms.map(|v| v as i64),
+        })
+        .collect();
+    crate::inventory::publish(
+        state,
+        &key,
+        crate::inventory::ScanReport {
+            kind: "discovery".into(),
+            started_at: crate::inventory::now(),
+            cidr: Some(cidr.to_string()),
+            hosts,
+            ports: Vec::new(),
+            speedtest: None,
+        },
+    )
+    .await;
+}
+
 fn sealing_key(state: &AppState) -> Option<crate::secrets::SecretKey> {
     crate::secrets::load_or_create_key(&state.config.dir()).ok()
 }
@@ -465,33 +505,7 @@ pub async fn discovery_once(state: &AppState, cidr: String) {
     );
     let _ = state.events.send(done_event(&effective_cidr, hosts_found));
 
-    if let Some(key) = sealing_key(&state) {
-        let hosts = state
-            .discovery
-            .snapshot()
-            .into_iter()
-            .map(|h| crate::inventory::ScanHost {
-                ip: h.ip,
-                hostname: h.hostname,
-                mac: h.mac,
-                vendor: h.vendor,
-                latency_ms: h.latency_ms.map(|v| v as i64),
-            })
-            .collect();
-        crate::inventory::publish(
-            &state,
-            &key,
-            crate::inventory::ScanReport {
-                kind: "discovery".into(),
-                started_at: crate::inventory::now(),
-                cidr: Some(effective_cidr.clone()),
-                hosts,
-                ports: Vec::new(),
-                speedtest: None,
-            },
-        )
-        .await;
-    }
+    publish_discovery(&state, &effective_cidr).await;
 
     // Remettre scan_cancel à true (idle) une fois le scan terminé.
     state.scan_cancel.store(true, Ordering::SeqCst);
