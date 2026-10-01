@@ -151,6 +151,10 @@ pub fn build_router(state: AppState) -> Router {
         Role::Viewer,
         Router::new()
             .route("/api/me", get(me))
+            // ⚠️ Lecture seule et sans effet de bord : savoir quelle version
+            // existe ne conduit rien. Ouvert au rôle le plus bas, comme le
+            // reste de ce groupe.
+            .route("/api/probe-release", get(probe_release))
             .route("/api/me/password", post(change_own_password))
             .route("/api/me/lang", post(set_own_lang))
             .route("/api/me/totp", get(totp_status).delete(disable_own_totp))
@@ -507,6 +511,47 @@ struct SetupBody {
     setup_token: String,
     username: String,
     password: String,
+}
+
+/// La dernière version de sonde publiée, pour colorer celles qui traînent.
+///
+/// 🔴 **Un échec n'est pas une erreur ici.** Un hub auto-hébergé peut n'avoir
+/// aucune sortie internet — le hub ne joint jamais les sondes, ce sont elles qui
+/// l'appellent, donc rien ne l'oblige à sortir. Sans réponse, on rend `null` et
+/// l'interface retombe sur la version la plus récente du parc : « laquelle
+/// traîne derrière les autres » reste une question utile.
+///
+/// ⚠️ Mis en cache six heures. Interroger GitHub à chaque affichage du parc
+/// ferait une requête sortante par rafraîchissement d'écran, et finirait
+/// limité en débit — pour un chiffre qui bouge quelques fois par an.
+async fn probe_release() -> Response {
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<std::sync::Mutex<Option<(Option<String>, Instant)>>> = OnceLock::new();
+    const TTL: Duration = Duration::from_secs(6 * 3600);
+
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((value, at)) = guard.as_ref() {
+            if at.elapsed() < TTL {
+                return ok_json(json!({ "latest": value }));
+            }
+        }
+    }
+
+    // ⚠️ Le tag porte un « v » — « v2.4.4 ». L'interface compare des nombres,
+    // elle le retire ici plutôt que dans chaque appelant.
+    let latest = match lanprobe_core::updater::latest_app_release().await {
+        Ok(release) => Some(release.tag.trim_start_matches('v').to_string()),
+        Err(e) => {
+            tracing::debug!("version publiée illisible ({e}) — l'interface se rabattra sur le parc");
+            None
+        }
+    };
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((latest.clone(), Instant::now()));
+    }
+    ok_json(json!({ "latest": latest }))
 }
 
 async fn setup(State(state): State<AppState>, Json(body): Json<SetupBody>) -> Response {

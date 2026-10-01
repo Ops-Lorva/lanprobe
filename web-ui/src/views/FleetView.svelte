@@ -123,8 +123,26 @@
   // vers « silencieuse » entre deux chargements du parc. Sans elle, le bandeau
   // resterait figé sur le verdict du dernier rafraîchissement.
   const totals = $derived(fleetTotals($fleet.probes, $now));
-  /** La version la plus récente du parc : la référence de « pas à jour ». */
-  const newestVersionSeen = $derived(newestVersion($fleet.probes.map((p) => p.version)));
+  /**
+   * La référence de « pas à jour » : la dernière version PUBLIÉE quand le hub
+   * arrive à la lire, la plus récente du parc sinon.
+   *
+   * 🔴 Les deux répondent à des questions différentes, et la première est la
+   * bonne : avec le parc seul, un parc entièrement en retard ne signale rien.
+   * ⚠️ Mais le repli n'est pas un pis-aller : un hub sans sortie internet
+   * fonctionne parfaitement — ce sont les sondes qui l'appellent — et
+   * « laquelle traîne derrière les autres » reste utile.
+   */
+  let publishedVersion = $state<string | null>(null);
+  $effect(() => {
+    // Un échec ne dit rien à l'écran : l'absence de couleur n'est pas une
+    // alerte, et un bandeau « GitHub injoignable » devant un parc serait du
+    // bruit pour un chiffre accessoire.
+    api.latestProbeRelease().then((r) => (publishedVersion = r.latest)).catch(() => {});
+  });
+  const newestVersionSeen = $derived(
+    publishedVersion ?? newestVersion($fleet.probes.map((p) => p.version)),
+  );
 
   const bufferingCount = $derived($fleet.probes.filter((p) => p.buffered_points > 0).length);
   const hasFilter = $derived(search.trim() !== '' || statusFilter !== 'all');

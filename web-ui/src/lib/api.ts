@@ -977,6 +977,17 @@ export const api = {
   },
 
   /**
+   * La dernière version de sonde publiée, ou `null`.
+   *
+   * ⚠️ `null` n'est pas une panne : un hub auto-hébergé peut n'avoir aucune
+   * sortie internet. L'interface retombe alors sur la version la plus récente
+   * du parc.
+   */
+  latestProbeRelease(): Promise<{ latest: string | null }> {
+    return request<{ latest: string | null }>('/api/probe-release');
+  },
+
+  /**
    * Retire un site du parc — ou l'y remet — **sans rien supprimer**.
    *
    * 🔴 C'est la réponse à « comment je fais partir un client ». Le supprimer
