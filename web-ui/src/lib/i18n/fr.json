@@ -953,7 +953,11 @@
     "title": "Commandes",
     "sub": "Ce qui a été demandé à cette sonde depuis le hub, et ce qu'elle en a fait.",
     "col_target": "Cible",
-    "queued_help": "Le hub ne joint jamais la sonde : la commande part dans la réponse à son prochain battement de cœur, d'ici {n} s."
+    "queued_help": "Le hub ne joint jamais la sonde : la commande part dans la réponse à son prochain battement de cœur, d'ici {n} s.",
+    "col_origin": "Depuis",
+    "origin_hub": "Hub",
+    "origin_unknown": "Inconnue",
+    "origin_device_unnamed": "Appareil"
   },
   "sla": {
     "coverage_partial": "{pct} % de la période mesurée",

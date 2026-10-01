@@ -953,7 +953,11 @@
     "title": "Commands",
     "sub": "What was asked of this probe from the hub, and what came of it.",
     "col_target": "Target",
-    "queued_help": "The hub never reaches into the probe: the command travels in the reply to its next heartbeat, within {n} s."
+    "queued_help": "The hub never reaches into the probe: the command travels in the reply to its next heartbeat, within {n} s.",
+    "col_origin": "From",
+    "origin_hub": "Hub",
+    "origin_unknown": "Unknown",
+    "origin_device_unnamed": "Device"
   },
   "sla": {
     "coverage_partial": "{pct}% of the period measured",

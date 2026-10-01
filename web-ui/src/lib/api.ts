@@ -465,6 +465,20 @@ export interface ProbeCommand {
   state: string;
   created_at: number;
   created_by: string | null;
+  /**
+   * D'où la commande a été lancée (contrat § 26) : `hub` | `device`.
+   *
+   * 🔴 **`null` veut dire « inconnue », jamais « hub ».** Les commandes
+   * empilées avant le § 26 n'ont pas d'origine enregistrée ; les afficher
+   * comme venant du hub inventerait une provenance. Passer par
+   * `commandOrigin()` (`./command-origin`) plutôt que de tester ce champ sur
+   * place : c'est là que les trois cas sont tranchés une seule fois.
+   */
+  origin?: string | null;
+  /** L'appareil, quand `origin` vaut `device`. Survit à son renommage. */
+  origin_device_id?: string | null;
+  /** Son nom **tel qu'il était à l'empilement** — pas celui d'aujourd'hui. */
+  origin_device_name?: string | null;
   delivered_count: number;
   settled_at: number | null;
   error: string | null;

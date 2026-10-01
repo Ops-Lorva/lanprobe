@@ -86,6 +86,7 @@
   // Même raison : l'union « liste tenue par le hub » + « annonce de la sonde »
   // est la règle qu'on ne peut pas se permettre de casser en silence.
   import { effectiveMonitors, removedMonitors } from '$lib/monitors';
+  import { commandOrigin } from '$lib/command-origin';
   import { platformLabel } from '$lib/format';
   import StatusMark from '$lib/components/StatusMark.svelte';
   import BufferBadge from '$lib/components/BufferBadge.svelte';
@@ -2551,10 +2552,21 @@
                     <th>{$_('commands.col_target')}</th>
                     <th>{$_('commands.col_state')}</th>
                     <th>{$_('commands.col_by')}</th>
+                    <!--
+                      « Par » et « Depuis » sont deux colonnes parce que ce
+                      sont deux questions (contrat § 26) : le même compte sert
+                      au navigateur du hub et à l'app sur le téléphone du
+                      technicien. Les fondre en une seule — « claire (iPhone) »
+                      — rendrait la colonne illisible pour les lignes qui n'ont
+                      pas d'origine, et c'est justement celles-là qu'il ne faut
+                      pas confondre avec le hub.
+                    -->
+                    <th>{$_('commands.col_origin')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {#each commandLog as c (c.id)}
+                    {@const origin = commandOrigin(c)}
                     <tr>
                       <td class="lp-mono">{logTime(c.created_at, lang)}</td>
                       <td>{$_(`commands.kind_${c.kind}`)}</td>
@@ -2568,6 +2580,28 @@
                         {/if}
                       </td>
                       <td>{c.created_by ?? '—'}</td>
+                      <td>
+                        {#if origin.kind === 'hub'}
+                          {$_('commands.origin_hub')}
+                        {:else if origin.kind === 'device'}
+                          <!--
+                            Le nom qu'avait l'appareil À L'INSTANT où la
+                            commande a été empilée — pas celui d'aujourd'hui.
+                            Un téléphone qui change de main se fait renommer,
+                            et le nom courant attribuerait à son nouveau
+                            porteur un scan lancé par l'ancien.
+                          -->
+                          {origin.label ?? $_('commands.origin_device_unnamed')}
+                        {:else}
+                          <!--
+                            🔴 « Inconnue », jamais « Hub ». Ces lignes ont été
+                            empilées avant que le hub ne note sa provenance :
+                            personne ne sait d'où elles viennent, et l'écrire
+                            est la seule réponse honnête.
+                          -->
+                          <span class="cnote">{$_('commands.origin_unknown')}</span>
+                        {/if}
+                      </td>
                     </tr>
                   {/each}
                 </tbody>

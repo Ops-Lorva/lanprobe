@@ -518,4 +518,24 @@ describe('catalogues de traduction', () => {
       expect(REQUISES_PROFILS_DE_SCAN.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+
+  const REQUISES_ORIGINE_DES_COMMANDES = [
+    'commands.col_origin',
+    'commands.origin_hub',
+    // ⚠️ « Inconnue », et non « Hub » : une commande empilée avant le § 26
+    // n'a pas d'origine enregistrée. Une clé manquante afficherait
+    // « commands.origin_unknown » en toutes lettres dans le tableau, devant
+    // le client.
+    'commands.origin_unknown',
+    // Un appareil dont on ne tient ni nom ni identifiant reste un appareil :
+    // on le dit, plutôt que d'afficher une cellule vide.
+    'commands.origin_device_unnamed',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés de l'origine d'une commande`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_ORIGINE_DES_COMMANDES.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });
