@@ -34,9 +34,28 @@
       // celle d'une config réseau qui n'existe plus (changement d'IP/gw).
       try { await invoke('cmd_reset_internet_monitor'); } catch {}
       flashStatus(tr('profiles.applied', { values: { name: p.name, iface } }));
+      const wanted = new Set(p.monitor_ips ?? []);
+      // 🔴 Les surveillances de l'ANCIEN profil s'arrêtent. Elles visaient le
+      // réseau d'un autre site : après la bascule, elles ne mesurent plus rien
+      // de réel et passent toutes en rouge — on fabrique une panne chez un
+      // client qu'on a quitté. Même raison que la remise à zéro de l'historique
+      // internet juste au-dessus.
+      //
+      // ⚠️ Ce qui est dans le NOUVEAU profil n'est pas touché : arrêter puis
+      // relancer la même cible ferait un trou dans sa courbe pour rien.
+      //
+      // ⚠️ `cmd_stop_ping` et pas seulement un retrait d'affichage : le retrait
+      // doit être ÉCRIT, sinon le hub le réapplique au battement suivant et la
+      // cible revient toute seule.
+      for (const ip of Array.from($monitoring.keys())) {
+        if (wanted.has(ip)) continue;
+        monitoring.removeHost(ip);
+        try { await invoke('cmd_stop_ping', { ip }); }
+        catch (e) { console.error('[Profiles] cmd_stop_ping failed for', ip, e); }
+      }
       // Auto-ping : démarre un monitor pour chaque IP associée au profil,
       // skip celles déjà en cours pour ne pas doubler les tasks.
-      for (const ip of p.monitor_ips ?? []) {
+      for (const ip of wanted) {
         if ($monitoring.has(ip)) continue;
         monitoring.addHost(ip);
         try { await invoke('cmd_start_ping', { ip }); }
