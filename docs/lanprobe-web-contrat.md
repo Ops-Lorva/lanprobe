@@ -1333,6 +1333,37 @@ commande » en détail : ils s'affichent donc « anonyme ». Ce n'est pas le hub
 agit — c'est un humain qu'on ne sait pas nommer — et leur donner une troisième
 marque n'a pas été tranché.
 
+### Le nom de la cible, à côté de son identifiant
+
+```json
+{ "target": "9f2c…", "target_name": "Durand" }
+{ "target": "site-parti-a-la-benne", "target_name": null }
+```
+
+Une ligne d'audit portait un identifiant nu : exact, mais illisible — on ne
+savait pas de quel client on parlait sans aller le chercher ailleurs.
+
+⚠️ **L'identifiant reste affiché.** C'est lui le fait : il ne change jamais, et
+c'est lui qui permet de recouper deux lignes. Le nom vient **à côté**.
+
+⚠️ **Un nom qui n'existe plus ne s'invente pas.** Site supprimé, sonde partie,
+compte parti : `target_name` vaut `null` et l'écran montre l'identifiant seul.
+Jamais « inconnu » déguisé en nom, jamais un trou.
+
+🔴 **Le nom est résolu à la LECTURE, donc c'est celui d'aujourd'hui** — et c'est
+l'inverse du choix fait pour l'origine d'une commande (§ 26), où le nom de
+l'appareil est figé à l'instant du geste. Les deux sont justes pour des raisons
+différentes : l'audit sert à retrouver *de quoi* on parle maintenant (« c'est
+quel client, ce site ? »), l'origine d'une commande sert à dire *qui* l'a lancée
+à l'époque. **Ne pas les « harmoniser »** un jour de ménage.
+
+⚠️ La résolution se fait en **une passe pour toute la page** — deux requêtes
+`IN (…)`, sondes et sites —, jamais une jointure par ligne : un journal grossit
+sans fin et une recherche par ligne se paierait à chaque lecture.
+
+⚠️ Seuls les sites et les sondes sont résolus. Le reste des cibles se lit déjà :
+un nom de compte EST le compte, un nom d'archive se lit, une adresse IP se lit.
+
 **Aucune route ne supprime une ligne, et il n'y a pas de purge par
 ancienneté.** `DELETE /api/audit` rend `405`. Un journal qu'on peut nettoyer ne
 prouve rien, et quelques dizaines d'octets par geste d'opérateur ne justifient

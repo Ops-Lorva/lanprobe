@@ -275,7 +275,26 @@
 
           <span class="action" title={e.action}>{actionLabel(e.action)}</span>
 
-          <span class="target lp-mono">{e.target ?? '—'}</span>
+          <!--
+            🔴 L'identifiant RESTE, le nom vient à côté : c'est l'identifiant
+            qui est le fait — il ne change jamais et permet de recouper deux
+            lignes —, et c'est le nom qui dit de quel client on parle.
+
+            ⚠️ Un nom qui n'existe plus ne s'invente pas : site supprimé, sonde
+            partie, et on affiche l'identifiant seul. Jamais « inconnu » déguisé
+            en nom, jamais un trou.
+
+            ⚠️ Le nom est celui d'AUJOURD'HUI, résolu à la lecture — l'inverse
+            de l'origine d'une commande (§ 26), figée à l'instant du geste. Les
+            deux sont justes : l'audit sert à retrouver DE QUOI on parle
+            maintenant, l'origine à dire QUI a lancé la commande à l'époque.
+          -->
+          <span class="target">
+            <span class="lp-mono">{e.target ?? '—'}</span>
+            {#if e.target_name}
+              <span class="tname">{e.target_name}</span>
+            {/if}
+          </span>
 
           <span class="outcome">
             {#if e.outcome === 'failure'}
@@ -407,6 +426,11 @@
     font-size: 11.5px;
     color: var(--ep-text-secondary);
     overflow-wrap: anywhere;
+  }
+  /* Le nom, discret : c'est l'identifiant qui porte le fait. */
+  .tname {
+    color: var(--ep-text-muted);
+    font-size: 11px;
   }
   .target {
     font-size: 11px;

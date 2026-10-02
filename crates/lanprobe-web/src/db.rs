@@ -2311,6 +2311,55 @@ impl Db {
         Ok(())
     }
 
+    /// Le nom **d'aujourd'hui** des cibles données, quand il existe encore.
+    ///
+    /// 🔴 Résolu **à la lecture**, et c'est l'inverse du choix fait pour
+    /// l'origine d'une commande (§ 26), où le nom de l'appareil est figé au
+    /// moment du geste. Les deux sont justes pour des raisons différentes :
+    /// l'audit sert à retrouver *de quoi* on parle maintenant — « c'est quel
+    /// client, ce site ? » —, l'origine d'une commande sert à dire *qui* l'a
+    /// lancée à l'époque. **Ne pas les « harmoniser »** un jour de ménage.
+    ///
+    /// ⚠️ Une cible dont le nom n'existe plus — site supprimé, sonde partie —
+    /// n'est **pas** dans la table rendue. L'interface affiche alors
+    /// l'identifiant seul : jamais « inconnu » déguisé en nom, jamais un trou.
+    ///
+    /// ⚠️ **Deux requêtes pour toute la page**, pas une jointure par ligne : un
+    /// journal grossit sans fin, et une recherche par ligne se paierait à
+    /// chaque lecture.
+    pub fn audit_target_names(
+        &self,
+        targets: &[String],
+    ) -> DbResult<std::collections::HashMap<String, String>> {
+        let mut out = std::collections::HashMap::new();
+        if targets.is_empty() {
+            return Ok(out);
+        }
+        let holes = std::iter::repeat_n("?", targets.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params: Vec<&dyn rusqlite::ToSql> =
+            targets.iter().map(|t| t as &dyn rusqlite::ToSql).collect();
+        let conn = self.lock()?;
+        // Les sondes et les sites, et eux seuls : le reste des cibles est déjà
+        // lisible — un nom de compte EST le compte, un nom de fichier de
+        // sauvegarde se lit, une IP se lit.
+        for table in [
+            format!("SELECT site_id, name FROM sites WHERE site_id IN ({holes})"),
+            format!("SELECT probe_id, name FROM probes WHERE probe_id IN ({holes})"),
+        ] {
+            let mut stmt = conn.prepare(&table)?;
+            let rows = stmt.query_map(params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, name) = row?;
+                out.insert(id, name);
+            }
+        }
+        Ok(out)
+    }
+
     /// Les lignes, de la plus récente à la plus ancienne.
     pub fn list_audit(&self, filter: &AuditFilter) -> DbResult<Vec<AuditEntry>> {
         let limit = filter.limit.clamp(1, AUDIT_MAX_LIMIT);

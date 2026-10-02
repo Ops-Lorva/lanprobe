@@ -445,6 +445,18 @@ export interface AuditEntry {
   actor_kind?: string | null;
   action: string;
   target: string | null;
+  /**
+   * Le nom de la cible **aujourd'hui**, résolu à la lecture par le hub.
+   *
+   * ⚠️ `null` quand il n'existe plus — site supprimé, sonde partie : on affiche
+   * alors l'identifiant seul. Un nom disparu ne s'invente pas.
+   *
+   * 🔴 C'est le nom du MOMENT, à l'inverse d'`origin_device_name` (§ 26), figé
+   * à l'instant du geste. L'audit sert à retrouver de quoi on parle
+   * maintenant ; l'origine d'une commande, à dire qui l'a lancée à l'époque.
+   * Ne pas les « harmoniser ».
+   */
+  target_name?: string | null;
   outcome: AuditOutcome;
   detail: string | null;
 }

@@ -1881,8 +1881,40 @@ async fn read_audit(State(state): State<AppState>, Query(query): Query<AuditQuer
             let next = (entries.len() as i64 >= filter.limit.clamp(1, crate::db::AUDIT_MAX_LIMIT))
                 .then(|| entries.last().map(|e| e.id))
                 .flatten();
+            // ⚠️ **Une passe pour toute la page.** Un journal grossit sans fin,
+            // et une recherche par ligne se paierait à chaque lecture.
+            let targets: Vec<String> = {
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                entries
+                    .iter()
+                    .filter_map(|e| e.target.as_deref())
+                    .filter(|t| seen.insert(t))
+                    .map(str::to_string)
+                    .collect()
+            };
+            let names = state.db.audit_target_names(&targets).unwrap_or_default();
+            let rendered: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|e| {
+                    let mut value =
+                        serde_json::to_value(e).unwrap_or(serde_json::Value::Null);
+                    // 🔴 L'identifiant reste : c'est lui le fait, il ne change
+                    // jamais, et c'est lui qui permet de recouper deux lignes.
+                    // Le nom vient À CÔTÉ — et il vaut `null` quand il n'existe
+                    // plus, parce qu'un nom disparu ne s'invente pas.
+                    let name = e
+                        .target
+                        .as_deref()
+                        .and_then(|t| names.get(t))
+                        .cloned();
+                    if let Some(map) = value.as_object_mut() {
+                        map.insert("target_name".into(), json!(name));
+                    }
+                    value
+                })
+                .collect();
             ok_json(json!({
-                "entries": serde_json::to_value(&entries).unwrap_or(serde_json::Value::Null),
+                "entries": rendered,
                 "next_before_id": next,
             }))
         }
@@ -11487,6 +11519,62 @@ mod tests {
         assert!(!rendered.contains(&token), "le jeton ne doit jamais être journalisé");
         assert!(rendered.contains("influx.read_token.create"), "{rendered}");
         assert!(rendered.contains("influx.read_token.revoke"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn le_journal_donne_le_nom_de_la_cible_a_cote_de_son_identifiant() {
+        // « L'id des cibles c'est bien, mais si on peut avoir le nom à côté
+        // aussi, ça peut être bien » (Benjamin, 02/10). Une ligne d'audit porte
+        // un identifiant nu : exact, mais illisible — on ne sait pas de quel
+        // client on parle sans aller le chercher ailleurs.
+        //
+        // 🔴 L'identifiant RESTE : c'est lui le fait, il ne change jamais, et
+        // c'est lui qui permet de recouper deux lignes.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, _) = h.enroll(&session, "Durand", "Paris").await;
+        let site_id = h
+            .state
+            .db
+            .list_sites()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .site_id;
+
+        // Une cible qui n'existe pas : un site supprimé, une sonde partie.
+        h.state
+            .db
+            .record_audit(
+                Some("admin"),
+                "site.delete",
+                Some("site-parti-a-la-benne"),
+                crate::db::Outcome::Success,
+                None,
+            )
+            .unwrap();
+
+        let (_, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/audit"), &session))
+            .await;
+        let entries = body["entries"].as_array().unwrap();
+        let find = |target: &str| {
+            entries
+                .iter()
+                .find(|e| e["target"] == target)
+                .unwrap_or_else(|| panic!("ligne {target} absente de {body}"))
+                .clone()
+        };
+
+        assert_eq!(find(&site_id)["target_name"], "Durand");
+        assert_eq!(find(&probe_id)["target_name"], "Paris");
+        // 🔴 Un nom qui n'existe plus ne s'invente pas : on affiche
+        // l'identifiant seul. Jamais « inconnu » déguisé en nom, jamais un trou.
+        assert!(
+            find("site-parti-a-la-benne")["target_name"].is_null(),
+            "{body}"
+        );
     }
 
     #[tokio::test]
