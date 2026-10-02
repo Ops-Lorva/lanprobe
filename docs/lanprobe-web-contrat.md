@@ -1494,6 +1494,55 @@ défaut `0` = illimité) — et comme pour la rétention Influx, **la réduire s
 des données** : même confirmation explicite exigée, côté serveur comme côté
 interface.
 
+### 🔴 Les ports sont FUSIONNÉS par machine — c'est un inventaire, pas un instantané
+
+`GET /api/probes/{id}/inventory?kind=ports` ne rend **pas** le dernier scan :
+il rend l'inventaire **composé machine par machine** (`merged_ports_inventory`).
+Pour chaque adresse, le scan le plus récent **qui parle d'elle** gagne.
+
+La raison : chaque publication crée un scan entier côté hub, et l'écran
+n'affichait que le dernier. Ça tenait parce que la sonde republie toutes les
+machines qu'elle connaît — mais **une sonde qui redémarre repart sans
+mémoire** : sa première publication ne porte qu'une machine, et toutes les
+autres sortaient de l'écran. Encore en base, invisibles jusqu'à un nouveau
+scan. Décision de Benjamin (02/10) : « pour la sonde on repart à zéro après un
+reboot, mais c'est bien d'avoir l'histo visible sur le hub. »
+
+🔴 **C'est la date par machine qui rend la fusion honnête.** Sans elle, une
+ligne vieille de trois semaines serait indiscernable d'une ligne fraîche, et
+l'écran affirmerait un état courant qu'il n'a pas. Elle est affichée à côté de
+chaque machine, et une machine sans date **le dit**.
+
+🔴 **Les ports d'une machine se remplacent EN BLOC**, jamais en s'ajoutant : un
+port fermé depuis le dernier scan doit DISPARAÎTRE de la ligne. Les fusionner
+ferait croire à des portes ouvertes qui ne le sont plus — exactement l'inverse
+du service rendu. D'où la jointure sur le `scan_id` gagnant **et** l'adresse,
+et non sur la seule adresse.
+
+⚠️ **Par machine ET par sonde.** Deux sondes peuvent légitimement voir la même
+adresse sur deux réseaux différents ; un scan de l'une ne touche à rien chez
+l'autre.
+
+⚠️ **Rien ne s'efface.** Les scans précédents restent en base : on change ce
+que l'écran compose, pas ce qu'on garde. `prune_inventory` (rétention) demeure
+le seul chemin qui supprime.
+
+⚠️ `scan_id` et `started_at` restent ceux de la **dernière publication** — ils
+disent quand le hub a entendu parler des ports de cette sonde pour la dernière
+fois, ce qui est toujours vrai. La forme de la réponse est inchangée : un
+lecteur qui n'affiche que `hosts` et `ports` n'a rien à adapter.
+
+⚠️ **Une découverte ne fusionne pas.** Un balayage répond pour tout un réseau
+d'un coup : son dernier résultat est la réponse entière, et une machine absente
+y veut dire « elle n'a pas répondu », pas « on ne l'a pas regardée ». Un scan de
+ports, lui, s'accumule machine par machine.
+
+⚠️ **Le rapport SLA, lui, reste sur `latest_scan`** : son onglet « ports » date
+chaque ligne avec le `started_at` du LOT (`sla-report.ts`), pas avec la date de
+la machine. Lui servir l'inventaire fusionné ferait passer une machine vue il y
+a trois semaines pour fraîchement scannée — la fusion exige d'abord que le
+rapport date ses lignes machine par machine.
+
 ### La date de scan est portée par CHAQUE machine
 
 ```json

@@ -3754,7 +3754,17 @@ async fn probe_inventory(
             Ok(rows) => ok_json(json!({ "speedtests": rows })),
             Err(e) => error_response(e),
         },
-        Some(kind @ ("ports" | "discovery")) => match state.db.latest_scan(&id, kind) {
+        // 🔴 Les ports sont **fusionnés par machine**, la découverte non. Une
+        // sonde qui redémarre repart sans mémoire : sa première publication ne
+        // porte qu'une machine, et toutes les autres sortaient de l'écran. Un
+        // scan de ports est un inventaire qui s'accumule machine par machine —
+        // un balayage de découverte, lui, répond pour tout un réseau d'un coup,
+        // et son dernier résultat est la réponse entière.
+        Some("ports") => match state.db.merged_ports_inventory(&id) {
+            Ok(scan) => ok_json(json!({ "scan": scan })),
+            Err(e) => error_response(e),
+        },
+        Some(kind @ "discovery") => match state.db.latest_scan(&id, kind) {
             // `null` et non un scan vide : « jamais lancé » et « lancé, rien
             // trouvé » appellent deux phrases différentes à l'écran.
             Ok(scan) => ok_json(json!({ "scan": scan })),
@@ -8449,6 +8459,144 @@ mod tests {
             "{}",
             out["scan"]["hosts"][0]
         );
+    }
+
+    #[tokio::test]
+    async fn l_inventaire_des_ports_fusionne_par_machine_au_lieu_de_remplacer() {
+        // 🔴 Chaque publication crée un scan ENTIER côté hub, et l'écran
+        // n'affiche que le dernier. Ça tenait parce que la sonde republie
+        // toutes les machines qu'elle connaît — mais **une sonde qui redémarre
+        // repart sans mémoire** : sa première publication ne porte qu'une
+        // machine, et toutes les autres sortaient de l'écran. Encore en base,
+        // invisibles jusqu'à un nouveau scan. Demande de Benjamin (02/10) :
+        // « pour la sonde on repart à zéro après un reboot, mais c'est bien
+        // d'avoir l'histo visible sur le hub. »
+        //
+        // C'est un inventaire, pas un instantané.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let publish = |body: serde_json::Value| {
+            let h = &h;
+            let probe_id = probe_id.clone();
+            let token = token.clone();
+            async move {
+                let (status, out, _) = h
+                    .call(with_bearer(
+                        json_request("POST", &format!("/api/probes/{probe_id}/scans"), body),
+                        &token,
+                    ))
+                    .await;
+                assert_eq!(status, StatusCode::OK, "{out}");
+            }
+        };
+
+        publish(serde_json::json!({
+            "kind": "ports",
+            "started_at": 1_790_000_000,
+            "hosts": [
+                { "ip": "10.0.8.1",  "scanned_at": 1_790_000_000, "profile_id": "web" },
+                { "ip": "10.0.8.50", "scanned_at": 1_790_000_000 }
+            ],
+            "ports": [
+                { "ip": "10.0.8.1",  "port": 22, "proto": "tcp" },
+                { "ip": "10.0.8.50", "port": 80, "proto": "tcp" }
+            ]
+        }))
+        .await;
+
+        // La sonde redémarre : elle ne connaît plus que la machine qu'elle
+        // vient de scanner, et le 22 est fermé depuis.
+        publish(serde_json::json!({
+            "kind": "ports",
+            "started_at": 1_790_003_600,
+            "hosts": [{ "ip": "10.0.8.1", "scanned_at": 1_790_003_600 }],
+            "ports": [{ "ip": "10.0.8.1", "port": 443, "proto": "tcp" }]
+        }))
+        .await;
+
+        let (_, read, _) = h
+            .call(with_cookie(
+                json_request(
+                    "GET",
+                    &format!("/api/probes/{probe_id}/inventory?kind=ports"),
+                    serde_json::json!({}),
+                ),
+                &session,
+            ))
+            .await;
+
+        // 🔴 La machine que la sonde a oubliée reste affichée, avec sa dernière
+        // date connue — c'est elle qui rend la fusion honnête : sans elle, une
+        // ligne vieille de trois semaines serait indiscernable d'une fraîche.
+        let hosts = read["scan"]["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 2, "{hosts:?}");
+        assert_eq!(hosts[0]["ip"], "10.0.8.1");
+        assert_eq!(hosts[0]["scanned_at"], 1_790_003_600);
+        assert_eq!(hosts[1]["ip"], "10.0.8.50");
+        assert_eq!(hosts[1]["scanned_at"], 1_790_000_000);
+
+        // ⚠️ Et les ports d'une machine se remplacent **en bloc** : le 22,
+        // fermé depuis le dernier scan, DOIT disparaître. Les fusionner ferait
+        // croire à des portes ouvertes qui ne le sont plus — exactement
+        // l'inverse du service rendu.
+        let ports = read["scan"]["ports"].as_array().unwrap();
+        let couples: Vec<(&str, u64)> = ports
+            .iter()
+            .map(|p| (p["ip"].as_str().unwrap(), p["port"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(couples, vec![("10.0.8.1", 443), ("10.0.8.50", 80)], "{ports:?}");
+
+        // Le profil suit la machine, scan par scan : celui du dernier scan de
+        // `10.0.8.1` — qui n'en avait pas — remplace le « web » du précédent.
+        assert!(hosts[0]["profile_id"].is_null(), "{}", hosts[0]);
+    }
+
+    #[tokio::test]
+    async fn la_fusion_de_l_inventaire_ne_melange_pas_deux_sondes() {
+        // ⚠️ Deux sondes peuvent légitimement voir la MÊME adresse sur deux
+        // réseaux différents. La fusion se fait par machine **et par sonde** :
+        // un scan de l'une ne touche à rien chez l'autre.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (paris, jeton_paris) = h.enroll(&session, "Durand", "Paris").await;
+        let (lyon, jeton_lyon) = h.enroll(&session, "Durand", "Lyon").await;
+
+        for (probe_id, token, port) in [(&paris, &jeton_paris, 22), (&lyon, &jeton_lyon, 443)] {
+            let (status, out, _) = h
+                .call(with_bearer(
+                    json_request(
+                        "POST",
+                        &format!("/api/probes/{probe_id}/scans"),
+                        serde_json::json!({
+                            "kind": "ports",
+                            "started_at": 1_790_000_000,
+                            "hosts": [{ "ip": "192.168.1.1", "scanned_at": 1_790_000_000 }],
+                            "ports": [{ "ip": "192.168.1.1", "port": port, "proto": "tcp" }]
+                        }),
+                    ),
+                    token,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{out}");
+        }
+
+        for (probe_id, attendu) in [(&paris, 22), (&lyon, 443)] {
+            let (_, read, _) = h
+                .call(with_cookie(
+                    json_request(
+                        "GET",
+                        &format!("/api/probes/{probe_id}/inventory?kind=ports"),
+                        serde_json::json!({}),
+                    ),
+                    &session,
+                ))
+                .await;
+            let ports = read["scan"]["ports"].as_array().unwrap();
+            assert_eq!(ports.len(), 1, "{ports:?}");
+            assert_eq!(ports[0]["port"], attendu);
+        }
     }
 
     #[tokio::test]

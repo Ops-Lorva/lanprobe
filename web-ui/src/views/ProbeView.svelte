@@ -2409,7 +2409,15 @@
                  pareil : le second est une conclusion sur le réseau. -->
             <p class="empty">{$_('probe.ports_never')}</p>
           {:else}
-            <!-- Le lot, pas les machines : chaque ligne porte sa propre date. -->
+            <!--
+              🔴 **Un inventaire fusionné, pas un scan.** Le hub compose la
+              liste machine par machine : une machine reste affichée avec sa
+              dernière date connue jusqu'à ce qu'un nouveau scan la remplace,
+              sans quoi une sonde qui redémarre — et repart sans mémoire —
+              faisait sortir de l'écran toutes celles qu'elle a oubliées.
+              `started_at` ne date donc que la DERNIÈRE publication, et c'est
+              ce que la phrase dit : chaque ligne porte sa propre date.
+            -->
             <p class="scanmeta">{$_('probe.published_at', { values: { when: logTime(portsScan.started_at, lang) } })}</p>
             {#if portsByHost.length === 0}
               <p class="empty">{$_('probe.ports_empty')}</p>

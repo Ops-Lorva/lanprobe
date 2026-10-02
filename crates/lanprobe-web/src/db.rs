@@ -3885,6 +3885,138 @@ impl Db {
         Ok(Some(Scan { scan_id, kind: kind.to_string(), started_at, cidr, hosts, ports }))
     }
 
+    /// L'inventaire des ports d'une sonde, **fusionné par machine**.
+    ///
+    /// 🔴 **C'est un inventaire, pas un instantané.** Chaque publication crée
+    /// un scan entier, et l'écran n'affiche que le dernier : ça tenait parce
+    /// que la sonde republie toutes les machines qu'elle connaît. Mais une
+    /// sonde qui **redémarre repart sans mémoire** — sa première publication ne
+    /// porte qu'une machine, et toutes les autres sortaient de l'écran. Encore
+    /// en base, invisibles jusqu'à un nouveau scan.
+    ///
+    /// Une machine reste donc affichée avec sa dernière date connue jusqu'à ce
+    /// qu'un nouveau scan la remplace.
+    ///
+    /// 🔴 **C'est la date par machine (v28) qui rend la fusion honnête.** Sans
+    /// elle, une ligne vieille de trois semaines serait indiscernable d'une
+    /// ligne fraîche, et l'écran affirmerait un état courant qu'il n'a pas. Une
+    /// machine sans date le dit.
+    ///
+    /// 🔴 **Les ports d'une machine se remplacent EN BLOC**, jamais en
+    /// s'ajoutant : un port fermé depuis le dernier scan doit DISPARAÎTRE de la
+    /// ligne. Les fusionner ferait croire à des portes ouvertes qui ne le sont
+    /// plus — exactement l'inverse du service rendu. D'où la jointure sur le
+    /// `scan_id` gagnant, et non sur la seule adresse.
+    ///
+    /// ⚠️ **Par machine ET par sonde.** Deux sondes peuvent légitimement voir
+    /// la même adresse sur deux réseaux différents ; un scan de l'une ne touche
+    /// à rien chez l'autre.
+    ///
+    /// ⚠️ **Rien ne s'efface** : les scans précédents restent en base. On
+    /// change ce que l'écran compose, pas ce qu'on garde — la purge de
+    /// rétention reste le seul chemin qui supprime (`prune_inventory`).
+    ///
+    /// ⚠️ `scan_id` et `started_at` restent ceux de la **dernière
+    /// publication** : ils disent quand le hub a entendu parler des ports de
+    /// cette sonde pour la dernière fois, ce qui est toujours vrai. Les dates
+    /// des lignes, elles, sont celles des machines.
+    pub fn merged_ports_inventory(&self, probe_id: &str) -> DbResult<Option<Scan>> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let head: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT scan_id, started_at FROM scans
+                  WHERE probe_id = ?1 AND kind = 'ports'
+                  ORDER BY started_at DESC LIMIT 1",
+                rusqlite::params![probe_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        // `None` quand la sonde n'a jamais publié de scan de ports :
+        // l'interface doit dire « jamais lancé » et non « aucun résultat », qui
+        // laisserait croire à un scan blanc.
+        let Some((scan_id, started_at)) = head else {
+            return Ok(None);
+        };
+
+        // 🔴 Le scan le plus récent **qui parle de cette machine** gagne, et
+        // lui seul. L'ordre est celui des publications (`s.started_at`) : c'est
+        // quand le hub a appris le fait. Les départages derrière ne servent
+        // qu'à rendre le résultat déterminé si deux publications tombent dans
+        // la même seconde — sans quoi la ligne changerait d'un affichage à
+        // l'autre sans que rien n'ait bougé.
+        const GAGNANT: &str = "
+            SELECT h.scan_id, h.ip, h.hostname, h.mac, h.vendor, h.latency_ms,
+                   h.scanned_at, h.profile_id,
+                   ROW_NUMBER() OVER (
+                     PARTITION BY h.ip
+                     ORDER BY s.started_at DESC, h.scanned_at DESC, h.scan_id DESC
+                   ) AS rang
+              FROM scan_hosts h
+              JOIN scans s ON s.scan_id = h.scan_id
+             WHERE s.probe_id = ?1 AND s.kind = 'ports'";
+
+        let hosts = {
+            // Le nom du profil est résolu ici comme dans `latest_scan`, et pour
+            // les mêmes raisons — y compris `deleted_at IS NULL`.
+            let sql = format!(
+                "WITH gagnant AS ({GAGNANT})
+                 SELECT g.ip, g.hostname, g.mac, g.vendor, g.latency_ms, g.scanned_at,
+                        g.profile_id, p.name
+                   FROM gagnant g
+                   LEFT JOIN portscan_profiles p
+                          ON p.profile_id = g.profile_id AND p.deleted_at IS NULL
+                  WHERE g.rang = 1 ORDER BY g.ip"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![probe_id], |r| {
+                Ok(ScanHost {
+                    ip: r.get(0)?,
+                    hostname: r.get(1)?,
+                    mac: r.get(2)?,
+                    vendor: r.get(3)?,
+                    latency_ms: r.get(4)?,
+                    scanned_at: r.get(5)?,
+                    profile_id: r.get(6)?,
+                    profile_name: r.get(7)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let ports = {
+            // ⚠️ La jointure porte sur `scan_id` **et** `ip` : les ports
+            // viennent du seul scan gagnant de cette machine. Joindre sur la
+            // seule adresse ressusciterait les ports des scans précédents, et
+            // un port fermé depuis resterait affiché comme ouvert.
+            let sql = format!(
+                "WITH gagnant AS ({GAGNANT})
+                 SELECT t.ip, t.port, t.proto, t.service
+                   FROM scan_ports t
+                   JOIN gagnant g ON g.scan_id = t.scan_id AND g.ip = t.ip AND g.rang = 1
+                  ORDER BY t.ip, t.port"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![probe_id], |r| {
+                Ok(ScanPort {
+                    ip: r.get(0)?,
+                    port: r.get(1)?,
+                    proto: r.get(2)?,
+                    service: r.get(3)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(Some(Scan {
+            scan_id,
+            kind: "ports".into(),
+            // ⚠️ Un scan de ports ne porte pas de CIDR : c'est le champ d'une
+            // découverte. Le laisser nul plutôt que d'aller le chercher.
+            cidr: None,
+            started_at,
+            hosts,
+            ports,
+        }))
+    }
+
     /// Historique des tests de débit, du plus récent au plus ancien.
     pub fn speedtest_history(&self, probe_id: &str, limit: i64) -> DbResult<Vec<SpeedtestRow>> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
