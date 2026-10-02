@@ -790,6 +790,7 @@
     "col_target": "Target",
     "col_outcome": "Outcome",
     "anonymous": "anonymous",
+    "system": "system",
     "success": "Success",
     "failure": "Failed",
     "load_more": "Load older",

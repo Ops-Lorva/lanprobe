@@ -430,8 +430,19 @@ export type AuditOutcome = 'success' | 'failure';
 export interface AuditEntry {
   id: number;
   at: number;
-  /** `null` = tentative anonyme (connexion sur un compte inconnu). */
+  /** `null` quand aucun compte n'est en cause — voir `actor_kind`. */
   actor: string | null;
+  /**
+   * Pourquoi l'acteur est vide.
+   *
+   * - `'system'` : **le hub lui-même** (sauvegarde planifiée, rétention).
+   * - `null` : **on ne sait pas qui c'était** — tentative de connexion sur un
+   *   compte inconnu, ou ligne écrite avant la v29 du schéma.
+   *
+   * ⚠️ Une valeur inconnue se lit « inconnue », jamais brute et jamais prise
+   * pour « système » : voir `auditActor`.
+   */
+  actor_kind?: string | null;
   action: string;
   target: string | null;
   outcome: AuditOutcome;

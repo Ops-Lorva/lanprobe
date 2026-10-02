@@ -790,6 +790,7 @@
     "col_target": "Objeto",
     "col_outcome": "Resultado",
     "anonymous": "anónimo",
+    "system": "sistema",
     "success": "Correcto",
     "failure": "Con error",
     "load_more": "Cargar más antiguas",

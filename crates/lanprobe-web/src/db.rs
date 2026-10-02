@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 28;
+pub const SCHEMA_VERSION: i64 = 29;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -847,6 +847,29 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE scan_hosts ADD COLUMN scanned_at INTEGER;
     "#,
+    // v28 → v29 : distinguer « le hub l'a fait » de « on ne sait pas qui ».
+    //
+    // 🔴 Les deux s'écrivaient `actor IS NULL`, et l'écran affichait
+    // « anonyme » pour les deux. Or « anonyme » dit une chose précise : une
+    // tentative de connexion sur un compte INCONNU, un humain qu'on n'a pas pu
+    // identifier. Une sauvegarde planifiée, elle, est faite par le hub.
+    // Confondre les deux fait chercher qui s'est connecté pour un geste que
+    // personne n'a fait.
+    //
+    // ⚠️ **Une marque, pas un faux acteur.** Écrire `actor = 'système'` aurait
+    // suffi à l'affichage et créé deux pièges : un vrai compte nommé
+    // « système » deviendrait indiscernable, et le filtre par acteur les
+    // mélangerait. L'acteur reste donc vide, et c'est `actor_kind` qui dit
+    // pourquoi.
+    //
+    // ⚠️ **Aucun `DEFAULT`, et aucune reprise des lignes déjà écrites.** On ne
+    // peut pas savoir après coup laquelle était une sauvegarde planifiée et
+    // laquelle une tentative anonyme sans le DEVINER depuis l'action — c'est
+    // précisément ce qu'on refuse de faire à l'affichage. Les anciennes lignes
+    // restent « anonyme », et seules les nouvelles disent vrai.
+    r#"
+    ALTER TABLE audit_log ADD COLUMN actor_kind TEXT;
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
@@ -1205,8 +1228,19 @@ impl serde::Serialize for Outcome {
 pub struct AuditEntry {
     pub id: i64,
     pub at: i64,
-    /// `None` pour une tentative anonyme — connexion sur un compte inconnu.
+    /// `None` quand aucun compte n'est en cause : voir [`Self::actor_kind`].
     pub actor: Option<String>,
+    /// Pourquoi l'acteur est vide.
+    ///
+    /// - `Some("system")` : **le hub lui-même** — sauvegarde planifiée,
+    ///   rétention. Personne ne l'a demandé.
+    /// - `None` : **on ne sait pas qui c'était** — tentative de connexion sur
+    ///   un compte inconnu, ou ligne écrite avant la v29 du schéma.
+    ///
+    /// ⚠️ Une valeur que l'interface ne connaît pas se lit « inconnue », jamais
+    /// brute et jamais prise pour « système » — même règle qu'à l'origine d'une
+    /// commande (§ 26).
+    pub actor_kind: Option<String>,
     pub action: String,
     pub target: Option<String>,
     pub outcome: Outcome,
@@ -2249,12 +2283,40 @@ impl Db {
         Ok(())
     }
 
+    /// Journalise un geste que **le hub** a fait de lui-même : sauvegarde
+    /// planifiée, rétention.
+    ///
+    /// 🔴 À ne pas confondre avec [`Self::record_audit`] sans acteur, qui dit
+    /// « on ne sait pas qui c'était » — une tentative de connexion sur un
+    /// compte inconnu. L'écran écrit « système » pour l'un, « anonyme » pour
+    /// l'autre, et les mélanger fait chercher un humain derrière un geste que
+    /// personne n'a demandé.
+    ///
+    /// ⚠️ L'acteur reste VIDE : un `actor = 'système'` serait indiscernable
+    /// d'un vrai compte portant ce nom, et le filtre par acteur les
+    /// mélangerait.
+    pub fn record_system_audit(
+        &self,
+        action: &str,
+        target: Option<&str>,
+        outcome: Outcome,
+        detail: Option<&str>,
+    ) -> DbResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO audit_log (at, actor, actor_kind, action, target, outcome, detail)
+             VALUES (?1, NULL, 'system', ?2, ?3, ?4, ?5)",
+            rusqlite::params![now(), action, target, outcome.as_str(), detail],
+        )?;
+        Ok(())
+    }
+
     /// Les lignes, de la plus récente à la plus ancienne.
     pub fn list_audit(&self, filter: &AuditFilter) -> DbResult<Vec<AuditEntry>> {
         let limit = filter.limit.clamp(1, AUDIT_MAX_LIMIT);
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, at, actor, action, target, outcome, detail FROM audit_log
+            "SELECT id, at, actor, action, target, outcome, detail, actor_kind FROM audit_log
              WHERE (?1 IS NULL OR id < ?1)
                AND (?2 IS NULL OR actor = ?2)
                AND (?3 IS NULL OR action = ?3)
@@ -2272,6 +2334,7 @@ impl Db {
                     target: r.get(4)?,
                     outcome: Outcome::from_stored(&r.get::<_, String>(5)?),
                     detail: r.get(6)?,
+                    actor_kind: r.get(7)?,
                 })
             },
         )?;
@@ -5525,6 +5588,40 @@ mod tests {
             .unwrap();
         assert_eq!(next[0].action, "action.2");
         assert_eq!(next[1].action, "action.1");
+    }
+
+    #[test]
+    fn un_geste_du_hub_n_est_pas_une_tentative_anonyme() {
+        // 🔴 Les deux cas s'écrivaient `actor IS NULL`, et l'écran affichait
+        // « anonyme » pour les deux. Or « anonyme » veut dire une chose
+        // précise : une tentative de connexion sur un compte inconnu, un
+        // humain qu'on n'a pas pu identifier. Une sauvegarde planifiée, elle,
+        // est faite par le hub. Confondre les deux fait chercher qui s'est
+        // connecté pour un geste que personne n'a fait.
+        let db = open_memory();
+        db.record_system_audit(
+            "backup.create",
+            Some("hub-2026-10-02.tar.zst"),
+            Outcome::Success,
+            Some("sauvegarde automatique"),
+        )
+        .unwrap();
+        db.record_audit(None, "auth.login", None, Outcome::Failure, Some("compte inconnu"))
+            .unwrap();
+
+        let lines = db.list_audit(&AuditFilter::default()).unwrap();
+        let backup = lines.iter().find(|e| e.action == "backup.create").unwrap();
+        let login = lines.iter().find(|e| e.action == "auth.login").unwrap();
+
+        // ⚠️ L'acteur reste VIDE dans les deux cas : inventer un compte
+        // « système » le rendrait indiscernable d'un vrai compte qui
+        // s'appellerait ainsi, et le filtre par acteur les mélangerait.
+        assert!(backup.actor.is_none());
+        assert_eq!(backup.actor_kind.as_deref(), Some("system"));
+        // Et l'autre reste sans marque : on ne sait pas qui c'était, et c'est
+        // exactement ce que la ligne doit dire.
+        assert!(login.actor.is_none());
+        assert_eq!(login.actor_kind, None);
     }
 
     #[test]

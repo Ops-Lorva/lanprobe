@@ -665,11 +665,16 @@ impl Scheduler {
                     report.file,
                     report.bytes
                 );
-                // Journalisée sans acteur : personne ne l'a demandée, c'est
-                // le hub. Une ligne d'audit reste due — c'est ce qui permet
-                // de constater après coup que les sauvegardes tournent.
-                let _ = self.db.record_audit(
-                    None,
+                // Journalisée au nom du HUB, pas sans acteur : personne ne
+                // l'a demandée. Une ligne d'audit reste due — c'est ce qui
+                // permet de constater après coup que les sauvegardes tournent.
+                //
+                // 🔴 « Sans acteur » veut dire « on ne sait pas qui c'était »,
+                // et l'écran l'écrit « anonyme » : c'est le mot d'une tentative
+                // de connexion sur un compte inconnu. L'employer ici faisait
+                // chercher qui s'était connecté pour un geste que personne
+                // n'a fait.
+                let _ = self.db.record_system_audit(
                     "backup.create",
                     Some(&report.file),
                     crate::db::Outcome::Success,
@@ -679,8 +684,7 @@ impl Scheduler {
             }
             Ok(Err(e)) => {
                 tracing::error!("sauvegarde automatique en échec : {e}");
-                let _ = self.db.record_audit(
-                    None,
+                let _ = self.db.record_system_audit(
                     "backup.create",
                     None,
                     crate::db::Outcome::Failure,

@@ -790,6 +790,7 @@
     "col_target": "Cible",
     "col_outcome": "Résultat",
     "anonymous": "anonyme",
+    "system": "système",
     "success": "Succès",
     "failure": "Échec",
     "load_more": "Charger la suite",

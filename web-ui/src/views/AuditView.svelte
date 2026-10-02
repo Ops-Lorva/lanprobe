@@ -4,6 +4,7 @@
   import { api, ApiError, AUDIT_ACTIONS, type AuditEntry } from '$lib/api';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import { absoluteTime, logTime, relativeTime, now } from '$lib/time';
+  import { auditActor as actorOf } from '$lib/audit-actors';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
   const lang = $derived($locale ?? 'en');
@@ -253,12 +254,21 @@
           </span>
 
           <span class="actor">
-            {#if e.actor}
+            <!--
+              🔴 Trois réponses, pas deux. « Anonyme » dit une chose précise :
+              une tentative de connexion sur un compte inconnu, un humain qu'on
+              n'a pas pu identifier. Une sauvegarde planifiée, elle, est faite
+              par le hub — l'afficher « anonyme » faisait chercher qui s'était
+              connecté pour un geste que personne n'a demandé.
+
+              Le hub ne recopie jamais la saisie dans `actor` : un jour, ce
+              champ recevrait un mot de passe tapé dans la mauvaise case.
+            -->
+            {#if actorOf(e).kind === 'account'}
               {e.actor}
+            {:else if actorOf(e).kind === 'system'}
+              <em class="anon">{$_('audit.system')}</em>
             {:else}
-              <!-- `actor` nul = tentative anonyme. Le hub ne recopie jamais la
-                   saisie : un jour, ce champ recevrait un mot de passe tapé
-                   dans la mauvaise case. -->
               <em class="anon">{$_('audit.anonymous')}</em>
             {/if}
           </span>

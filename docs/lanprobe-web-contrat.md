@@ -1296,10 +1296,42 @@ rejouerait des lignes déjà vues dès qu'une ligne s'ajoute pendant la lecture.
 `next_before_id` n'est rendu que si la page est pleine — sinon l'interface
 afficherait un « suivant » qui ne mène à rien.
 
-`actor` vaut `null` pour une tentative anonyme : une connexion ratée sur un
-compte inexistant n'a pas d'acteur connu, et **la saisie n'est jamais
-recopiée** — ce champ reçoit un jour un mot de passe tapé dans la mauvaise
-case.
+`actor` vaut `null` quand aucun compte n'est en cause, et **la saisie n'est
+jamais recopiée** — ce champ reçoit un jour un mot de passe tapé dans la
+mauvaise case.
+
+### 🔴 Trois réponses à « qui », pas deux
+
+| Affiché | En base | Ce que ça veut dire |
+|---|---|---|
+| le compte | `actor = 'claire'` | quelqu'un l'a fait |
+| `système` | `actor IS NULL`, `actor_kind = 'system'` | **le hub** l'a fait : sauvegarde planifiée, rétention |
+| `anonyme` | `actor IS NULL`, `actor_kind IS NULL` | **on ne sait pas qui** : connexion sur un compte inconnu, ou ligne d'avant la v29 |
+
+« Anonyme » dit une chose précise : un humain qu'on n'a pas pu identifier. Une
+sauvegarde planifiée, elle, n'a été demandée par personne. Les afficher pareil
+faisait chercher qui s'était connecté pour un geste que personne n'a fait — et
+au pire lire une fausse alerte de sécurité.
+
+⚠️ **Une marque, pas un faux acteur.** Écrire `actor = 'système'` aurait suffi à
+l'affichage et créé deux pièges : un vrai compte nommé « système » deviendrait
+indiscernable, et le filtre par acteur les mélangerait.
+
+⚠️ **Les lignes d'avant la v29 restent « anonyme ».** On ne peut pas savoir
+après coup laquelle était une sauvegarde planifiée sans le DEVINER depuis
+l'action — exactement ce qu'on refuse de faire à l'affichage. La colonne est
+donc ajoutée sans `DEFAULT` et sans reprise.
+
+⚠️ Une valeur d'`actor_kind` que la version chargée ne connaît pas se lit
+**inconnue**, jamais brute et jamais prise pour « système » : ce serait
+affirmer que le hub a fait quelque chose dont on ne sait rien. Même règle qu'à
+l'origine d'une commande (§ 26).
+
+⚠️ Les gestes de la **ligne de commande** (`lanprobe-web backup`,
+`disable-totp`…) sont encore journalisés sans acteur ni marque, avec « ligne de
+commande » en détail : ils s'affichent donc « anonyme ». Ce n'est pas le hub qui
+agit — c'est un humain qu'on ne sait pas nommer — et leur donner une troisième
+marque n'a pas été tranché.
 
 **Aucune route ne supprime une ligne, et il n'y a pas de purge par
 ancienneté.** `DELETE /api/audit` rend `405`. Un journal qu'on peut nettoyer ne
