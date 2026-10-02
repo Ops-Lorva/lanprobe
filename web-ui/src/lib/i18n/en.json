@@ -587,6 +587,7 @@
     "profile_db": "Databases",
     "profile_remote": "Remote access",
     "profile_full": "Full (extended)",
+    "profile_none": "no profile",
     "discovery_ping": "Watch",
     "discovery_scan": "Scan ports",
     "ipHistoryEmpty": "Address history available since the hub was updated.",

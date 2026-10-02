@@ -596,6 +596,26 @@ export interface ScanHost {
    * lignes d'avant la v28 du schéma n'en ont pas.
    */
   scanned_at?: number | null;
+  /**
+   * Le profil de scan avec lequel CETTE machine a été scannée.
+   *
+   * ⚠️ Au niveau de la machine, pas du lot — même raison que `scanned_at` : la
+   * sonde publie toutes les machines qu'elle connaît à chaque scan, et deux
+   * d'entre elles ont pu être scannées avec deux profils différents.
+   *
+   * ⚠️ Absent ou nul = **aucun profil**, et ça se dit à l'écran. Les lignes
+   * d'avant la v30 du schéma n'en ont pas, et un scan lancé depuis la fenêtre
+   * de la sonde sans en choisir n'en avait aucun.
+   */
+  profile_id?: string | null;
+  /**
+   * Le nom du profil, **résolu par le hub à la lecture**.
+   *
+   * ⚠️ Nul quand le profil a été supprimé depuis : la ligne affiche alors
+   * `profile_id` seul. Voir `scanProfileLabel`, qui porte la règle et ses
+   * tests — on n'invente jamais un nom.
+   */
+  profile_name?: string | null;
 }
 
 export interface ScanPort {

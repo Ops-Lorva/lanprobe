@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { PortscanProfile } from './api';
-import { parsePorts, formatPorts, portScanArgs, profileLabel } from './portscan-profiles';
+import {
+  parsePorts,
+  formatPorts,
+  portScanArgs,
+  profileLabel,
+  scanProfileLabel,
+} from './portscan-profiles';
 
 const profile = (over: Partial<PortscanProfile> = {}): PortscanProfile => ({
   profile_id: 'cams',
@@ -116,5 +122,40 @@ describe('profileLabel', () => {
     // Celui-là a été nommé par quelqu'un : le traduire serait lui en inventer
     // un autre.
     expect(profileLabel(profile({ name: 'Caméras' }), t)).toBe('Caméras');
+  });
+});
+
+describe('scanProfileLabel', () => {
+  const t = (key: string) =>
+    ({ 'probe.profile_web': 'Toile', 'probe.profile_none': 'sans profil' })[key] ?? key;
+
+  it('affiche le nom que le hub a résolu', () => {
+    expect(scanProfileLabel({ profile_id: 'cams', profile_name: 'Caméras' }, t)).toBe('Caméras');
+  });
+
+  it('traduit les profils d’origine, comme l’écran des profils', () => {
+    // Sans quoi le même profil s'appellerait « Courants » dans un écran et
+    // « Common » dans l'autre.
+    expect(scanProfileLabel({ profile_id: 'web', profile_name: 'Web' }, t)).toBe('Toile');
+  });
+
+  it('affiche l’identifiant SEUL quand le profil a été supprimé depuis', () => {
+    // 🔴 L'identifiant est le fait, le nom une commodité. Rendre le nom de la
+    // pierre tombale serait trompeur : l'unicité du nom ne vaut que parmi les
+    // profils vivants, donc un profil neuf peut l'avoir repris avec une autre
+    // liste de ports derrière.
+    expect(scanProfileLabel({ profile_id: 'cams', profile_name: null }, t)).toBe('cams');
+  });
+
+  it('n’invente AUCUN profil pour un scan qui n’en avait pas', () => {
+    // 🔴 Un scan lancé avant cette version, ou depuis la fenêtre de la sonde
+    // sans profil, n'en avait pas. Afficher un profil par défaut dirait d'un
+    // scan qu'il a eu un réglage que personne ne lui a donné.
+    expect(scanProfileLabel({ profile_id: null, profile_name: null }, t)).toBe('sans profil');
+    expect(scanProfileLabel({}, t)).toBe('sans profil');
+  });
+
+  it('traite un identifiant vide comme une absence, pas comme un nom', () => {
+    expect(scanProfileLabel({ profile_id: '  ' }, t)).toBe('sans profil');
   });
 });

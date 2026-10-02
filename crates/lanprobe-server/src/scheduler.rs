@@ -171,6 +171,10 @@ pub async fn publish_discovery(state: &AppState, cidr: &str) {
             // `started_at` du rapport n'apprendrait rien, et inventer une date
             // par machine serait faux.
             scanned_at: None,
+            // ⚠️ Une découverte ne scanne aucun port : elle n'a pas de profil,
+            // et lui en attribuer un ferait croire à un scan de ports qui n'a
+            // pas eu lieu.
+            profile_id: None,
         })
         .collect();
     crate::inventory::publish(
@@ -258,6 +262,11 @@ fn inventory_from_entries(
             vendor: None,
             latency_ms: None,
             scanned_at: (entry.timestamp > 0).then_some(entry.timestamp as i64),
+            // ⚠️ Le profil de CETTE machine. La sonde le range déjà avec le
+            // résultat du scan, il ne lui manquait que ce chemin pour monter au
+            // hub — jusqu'ici, l'écran du hub ne pouvait pas dire avec quel
+            // profil un scan avait été lancé.
+            profile_id: entry.profile_id.clone(),
         });
         // ⚠️ Seuls les ports OUVERTS : publier les milliers de ports fermés
         // d'un scan complet gonflerait l'inventaire sans rien apprendre.
@@ -900,6 +909,50 @@ mod tests {
         }];
         let (hosts, _) = super::inventory_from_entries(&entries);
         assert_eq!(hosts[0].scanned_at, None);
+    }
+
+    #[test]
+    fn chaque_machine_publiee_porte_le_profil_avec_lequel_elle_a_ete_scannee() {
+        // 🔴 **Le profil est à la MACHINE, pas au lot** — même raison que la
+        // date : la sonde publie toutes les machines qu'elle connaît à chaque
+        // scan, et deux d'entre elles ont pu être scannées avec deux profils
+        // différents. Un profil au niveau du rapport attribuerait à l'une le
+        // profil de l'autre : plausible, et faux.
+        let entries = vec![
+            PortScanEntry {
+                ip: "10.0.0.1".into(),
+                tcp: vec![port(22, true)],
+                timestamp: 1_790_000_000,
+                profile_id: Some("remote".into()),
+                ..Default::default()
+            },
+            PortScanEntry {
+                ip: "10.0.0.2".into(),
+                tcp: vec![port(80, true)],
+                timestamp: 1_790_003_600,
+                profile_id: Some("web".into()),
+                ..Default::default()
+            },
+        ];
+
+        let (hosts, _) = super::inventory_from_entries(&entries);
+        assert_eq!(hosts[0].profile_id.as_deref(), Some("remote"));
+        assert_eq!(hosts[1].profile_id.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn un_scan_sans_profil_part_sans_profil_plutot_qu_avec_un_defaut() {
+        // ⚠️ Un scan lancé depuis la fenêtre de la sonde sans choisir de profil
+        // n'en avait pas. Lui en coller un — « common », ou celui de la machine
+        // précédente — serait affirmer un réglage que personne n'a fait.
+        let entries = vec![PortScanEntry {
+            ip: "10.0.0.3".into(),
+            tcp: vec![port(22, true)],
+            timestamp: 1_790_000_000,
+            ..Default::default()
+        }];
+        let (hosts, _) = super::inventory_from_entries(&entries);
+        assert_eq!(hosts[0].profile_id, None);
     }
 
     use crate::config::ConfigStore;

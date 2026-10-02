@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 29;
+pub const SCHEMA_VERSION: i64 = 30;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -870,6 +870,40 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE audit_log ADD COLUMN actor_kind TEXT;
     "#,
+    // v29 → v30 : le profil de scan employé, **par machine**.
+    //
+    // 🔴 L'écran ne disait pas avec quel profil un scan avait été lancé. La
+    // sonde rangeait bien l'identifiant avec son résultat, et la commande du
+    // hub le lui transportait depuis le 02/10 — mais le rapport publié au hub
+    // ne le portait pas, et la chaîne s'arrêtait là.
+    //
+    // 🔴 **Sur `scan_hosts`, pas sur `scans`**, et pour la même raison qu'en
+    // v28 pour la date : la sonde publie toutes les machines qu'elle connaît à
+    // chaque scan de ports, et deux d'entre elles ont pu être scannées avec
+    // deux profils différents. Un profil au niveau du lot attribuerait à l'une
+    // le profil de l'autre — plausible, et faux.
+    //
+    // ⚠️ **L'identifiant, jamais le nom.** Le nom vit dans
+    // `portscan_profiles` et se résout à la lecture : le recopier ici le
+    // figerait à l'instant du scan et le ferait diverger au premier renommage.
+    // Et un profil supprimé depuis ne rend alors plus de nom du tout —
+    // l'écran affiche l'identifiant seul, plutôt qu'un nom que rien n'empêche
+    // d'avoir été repris par un profil neuf (l'unicité du nom ne vaut que
+    // parmi les profils vivants).
+    //
+    // ⚠️ **Aucune clé étrangère vers `portscan_profiles`.** Un `REFERENCES`
+    // ferait tomber l'enregistrement d'un scan dont le profil n'est pas encore
+    // descendu sur la sonde, ou vient d'être supprimé sur le hub : un scan qui
+    // a bien eu lieu serait alors perdu pour une question d'étiquette. Les
+    // ports font foi, pas le profil.
+    //
+    // ⚠️ **Aucun `DEFAULT`**, comme en v28 et en v26 : les lignes déjà en base
+    // n'ont pas de profil, et il n'y a aucun moyen honnête de le retrouver.
+    // Un `DEFAULT 'common'` les attribuerait toutes à un profil que personne
+    // n'a choisi, sur des lignes qu'on ne pourra plus corriger.
+    r#"
+    ALTER TABLE scan_hosts ADD COLUMN profile_id TEXT;
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
@@ -957,6 +991,31 @@ pub struct ScanHost {
     /// que d'afficher une heure fausse.
     #[serde(default)]
     pub scanned_at: Option<i64>,
+    /// Le profil de scan avec lequel **cette** machine a été scannée.
+    ///
+    /// 🔴 **Au niveau de la machine, pas du rapport** — même raison que
+    /// `scanned_at` : la sonde publie toutes les machines qu'elle connaît à
+    /// chaque scan de ports, et deux d'entre elles ont pu être scannées avec
+    /// deux profils différents.
+    ///
+    /// ⚠️ `None` reste `None` : les lignes d'avant la v30 n'en ont pas, et une
+    /// sonde antérieure n'en envoie pas. Afficher un profil par défaut dirait
+    /// d'un scan qu'il a eu un réglage que personne ne lui a donné.
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// Le nom du profil, **résolu par le hub à la lecture**.
+    ///
+    /// 🔴 L'identifiant est le fait, le nom n'est qu'une commodité. Le ranger
+    /// en base à côté de l'identifiant le figerait à l'instant du scan et le
+    /// ferait diverger au premier renommage ; `record_scan` ne l'écrit donc
+    /// jamais, même si une sonde en envoyait un.
+    ///
+    /// ⚠️ `None` quand le profil a été **supprimé depuis** : l'écran affiche
+    /// alors l'identifiant seul. Pas le nom de la pierre tombale — l'unicité
+    /// du nom ne vaut que parmi les profils vivants, et rien n'empêche un
+    /// profil neuf de l'avoir repris avec une autre liste de ports derrière.
+    #[serde(default)]
+    pub profile_name: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3712,10 +3771,14 @@ impl Db {
             // `OR REPLACE` : une même adresse vue deux fois dans un scan n'est
             // pas une erreur de la sonde, c'est une réponse en double sur le
             // réseau. On garde la dernière plutôt que de rejeter tout le scan.
+            // ⚠️ `profile_name` n'est PAS écrit, même si la sonde en envoyait
+            // un : seul l'identifiant est un fait. Le nom se résout à la
+            // lecture, sans quoi il serait figé à l'instant du scan et
+            // divergerait au premier renommage du profil.
             tx.execute(
                 "INSERT OR REPLACE INTO scan_hosts
-                    (scan_id, ip, hostname, mac, vendor, latency_ms, scanned_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (scan_id, ip, hostname, mac, vendor, latency_ms, scanned_at, profile_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     scan_id,
                     host.ip,
@@ -3723,7 +3786,8 @@ impl Db {
                     host.mac,
                     host.vendor,
                     host.latency_ms,
-                    host.scanned_at
+                    host.scanned_at,
+                    host.profile_id
                 ],
             )?;
         }
@@ -3771,9 +3835,23 @@ impl Db {
         };
 
         let hosts = {
+            // 🔴 Le nom du profil est résolu **ici**, à la lecture, par une
+            // jointure — pas recopié dans `scan_hosts` à l'écriture : un nom
+            // rangé avec le scan serait figé à l'instant du scan et
+            // divergerait au premier renommage.
+            //
+            // ⚠️ `deleted_at IS NULL` : un profil supprimé depuis ne rend plus
+            // de nom, et l'écran affiche l'identifiant seul. Rendre le nom de
+            // la pierre tombale serait trompeur — l'unicité du nom ne vaut que
+            // parmi les profils vivants, donc un profil neuf peut l'avoir
+            // repris avec une autre liste de ports derrière.
             let mut stmt = conn.prepare(
-                "SELECT ip, hostname, mac, vendor, latency_ms, scanned_at FROM scan_hosts
-                  WHERE scan_id = ?1 ORDER BY ip",
+                "SELECT h.ip, h.hostname, h.mac, h.vendor, h.latency_ms, h.scanned_at,
+                        h.profile_id, p.name
+                   FROM scan_hosts h
+                   LEFT JOIN portscan_profiles p
+                          ON p.profile_id = h.profile_id AND p.deleted_at IS NULL
+                  WHERE h.scan_id = ?1 ORDER BY h.ip",
             )?;
             let rows = stmt.query_map(rusqlite::params![&scan_id], |r| {
                 Ok(ScanHost {
@@ -3783,6 +3861,8 @@ impl Db {
                     vendor: r.get(3)?,
                     latency_ms: r.get(4)?,
                     scanned_at: r.get(5)?,
+                    profile_id: r.get(6)?,
+                    profile_name: r.get(7)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -4445,6 +4525,65 @@ mod tests {
                 "colonne {expected} absente de reports : {reports:?}"
             );
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_v30_laisse_sans_profil_les_machines_deja_scannees() {
+        // 🔴 Le cas qui compte : un hub en service, son inventaire déjà
+        // rempli, qu'on met à jour.
+        //
+        // ⚠️ Ces lignes-là doivent rester SANS profil — `NULL`. Un
+        // `DEFAULT 'common'` dans l'ALTER TABLE aurait affirmé qu'un scan de
+        // septembre employait un profil que personne ne lui a choisi, sur des
+        // lignes qu'on ne pourra plus corriger. Même arbitrage qu'en v28 pour
+        // la date et qu'en v26 pour l'origine d'une commande.
+        let dir = tmp_dir("v29-to-v30");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..29] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 29").unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO probes (probe_id, site_id, name, token_hash, created_at)
+                 VALUES ('p-1', 's-1', 'Paris', 'h', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scans (scan_id, probe_id, kind, started_at)
+                 VALUES ('sc-1', 'p-1', 'ports', 1000)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scan_hosts (scan_id, ip, scanned_at)
+                 VALUES ('sc-1', '10.0.8.1', 900)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+
+        let scan = db.latest_scan("p-1", "ports").unwrap().unwrap();
+        assert_eq!(scan.hosts.len(), 1, "la machine d'avant doit survivre");
+        // Ce qu'elle savait, elle le sait toujours.
+        assert_eq!(scan.hosts[0].scanned_at, Some(900));
+        assert_eq!(
+            scan.hosts[0].profile_id, None,
+            "une machine d'avant la v30 n'a PAS de profil, et surtout pas « common »"
+        );
+        assert_eq!(scan.hosts[0].profile_name, None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

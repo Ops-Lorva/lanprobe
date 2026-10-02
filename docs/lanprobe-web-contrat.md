@@ -1445,9 +1445,11 @@ CREATE TABLE scans (               -- une exécution
 );
 
 CREATE TABLE scan_hosts (          -- une machine vue lors d'un scan
-  scan_id  TEXT NOT NULL REFERENCES scans(scan_id),
-  ip       TEXT NOT NULL,
-  hostname TEXT, mac TEXT, vendor TEXT, latency_ms INTEGER,
+  scan_id    TEXT NOT NULL REFERENCES scans(scan_id),
+  ip         TEXT NOT NULL,
+  hostname   TEXT, mac TEXT, vendor TEXT, latency_ms INTEGER,
+  scanned_at INTEGER,              -- quand CETTE machine (v28)
+  profile_id TEXT,                 -- avec quel profil (v30), SANS clé étrangère
   PRIMARY KEY (scan_id, ip)
 );
 
@@ -1526,6 +1528,49 @@ la machine.
 ⚠️ Côté interface, les dates sont résolues en **une passe** pour la page
 (`hostScanDates`). Un scan d'un /24 donne des centaines de machines : chercher
 la date dans `hosts` à chaque ligne affichée ferait un parcours par ligne.
+
+### Le profil employé est porté par CHAQUE machine
+
+```json
+"hosts": [
+  { "ip": "10.0.8.1",  "profile_id": "web",  "profile_name": "Web" },
+  { "ip": "10.0.8.50", "profile_id": "cams", "profile_name": null },
+  { "ip": "10.0.8.99", "profile_id": null,   "profile_name": null }
+]
+```
+
+🔴 **Sur la machine, pas sur le rapport**, et pour la même raison que la date :
+la sonde publie toutes les machines qu'elle connaît à chaque scan de ports, et
+deux d'entre elles ont pu être scannées avec deux profils différents. Un profil
+au niveau du lot attribuerait à l'une le profil de l'autre.
+
+🔴 **L'identifiant est le fait, le nom n'est qu'une commodité.** Seul
+`scan_hosts.profile_id` est rangé en base ; `profile_name` est résolu **à la
+lecture** par une jointure sur `portscan_profiles` (`latest_scan`). Recopier le
+nom à l'écriture le figerait à l'instant du scan et le ferait diverger au
+premier renommage du profil.
+
+⚠️ **`profile_name` nul = profil supprimé depuis** : la jointure exige
+`deleted_at IS NULL`, et l'écran affiche alors l'identifiant seul. On ne rend
+pas le nom de la pierre tombale — l'unicité du nom ne vaut que parmi les
+profils vivants, donc un profil neuf peut l'avoir repris avec une autre liste de
+ports derrière, et le technicien irait lire la mauvaise liste.
+
+⚠️ **`profile_id` nul = aucun profil**, et l'écran le dit (« sans profil »).
+C'est le cas d'un scan lancé depuis la fenêtre de la sonde sans en choisir, et
+celui des lignes d'avant la v30 : la colonne est ajoutée **sans `DEFAULT`**.
+Afficher un profil par défaut dirait d'un scan qu'il a eu un réglage que
+personne ne lui a donné.
+
+⚠️ **Aucune clé étrangère vers `portscan_profiles`.** Un `REFERENCES` ferait
+tomber l'enregistrement d'un scan dont le profil n'est pas encore descendu sur
+la sonde, ou vient d'être supprimé sur le hub : un scan qui a bien eu lieu
+serait perdu pour une question d'étiquette. Les ports font foi, pas le profil —
+c'est déjà la règle côté sonde, qui ne valide pas le `profile_id` d'une
+commande.
+
+⚠️ Une **découverte** n'a pas de profil : elle ne scanne aucun port, et lui en
+attribuer un ferait croire à un scan de ports qui n'a pas eu lieu.
 
 ### Le compte de ports ouverts dit sa famille
 

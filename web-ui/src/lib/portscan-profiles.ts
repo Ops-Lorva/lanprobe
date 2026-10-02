@@ -43,6 +43,41 @@ export function profileLabel(profile: PortscanProfile, t: (key: string) => strin
 }
 
 /**
+ * Le profil avec lequel une machine a été scannée, tel qu'on l'affiche.
+ *
+ * 🔴 **L'identifiant est le fait, le nom n'est qu'une commodité.** Le hub le
+ * résout à la lecture depuis sa table des profils (`latest_scan`) ; il n'est
+ * jamais rangé avec le scan, sans quoi il serait figé à l'instant du scan et
+ * divergerait au premier renommage.
+ *
+ * 🔴 **Profil supprimé depuis : l'identifiant SEUL.** On ne rend pas le nom de
+ * la pierre tombale — l'unicité du nom ne vaut que parmi les profils vivants,
+ * donc un profil neuf peut l'avoir repris avec une autre liste de ports
+ * derrière, et le technicien irait lire la mauvaise liste. On n'invente jamais
+ * un nom.
+ *
+ * 🔴 **Aucun profil : on le dit.** Un scan lancé avant la v30 du schéma, ou
+ * depuis la fenêtre de la sonde sans en choisir, n'en avait pas. Afficher un
+ * profil par défaut dirait d'un scan qu'il a eu un réglage que personne ne lui
+ * a donné.
+ */
+export function scanProfileLabel(
+  host: { profile_id?: string | null; profile_name?: string | null },
+  t: (key: string) => string,
+): string {
+  const id = host.profile_id?.trim();
+  if (!id) return t('probe.profile_none');
+  // ⚠️ L'absence de nom se teste AVANT la traduction d'un profil de base :
+  // c'est elle qui dit « supprimé », et un profil de base se supprime comme
+  // les autres.
+  if (!host.profile_name?.trim()) return id;
+  // Les profils de base restent traduits, comme dans l'écran des profils :
+  // sans quoi le même profil s'appellerait « Courants » ici et « Common » là.
+  const key = SEEDED_LABELS[id];
+  return key ? t(key) : host.profile_name;
+}
+
+/**
  * Lit une liste de ports saisie à la main.
  *
  * Triée et dédoublonnée — le hub le refera de son côté, mais l'écran doit

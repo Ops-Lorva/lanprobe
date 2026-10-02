@@ -8363,6 +8363,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chaque_machine_garde_le_profil_qui_l_a_scannee_et_son_nom_se_resout_a_la_lecture() {
+        // 🔴 L'écran ne disait pas avec quel profil un scan avait été lancé :
+        // la sonde rangeait bien l'identifiant avec le résultat, mais il ne
+        // montait pas au hub. Demande de Benjamin (02/10).
+        //
+        // 🔴 **Le profil est à la MACHINE, pas au lot** — même raison que la
+        // date : la sonde publie toutes les machines qu'elle connaît à chaque
+        // scan, et deux d'entre elles ont pu être scannées avec deux profils
+        // différents.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/scans"),
+                    serde_json::json!({
+                        "kind": "ports",
+                        "started_at": 1_790_003_600,
+                        "hosts": [
+                            { "ip": "10.0.8.1", "profile_id": "web" },
+                            // ⚠️ Sans profil : un scan lancé depuis la fenêtre
+                            // de la sonde sans en choisir n'en avait aucun, et
+                            // les lignes d'avant la v30 n'en portent pas.
+                            { "ip": "10.0.8.50" }
+                        ],
+                        "ports": [{ "ip": "10.0.8.1", "port": 443, "proto": "tcp" }]
+                    }),
+                ),
+                &token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let read = |session: String| {
+            let h = &h;
+            let probe_id = probe_id.clone();
+            async move {
+                let (_, read, _) = h
+                    .call(with_cookie(
+                        json_request(
+                            "GET",
+                            &format!("/api/probes/{probe_id}/inventory?kind=ports"),
+                            serde_json::json!({}),
+                        ),
+                        &session,
+                    ))
+                    .await;
+                read
+            }
+        };
+
+        let out = read(session.clone()).await;
+        // L'identifiant est le fait : il est rendu tel qu'il a été reçu.
+        assert_eq!(out["scan"]["hosts"][0]["profile_id"], "web");
+        // Le nom n'est qu'une commodité, résolu depuis la table des profils à
+        // la lecture : le figer au scan le ferait diverger au premier renommage.
+        assert_eq!(out["scan"]["hosts"][0]["profile_name"], "Web");
+        // 🔴 Une absence reste une absence. Afficher un profil par défaut dirait
+        // d'un scan qu'il a eu un réglage que personne ne lui a donné.
+        assert!(
+            out["scan"]["hosts"][1]["profile_id"].is_null(),
+            "{}",
+            out["scan"]["hosts"][1]
+        );
+        assert!(
+            out["scan"]["hosts"][1]["profile_name"].is_null(),
+            "{}",
+            out["scan"]["hosts"][1]
+        );
+
+        // 🔴 Profil supprimé depuis : l'identifiant reste, le nom disparaît.
+        // L'écran affichera l'identifiant seul plutôt qu'un nom qui n'a plus
+        // de liste de ports derrière lui — et que rien n'empêche d'avoir été
+        // repris par un profil neuf, l'unicité du nom ne valant que parmi les
+        // profils vivants.
+        h.state.db.delete_portscan_profile("web").unwrap();
+        let out = read(session).await;
+        assert_eq!(out["scan"]["hosts"][0]["profile_id"], "web");
+        assert!(
+            out["scan"]["hosts"][0]["profile_name"].is_null(),
+            "{}",
+            out["scan"]["hosts"][0]
+        );
+    }
+
+    #[tokio::test]
     async fn a_scan_never_launched_is_null_not_an_empty_scan() {
         // « Jamais lancé » et « lancé, rien trouvé » appellent deux phrases
         // différentes à l'écran. Rendre un scan vide dans les deux cas ferait

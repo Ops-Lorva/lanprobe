@@ -40,6 +40,24 @@ pub struct ScanHost {
     /// pouvoir dire « date inconnue » au lieu d'afficher 1970.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scanned_at: Option<i64>,
+    /// Le profil de scan avec lequel **cette** machine a été scannée.
+    ///
+    /// 🔴 **Au niveau de la machine, pas du rapport** — même raison que
+    /// `scanned_at` : la sonde publie toutes les machines qu'elle connaît à
+    /// chaque scan, et deux d'entre elles ont pu être scannées avec deux
+    /// profils différents. Un profil porté par le rapport attribuerait à l'une
+    /// le profil de l'autre.
+    ///
+    /// ⚠️ **L'identifiant, jamais le nom.** Le nom vit dans la table des
+    /// profils du hub, qui le résout à la lecture : l'envoyer d'ici le figerait
+    /// à l'instant du scan et le ferait diverger dès le premier renommage.
+    ///
+    /// ⚠️ Omis quand il n'y en a pas — un scan lancé depuis la fenêtre de la
+    /// sonde sans choisir de profil n'en avait aucun. L'écran doit pouvoir le
+    /// dire ; inventer « common » serait affirmer un réglage que personne n'a
+    /// fait.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

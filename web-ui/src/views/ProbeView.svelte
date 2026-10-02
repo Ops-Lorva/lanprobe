@@ -25,7 +25,7 @@
     type Scan,
     type SpeedtestRow,
   } from '$lib/api';
-  import { portScanArgs, profileLabel } from '$lib/portscan-profiles';
+  import { portScanArgs, profileLabel, scanProfileLabel } from '$lib/portscan-profiles';
   import { hostScanDates } from '$lib/scan-host-dates';
   // Le décompte de ports ouverts dit sa famille, et avec la MÊME notation que
   // l'app iOS : deux surfaces du même produit ne comptent pas de deux façons.
@@ -922,6 +922,21 @@
    * l'instant.
    */
   const portsScannedAt = $derived(hostScanDates(portsScan?.hosts));
+
+  /**
+   * Le profil de scan de chaque machine, en **une passe**.
+   *
+   * 🔴 Le profil est porté par la MACHINE, pas par le lot : la sonde publie
+   * toutes les machines qu'elle connaît à chaque scan, et deux d'entre elles
+   * ont pu être scannées avec deux profils différents.
+   *
+   * ⚠️ Même raison qu'une passe pour les dates : un scan d'un /24 donne des
+   * centaines de machines, et chercher dans `hosts` à chaque ligne affichée
+   * ferait un parcours par ligne.
+   */
+  const portsProfiles = $derived(
+    new Map((portsScan?.hosts ?? []).map((h) => [h.ip, h] as const)),
+  );
 
   /** Ports groupés par machine — l'inventaire arrive à plat. */
   const portsByHost = $derived.by(() => {
@@ -2422,6 +2437,17 @@
                         {portCountWording(countPortFamilies(list), (k, v) => $_(k, { values: v }))}
                       </span>
                       <!--
+                        Le profil employé pour CETTE machine. ⚠️ Un scan qui
+                        n'en avait pas écrit « sans profil » : afficher un
+                        profil par défaut dirait d'un scan qu'il a eu un
+                        réglage que personne ne lui a donné. Et un profil
+                        supprimé depuis n'affiche que son identifiant — la
+                        règle est dans `scanProfileLabel`, avec ses tests.
+                      -->
+                      <span class="hostprofile">
+                        {scanProfileLabel(portsProfiles.get(ip) ?? {}, (k) => $_(k))}
+                      </span>
+                      <!--
                         ⚠️ La date de CETTE machine, pas celle du lot. Et quand
                         elle manque — lignes d'avant la v28, sonde antérieure —
                         on l'écrit : afficher l'heure de publication serait
@@ -3411,6 +3437,12 @@
     margin-left: auto;
     font-size: 11px;
     color: var(--ep-text-dim);
+  }
+  /* Le profil employé, entre le nombre de ports et la date. */
+  .hostprofile {
+    font-size: 11px;
+    color: var(--ep-text-muted);
+    white-space: nowrap;
   }
   /* La date de la machine, après son nombre de ports. */
   .hostwhen {
