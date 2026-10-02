@@ -6,6 +6,29 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.7] - 2026-10-02
+
+### English
+
+- **Added: each machine of a port scan carries its own scan date.** Until now
+  the hub only knew when the batch was published, so a machine scanned an hour
+  earlier looked as if it had just been scanned. ⚠️ A machine whose date is
+  unknown says so — it never borrows the batch's date.
+- **Added: a scan commanded from the hub or the phone says which profile it
+  came from**, and can carry a UDP port list. ⚠️ An unknown profile identifier
+  never fails the scan: the ports are the fact, the profile is a label.
+
+### Français
+
+- **Ajouté : chaque machine d'un scan de ports porte SA date de scan.** Le hub
+  ne connaissait que la date de publication du lot : une machine scannée une
+  heure plus tôt paraissait scannée à l'instant. ⚠️ Une machine dont la date
+  est inconnue le dit — elle n'emprunte jamais celle du lot.
+- **Ajouté : un scan commandé depuis le hub ou le téléphone dit de quel profil
+  il vient**, et peut porter une liste de ports UDP. ⚠️ Un identifiant de
+  profil inconnu ne fait jamais échouer le scan : les ports font foi, le
+  profil n'est qu'une étiquette.
+
 ## [2.4.6] - 2026-10-02
 
 ### English
