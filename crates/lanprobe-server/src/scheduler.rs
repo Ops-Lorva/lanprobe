@@ -193,21 +193,44 @@ pub async fn publish_discovery(state: &AppState, cidr: &str) {
 /// d'un scan complet gonflerait l'inventaire sans rien apprendre.
 ///
 /// ⚠️ Sans clé de scellement, il n'y a pas de hub à qui parler.
-pub async fn publish_ports(state: &AppState, ip: &str) {
+pub async fn publish_ports(state: &AppState, _just_scanned: &str) {
     let Some(key) = sealing_key(state) else { return };
-    let Some(entry) = state.portscan.snapshot().into_iter().find(|e| e.ip == ip) else { return };
-    let ports = entry
-        .tcp
-        .iter()
-        .chain(entry.udp.iter())
-        .filter(|p| p.open)
-        .map(|p| crate::inventory::ScanPort {
-            ip: ip.to_string(),
-            port: p.port,
-            proto: p.proto.clone(),
-            service: (!p.service.is_empty()).then(|| p.service.clone()),
-        })
-        .collect();
+    // 🔴 **Toutes les machines connues, pas seulement celle qu'on vient de
+    // scanner.** Chaque publication crée un scan ENTIER côté hub, et le hub
+    // n'affiche que le dernier : ne publier qu'une machine faisait disparaître
+    // toutes les précédentes à chaque nouveau scan. Deux machines scannées sur
+    // la sonde, une seule visible sur le hub — constaté le 02/10.
+    //
+    // ⚠️ Seuls les ports OUVERTS partent : publier les milliers de ports fermés
+    // d'un scan complet gonflerait l'inventaire sans rien apprendre.
+    let entries = state.portscan.snapshot();
+    let mut hosts = Vec::new();
+    let mut ports = Vec::new();
+    for entry in &entries {
+        hosts.push(crate::inventory::ScanHost {
+            ip: entry.ip.clone(),
+            hostname: None,
+            mac: None,
+            vendor: None,
+            latency_ms: None,
+        });
+        for p in entry.tcp.iter().chain(entry.udp.iter()).filter(|p| p.open) {
+            ports.push(crate::inventory::ScanPort {
+                ip: entry.ip.clone(),
+                port: p.port,
+                proto: p.proto.clone(),
+                service: (!p.service.is_empty()).then(|| p.service.clone()),
+            });
+        }
+    }
+    if hosts.is_empty() {
+        return;
+    }
+    tracing::info!(
+        "scan de ports publié au hub : {} machines, {} ports ouverts",
+        hosts.len(),
+        ports.len()
+    );
     crate::inventory::publish(
         state,
         &key,
@@ -215,13 +238,7 @@ pub async fn publish_ports(state: &AppState, ip: &str) {
             kind: "ports".into(),
             started_at: crate::inventory::now(),
             cidr: None,
-            hosts: vec![crate::inventory::ScanHost {
-                ip: ip.to_string(),
-                hostname: None,
-                mac: None,
-                vendor: None,
-                latency_ms: None,
-            }],
+            hosts,
             ports,
             speedtest: None,
         },
