@@ -106,8 +106,22 @@ pub(crate) async fn build(
     // Les inventaires du rapport : ce que la sonde a vu sur le réseau, et les
     // ports ouverts qu'elle y a relevés. Un client qui reçoit un SLA veut
     // aussi savoir ce qui tournait chez lui.
+    //
+    // 🔴 **Les ports sont FUSIONNÉS par machine, la découverte non** — la même
+    // règle que `probe_inventory`, et pour la même raison : une sonde qui
+    // redémarre repart sans mémoire, sa première publication ne porte qu'une
+    // machine, et toutes les autres sortaient du rapport alors qu'elles étaient
+    // encore à l'écran. Un client qui compare les deux ne peut pas trancher
+    // lequel mentait. Un scan de ports est un inventaire qui s'accumule machine
+    // par machine ; un balayage de découverte, lui, répond pour tout un réseau
+    // d'un coup, et son dernier résultat est la réponse entière.
+    //
+    // ⚠️ La fusion ne vaut QU'AVEC la date par machine, livrée avant elle : les
+    // machines qu'elle ramène portent de vieilles dates, et un classeur qui les
+    // daterait avec le lot publié les ferait passer pour fraîchement scannées.
+    // C'est la raison de l'ordre des deux corrections.
     let discovery = state.db.latest_scan(probe_id, "discovery").ok().flatten();
-    let ports = state.db.latest_scan(probe_id, "ports").ok().flatten();
+    let ports = state.db.merged_ports_inventory(probe_id).ok().flatten();
 
     // L'historique des adresses voyage AVEC le rapport : le tableau de
     // l'interface et l'onglet Excel découpent les mêmes relevés avec les mêmes

@@ -8554,6 +8554,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn le_rapport_sla_lit_le_meme_inventaire_fusionne_que_l_ecran() {
+        // 🔴 **Le rapport et l'écran doivent montrer le MÊME ensemble de
+        // machines.** L'écran lit l'inventaire fusionné par machine ; le
+        // rapport lisait encore le dernier scan seul, et une machine que la
+        // sonde a oubliée après un redémarrage disparaissait du classeur alors
+        // qu'elle était à l'écran. Un client qui compare les deux ne peut pas
+        // trancher lequel mentait.
+        //
+        // ⚠️ L'ordre importait : brancher la fusion AVANT de dater par machine
+        // aurait fait passer une machine vue il y a trois semaines pour
+        // fraîchement scannée — la fusion la ramène justement avec sa vieille
+        // date. C'est pourquoi `scanned_at` est vérifié ici aussi.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let publish = |body: serde_json::Value| {
+            let h = &h;
+            let probe_id = probe_id.clone();
+            let token = token.clone();
+            async move {
+                let (status, out, _) = h
+                    .call(with_bearer(
+                        json_request("POST", &format!("/api/probes/{probe_id}/scans"), body),
+                        &token,
+                    ))
+                    .await;
+                assert_eq!(status, StatusCode::OK, "{out}");
+            }
+        };
+
+        publish(serde_json::json!({
+            "kind": "ports",
+            "started_at": 1_790_000_000,
+            "hosts": [{ "ip": "10.0.8.50", "scanned_at": 1_790_000_000 }],
+            "ports": [{ "ip": "10.0.8.50", "port": 80, "proto": "tcp" }]
+        }))
+        .await;
+
+        // La sonde redémarre : elle ne republie plus que la machine qu'elle
+        // vient de scanner. `10.0.8.50` est toujours en base.
+        publish(serde_json::json!({
+            "kind": "ports",
+            "started_at": 1_790_003_600,
+            "hosts": [{ "ip": "10.0.8.1", "scanned_at": 1_790_003_600 }],
+            "ports": [{ "ip": "10.0.8.1", "port": 443, "proto": "tcp" }]
+        }))
+        .await;
+
+        let (status, sla, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{sla}");
+
+        let hosts = sla["ports"]["hosts"].as_array().expect("machines absentes");
+        let adresses: Vec<&str> = hosts.iter().map(|h| h["ip"].as_str().unwrap()).collect();
+        assert_eq!(adresses, vec!["10.0.8.1", "10.0.8.50"], "{hosts:?}");
+        // Et chacune garde SA date : celle que la fusion a retrouvée, pas
+        // celle du dernier lot publié.
+        assert_eq!(hosts[0]["scanned_at"], 1_790_003_600);
+        assert_eq!(hosts[1]["scanned_at"], 1_790_000_000);
+
+        let ports = sla["ports"]["ports"].as_array().expect("ports absents");
+        let couples: Vec<(&str, u64)> = ports
+            .iter()
+            .map(|p| (p["ip"].as_str().unwrap(), p["port"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(couples, vec![("10.0.8.1", 443), ("10.0.8.50", 80)], "{ports:?}");
+
+        // ⚠️ La DÉCOUVERTE ne se fusionne pas, et ce test le fige : un
+        // balayage répond pour tout un réseau d'un coup, son dernier résultat
+        // est la réponse entière. La fusionner ressusciterait une machine
+        // débranchée depuis.
+        publish(serde_json::json!({
+            "kind": "discovery",
+            "started_at": 1_790_000_000,
+            "cidr": "10.0.8.0/24",
+            "hosts": [{ "ip": "10.0.8.7" }, { "ip": "10.0.8.8" }],
+            "ports": []
+        }))
+        .await;
+        publish(serde_json::json!({
+            "kind": "discovery",
+            "started_at": 1_790_003_600,
+            "cidr": "10.0.8.0/24",
+            "hosts": [{ "ip": "10.0.8.7" }],
+            "ports": []
+        }))
+        .await;
+        let (status, sla, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/sla?range=24h")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{sla}");
+        let decouvertes = sla["discovery"]["hosts"].as_array().unwrap();
+        assert_eq!(decouvertes.len(), 1, "{decouvertes:?}");
+        assert_eq!(decouvertes[0]["ip"], "10.0.8.7");
+    }
+
+    #[tokio::test]
     async fn la_fusion_de_l_inventaire_ne_melange_pas_deux_sondes() {
         // ⚠️ Deux sondes peuvent légitimement voir la MÊME adresse sur deux
         // réseaux différents. La fusion se fait par machine **et par sonde** :
