@@ -6,6 +6,38 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.5] - 2026-10-02
+
+### English
+
+- **Fixed: a machine that answers no ping is now reported to the hub.** A MAC
+  showing up in the ARP table after the sweep is a real machine — it exists on
+  the network, it simply did not answer, which is the common case for a
+  firewalled Windows box or a game console. The engine only updated an
+  **existing** entry, while the window created one on the same event: the
+  probe's own screen showed six machines and the hub received four, so the
+  phone faithfully displayed a truncated network. ⚠️ No latency is recorded
+  rather than zero — it did not answer, and zero would be a lie.
+- **Added: the log says how many machines a discovery published.** The gap
+  between what a screen showed and what the hub received took a database
+  investigation; it now takes one line.
+
+### Français
+
+- **Corrigé : une machine qui ne répond à aucun ping est enfin remontée au
+  hub.** Une MAC qui apparaît dans la table ARP après le balayage désigne une
+  machine bien réelle — elle existe sur le réseau, elle n'a simplement pas
+  répondu, ce qui est le cas courant d'un poste Windows pare-feu activé ou
+  d'une console de jeu. Le moteur ne mettait à jour qu'une entrée
+  **existante**, alors que la fenêtre en créait une sur le même événement :
+  l'écran de la sonde affichait six machines et le hub en recevait quatre, si
+  bien que le téléphone montrait fidèlement un parc amputé. ⚠️ Aucune latence
+  n'est enregistrée plutôt qu'un zéro — elle n'a pas répondu, et zéro serait un
+  mensonge.
+- **Ajouté : le journal dit combien de machines une découverte a publiées.**
+  L'écart entre ce qu'un écran montrait et ce que le hub recevait a demandé une
+  enquête en base de données ; il tient désormais en une ligne.
+
 ## [2.4.4] - 2026-10-01
 
 ### English
