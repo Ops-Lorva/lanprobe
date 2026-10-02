@@ -579,6 +579,8 @@
     "iperf_placeholder": "Serveur iperf3 (ex. 10.4.8.1)",
     "discovery_placeholder": "Réseau, vide = auto (ex. 10.0.8.0/24)",
     "ports_count": "{n, plural, one {# port ouvert} other {# ports ouverts}}",
+    "ports_count_tcp": "{n, plural, one {# port TCP ouvert} other {# ports TCP ouverts}}",
+    "ports_count_udp": "{n, plural, one {# port UDP ouvert} other {# ports UDP ouverts}}",
     "profile_common": "Courants",
     "profile_web": "Web",
     "profile_infra": "Infra",

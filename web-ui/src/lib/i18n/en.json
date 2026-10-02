@@ -579,6 +579,8 @@
     "iperf_placeholder": "iperf3 server (e.g. 10.4.8.1)",
     "discovery_placeholder": "Network, blank = auto (e.g. 10.0.8.0/24)",
     "ports_count": "{n, plural, one {# open port} other {# open ports}}",
+    "ports_count_tcp": "{n, plural, one {# open TCP port} other {# open TCP ports}}",
+    "ports_count_udp": "{n, plural, one {# open UDP port} other {# open UDP ports}}",
     "profile_common": "Common",
     "profile_web": "Web",
     "profile_infra": "Infra",

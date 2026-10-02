@@ -27,6 +27,9 @@
   } from '$lib/api';
   import { portScanArgs, profileLabel } from '$lib/portscan-profiles';
   import { hostScanDates } from '$lib/scan-host-dates';
+  // Le décompte de ports ouverts dit sa famille, et avec la MÊME notation que
+  // l'app iOS : deux surfaces du même produit ne comptent pas de deux façons.
+  import { countPortFamilies, portCountWording } from '$lib/port-count';
   import {
     MEASUREMENT,
     MetricsShapeError,
@@ -2409,7 +2412,15 @@
                     >
                       <span class="caret" class:on={openHost === ip} aria-hidden="true">›</span>
                       <span class="lp-mono">{ip}</span>
-                      <span class="hostn">{$_('probe.ports_count', { values: { n: list.length } })}</span>
+                      <!--
+                        ⚠️ Le compte dit aussi la FAMILLE. « 8 ports ouverts »
+                        ne distingue pas huit services TCP d'une machine qui ne
+                        répond qu'en UDP, et ça change ce qu'on va vérifier.
+                        La notation est celle de l'app iOS — voir `port-count.ts`.
+                      -->
+                      <span class="hostn">
+                        {portCountWording(countPortFamilies(list), (k, v) => $_(k, { values: v }))}
+                      </span>
                       <!--
                         ⚠️ La date de CETTE machine, pas celle du lot. Et quand
                         elle manque — lignes d'avant la v28, sonde antérieure —

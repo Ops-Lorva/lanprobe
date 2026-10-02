@@ -579,6 +579,8 @@
     "iperf_placeholder": "Servidor iperf3 (p. ej. 10.4.8.1)",
     "discovery_placeholder": "Red, vacío = automático (p. ej. 10.0.8.0/24)",
     "ports_count": "{n, plural, one {# puerto abierto} other {# puertos abiertos}}",
+    "ports_count_tcp": "{n, plural, one {# puerto TCP abierto} other {# puertos TCP abiertos}}",
+    "ports_count_udp": "{n, plural, one {# puerto UDP abierto} other {# puertos UDP abiertos}}",
     "profile_common": "Comunes",
     "profile_web": "Web",
     "profile_infra": "Infra",

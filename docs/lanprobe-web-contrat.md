@@ -1527,6 +1527,30 @@ la machine.
 (`hostScanDates`). Un scan d'un /24 donne des centaines de machines : chercher
 la date dans `hosts` à chaque ligne affichée ferait un parcours par ligne.
 
+### Le compte de ports ouverts dit sa famille
+
+🔴 « 8 ports ouverts » ne dit pas ce qu'on regarde. Huit services TCP et une
+machine qui ne répond qu'en UDP ne se vérifient pas de la même façon, et le
+chiffre seul laisse le technicien deviner laquelle des deux il a sous les yeux.
+La ligne écrit donc `8 ports ouverts · 4 TCP · 4 UDP`.
+
+🔴 **La notation est celle de l'app iOS** (`PortScanWording.ports(total:tcp:udp:)`),
+à la virgule près — côté hub, c'est `portCountWording` dans `port-count.ts`.
+Deux surfaces du même produit qui comptent de deux façons font douter des deux.
+Les deux règles déjà tranchées s'appliquent ici sans retouche :
+
+- une **seule** famille ne se répète pas : « 2 ports · 2 TCP » dit deux fois la
+  même chose, on écrit « 2 ports TCP ouverts » (d'où `ports_count_tcp` et
+  `ports_count_udp`, qui laissent chaque langue accorder la phrase entière —
+  « TCP » et « UDP », eux, ne se traduisent jamais) ;
+- un protocole qu'on ne sait pas nommer **compte dans le total** sans étiquette
+  inventée. Le total peut donc DÉPASSER `tcp + udp`, et c'est pour ça qu'il est
+  porté à part et non recalculé comme une somme à l'affichage.
+
+⚠️ Le hub ajoute une garde que l'app n'a pas : à `total = 0`, la famille ne
+s'écrit pas. Sans elle, `tcp === total` serait vrai pour deux zéros et l'écran
+attribuerait au TCP une absence de port ouvert.
+
 ## 13. Notifications
 
 ### Deux canaux, pas cinq
