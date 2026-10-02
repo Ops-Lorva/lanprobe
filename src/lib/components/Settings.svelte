@@ -10,6 +10,10 @@
   import { selectedInterface } from '../stores/selectedInterface';
   import { scheduler } from '../stores/scheduler';
 
+  // Les profils de scan tels que l'écran les montre : une sonde rattachée à un
+  // hub n'affiche plus ses profils de base (contrat § 25).
+  const visiblePortscanProfiles = portscanProfiles.visible;
+
   // ── Rattachement à un hub ───────────────────────────────────────────────
   let hub = $state<{ enrolled: boolean; url: string; name: string; site: string }>({
     enrolled: false, url: '', name: '', site: '',
@@ -479,8 +483,12 @@
           }}
         >
           <option value="">{$_('settings.auto_port_scan.disabled')}</option>
-          {#each $portscanProfiles as p (p.id)}
-            <option value={p.id}>{p.builtin ? p.name : `★ ${p.name}`} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
+          <!-- ⚠️ Les profils AFFICHÉS, pas tous : une sonde rattachée à un hub
+               n'affiche plus ses profils de base (§ 25). Proposer ici un
+               profil invisible ailleurs ferait tourner un scan automatique
+               avec une liste de ports introuvable à l'écran. -->
+          {#each $visiblePortscanProfiles as p (p.id)}
+            <option value={p.id}>{p.from_hub ? `★ ${p.name}` : p.name} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
           {/each}
         </select>
       </label>

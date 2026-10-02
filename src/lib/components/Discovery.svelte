@@ -131,7 +131,10 @@
   function closeContextMenu() { ctxMenu = null; }
 
   function scanPortsFor(ip: string) {
-    const active = get(portscanProfiles).find(p => p.id === get(portscanProfiles.active));
+    // ⚠️ Le profil actif **parmi ceux qui s'affichent** (§ 25) : une sonde
+    // rattachée à un hub n'affiche plus ses profils de base, et scanner avec
+    // une liste de ports que l'écran ne montre nulle part serait invérifiable.
+    const active = get(portscanProfiles.current);
     portscan.add(ip, active?.tcp_ports, active?.udp_ports, active?.id ?? null, active?.name ?? null);
   }
   async function addPingMonitorFor(ip: string) {

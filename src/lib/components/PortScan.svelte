@@ -18,7 +18,18 @@
 
   let activeId = $state('builtin:common');
   portscanProfiles.active.subscribe(v => { activeId = v; });
-  const activeProfile = $derived($portscanProfiles.find(p => p.id === activeId) ?? $portscanProfiles[0]);
+
+  // 🔴 Les sélecteurs n'affichent PAS la liste complète : dès que la sonde est
+  // rattachée à un hub, ses profils de base disparaissent de l'écran (§ 25,
+  // décision du 02/10). Le hub sème les mêmes et fait autorité ; les montrer
+  // tous les deux donnait trois paires de même nom aux contenus différents —
+  // `Common` 16T/6U en local contre 0/0 au hub. Rien n'est supprimé : ils
+  // resservent le jour où la sonde est désenrôlée.
+  const visibleProfiles = portscanProfiles.visible;
+  // Le profil actif parmi ceux qui s'affichent, repli compris : sinon une sonde
+  // qu'on vient d'enrôler garderait un profil de base invisible comme actif.
+  const currentProfile = portscanProfiles.current;
+  const activeProfile = $derived($currentProfile);
 
   function parsePorts(text: string): number[] {
     const out = new Set<number>();
@@ -54,12 +65,14 @@
   }
 
   function rescan(entry: ScanEntry) {
-    const prof = $portscanProfiles.find(p => p.id === entry.profileId) ?? activeProfile;
+    // ⚠️ Cherché parmi les profils AFFICHÉS : relancer avec un profil de base
+    // que l'écran ne montre plus scannerait une liste de ports invisible.
+    const prof = $visibleProfiles.find(p => p.id === entry.profileId) ?? activeProfile;
     portscan.add(entry.ip, prof?.tcp_ports, prof?.udp_ports, prof?.id ?? null, prof?.name ?? null);
   }
 
   function rescanWith(ip: string, profileId: string) {
-    const prof = $portscanProfiles.find(p => p.id === profileId);
+    const prof = $visibleProfiles.find(p => p.id === profileId);
     if (!prof) return;
     portscan.add(ip, prof.tcp_ports, prof.udp_ports, prof.id, prof.name);
   }
@@ -105,7 +118,13 @@
   function removeProfile(p: PortScanProfile) {
     if (p.builtin) return;
     portscanProfiles.remove(p.id);
-    if (activeId === p.id) portscanProfiles.setActive('builtin:common');
+    // ⚠️ On ne retombe pas en dur sur `builtin:common` : il est invisible dès
+    // que la sonde est rattachée à un hub. Le premier profil affiché, ou rien
+    // du tout — et rien du tout veut dire « la sonde garde sa propre liste ».
+    if (activeId === p.id) {
+      const reste = $visibleProfiles.filter(x => x.id !== p.id);
+      portscanProfiles.setActive(reste[0]?.id ?? 'builtin:common');
+    }
   }
 
   function openCount(e: ScanEntry): number {
@@ -118,8 +137,8 @@
     <h1>{$_('port_scan.title')}</h1>
     <div class="add-row">
       <select class="profile-select" value={activeId} onchange={(e) => portscanProfiles.setActive((e.currentTarget as HTMLSelectElement).value)}>
-        {#each $portscanProfiles as p (p.id)}
-          <option value={p.id}>{p.builtin ? p.name : `★ ${p.name}`} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
+        {#each $visibleProfiles as p (p.id)}
+          <option value={p.id}>{p.from_hub ? `★ ${p.name}` : p.name} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
         {/each}
       </select>
       <button class="icon-btn" title={$_('port_scan.manage_profiles')} onclick={() => showManager = true}>⚙</button>
@@ -169,8 +188,8 @@
                   disabled={entry.scanning}
                   onchange={(e) => rescanWith(entry.ip, (e.currentTarget as HTMLSelectElement).value)}
                 >
-                  {#each $portscanProfiles as p (p.id)}
-                    <option value={p.id}>{p.builtin ? p.name : `★ ${p.name}`} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
+                  {#each $visibleProfiles as p (p.id)}
+                    <option value={p.id}>{p.from_hub ? `★ ${p.name}` : p.name} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
                   {/each}
                 </select>
               </label>
@@ -264,13 +283,13 @@
           </div>
         {:else}
           <div class="profile-list">
-            {#if $portscanProfiles.some(p => p.from_hub)}
+            {#if $visibleProfiles.some(p => p.from_hub)}
               <p class="hub-note">{$_('port_scan.from_hub_hint')}</p>
             {/if}
-            {#each $portscanProfiles as p (p.id)}
+            {#each $visibleProfiles as p (p.id)}
               <div class="profile-row">
                 <div class="profile-meta">
-                  <div class="profile-name">{p.builtin ? p.name : `★ ${p.name}`}</div>
+                  <div class="profile-name">{p.from_hub ? `★ ${p.name}` : p.name}</div>
                   <div class="profile-sub">
                     {p.tcp_ports.length} TCP · {p.udp_ports.length} UDP
                     <!-- ⚠️ Le hub fait autorité sur ce profil : l'éditer ici

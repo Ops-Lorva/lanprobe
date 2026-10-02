@@ -3143,13 +3143,33 @@ ensuite — les reposer ressusciterait un profil supprimé exprès. ⚠️ `infr
 répétait `161` dans le code du hub : la ligne posée en base est triée et
 dédoublonnée.
 
-### Côté sonde, sans hub
+### Ce que l'écran de la sonde affiche
 
 L'écran de scan de ports de la sonde continue de marcher **seul** : ses profils
 de base sont dans son code, ils ne montent pas et ne descendent pas. Un profil
-venu du hub est marqué comme tel et l'écran **le dit** — l'éditer localement
+venu du hub est marqué d'une étoile et l'écran **le dit** — l'éditer localement
 tiendrait jusqu'au battement suivant, et laisser croire le contraire serait un
 mensonge d'interface (§ 18).
+
+🔴 **Une sonde rattachée à un hub n'affiche plus ses profils de base.** Elle
+montre ce qu'elle a créé, et ce que le hub lui a livré. Décision de Benjamin,
+02/10 — et c'est ce qui supprime les doublons à la racine : l'écran montrait
+côte à côte trois paires de même nom aux contenus **différents** (`Common`
+16 TCP/6 UDP en local contre 0/0 au hub, `Web` 13 contre 8, `Databases` 13/1
+contre 8/0).
+
+⚠️ Masquer sur le **nom** aurait caché des ports réellement scannés. Ne plus
+afficher les profils de base n'en cache aucun, puisque le hub sème désormais
+exactement les mêmes et fait autorité.
+
+⚠️ C'est une décision d'**affichage**, pas une suppression : les profils de base
+restent dans l'application et resservent tels quels le jour où la sonde est
+désenrôlée. C'est le seul moment où ils servent encore.
+
+⚠️ Le profil **actif** est résolu parmi ceux qui s'affichent. Sans ce repli, une
+sonde qu'on vient d'enrôler garderait `builtin:common` comme profil actif,
+devenu invisible : le sélecteur n'afficherait aucune sélection et le scan
+partirait avec une liste de ports introuvable à l'écran.
 
 ## 26. D'où vient une commande ✅ implémenté
 
