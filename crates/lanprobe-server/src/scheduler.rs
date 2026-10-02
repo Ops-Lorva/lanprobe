@@ -149,6 +149,13 @@ fn start_sub_tasks(cfg: &SchedulerConfig, state: &AppState) -> Vec<tokio::task::
 /// travaille alors seule, et ce n'est pas une erreur.
 pub async fn publish_discovery(state: &AppState, cidr: &str) {
     let Some(key) = sealing_key(state) else { return };
+    // ⚠️ Le compte est journalisé : l'écart entre ce qu'une fenêtre affiche et
+    // ce que le hub reçoit a demandé une enquête en base de données le 01/10.
+    // Il tient en une ligne de journal.
+    tracing::info!(
+        "découverte publiée au hub : {} machines",
+        state.discovery.snapshot().len()
+    );
     let hosts = state
         .discovery
         .snapshot()

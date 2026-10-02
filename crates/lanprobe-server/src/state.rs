@@ -73,11 +73,40 @@ impl DiscoveryStateInner {
             }
         }
     }
+    /// 🔴 **Crée l'entrée si elle manque, au lieu de l'ignorer.**
+    ///
+    /// Une MAC qui apparaît dans la table ARP APRÈS le balayage désigne une
+    /// machine bien réelle : elle existe sur le réseau, elle n'a simplement pas
+    /// répondu au ping — un pare-feu local, et c'est le cas le plus courant sur
+    /// un poste Windows ou une console de jeu.
+    ///
+    /// ⚠️ Avant, cette fonction ne mettait à jour qu'une entrée EXISTANTE. Ces
+    /// machines-là n'étaient donc jamais enregistrées, alors que l'affichage,
+    /// lui, les créait en recevant l'événement. La fenêtre de la sonde montrait
+    /// six machines, le hub n'en recevait que quatre, et le téléphone affichait
+    /// fidèlement un parc amputé. Constaté le 01/10.
     pub fn update_mac(&self, ip: &str, mac: String) {
         if let Ok(mut g) = self.hosts.lock() {
-            if let Some(h) = g.get_mut(ip) {
-                h.vendor = lanprobe_core::oui::vendor_for_mac(&mac);
-                h.mac = Some(mac);
+            let vendor = lanprobe_core::oui::vendor_for_mac(&mac);
+            match g.get_mut(ip) {
+                Some(h) => {
+                    h.vendor = vendor;
+                    h.mac = Some(mac);
+                }
+                None => {
+                    g.insert(
+                        ip.to_string(),
+                        DiscoveredHost {
+                            ip: ip.to_string(),
+                            hostname: None,
+                            mac: Some(mac),
+                            vendor,
+                            // ⚠️ `None` et pas zéro : elle n'a pas répondu, ce
+                            // n'est pas une latence nulle.
+                            latency_ms: None,
+                        },
+                    );
+                }
             }
         }
     }
@@ -350,5 +379,49 @@ impl AppState {
             event: event.into(),
             payload,
         });
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    /// 🔴 Une MAC vue dans la table ARP **après** le balayage désigne une
+    /// machine réelle qui n'a pas répondu au ping — un pare-feu local, le cas
+    /// courant d'un poste Windows ou d'une console. Elle doit être enregistrée,
+    /// pas ignorée : sinon la fenêtre de la sonde la montre (son affichage, lui,
+    /// crée l'entrée) et le hub ne la reçoit jamais. Six machines à l'écran,
+    /// quatre sur le téléphone, constaté le 01/10.
+    #[test]
+    fn une_machine_vue_seulement_par_arp_est_enregistree() {
+        let state: DiscoveryState = Arc::new(DiscoveryStateInner::default());
+        state.update_mac("10.0.8.80", "9c:6b:00:c8:65:c9".into());
+
+        let found = state.snapshot();
+        assert_eq!(found.len(), 1, "la machine vue par ARP a été perdue");
+        assert_eq!(found[0].ip, "10.0.8.80");
+        assert_eq!(found[0].mac.as_deref(), Some("9c:6b:00:c8:65:c9"));
+        // ⚠️ Pas de latence : elle n'a pas répondu. Zéro serait un mensonge.
+        assert!(found[0].latency_ms.is_none());
+    }
+
+    /// Et elle ne doit pas écraser ce qu'on sait déjà d'une machine qui, elle,
+    /// a répondu.
+    #[test]
+    fn une_machine_qui_a_repondu_garde_sa_latence() {
+        let state: DiscoveryState = Arc::new(DiscoveryStateInner::default());
+        state.upsert(DiscoveredHost {
+            ip: "10.0.8.1".into(),
+            hostname: None,
+            mac: None,
+            vendor: None,
+            latency_ms: Some(6),
+        });
+        state.update_mac("10.0.8.1", "94:2a:6f:f2:fd:ed".into());
+
+        let found = state.snapshot();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].latency_ms, Some(6), "la latence mesurée a été perdue");
+        assert_eq!(found[0].mac.as_deref(), Some("94:2a:6f:f2:fd:ed"));
     }
 }
