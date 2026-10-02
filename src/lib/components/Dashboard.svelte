@@ -64,6 +64,23 @@
     try {
       await api.applyDhcp(selected);
       try { await invoke('cmd_reset_internet_monitor'); } catch {}
+      // 🔴 **Repasser en DHCP, c'est changer de réseau.** Les surveillances en
+      // cours visaient les adresses du plan précédent : elles ne mesurent plus
+      // rien de réel et passeraient toutes en rouge, fabriquant une panne qui
+      // n'existe pas. Même geste que l'application d'un profil réseau, pour la
+      // même raison.
+      //
+      // ⚠️ Rien ne redémarre derrière : contrairement à un profil, le DHCP ne
+      // porte aucune liste de cibles. On s'arrête, on ne devine pas.
+      //
+      // ⚠️ `cmd_stop_ping` et pas un simple retrait d'affichage : le retrait
+      // doit être ÉCRIT, sinon le hub le réapplique au battement suivant et la
+      // cible revient toute seule.
+      for (const ip of Array.from($monitoring.keys())) {
+        monitoring.removeHost(ip);
+        try { await invoke('cmd_stop_ping', { ip }); }
+        catch (e) { console.error('[Dashboard] cmd_stop_ping failed for', ip, e); }
+      }
       flashStatus($_('dashboard.dhcp_applied', { values: { iface: selected } }));
       await loadDetails(selected);
     } catch (e) {
