@@ -70,7 +70,16 @@ minisign-verify = "0.2"
 # l'ouvrir avec l'explorateur de son système sans rien installer, ce qui
 # exclut zstd sous Windows et macOS. `deflate` seul — les autres méthodes de
 # compression du format ne sont pas lues par tous les outils intégrés.
-zip = { version = "4", default-features = false, features = ["deflate"] }
+#
+# `aes-crypto` : le téléchargement d'une archive peut la sceller par mot de
+# passe. **AES-256 et jamais ZipCrypto** — ce dernier, le chiffrement
+# historique du format, se casse en quelques secondes avec des outils
+# publics : promettre une archive protégée avec lui serait pire que de ne
+# rien promettre. L'AES du format n'est pas lu par l'explorateur de Windows
+# ni par l'utilitaire d'archive de macOS ; c'est pourquoi l'archive **sans**
+# mot de passe reste le défaut, et l'interface dit qu'il faudra 7-Zip ou Keka
+# pour ouvrir l'autre.
+zip = { version = "4", default-features = false, features = ["deflate", "aes-crypto"] }
 
 # Le classeur SLA remis au client (contrat § 23). Un XLSX est un zip et `zip`
 # est déjà là — mais écrire le SpreadsheetML à la main serait une bibliothèque

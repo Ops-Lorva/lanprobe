@@ -276,7 +276,14 @@ pub fn build_router(state: AppState) -> Router {
             // vit ici et nulle part ailleurs : dans ce groupe elle hérite
             // d'`admin` sans une ligne de code en plus, et une route posée
             // plus haut par mégarde se verrait au premier coup d'œil.
-            .route("/api/backups/{file}", get(download_backup))
+            // `GET` sert l'archive telle quelle ; `POST` la scelle avec le mot
+            // de passe du corps du formulaire. ⚠️ Deux méthodes et non deux
+            // routes, et surtout pas de `?password=` : `access_log` écrit la
+            // chaîne de requête dans les journaux du conteneur.
+            .route(
+                "/api/backups/{file}",
+                get(download_backup).post(download_backup_sealed),
+            )
             .route("/api/backup/restore/{file}", post(restore_named_backup))
             .route(
                 "/api/backup/restore",
@@ -5222,14 +5229,38 @@ fn backup_status(e: &crate::backup::BackupError) -> StatusCode {
     use crate::backup::BackupError::*;
     match e {
         NotAnArchive(_) | Corrupt(_) => StatusCode::BAD_REQUEST,
-        SchemaTooNew { .. } | ConfirmationRequired(_) => StatusCode::CONFLICT,
+        // Mêmes 409 que la confirmation d'écrasement, et pour la même raison :
+        // la demande est valide, il lui manque quelque chose. Rien n'a été
+        // touché, il suffit de la renvoyer complète.
+        SchemaTooNew { .. } | ConfirmationRequired(_) | PasswordRequired | WrongPassword => {
+            StatusCode::CONFLICT
+        }
         Io(_) | Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Discriminant **lisible par la machine** des deux refus de mot de passe.
+///
+/// ⚠️ L'interface ne doit pas les reconnaître au texte du message : une
+/// reformulation casserait l'écran, et « mot de passe incorrect » pris pour
+/// « archive abîmée » fait jeter une sauvegarde valide. Même motif que
+/// `totp_required` sur la connexion.
+fn backup_code(e: &crate::backup::BackupError) -> Option<&'static str> {
+    use crate::backup::BackupError::*;
+    match e {
+        PasswordRequired => Some("password_required"),
+        WrongPassword => Some("password_wrong"),
+        _ => None,
     }
 }
 
 fn backup_error(e: crate::backup::BackupError) -> Response {
     let status = backup_status(&e);
-    (status, Json(json!({ "error": e.to_string() }))).into_response()
+    let mut body = json!({ "error": e.to_string() });
+    if let Some(code) = backup_code(&e) {
+        body["code"] = json!(code);
+    }
+    (status, Json(body)).into_response()
 }
 
 /// La cible InfluxDB, ou `None` s'il n'y a pas de quoi l'appeler. Sans jeton
@@ -5370,6 +5401,10 @@ async fn list_backups(State(state): State<AppState>) -> Response {
 struct RestoreBody {
     #[serde(default)]
     confirm_overwrite: bool,
+    /// Mot de passe d'une archive scellée. ⚠️ **Jamais enregistré, jamais
+    /// journalisé** : il traverse le hub et il est oublié.
+    #[serde(default)]
+    password: Option<String>,
 }
 
 /// Résout un nom d'archive **venu du client** en chemin sur le volume.
@@ -5439,8 +5474,10 @@ async fn restore_named_backup(
             return fail(StatusCode::BAD_REQUEST, &why);
         }
     };
-    let confirm = body.map(|Json(b)| b.confirm_overwrite).unwrap_or(false);
-    run_restore(&state, &actor, archive, &file, confirm).await
+    let (confirm, password) = body
+        .map(|Json(b)| (b.confirm_overwrite, b.password))
+        .unwrap_or((false, None));
+    run_restore(&state, &actor, archive, &file, confirm, password).await
 }
 
 /// Sert une archive du volume, **en flux**.
@@ -5457,14 +5494,78 @@ async fn download_backup(
     Extension(actor): Extension<Identity>,
     Path(file): Path<String>,
 ) -> Response {
-    let archive = match archive_in_backup_dir(&state, &file) {
+    serve_archive(&state, &actor, &file, None).await
+}
+
+/// Champ unique du formulaire de téléchargement.
+///
+/// ⚠️ **Le mot de passe passe par le CORPS, jamais par l'URL.**
+/// `access_log` journalise la requête avec sa chaîne de requête : un
+/// `?password=…` finirait en clair dans les journaux du conteneur, c'est-à-dire
+/// exactement là où on ne veut pas de lui. Un `<form method="POST">` du
+/// navigateur déclenche un téléchargement natif, sans que l'archive passe par
+/// la mémoire de l'onglet.
+#[derive(Deserialize, Default)]
+struct DownloadForm {
+    /// Vide = pas de mot de passe. Une chaîne vide passée au chiffrement
+    /// produirait une archive « protégée » par rien.
+    #[serde(default)]
+    password: String,
+}
+
+/// Même route, en `POST`, pour le choix « protéger par un mot de passe ».
+async fn download_backup_sealed(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(file): Path<String>,
+    axum::extract::Form(form): axum::extract::Form<DownloadForm>,
+) -> Response {
+    let password = (!form.password.is_empty()).then_some(form.password);
+    serve_archive(&state, &actor, &file, password.as_deref()).await
+}
+
+/// Copie de travail qui disparaît avec le flux qui la sert.
+///
+/// ⚠️ Sans ce `Drop`, chaque téléchargement protégé laisserait une copie de
+/// l'archive dans le volume. Elle porte les mêmes secrets que l'originale, et
+/// `backup::list` ne la montrerait pas — son nom ne correspond à aucune
+/// archive. Le disque se remplirait sans que rien à l'écran ne le dise. Le
+/// `Drop` s'exécute aussi quand le client raccroche au milieu.
+struct SealedCopy {
+    file: tokio::fs::File,
+    path: std::path::PathBuf,
+}
+
+impl tokio::io::AsyncRead for SealedCopy {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().file).poll_read(cx, buf)
+    }
+}
+
+impl Drop for SealedCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+async fn serve_archive(
+    state: &AppState,
+    actor: &Identity,
+    file: &str,
+    password: Option<&str>,
+) -> Response {
+    let archive = match archive_in_backup_dir(state, file) {
         Ok(path) => path,
         Err(why) => {
             audit(
-                &state,
+                state,
                 Some(&actor.username),
                 "backup.download",
-                Some(&file),
+                Some(file),
                 Outcome::Failure,
                 Some("nom d'archive refusé"),
             );
@@ -5472,30 +5573,85 @@ async fn download_backup(
         }
     };
 
-    let bytes = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
-    let handle = match tokio::fs::File::open(&archive).await {
-        Ok(handle) => handle,
-        Err(e) => {
-            audit(
-                &state,
-                Some(&actor.username),
-                "backup.download",
-                Some(&file),
-                Outcome::Failure,
-                Some(&e.to_string()),
-            );
-            return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    // L'archive scellée est une RÉÉCRITURE : l'originale du volume ne bouge
+    // pas. La copie vit dans le répertoire de sauvegarde et non dans `/tmp` —
+    // c'est le volume dimensionné pour des archives, et son nom à point
+    // d'entrée la tient hors de `backup::list`, comme le téléversement.
+    let (served, bytes, scellee) = match password {
+        None => {
+            let bytes = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
+            match tokio::fs::File::open(&archive).await {
+                Ok(handle) => (Served::Plain(handle), bytes, false),
+                Err(e) => return download_failed(state, actor, file, &e.to_string()),
+            }
+        }
+        Some(password) => {
+            let copie = state
+                .backup_dir
+                .join(format!(".telechargement-{}.zip", crate::backup::now()));
+            let (source, destination, mot) =
+                (archive.clone(), copie.clone(), password.to_string());
+            // Le chiffrement est du calcul pur sur des centaines de Mo : le
+            // laisser sur le fil d'exécution asynchrone bloquerait tout le hub
+            // pendant la durée du scellement.
+            let sealed = tokio::task::spawn_blocking(move || {
+                crate::backup::seal(&source, &destination, &mot)
+            })
+            .await;
+            match sealed {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let _ = std::fs::remove_file(&copie);
+                    return download_failed(state, actor, file, &e.to_string());
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&copie);
+                    return download_failed(state, actor, file, &e.to_string());
+                }
+            }
+            let bytes = std::fs::metadata(&copie).map(|m| m.len()).unwrap_or(0);
+            match tokio::fs::File::open(&copie).await {
+                Ok(file) => (
+                    Served::Sealed(SealedCopy { file, path: copie }),
+                    bytes,
+                    true,
+                ),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&copie);
+                    return download_failed(state, actor, file, &e.to_string());
+                }
+            }
         }
     };
 
+    // ⚠️ Le journal dit QUE l'archive est sortie, et si elle était protégée.
+    // Jamais par quel mot de passe : un secret dans le journal d'audit est un
+    // secret public, et le journal est lisible par tout administrateur.
     audit(
-        &state,
+        state,
         Some(&actor.username),
         "backup.download",
-        Some(&file),
+        Some(file),
         Outcome::Success,
-        Some(&format!("archive servie à {} ({bytes} octets)", actor.username)),
+        Some(&format!(
+            "archive servie à {} ({bytes} octets, {})",
+            actor.username,
+            if scellee {
+                "protégée par mot de passe (AES-256)"
+            } else {
+                "sans mot de passe"
+            }
+        )),
     );
+
+    let body = match served {
+        Served::Plain(handle) => {
+            axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(handle))
+        }
+        Served::Sealed(copie) => {
+            axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(copie))
+        }
+    };
 
     (
         StatusCode::OK,
@@ -5507,9 +5663,26 @@ async fn download_backup(
                 format!("attachment; filename=\"{file}\""),
             ),
         ],
-        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(handle)),
+        body,
     )
         .into_response()
+}
+
+enum Served {
+    Plain(tokio::fs::File),
+    Sealed(SealedCopy),
+}
+
+fn download_failed(state: &AppState, actor: &Identity, file: &str, why: &str) -> Response {
+    audit(
+        state,
+        Some(&actor.username),
+        "backup.download",
+        Some(file),
+        Outcome::Failure,
+        Some(why),
+    );
+    fail(StatusCode::INTERNAL_SERVER_ERROR, why)
 }
 
 /// Restaure une archive **téléversée**. C'est le chemin principal : on remet
@@ -5525,6 +5698,9 @@ async fn restore_uploaded_backup(
     mut multipart: axum::extract::Multipart,
 ) -> Response {
     let mut confirm = false;
+    // ⚠️ Le mot de passe d'une archive scellée. Il ne sort pas de ce handler :
+    // ni base, ni journal, ni trace. Une archive dont on l'a perdu est perdue.
+    let mut password: Option<String> = None;
     let mut uploaded: Option<std::path::PathBuf> = None;
 
     if let Err(e) = std::fs::create_dir_all(&state.backup_dir) {
@@ -5546,6 +5722,12 @@ async fn restore_uploaded_backup(
         match field.name().unwrap_or_default() {
             "confirm_overwrite" => {
                 confirm = field.text().await.map(|v| v.trim() == "true").unwrap_or(false);
+            }
+            // Un champ vide = pas de mot de passe. Garder la chaîne vide
+            // ferait tenter un déchiffrement avec un mot de passe nul sur une
+            // archive en clair, et le refus serait incompréhensible.
+            "password" => {
+                password = field.text().await.ok().filter(|v| !v.is_empty());
             }
             "archive" => {
                 let mut field = field;
@@ -5587,7 +5769,15 @@ async fn restore_uploaded_backup(
             "aucune archive dans l'envoi : champ « archive » attendu",
         );
     };
-    let response = run_restore(&state, &actor, archive.clone(), "archive téléversée", confirm).await;
+    let response = run_restore(
+        &state,
+        &actor,
+        archive.clone(),
+        "archive téléversée",
+        confirm,
+        password,
+    )
+    .await;
 
     // L'archive téléversée reste dans le répertoire de sauvegarde, sous son
     // nom canonique quand il est libre. Rien ne se supprime sur ce projet, et
@@ -5626,6 +5816,9 @@ async fn run_restore(
     archive: std::path::PathBuf,
     label: &str,
     confirm_overwrite: bool,
+    // ⚠️ Le mot de passe d'une archive scellée. Il traverse ce handler et
+    // s'arrête là : rien ne l'enregistre, rien ne le journalise.
+    password: Option<String>,
 ) -> Response {
     let (config_dir, influx) = (state.config_dir.clone(), influx_target(state));
     let outcome = tokio::task::spawn_blocking(move || {
@@ -5633,6 +5826,7 @@ async fn run_restore(
             archive: &archive,
             config_dir: &config_dir,
             confirm_overwrite,
+            password: password.as_deref(),
             influx,
             now: crate::backup::now(),
         })
@@ -6347,7 +6541,30 @@ mod tests {
     /// Corps multipart minimal : un champ fichier, et le drapeau de
     /// confirmation. Écrit à la main parce qu'aucune dépendance de test ne le
     /// fabrique et que la forme est justement ce qu'on veut figer.
+    /// Un envoi de formulaire, comme celui qu'un `<form method="POST">` du
+    /// navigateur produit. ⚠️ C'est la seule façon de faire passer un mot de
+    /// passe sans le mettre dans l'URL — `access_log` journalise la requête
+    /// avec sa chaîne de requête.
+    fn form_request(method: &str, uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::HOST, "hub.example.org:8443")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
     fn multipart_request(uri: &str, archive: &[u8], confirm: Option<bool>) -> Request<Body> {
+        multipart_with_password(uri, archive, confirm, None)
+    }
+
+    fn multipart_with_password(
+        uri: &str,
+        archive: &[u8],
+        confirm: Option<bool>,
+        password: Option<&str>,
+    ) -> Request<Body> {
         const BOUNDARY: &str = "----lanprobe-test-boundary";
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(
@@ -6364,6 +6581,15 @@ mod tests {
                 format!(
                     "--{BOUNDARY}\r\nContent-Disposition: form-data; \
                      name=\"confirm_overwrite\"\r\n\r\n{confirm}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some(password) = password {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; \
+                     name=\"password\"\r\n\r\n{password}\r\n"
                 )
                 .as_bytes(),
             );
@@ -6784,6 +7010,156 @@ mod tests {
         assert_eq!(lines[0]["actor"], "admin");
         assert_eq!(lines[0]["outcome"], "success");
         assert_eq!(lines[0]["target"], file);
+    }
+
+    #[tokio::test]
+    async fn a_download_can_be_sealed_with_a_password_and_leaves_no_copy_behind() {
+        // Le choix est explicite : sans mot de passe l'archive s'ouvre au
+        // Finder et dans l'explorateur, avec mot de passe elle est en
+        // AES-256 et il faut 7-Zip ou Keka. Les deux chemins doivent rendre
+        // une archive LanProbe lisible, et aucun ne doit laisser de copie de
+        // travail dans le volume — elle porterait les mêmes secrets.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, created, _) = h
+            .call(with_cookie(empty_request("POST", "/api/backup"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let file = created["file"].as_str().unwrap().to_string();
+        let en_clair = std::fs::read(h.state.backup_dir.join(&file)).unwrap();
+
+        // Sans mot de passe : l'archive part telle quelle.
+        let (status, _, body) = h
+            .call_raw(with_cookie(
+                form_request("POST", &format!("/api/backups/{file}"), "password="),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(body, en_clair, "sans mot de passe, rien ne doit être réécrit");
+
+        // Avec mot de passe : chiffrée, et lisible avec lui seul.
+        let (status, headers, body) = h
+            .call_raw(with_cookie(
+                form_request(
+                    "POST",
+                    &format!("/api/backups/{file}"),
+                    "password=mot-de-passe-de-test",
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_ne!(body, en_clair, "une archive scellée n'est pas l'originale");
+        assert!(
+            headers
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains(&file),
+            "le nom du fichier ne change pas : c'est la même sauvegarde"
+        );
+
+        let sortie = std::env::temp_dir().join(format!("lanprobe-scellee-{}.zip", std::process::id()));
+        std::fs::write(&sortie, &body).unwrap();
+        assert!(
+            matches!(
+                crate::backup::inspect(&sortie),
+                Err(crate::backup::BackupError::PasswordRequired)
+            ),
+            "l'archive téléchargée doit réclamer son mot de passe"
+        );
+        let manifest = crate::backup::inspect_with(&sortie, Some("mot-de-passe-de-test")).unwrap();
+        assert_eq!(manifest.marker, crate::backup::MARKER);
+
+        // ⚠️ Le volume ne garde QUE l'archive d'origine. Une copie de travail
+        // oubliée remplirait le disque sans apparaître dans aucune liste.
+        let restant: Vec<String> = std::fs::read_dir(&h.state.backup_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(restant, vec![file.clone()], "copie de travail oubliée : {restant:?}");
+
+        // Le journal dit qu'une archive est sortie et SI elle était protégée.
+        // Il ne dit jamais par quoi.
+        let lines = h.audit(&session, "backup.download").await;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let details: Vec<&str> = lines
+            .iter()
+            .map(|l| l["detail"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            details.iter().any(|d| d.contains("protégée")),
+            "le journal doit dire qu'une archive est sortie protégée : {details:?}"
+        );
+        assert!(
+            !details.iter().any(|d| d.contains("mot-de-passe-de-test")),
+            "🔴 le mot de passe ne doit JAMAIS être journalisé : {details:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sealed_archive_is_restored_with_its_password_and_a_wrong_one_is_named_as_such() {
+        // ⚠️ « Mot de passe incorrect » et « archive abîmée » se ressemblent à
+        // la lecture d'un ZIP. L'API doit les distinguer par un code que
+        // l'interface lit sans analyser le texte du message.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, created, _) = h
+            .call(with_cookie(empty_request("POST", "/api/backup"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let file = created["file"].as_str().unwrap().to_string();
+        let (status, _, scellee) = h
+            .call_raw(with_cookie(
+                form_request("POST", &format!("/api/backups/{file}"), "password=le-bon"),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Sans mot de passe, le hub le RÉCLAME.
+        let (status, body, _) = h
+            .call(with_cookie(
+                multipart_request("/api/backup/restore", &scellee, Some(true)),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "password_required", "{body}");
+
+        // Avec le mauvais, il le dit — et ne parle pas de corruption.
+        let (status, body, _) = h
+            .call(with_cookie(
+                multipart_with_password(
+                    "/api/backup/restore",
+                    &scellee,
+                    Some(true),
+                    Some("le-mauvais"),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "password_wrong", "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("mot de passe incorrect"),
+            "le refus doit nommer le mot de passe, pas une corruption : {body}"
+        );
+
+        // Avec le bon, elle se restaure.
+        let (status, body, _) = h
+            .call(with_cookie(
+                multipart_with_password("/api/backup/restore", &scellee, Some(true), Some("le-bon")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], true);
     }
 
     #[tokio::test]

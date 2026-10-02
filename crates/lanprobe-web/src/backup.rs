@@ -111,6 +111,18 @@ pub enum BackupError {
     SchemaTooNew { archive: i64, binary: i64 },
     /// L'archive écraserait des données en place et personne ne l'a confirmé.
     ConfirmationRequired(String),
+    /// L'archive est scellée par un mot de passe et aucun n'a été fourni.
+    ///
+    /// ⚠️ Distincte de `NotAnArchive` : une archive scellée **est** une
+    /// archive LanProbe. Les confondre ferait conclure « mauvais fichier » et
+    /// jeter une sauvegarde parfaitement valide.
+    PasswordRequired,
+    /// Le mot de passe fourni n'ouvre pas l'archive.
+    ///
+    /// ⚠️ Distincte de `Corrupt` : à la lecture d'un ZIP les deux se
+    /// ressemblent, et « archive abîmée » envoie chercher une autre
+    /// sauvegarde là où il suffisait de retaper trois caractères.
+    WrongPassword,
     /// Une entrée du manifeste ne correspond pas à ce que porte l'archive.
     Corrupt(String),
     Io(String),
@@ -130,6 +142,14 @@ impl std::fmt::Display for BackupError {
                  jour avant de restaurer : rien n'a été touché."
             ),
             BackupError::ConfirmationRequired(m) => write!(f, "{m}"),
+            BackupError::PasswordRequired => write!(
+                f,
+                "cette archive est protégée par un mot de passe : donnez-le pour la restaurer"
+            ),
+            BackupError::WrongPassword => write!(
+                f,
+                "mot de passe incorrect — l'archive n'est pas abîmée, rien n'a été touché"
+            ),
             BackupError::Corrupt(m) => write!(f, "archive incohérente : {m}"),
             BackupError::Io(m) => write!(f, "{m}"),
             BackupError::Internal(m) => write!(f, "{m}"),
@@ -249,6 +269,9 @@ pub struct RestoreRequest<'a> {
     /// Sans ceci, une restauration qui écraserait des données en place est
     /// refusée. Rien ne s'écrase par accident sur ce projet.
     pub confirm_overwrite: bool,
+    /// Mot de passe d'une archive scellée. `None` sur une archive scellée fait
+    /// répondre `PasswordRequired` **avant** que rien ne bouge.
+    pub password: Option<&'a str>,
     pub influx: Option<InfluxTarget>,
     pub now: i64,
 }
@@ -700,23 +723,125 @@ impl Scheduler {
     }
 }
 
+// ── Scellement par mot de passe ────────────────────────────────────────────
+
+/// Réécrit `source` dans `destination` en chiffrant **toutes** ses entrées,
+/// manifeste compris, avec le mot de passe donné.
+///
+/// 🔴 **AES-256, jamais ZipCrypto.** ZipCrypto est le chiffrement historique
+/// du format : il est lu par tous les outils intégrés, et il se casse en
+/// quelques secondes avec des outils publics. Le proposer serait une
+/// protection de façade — on croirait l'archive protégée, ce qui est pire
+/// que de savoir qu'elle ne l'est pas. Le prix de l'AES est qu'il n'est lu ni
+/// par l'explorateur de Windows ni par l'utilitaire d'archive de macOS :
+/// l'interface doit le dire, et l'archive sans mot de passe reste le défaut.
+///
+/// ⚠️ **`source` n'est pas touchée.** L'archive du volume — celle de la
+/// sauvegarde planifiée — garde sa forme : la rétention et les restaurations
+/// suivantes ne doivent pas se mettre à dépendre d'un mot de passe que
+/// personne n'a demandé à l'époque. On ne scelle que ce qui SORT du hub.
+///
+/// Le mot de passe n'est ni enregistré ni journalisé : il sert à chiffrer,
+/// puis il est oublié. Une archive dont on l'a perdu est perdue, et c'est le
+/// marché.
+pub fn seal(source: &Path, destination: &Path, password: &str) -> BackupResult<()> {
+    let file = std::fs::File::open(source)
+        .map_err(|e| BackupError::NotAnArchive(format!("{} : {e}", source.display())))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| BackupError::NotAnArchive(format!("ZIP illisible ({e})")))?;
+
+    let out = std::fs::File::create(destination)?;
+    let mut writer = zip::ZipWriter::new(std::io::BufWriter::new(out));
+
+    // Les noms d'abord : `by_index` emprunte l'archive, et on ne peut pas
+    // tenir cet emprunt pendant qu'on lit l'entrée suivante.
+    let names: Vec<String> = (0..zip.len())
+        .map(|i| {
+            zip.by_index_raw(i)
+                .map(|e| e.name().to_string())
+                .map_err(|e| BackupError::NotAnArchive(format!("ZIP illisible ({e})")))
+        })
+        .collect::<BackupResult<Vec<_>>>()?;
+
+    for name in names {
+        // ⚠️ Les options se reconstruisent à chaque tour : `with_aes_encryption`
+        // emprunte le mot de passe, donc `FileOptions` n'est plus `Copy` et ne
+        // peut pas être hissée hors de la boucle comme ailleurs dans ce module.
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, password);
+        let mut entry = zip
+            .by_name(&name)
+            .map_err(|e| BackupError::NotAnArchive(format!("« {name} » : {e}")))?;
+        writer
+            .start_file(name.as_str(), options)
+            .map_err(|e| BackupError::Internal(e.to_string()))?;
+        std::io::copy(&mut entry, &mut writer)?;
+    }
+    writer.finish().map_err(|e| BackupError::Internal(e.to_string()))?;
+    Ok(())
+}
+
 // ── Lecture d'une archive ──────────────────────────────────────────────────
 
 /// Lit le manifeste sans rien extraire. C'est ce qui permet de refuser
 /// proprement un fichier quelconque au lieu de dérouler une extraction sur
 /// des entrées arbitraires.
 pub fn inspect(archive: &Path) -> BackupResult<Manifest> {
+    inspect_with(archive, None)
+}
+
+/// Même lecture, avec le mot de passe d'une archive scellée. Un mot de passe
+/// donné pour rien sur une archive en clair est **ignoré**, pas refusé :
+/// l'interface peut en proposer un par excès de prudence.
+pub fn inspect_with(archive: &Path, password: Option<&str>) -> BackupResult<Manifest> {
     let file = std::fs::File::open(archive)
         .map_err(|e| BackupError::NotAnArchive(format!("{} : {e}", archive.display())))?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| BackupError::NotAnArchive(format!("ZIP illisible ({e})")))?;
-    read_manifest(&mut zip)
+    read_manifest(&mut zip, password)
 }
 
-fn read_manifest<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> BackupResult<Manifest> {
-    let mut entry = zip.by_name(MANIFEST_NAME).map_err(|_| {
-        BackupError::NotAnArchive(format!("pas de {MANIFEST_NAME} à la racine de l'archive"))
-    })?;
+/// Ouvre une entrée, scellée ou non, et traduit les refus du format en
+/// refus que l'interface sait présenter.
+///
+/// 🔴 Les trois cas ne doivent **jamais** se confondre : « il faut un mot de
+/// passe », « ce mot de passe est faux », « cette entrée n'est pas là ». Le
+/// deuxième pris pour le troisième fait jeter une sauvegarde valide.
+fn open_entry<'a, R: Read + Seek>(
+    zip: &'a mut zip::ZipArchive<R>,
+    name: &str,
+    password: Option<&str>,
+) -> Result<zip::read::ZipFile<'a, R>, BackupError> {
+    let opened = match password {
+        Some(password) => zip.by_name_decrypt(name, password.as_bytes()),
+        None => zip.by_name(name),
+    };
+    opened.map_err(|e| match e {
+        zip::result::ZipError::InvalidPassword => BackupError::WrongPassword,
+        zip::result::ZipError::UnsupportedArchive(
+            zip::result::ZipError::PASSWORD_REQUIRED,
+        ) => BackupError::PasswordRequired,
+        other => BackupError::Corrupt(format!("« {name} » : {other}")),
+    })
+}
+
+fn read_manifest<R: Read + Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    password: Option<&str>,
+) -> BackupResult<Manifest> {
+    let mut entry = match open_entry(zip, MANIFEST_NAME, password) {
+        Ok(entry) => entry,
+        // Un manifeste absent n'est pas une archive abîmée : c'est un fichier
+        // qui n'est pas une sauvegarde LanProbe. Le dire autrement enverrait
+        // chercher une corruption sur une image PNG renommée en `.zip`.
+        Err(BackupError::Corrupt(_)) => {
+            return Err(BackupError::NotAnArchive(format!(
+                "pas de {MANIFEST_NAME} à la racine de l'archive"
+            )))
+        }
+        Err(e) => return Err(e),
+    };
     let mut raw = String::new();
     entry
         .read_to_string(&mut raw)
@@ -774,7 +899,7 @@ pub fn restore(req: RestoreRequest<'_>) -> BackupResult<RestoreReport> {
         .map_err(|e| BackupError::NotAnArchive(format!("{} : {e}", req.archive.display())))?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| BackupError::NotAnArchive(format!("ZIP illisible ({e})")))?;
-    let manifest = read_manifest(&mut zip)?;
+    let manifest = read_manifest(&mut zip, req.password)?;
 
     if manifest.schema_version > SCHEMA_VERSION {
         return Err(BackupError::SchemaTooNew {
@@ -806,7 +931,7 @@ pub fn restore(req: RestoreRequest<'_>) -> BackupResult<RestoreReport> {
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
 
-    if let Err(e) = extract_and_verify(&mut zip, &manifest, &staging) {
+    if let Err(e) = extract_and_verify(&mut zip, &manifest, &staging, req.password) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
     }
@@ -963,6 +1088,7 @@ fn extract_and_verify<R: Read + Seek>(
     zip: &mut zip::ZipArchive<R>,
     manifest: &Manifest,
     staging: &Path,
+    password: Option<&str>,
 ) -> BackupResult<()> {
     // **On n'itère pas sur les entrées de l'archive, on itère sur le
     // manifeste.** Une entrée en trop dans le ZIP n'est jamais extraite : le
@@ -974,9 +1100,16 @@ fn extract_and_verify<R: Read + Seek>(
                 entry.path
             )));
         }
-        let mut source = zip.by_name(&entry.path).map_err(|_| {
-            BackupError::Corrupt(format!("« {} » annoncée au manifeste et absente", entry.path))
-        })?;
+        let mut source = match open_entry(zip, &entry.path, password) {
+            Ok(source) => source,
+            Err(BackupError::Corrupt(_)) => {
+                return Err(BackupError::Corrupt(format!(
+                    "« {} » annoncée au manifeste et absente",
+                    entry.path
+                )))
+            }
+            Err(e) => return Err(e),
+        };
         let destination = staging.join(&entry.path);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1035,12 +1168,16 @@ fn check_sqlite(path: &Path, expected_schema: i64) -> BackupResult<()> {
 /// d'une machine neuve, celui qui compte — on ne l'a qu'une fois les fichiers
 /// remis en place. La ligne de commande enchaîne donc les deux dans cet
 /// ordre ; l'API, qui tourne sur un hub déjà configuré, a déjà son jeton.
-pub fn restore_influx(archive: &Path, target: &InfluxTarget) -> BackupResult<()> {
+pub fn restore_influx(
+    archive: &Path,
+    target: &InfluxTarget,
+    password: Option<&str>,
+) -> BackupResult<()> {
     let file = std::fs::File::open(archive)
         .map_err(|e| BackupError::NotAnArchive(format!("{} : {e}", archive.display())))?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| BackupError::NotAnArchive(format!("ZIP illisible ({e})")))?;
-    let manifest = read_manifest(&mut zip)?;
+    let manifest = read_manifest(&mut zip, password)?;
     if !manifest.influx_included {
         return Err(BackupError::Corrupt(
             "l'archive ne contient pas de sauvegarde InfluxDB".into(),
@@ -1059,7 +1196,7 @@ pub fn restore_influx(archive: &Path, target: &InfluxTarget) -> BackupResult<()>
             .collect(),
         ..manifest
     };
-    let outcome = extract_and_verify(&mut zip, &series, &staging)
+    let outcome = extract_and_verify(&mut zip, &series, &staging, password)
         .and_then(|()| run_influx_restore(target, &staging.join("influx")));
     let _ = std::fs::remove_dir_all(&staging);
     outcome
@@ -1349,6 +1486,153 @@ mod tests {
         }
     }
 
+    // ── Le scellement par mot de passe ─────────────────────────────────────
+
+    #[test]
+    fn a_sealed_archive_is_aes_256_and_never_zipcrypto() {
+        // 🔴 Le cœur de la promesse. ZipCrypto est lu partout et se casse en
+        // quelques secondes : une archive scellée avec lui serait une
+        // protection de façade, et pire que pas de mot de passe du tout
+        // puisqu'on la croirait protégée. Ce test lit la méthode réellement
+        // écrite dans l'archive — pas l'intention du code.
+        let dir = tmp_dir("sceau-aes");
+        let db = populated(&dir);
+        let report = backup_into(&db, &dir, &dir.join("backup"), T0);
+
+        let scellee = dir.join("scellee.zip");
+        seal(&report.path, &scellee, "mot-de-passe-de-test").unwrap();
+
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&scellee).unwrap()).unwrap();
+        assert!(zip.len() > 1, "l'archive scellée doit garder ses entrées");
+        for i in 0..zip.len() {
+            let entry = zip.by_index_raw(i).unwrap();
+            let name = entry.name().to_string();
+            assert!(entry.encrypted(), "« {name} » n'est pas chiffrée");
+            // ⚠️ `compression()` rend la méthode de compression RÉELLE
+            // (Deflated), pas `CompressionMethod::Aes` : en AE-2 le format
+            // range la méthode d'origine dans le champ supplémentaire AES et
+            // la bibliothèque la remet en place à la lecture. Ce n'est donc
+            // pas là que se lit « AES plutôt que ZipCrypto ».
+            drop(entry);
+            // Le sel et la valeur de vérification ne sont présents QUE sur une
+            // entrée chiffrée en AES — c'est la lecture qui distingue
+            // réellement l'AES de ZipCrypto.
+            let info = zip
+                .get_aes_verification_key_and_salt(i)
+                .unwrap()
+                .unwrap_or_else(|| panic!("« {name} » n'est pas chiffrée en AES"));
+            assert_eq!(
+                info.aes_mode,
+                zip::AesMode::Aes256,
+                "« {name} » : seul l'AES-256 est accepté"
+            );
+        }
+    }
+
+    #[test]
+    fn sealing_leaves_the_archive_of_the_volume_untouched() {
+        // L'archive planifiée ne change pas : le scellement sert à ce qui
+        // SORT du hub. Réécrire celle du volume rendrait la rétention et les
+        // restaurations suivantes dépendantes d'un mot de passe que personne
+        // n'a demandé à l'époque.
+        let dir = tmp_dir("sceau-intact");
+        let db = populated(&dir);
+        let report = backup_into(&db, &dir, &dir.join("backup"), T0);
+        let avant = std::fs::read(&report.path).unwrap();
+
+        seal(&report.path, &dir.join("sortie.zip"), "secret").unwrap();
+
+        assert_eq!(std::fs::read(&report.path).unwrap(), avant);
+        assert!(inspect(&report.path).is_ok(), "elle doit rester lisible sans mot de passe");
+    }
+
+    #[test]
+    fn a_sealed_archive_says_it_needs_a_password_and_which_one_is_wrong() {
+        // ⚠️ « Mot de passe incorrect » et « archive abîmée » se ressemblent à
+        // la lecture d'un ZIP, et les confondre fait jeter une sauvegarde
+        // valide. Les deux refus sont donc distincts.
+        let dir = tmp_dir("sceau-refus");
+        let db = populated(&dir);
+        let report = backup_into(&db, &dir, &dir.join("backup"), T0);
+        let scellee = dir.join("scellee.zip");
+        seal(&report.path, &scellee, "le-bon").unwrap();
+
+        assert!(
+            matches!(inspect(&scellee), Err(BackupError::PasswordRequired)),
+            "sans mot de passe, le hub doit RÉCLAMER le mot de passe"
+        );
+        assert!(
+            matches!(
+                inspect_with(&scellee, Some("le-mauvais")),
+                Err(BackupError::WrongPassword)
+            ),
+            "un mauvais mot de passe ne doit jamais se lire « archive abîmée »"
+        );
+        let manifest = inspect_with(&scellee, Some("le-bon")).unwrap();
+        assert_eq!(manifest.marker, MARKER);
+        assert_eq!(manifest.created_at, "2026-08-28T14:30:00Z");
+
+        // Et un mot de passe donné pour rien sur une archive en clair ne doit
+        // pas la refuser : l'interface peut en proposer un par erreur.
+        assert!(inspect_with(&report.path, Some("inutile")).is_ok());
+    }
+
+    #[test]
+    fn a_sealed_archive_restores_with_its_password_and_nothing_moves_without_it() {
+        let dir = tmp_dir("sceau-restaure");
+        let db = populated(&dir);
+        let report = backup_into(&db, &dir, &dir.join("backup"), T0);
+        let scellee = dir.join("scellee.zip");
+        seal(&report.path, &scellee, "le-bon").unwrap();
+
+        let cible = tmp_dir("sceau-cible");
+        let temoin = cible.join("secret.key");
+        std::fs::write(&temoin, b"cle-en-place").unwrap();
+
+        for (password, attendu) in [
+            (None, "mot de passe réclamé"),
+            (Some("le-mauvais"), "mot de passe refusé"),
+        ] {
+            let err = restore(RestoreRequest {
+                archive: &scellee,
+                config_dir: &cible,
+                confirm_overwrite: true,
+                password,
+                influx: None,
+                now: T0 + 60,
+            })
+            .expect_err(attendu);
+            assert!(
+                matches!(
+                    err,
+                    BackupError::PasswordRequired | BackupError::WrongPassword
+                ),
+                "{attendu} : {err}"
+            );
+            assert_eq!(
+                std::fs::read(&temoin).unwrap(),
+                b"cle-en-place",
+                "rien ne doit bouger avant que le mot de passe soit bon"
+            );
+        }
+
+        let report = restore(RestoreRequest {
+            archive: &scellee,
+            config_dir: &cible,
+            confirm_overwrite: true,
+            password: Some("le-bon"),
+            influx: None,
+            now: T0 + 120,
+        })
+        .unwrap();
+        assert!(report.restored.iter().any(|p| p == DB_ENTRY), "{:?}", report.restored);
+        assert_eq!(
+            std::fs::read(cible.join("secret.key")).unwrap(),
+            b"cle-de-scellement-32-octets-xxxx",
+            "le volume doit porter le contenu de l'archive scellée"
+        );
+    }
+
     // ── Le nom et le manifeste ─────────────────────────────────────────────
 
     #[test]
@@ -1453,6 +1737,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: false,
+            password: None,
             influx: None,
             now: T0 + 3600,
         })
@@ -1597,6 +1882,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: false,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1648,6 +1934,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: false,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1673,6 +1960,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: false,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1704,6 +1992,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1735,6 +2024,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: false,
+            password: None,
             influx: None,
             now: T0,
         });
@@ -1758,6 +2048,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: false,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1787,6 +2078,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1826,6 +2118,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1836,6 +2129,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             // Même seconde : c'est tout le sujet.
             now: T0,
@@ -1893,6 +2187,7 @@ mod tests {
                 archive: &junk,
                 config_dir: &target,
                 confirm_overwrite: true,
+                password: None,
                 influx: None,
                 now: T0,
             }),
@@ -1939,6 +2234,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1967,6 +2263,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -1994,6 +2291,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -2023,6 +2321,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             now: T0,
         })
@@ -2048,6 +2347,7 @@ mod tests {
             archive: &report.path,
             config_dir: &target,
             confirm_overwrite: true,
+            password: None,
             influx: None,
             now: T0,
         })

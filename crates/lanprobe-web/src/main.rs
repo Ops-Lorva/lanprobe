@@ -74,6 +74,13 @@ enum Command {
         /// est refusée.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Mot de passe d'une archive téléchargée « protégée ».
+        ///
+        /// ⚠️ Sans cette option, une archive scellée serait irrécupérable en
+        /// ligne de commande — c'est-à-dire sur une machine neuve, le seul
+        /// cas où une sauvegarde compte vraiment.
+        #[arg(long)]
+        password: Option<String>,
     },
     /// Réinitialise le mot de passe d'un compte, et le réactive s'il était
     /// désactivé. ⚠️ Nécessite l'accès au conteneur ou au volume.
@@ -495,7 +502,11 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
             println!("second facteur retiré du compte « {username} »");
             Ok(())
         }
-        Command::Restore { archive, force } => {
+        Command::Restore {
+            archive,
+            force,
+            password,
+        } => {
             // ⚠️ **Aucune ouverture de base avant la restauration.** Ouvrir
             // `hub.sqlite` le CRÉE dans le volume cible, et la garde
             // « ce volume porte déjà des données » se déclenche alors sur le
@@ -525,6 +536,7 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
                 archive: &path,
                 config_dir: &args.config_dir,
                 confirm_overwrite: *force,
+                password: password.as_deref(),
                 // Le volet InfluxDB se joue après, avec le jeton capturé
                 // ci-dessus — pas avec celui que l'archive vient de poser.
                 influx: None,
@@ -548,7 +560,7 @@ fn run_command(args: &Args, command: &Command) -> Result<(), String> {
             let db = open_volume(args)?;
             let settings = Settings::new(db.clone());
             match influx_target_with_token(args, settings, live_token) {
-                Some(target) => match backup::restore_influx(&path, &target) {
+                Some(target) => match backup::restore_influx(&path, &target, password.as_deref()) {
                     Ok(()) => println!("  mesures InfluxDB restaurées"),
                     Err(e) => eprintln!("⚠️  mesures InfluxDB non restaurées : {e}"),
                 },
