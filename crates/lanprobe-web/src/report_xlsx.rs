@@ -141,6 +141,16 @@ pub(crate) struct ScanHost {
     pub vendor: Option<String>,
     #[serde(default)]
     pub latency_ms: Option<f64>,
+    /// Quand **cette** machine a été scannée, en secondes UNIX.
+    ///
+    /// ⚠️ À ne pas confondre avec `Scan::started_at`, qui date le LOT publié :
+    /// la sonde republie tout son inventaire à chaque scan de ports.
+    ///
+    /// ⚠️ `None` = **date inconnue**, et le classeur l'écrit. Les lignes
+    /// d'avant la v28 du schéma n'en ont pas, et une sonde antérieure n'en
+    /// envoie pas. Voir [`dates_par_machine`].
+    #[serde(default)]
+    pub scanned_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -573,6 +583,26 @@ impl Feuille {
     }
 }
 
+/// Les dates de scan par adresse, en **une passe**.
+///
+/// 🔴 Jumelle de `hostScanDates` (`web-ui/src/lib/scan-host-dates.ts`), et pour
+/// la même raison : depuis que la sonde republie tout son inventaire à chaque
+/// scan de ports, `Scan::started_at` ne date que le LOT. L'écrire sur une ligne
+/// de port ferait passer une machine scannée il y a trois semaines pour scannée
+/// à l'instant — plausible et faux, dans un document remis au client.
+///
+/// ⚠️ Une adresse absente de la table veut dire « date inconnue », y compris
+/// pour un `0`, qui daterait de 1970 et n'est qu'une absence déguisée.
+///
+/// ⚠️ Une passe et non une recherche par ligne : un scan d'un /24 donne des
+/// centaines de machines, et chaque machine porte plusieurs ports.
+fn dates_par_machine(hosts: &[ScanHost]) -> std::collections::HashMap<&str, i64> {
+    hosts
+        .iter()
+        .filter_map(|h| h.scanned_at.filter(|d| *d > 0).map(|d| (h.ip.as_str(), d)))
+        .collect()
+}
+
 /// Une ligne de la synthèse : une cible d'une sonde.
 struct Ligne {
     probe: String,
@@ -886,12 +916,25 @@ pub(crate) fn build(workbook: &Workbook, catalog: &Catalog) -> Result<BuiltFile,
         f.poser(&mut wb)?;
     }
 
-    let ports: Vec<(&str, i64, &ScanPort)> = payloads
+    // 🔴 **Chaque ligne de port porte la date de SA machine, pas celle du
+    // lot.** La sonde republie tout son inventaire à chaque scan de ports —
+    // sans quoi le hub, qui n'affiche que le dernier scan, perdait les machines
+    // précédentes —, donc `ports.started_at` ne date que la PUBLICATION.
+    //
+    // ⚠️ Un port n'a pas de date à lui : il tient la sienne de la machine.
+    // `None` quand la machine n'en a pas — jamais celle du lot.
+    let ports: Vec<(&str, Option<i64>, &ScanPort)> = payloads
         .iter()
         .flat_map(|p| {
+            let dates = p.ports.as_ref().map(|s| dates_par_machine(&s.hosts)).unwrap_or_default();
+            // ⚠️ Rassemblé ici, sonde par sonde : la table des dates ne vit que
+            // le temps de cette sonde, et un itérateur paresseux la ferait
+            // survivre à son emprunt.
             p.ports
                 .iter()
-                .flat_map(move |s| s.ports.iter().map(move |o| (p.probe.as_str(), s.started_at, o)))
+                .flat_map(|s| s.ports.iter())
+                .map(|o| (p.probe.as_str(), dates.get(o.ip.as_str()).copied(), o))
+                .collect::<Vec<_>>()
         })
         .collect();
     if !ports.is_empty() {
@@ -908,7 +951,15 @@ pub(crate) fn build(workbook: &Workbook, catalog: &Catalog) -> Result<BuiltFile,
         for (probe, at, o) in &ports {
             f.ecrire(&[
                 Cell::texte(*probe),
-                Cell::texte(catalog.date(*at)),
+                // ⚠️ « date inconnue » en toutes lettres, pas un tiret ni une
+                // case vide : dans un classeur, les deux se lisent comme un
+                // oubli d'export. Une absence de date est un fait, elle
+                // s'écrit — avec le libellé de l'écran, pour qu'un client ne
+                // croie pas à deux cas différents selon où il regarde.
+                Cell::texte(match at {
+                    Some(d) => catalog.date(*d),
+                    None => catalog.t("probe.scanned_unknown", &[]),
+                }),
                 Cell::texte(o.ip.clone()),
                 Cell::Nombre(o.port as f64),
                 Cell::texte(o.proto.clone()),
@@ -1547,6 +1598,75 @@ mod tests {
         };
         let err = build(&wb, &Catalog::load("fr")).unwrap_err();
         assert!(err.contains("relevé"), "cause non nommée : {err}");
+    }
+
+    // ── L'inventaire des ports ───────────────────────────────────────────
+
+    /// 29 août 2026 — bien AVANT `T0`, pour qu'un générateur qui daterait
+    /// encore avec le lot se voie immédiatement au lieu de passer parce que les
+    /// deux dates se ressemblent.
+    const T_ROUTEUR: i64 = 1_788_000_000;
+    const T_NAS: i64 = 1_788_100_000;
+
+    /// Une sonde dont le LOT et les MACHINES n'ont pas la même date, et dont
+    /// une machine n'a aucune date.
+    fn payload_ports_dates() -> serde_json::Value {
+        let mut p = payload_complet();
+        p["ports"] = json!({
+            "started_at": T0,
+            "cidr": null,
+            "hosts": [
+                { "ip": "192.168.1.1", "scanned_at": T_ROUTEUR },
+                { "ip": "192.168.1.10", "scanned_at": T_NAS },
+                // Une machine d'avant la v28 du schéma, ou publiée par une
+                // sonde antérieure : pas de date, et ça doit se lire.
+                { "ip": "192.168.1.99" },
+            ],
+            "ports": [
+                { "ip": "192.168.1.1", "port": 443, "proto": "tcp", "service": "https" },
+                { "ip": "192.168.1.10", "port": 22, "proto": "tcp", "service": null },
+                { "ip": "192.168.1.99", "port": 80, "proto": "tcp", "service": "http" },
+            ],
+        });
+        p
+    }
+
+    /// Les cellules de la colonne « Scan du » de l'onglet des ports.
+    ///
+    /// La première ligne de données est la 7e : 4 lignes de tête (sonde, site,
+    /// fenêtre, édition), une vide, puis l'en-tête du tableau.
+    fn colonne_scan_du_ports(c: &Classeur) -> Vec<Lu> {
+        c.colonne("Ports ouverts", 'B', 7)
+    }
+
+    #[test]
+    fn chaque_ligne_de_port_porte_la_date_de_sa_machine_pas_celle_du_lot() {
+        // 🔴 La sonde republie TOUT son inventaire à chaque scan de ports —
+        // sans quoi le hub, qui n'affiche que le dernier scan, perdait les
+        // machines précédentes. `started_at` ne date donc que la PUBLICATION :
+        // l'écrire sur une ligne de port fait passer une machine scannée il y a
+        // trois semaines pour scannée à l'instant.
+        let cat = Catalog::load("fr");
+        let (c, _) = classeur(vec![payload_ports_dates()], "fr");
+        let col = colonne_scan_du_ports(&c);
+        assert_eq!(col[0], Lu::Texte(cat.date(T_ROUTEUR)), "{col:?}");
+        assert_eq!(col[1], Lu::Texte(cat.date(T_NAS)), "{col:?}");
+        assert!(
+            !col.contains(&Lu::Texte(cat.date(T0))),
+            "la date du lot s'est glissée dans une ligne : {col:?}"
+        );
+    }
+
+    #[test]
+    fn une_machine_sans_date_lecrit_au_lieu_demprunter_celle_du_lot() {
+        // ⚠️ Et pas un tiret ni une case vide : dans un classeur, les deux se
+        // lisent comme un oubli d'export. Une absence de date est un fait, elle
+        // s'écrit — avec le libellé de l'écran, pour qu'un client ne croie pas
+        // à deux cas différents selon où il regarde.
+        let cat = Catalog::load("fr");
+        let (c, _) = classeur(vec![payload_ports_dates()], "fr");
+        let col = colonne_scan_du_ports(&c);
+        assert_eq!(col[2], Lu::Texte(cat.t("probe.scanned_unknown", &[])), "{col:?}");
     }
 
     // ── La langue ────────────────────────────────────────────────────────

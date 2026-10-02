@@ -916,16 +916,8 @@
     "scenario": "solo",
     "feuille": "Ports ouverts",
     "ou": "B7",
-    "navigateur": "texte \"01/09/2026 06:02:00\"",
-    "hub": "texte \"1 sept. 2026, 06:02:00 UTC\""
-  },
-  {
-    "nature": "date",
-    "scenario": "solo",
-    "feuille": "Ports ouverts",
-    "ou": "B8",
-    "navigateur": "texte \"01/09/2026 06:02:00\"",
-    "hub": "texte \"1 sept. 2026, 06:02:00 UTC\""
+    "navigateur": "texte \"31/08/2026 06:00:00\"",
+    "hub": "texte \"31 août 2026, 06:00:00 UTC\""
   },
   {
     "nature": "largeur",
@@ -2198,22 +2190,6 @@
     "ou": "B3",
     "navigateur": "texte \"03/09/2026 06:05:00\"",
     "hub": "texte \"3 sept. 2026, 06:05:00 UTC\""
-  },
-  {
-    "nature": "date",
-    "scenario": "multi",
-    "feuille": "Ports ouverts",
-    "ou": "B6",
-    "navigateur": "texte \"01/09/2026 06:02:00\"",
-    "hub": "texte \"1 sept. 2026, 06:02:00 UTC\""
-  },
-  {
-    "nature": "date",
-    "scenario": "multi",
-    "feuille": "Ports ouverts",
-    "ou": "B7",
-    "navigateur": "texte \"01/09/2026 06:02:00\"",
-    "hub": "texte \"1 sept. 2026, 06:02:00 UTC\""
   },
   {
     "nature": "largeur",

@@ -221,6 +221,103 @@ describe('buildSlaWorkbook', () => {
   });
 });
 
+/**
+ * L'onglet des ports ouverts : une charge où le LOT et les MACHINES n'ont pas
+ * la même date, et où une machine n'en a aucune.
+ *
+ * `started_at` est volontairement très postérieur aux dates des machines : un
+ * générateur qui daterait encore les lignes avec celle du lot se verrait
+ * immédiatement, au lieu de passer parce que les deux se ressemblent.
+ */
+const T_LOT = 1_788_300_000; // le lot publié
+const T_ROUTEUR = 1_788_000_000; // scanné bien avant
+const T_NAS = 1_788_100_000;
+
+function payloadPorts(): SlaPayload {
+  return {
+    probe: 'sonde-1',
+    site: 'Site A',
+    range: '-24h',
+    generated_at: T_LOT,
+    targets: [],
+    internet: [],
+    speedtests: [],
+    discovery: null,
+    ports: {
+      started_at: T_LOT,
+      cidr: null,
+      hosts: [
+        { ip: '192.168.1.1', scanned_at: T_ROUTEUR },
+        { ip: '192.168.1.42', scanned_at: T_NAS },
+        // Une machine d'avant la v28 du schéma, ou publiée par une sonde
+        // antérieure : elle n'a pas de date, et ça doit se lire.
+        { ip: '192.168.1.99' },
+      ],
+      ports: [
+        { ip: '192.168.1.1', port: 443, proto: 'tcp', service: 'https' },
+        { ip: '192.168.1.42', port: 22, proto: 'tcp', service: null },
+        { ip: '192.168.1.99', port: 80, proto: 'tcp', service: 'http' },
+      ],
+    },
+    public_ip_history: [],
+  };
+}
+
+/**
+ * Les cellules d'une colonne de l'onglet des ports, sans aucun en-tête.
+ *
+ * La ligne d'en-tête du tableau est repérée par son contenu et non par son
+ * numéro : le bloc de tête du rapport compte une ligne de plus quand il n'y a
+ * qu'une sonde, et un test qui compterait les lignes casserait pour une raison
+ * sans rapport avec ce qu'il vérifie.
+ */
+async function colonnePorts(payload: SlaPayload, colonne: number): Promise<string[]> {
+  const wb = await buildSlaWorkbook([payload], t, 'fr');
+  const sheet = wb.getWorksheet(t('sla.sheet_ports'))!;
+  let entete = 0;
+  sheet.eachRow((row, i) => {
+    if (String(row.getCell(2).value ?? '') === t('sla.col_scan_at')) entete = i;
+  });
+  const col: string[] = [];
+  sheet.eachRow((row, i) => {
+    if (i > entete) col.push(String(row.getCell(colonne).value ?? ''));
+  });
+  return col;
+}
+
+/** Les cellules de la colonne « Scan du » de l'onglet des ports. */
+const colonneScanDuPorts = (payload: SlaPayload) => colonnePorts(payload, 2);
+
+describe('onglet des ports — la date est celle de la MACHINE', () => {
+  beforeAll(async () => {
+    await import('exceljs');
+  }, 60_000);
+
+  it('date chaque ligne avec le scan de sa machine, pas avec le lot publié', async () => {
+    // 🔴 La sonde republie TOUT son inventaire à chaque scan de ports : sans
+    // quoi le hub, qui n'affichait que le dernier scan, perdait les machines
+    // précédentes. `started_at` date donc le LOT. L'écrire sur une ligne de
+    // port fait passer une machine scannée il y a trois semaines pour scannée
+    // à l'instant — et c'est un classeur remis à un client.
+    const col = await colonneScanDuPorts(payloadPorts());
+    const attendu = (s: number) =>
+      new Intl.DateTimeFormat('fr', { dateStyle: 'short', timeStyle: 'medium' }).format(
+        new Date(s * 1000),
+      );
+    expect(col[0]).toBe(attendu(T_ROUTEUR));
+    expect(col[1]).toBe(attendu(T_NAS));
+    expect(col).not.toContain(attendu(T_LOT));
+  });
+
+  it('écrit « date inconnue » pour une machine sans date, jamais celle du lot', async () => {
+    // ⚠️ Et jamais une case vide non plus : dans un classeur, une case vide se
+    // lit comme un oubli d'export. Une absence de date est un fait, elle
+    // s'écrit. Le libellé est celui de l'écran (`probe.scanned_unknown`) :
+    // deux formulations pour le même manque laisseraient croire à deux cas.
+    const col = await colonneScanDuPorts(payloadPorts());
+    expect(col[2]).toBe(t('probe.scanned_unknown'));
+  });
+});
 
 describe('stats — latences impossibles', () => {
   it('écarte une latence au-delà du délai sans toucher à la disponibilité', () => {

@@ -35,6 +35,12 @@
  *    fabriquerait une durée fausse.
  */
 
+// ⚠️ Les règles de l'inventaire sont **empruntées à l'écran**, pas recopiées :
+// un classeur qui daterait ou étiquetterait une machine autrement que la fiche
+// de la sonde donnerait deux réponses au même client selon l'endroit où il
+// regarde. Ces deux modules portent la règle ET ses tests.
+import { hostScanDates } from './scan-host-dates';
+
 export interface Sample {
   timestamp: number;
   /**
@@ -117,6 +123,16 @@ export interface ScanHost {
   mac?: string | null;
   vendor?: string | null;
   latency_ms?: number | null;
+  /**
+   * Quand CETTE machine a été scannée, en secondes UNIX.
+   *
+   * ⚠️ À ne pas confondre avec `Scan.started_at`, qui date le LOT publié : la
+   * sonde republie tout son inventaire à chaque scan de ports.
+   *
+   * ⚠️ Absente ou nulle = **date inconnue**, et le classeur l'écrit. Les lignes
+   * d'avant la v28 du schéma n'en ont pas. Voir `hostScanDates`.
+   */
+  scanned_at?: number | null;
 }
 
 export interface ScanPort {
@@ -717,9 +733,25 @@ export async function buildSlaWorkbook(
     autoFit(ws);
   }
 
-  const openPorts = payloads.flatMap((p) =>
-    (p.ports?.ports ?? []).map((o) => ({ probe: p.probe, at: p.ports!.started_at, ...o })),
-  );
+  // 🔴 **Chaque ligne de port porte la date de SA machine, pas celle du lot.**
+  // La sonde republie tout son inventaire à chaque scan de ports — sans quoi le
+  // hub, qui n'affiche que le dernier scan, perdait les machines précédentes —,
+  // donc `ports.started_at` ne date que la PUBLICATION. L'écrire sur une ligne
+  // de port ferait passer une machine scannée il y a trois semaines pour
+  // scannée à l'instant : plausible et faux, dans un document remis au client.
+  //
+  // ⚠️ Un port n'a pas de date à lui : il tient la sienne de la machine, par
+  // `hostScanDates`. C'est la MÊME table que celle de l'écran, et la même
+  // raison — une recherche par ligne sur un scan d'un /24 coûterait des
+  // centaines de parcours.
+  //
+  // ⚠️ `undefined` quand la machine n'a pas de date, pas la date du lot : la
+  // cellule écrira « date inconnue ». Les lignes d'avant la v28 du schéma n'en
+  // ont pas, et une sonde antérieure n'en envoie pas.
+  const openPorts = payloads.flatMap((p) => {
+    const dates = hostScanDates(p.ports?.hosts);
+    return (p.ports?.ports ?? []).map((o) => ({ probe: p.probe, at: dates.get(o.ip), ...o }));
+  });
   if (openPorts.length) {
     const ws = wb.addWorksheet(t('sla.sheet_ports'));
     header(ws, payloads.length === 1 ? first.probe : undefined);
@@ -732,7 +764,19 @@ export async function buildSlaWorkbook(
       t('sla.col_service'),
     ]);
     for (const o of openPorts) {
-      ws.addRow([o.probe, dt(o.at, locale), o.ip, o.port, o.proto, o.service ?? '—']);
+      // ⚠️ « date inconnue » en toutes lettres, pas un tiret ni une case vide :
+      // dans un classeur, les deux se lisent comme un oubli d'export, et c'est
+      // justement le genre de chiffre qu'un client vient contester. Le libellé
+      // est celui de l'écran — deux formulations pour le même manque
+      // laisseraient croire à deux cas différents.
+      ws.addRow([
+        o.probe,
+        o.at == null ? t('probe.scanned_unknown') : dt(o.at, locale),
+        o.ip,
+        o.port,
+        o.proto,
+        o.service ?? '—',
+      ]);
     }
     autoFit(ws);
   }
