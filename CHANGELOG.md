@@ -6,6 +6,41 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.6] - 2026-10-02
+
+### English
+
+- **Fixed: a port scan no longer makes the previous machines disappear from
+  the hub.** Each publication creates a whole scan on the hub, and the hub
+  shows only the latest one: publishing just the machine that was scanned
+  erased every earlier one. Two machines scanned on the probe, one visible on
+  the hub. The probe now publishes the complete state of its port scan.
+  ⚠️ Nothing is published when it knows no machine — an empty scan would
+  overwrite the inventory with nothing.
+- **Changed: switching back to DHCP stops every monitor**, exactly like
+  applying a network profile. You are changing networks: the targets of the
+  previous plan measure nothing real and would all turn red, manufacturing an
+  outage that does not exist. ⚠️ Nothing restarts afterwards — unlike a
+  profile, DHCP carries no list of targets.
+- Added to the log: how many machines a discovery and a port scan published.
+
+### Français
+
+- **Corrigé : un scan de ports ne fait plus disparaître les machines
+  précédentes du hub.** Chaque publication crée un scan entier côté hub, et le
+  hub n'affiche que le dernier : ne publier que la machine qu'on venait de
+  scanner effaçait toutes les autres. Deux machines scannées sur la sonde, une
+  seule visible sur le hub. La sonde publie désormais l'état complet de son
+  scan de ports. ⚠️ Rien n'est publié quand elle ne connaît aucune machine —
+  un scan vide écraserait l'inventaire par du néant.
+- **Changé : repasser en DHCP arrête toutes les surveillances**, exactement
+  comme l'application d'un profil réseau. On change de réseau : les cibles du
+  plan précédent ne mesurent plus rien de réel et passeraient toutes en rouge,
+  fabriquant une panne qui n'existe pas. ⚠️ Rien ne redémarre derrière —
+  contrairement à un profil, le DHCP ne porte aucune liste de cibles.
+- Ajouté au journal : combien de machines une découverte et un scan de ports
+  ont publiées.
+
 ## [2.4.5] - 2026-10-02
 
 ### English
