@@ -16,7 +16,7 @@ use lanprobe_core::discovery::{
     DiscoveredHost,
 };
 use lanprobe_core::interfaces::get_interface_details;
-use lanprobe_core::ports::scan_ports;
+use lanprobe_core::ports::{scan_ports, scan_udp_ports};
 use serde_json::json;
 
 use crate::state::AppState;
@@ -598,7 +598,7 @@ async fn run_discovery_task(state: AppState, interval_min: u64, cidr: String) {
 /// interface : un scan pris par le mauvais lien ne dit rien du réseau qu'on
 /// croit observer.
 pub async fn portscan_once(state: &AppState, ip: &str) -> Result<usize, String> {
-    portscan_with(state, ip, None).await
+    portscan_with(state, ip, None, None, None).await
 }
 
 /// Idem, avec une liste de ports imposée (profil choisi depuis le hub).
@@ -610,25 +610,49 @@ pub async fn portscan_with(
     state: &AppState,
     ip: &str,
     ports: Option<Vec<u16>>,
+    // ⚠️ Les ports UDP d'un profil. Le hub les modélise depuis le 02/10
+    // (§ 25) : sans eux, un « Common » lancé du hub ne rendait que la moitié de
+    // ce que le même profil rend depuis la fenêtre de la sonde.
+    udp_ports: Option<Vec<u16>>,
+    // 🔴 L'étiquette du profil employé, telle que le hub l'a donnée. Rangée
+    // avec le résultat, comme pour un scan local : sans elle, un scan lancé
+    // depuis le hub ou le téléphone s'affichait sans aucun profil sur l'écran
+    // de la sonde — défaut constaté le 02/10.
+    //
+    // ⚠️ Jamais validée : les ports font foi, le profil n'est qu'une étiquette.
+    // La sonde n'a peut-être pas encore reçu le profil que le hub vient de
+    // créer, et l'écran saura l'afficher dès qu'il descendra.
+    profile_id: Option<String>,
 ) -> Result<usize, String> {
     if ip.parse::<std::net::Ipv4Addr>().is_err() {
         return Err(format!("« {ip} » n'est pas une adresse IPv4"));
     }
     let src = resolve_src(state)?;
 
-    state.portscan.mark_in_progress(ip, None);
+    state.portscan.mark_in_progress(ip, profile_id.clone());
     let _ = state.events.send(crate::state::BroadcastEvent {
         event: "portscan:update".into(),
-        payload: json!({ "ip": ip, "in_progress": true, "profile_id": null }),
+        payload: json!({ "ip": ip, "in_progress": true, "profile_id": profile_id }),
     });
 
     let results = scan_ports(ip, src, ports).await;
-    let entry = state.portscan.set_tcp(ip, results, now_secs(), None);
+    let mut entry = state.portscan.set_tcp(ip, results, now_secs(), profile_id.clone());
+    // ⚠️ L'UDP seulement s'il est demandé. Sans liste, on ne lance PAS le scan
+    // UDP par défaut du cœur : une commande venue d'un hub antérieur à ce champ
+    // se mettrait à scanner des ports que personne n'a demandés.
+    if let Some(udp) = udp_ports.filter(|list| !list.is_empty()) {
+        let udp_results = scan_udp_ports(ip, src, Some(udp)).await;
+        entry = state.portscan.set_udp(ip, udp_results, now_secs());
+    }
     let _ = state.events.send(crate::state::BroadcastEvent {
         event: "portscan:update".into(),
         payload: serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null),
     });
-    tracing::info!("scan de ports terminé sur {ip} — {} TCP ouverts", entry.tcp.len());
+    tracing::info!(
+        "scan de ports terminé sur {ip} — {} TCP, {} UDP",
+        entry.tcp.len(),
+        entry.udp.len()
+    );
 
     publish_ports(state, ip).await;
 

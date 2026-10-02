@@ -36,10 +36,10 @@ pub struct LocalProfile {
     pub name: String,
     #[serde(default)]
     pub tcp_ports: Vec<u16>,
-    /// ⚠️ **Le hub ne modélise pas l'UDP.** Cette liste survit donc à une
-    /// réécriture venue du hub : il ne peut pas faire autorité sur un champ
-    /// qu'il n'a pas, et l'écraser détruirait un réglage que rien ne pourrait
-    /// reconstituer.
+    /// ⚠️ Le hub modélise l'UDP depuis le 02/10, et la **montée l'emporte** :
+    /// il peut donc en faire autorité sans rien détruire. Un hub antérieur,
+    /// lui, n'en parle pas du tout — et cette liste survit alors telle quelle,
+    /// parce qu'un champ absent n'est pas une liste vide.
     #[serde(default)]
     pub udp_ports: Vec<u16>,
     /// Vrai quand le profil vient du hub. L'écran le dit, parce qu'une
@@ -80,6 +80,15 @@ pub struct HubProfile {
     /// les deux ferait un scan complet là où on croyait restreindre.
     #[serde(default)]
     pub ports: Vec<u16>,
+    /// Les ports UDP, que le hub modélise depuis le 02/10.
+    ///
+    /// 🔴 **`Option`, et c'est tout l'arbitrage.** Champ ABSENT = hub antérieur
+    /// à l'UDP : on ne touche pas à la liste locale, sinon le premier battement
+    /// effacerait les ports UDP de tout le parc. Champ PRÉSENT = le hub en fait
+    /// autorité, liste vide comprise — il peut le faire sans rien détruire
+    /// depuis que l'UDP monte avec le profil.
+    #[serde(default)]
+    pub udp_ports: Option<Vec<u16>>,
     /// Une date, c'est la suppression explicite. `None` = vivant.
     #[serde(default)]
     pub deleted_at: Option<i64>,
@@ -133,6 +142,11 @@ pub fn merge(local: Vec<LocalProfile>, incoming: &[HubProfile], replace: bool) -
         next.id = id.to_string();
         next.name = entry.name.clone();
         next.tcp_ports = entry.ports.clone();
+        // ⚠️ Seulement si le hub en parle : un hub antérieur à l'UDP n'enverra
+        // pas le champ, et obéir à son silence effacerait la liste locale.
+        if let Some(udp) = entry.udp_ports.as_ref() {
+            next.udp_ports = udp.clone();
+        }
         next.from_hub = true;
         out.push(next);
     }
@@ -159,6 +173,9 @@ mod tests {
             profile_id: id.into(),
             name: format!("Hub {id}"),
             ports: ports.to_vec(),
+            // Par défaut, le hub ne dit RIEN de l'UDP : c'est le cas d'un hub
+            // antérieur au champ, et il ne doit rien changer en local.
+            udp_ports: None,
             deleted_at: None,
         }
     }
@@ -183,6 +200,7 @@ mod tests {
                 profile_id: "web".into(),
                 name: "Web".into(),
                 ports: vec![],
+                udp_ports: None,
                 deleted_at: Some(1_790_000_000),
             }],
             false,
@@ -242,13 +260,38 @@ mod tests {
 
     #[test]
     fn la_liste_udp_locale_survit_a_une_reecriture_du_hub() {
-        // ⚠️ Le hub ne modélise pas l'UDP : il ne peut pas faire autorité sur un
-        // champ qu'il n'a pas. L'écraser détruirait un réglage que rien ne
-        // pourrait reconstituer — ni le hub, ni la sonde.
+        // ⚠️ Tant que le hub n'en parle PAS, il ne peut pas en faire autorité :
+        // l'écraser détruirait un réglage que rien ne pourrait reconstituer —
+        // ni le hub, ni la sonde.
         let mut avec_udp = local("cams", true);
         avec_udp.udp_ports = vec![5353, 1900];
         let out = merge(vec![avec_udp], &[from_hub("cams", &[554])], false);
         assert_eq!(out[0].tcp_ports, vec![554], "le hub décide du TCP");
+        assert_eq!(out[0].udp_ports, vec![5353, 1900]);
+    }
+
+    #[test]
+    fn le_hub_fait_autorite_sur_l_udp_des_qu_il_en_parle() {
+        // Le hub modélise l'UDP depuis le 02/10, et la montée l'emporte : il
+        // peut donc en faire autorité sans rien détruire. Sans ça, un profil
+        // du hub resterait éternellement avec les ports UDP que la sonde avait
+        // le jour de son ingestion, et l'éditer sur le hub ne changerait rien.
+        let mut avec_udp = local("cams", true);
+        avec_udp.udp_ports = vec![5353, 1900];
+        let mut entrant = from_hub("cams", &[554]);
+        entrant.udp_ports = Some(vec![554]);
+
+        let out = merge(vec![avec_udp], &[entrant], false);
+        assert_eq!(out[0].udp_ports, vec![554]);
+    }
+
+    #[test]
+    fn un_hub_qui_ne_parle_pas_d_udp_ne_touche_pas_a_la_liste_locale() {
+        // ⚠️ Champ ABSENT ≠ liste vide. C'est un hub antérieur au champ : lui
+        // obéir effacerait les ports UDP de tout le parc au premier battement.
+        let mut avec_udp = local("cams", true);
+        avec_udp.udp_ports = vec![5353, 1900];
+        let out = merge(vec![avec_udp], &[from_hub("cams", &[554])], false);
         assert_eq!(out[0].udp_ports, vec![5353, 1900]);
     }
 

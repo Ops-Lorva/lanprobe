@@ -35,6 +35,26 @@ pub struct Ack {
     pub error: Option<String>,
 }
 
+/// Une liste de ports d'un argument de commande.
+///
+/// ⚠️ **Vide est rendu comme absent** : une liste vide veut dire « la sonde
+/// garde la sienne », jamais « ne scanne rien ». Les confondre ferait un scan
+/// complet là où on croyait restreindre (§ 25).
+fn port_list(command: &Command, name: &str) -> Option<Vec<u16>> {
+    command
+        .args
+        .get(name)
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.as_u64())
+                .filter(|p| *p >= 1 && *p <= 65_535)
+                .map(|p| p as u16)
+                .collect()
+        })
+        .filter(|v: &Vec<u16>| !v.is_empty())
+}
+
 fn arg<'a>(command: &'a Command, name: &str) -> Option<&'a str> {
     command
         .args
@@ -69,16 +89,24 @@ pub async fn execute(state: &AppState, command: &Command) -> Ack {
         }
         "port_scan" => match arg(command, "ip") {
             Some(ip) => {
-                // Le hub peut imposer la liste de ports. Vide ou absente, la
-                // sonde reprend sa liste courante — les profils vivent dans
-                // l'interface, pas dans la sonde.
-                let ports: Option<Vec<u16>> = command
-                    .args
-                    .get("ports")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|p| p.as_u64()).map(|p| p as u16).collect())
-                    .filter(|v: &Vec<u16>| !v.is_empty());
-                scheduler::portscan_with(state, ip, ports).await.map(|_| ())
+                // Le hub peut imposer les listes de ports. Vides ou absentes,
+                // la sonde reprend les siennes — une liste vide ne veut jamais
+                // dire « ne scanne rien » (§ 25).
+                let ports = port_list(command, "ports");
+                let udp_ports = port_list(command, "udp_ports");
+                // 🔴 **L'étiquette du profil employé.** Sans elle, un scan
+                // lancé depuis le hub ou depuis le téléphone s'affichait sur
+                // l'écran de la sonde SANS aucun profil, alors qu'un scan
+                // lancé dans sa fenêtre montrait le sien — constaté le 02/10.
+                //
+                // ⚠️ Elle n'est pas validée, et c'est volontaire : les ports
+                // font foi, le profil n'est qu'une étiquette. La sonde n'a
+                // peut-être pas encore reçu le profil que le hub vient de
+                // créer, et un scan qui marche ne doit pas tomber pour ça.
+                let profile_id = arg(command, "profile_id").map(str::to_string);
+                scheduler::portscan_with(state, ip, ports, udp_ports, profile_id)
+                    .await
+                    .map(|_| ())
             }
             None => Err("adresse manquante".into()),
         },
@@ -129,6 +157,89 @@ mod tests {
 
     fn command(kind: &str, args: serde_json::Value) -> Command {
         Command { id: 1, kind: kind.into(), args }
+    }
+
+    #[tokio::test]
+    async fn un_scan_commande_range_le_profil_qui_a_servi() {
+        // 🔴 Défaut constaté le 02/10 : un scan lancé depuis le hub ou depuis
+        // le téléphone n'affichait AUCUN profil sur l'écran de la sonde, alors
+        // qu'un scan lancé dans la fenêtre de la sonde montrait le sien. La
+        // commande ne portait que la liste de ports : personne ne disait de
+        // quel profil elle venait, et le résultat était donc rangé sans
+        // étiquette.
+        //
+        // Scan sur 127.0.0.1, un seul port : local et instantané.
+        let state = state();
+        let ack = execute(
+            &state,
+            &command(
+                "port_scan",
+                serde_json::json!({ "ip": "127.0.0.1", "ports": [1], "profile_id": "web" }),
+            ),
+        )
+        .await;
+        assert!(ack.ok, "{ack:?}");
+
+        let entry = state
+            .portscan
+            .snapshot()
+            .into_iter()
+            .find(|e| e.ip == "127.0.0.1")
+            .expect("le scan doit avoir laissé une entrée");
+        assert_eq!(entry.profile_id.as_deref(), Some("web"));
+    }
+
+    #[tokio::test]
+    async fn un_profil_inconnu_de_la_sonde_ne_fait_pas_echouer_le_scan() {
+        // ⚠️ **Les ports font foi, le profil n'est qu'une étiquette.** La sonde
+        // n'a pas forcément reçu le profil que le hub vient de créer — il
+        // descendra au battement suivant. Un scan qui marche ne doit pas tomber
+        // pour une étiquette qu'on ne sait pas encore traduire : elle est
+        // rangée telle quelle, et l'écran l'affichera dès qu'il la connaîtra.
+        let state = state();
+        let ack = execute(
+            &state,
+            &command(
+                "port_scan",
+                serde_json::json!({ "ip": "127.0.0.1", "ports": [1], "profile_id": "jamais-vu" }),
+            ),
+        )
+        .await;
+        assert!(ack.ok, "{ack:?}");
+
+        let entry = state
+            .portscan
+            .snapshot()
+            .into_iter()
+            .find(|e| e.ip == "127.0.0.1")
+            .expect("le scan doit avoir laissé une entrée");
+        assert_eq!(entry.profile_id.as_deref(), Some("jamais-vu"));
+    }
+
+    #[tokio::test]
+    async fn un_scan_commande_fait_aussi_l_udp_quand_le_hub_en_demande() {
+        // Le hub modélise désormais les ports UDP d'un profil (§ 25) : une
+        // commande qui en porte doit les scanner, sinon un profil « Common »
+        // lancé depuis le hub ne rendrait que la moitié de ce que le même
+        // profil rend depuis la fenêtre de la sonde.
+        let state = state();
+        let ack = execute(
+            &state,
+            &command(
+                "port_scan",
+                serde_json::json!({ "ip": "127.0.0.1", "ports": [1], "udp_ports": [1] }),
+            ),
+        )
+        .await;
+        assert!(ack.ok, "{ack:?}");
+
+        let entry = state
+            .portscan
+            .snapshot()
+            .into_iter()
+            .find(|e| e.ip == "127.0.0.1")
+            .expect("le scan doit avoir laissé une entrée");
+        assert_eq!(entry.udp.len(), 1, "{entry:?}");
     }
 
     #[tokio::test]

@@ -88,6 +88,12 @@ pub(crate) struct PortscanProfile {
     /// ⚠️ **Vide veut dire « la sonde garde sa liste »**, pas « ne scanne
     /// rien » : la sonde traite déjà `[]` comme une absence de restriction.
     pub ports: Vec<i64>,
+    /// Les ports UDP, que le hub modélise depuis le 02/10.
+    ///
+    /// ⚠️ Vide veut dire ici « ce profil ne scanne pas d'UDP », et c'est le cas
+    /// de tous les profils d'avant la v27 : personne n'avait pu leur en donner.
+    /// La sonde en fait donc autorité dès que le champ est là.
+    pub udp_ports: Vec<i64>,
     /// D'où sort ce profil. `None` = créé sur le hub.
     ///
     /// ⚠️ C'est une **trace**, pas un droit : elle ne donne aucune autorité à
@@ -103,13 +109,16 @@ pub(crate) struct PortscanProfile {
 
 /// Un profil annoncé par une sonde dans sa configuration (§ 16).
 ///
-/// ⚠️ Pas de `ports` UDP : le hub ne les modélise pas. La sonde, elle, les
-/// garde — voir [`PortscanProfile::ports`] et le § 25 du contrat.
 #[derive(Debug, Clone)]
 pub(crate) struct IncomingProfile {
     pub profile_id: String,
     pub name: String,
     pub ports: Vec<i64>,
+    /// 🔴 L'UDP monte avec le profil depuis que le hub le modélise. Sans ça, il
+    /// ingérerait un profil en laissant tomber ses ports UDP, puis le
+    /// réécrirait à la sonde **sans UDP** : un réglage détruit que plus
+    /// personne ne pourrait reconstituer.
+    pub udp_ports: Vec<i64>,
 }
 
 /// Ce que le hub a à apprendre à une sonde en retard.
@@ -148,9 +157,9 @@ pub(crate) fn normalize_ports(ports: &[i64]) -> Vec<i64> {
 /// faire monter poserait cinq lignes « Common », « Web »… dans la liste
 /// commune de tout le parc, en doublon de celles du hub.
 ///
-/// ⚠️ **`udp_ports` ne monte pas** : le hub ne modélise pas l'UDP. Ce n'est pas
-/// un oubli, c'est la raison pour laquelle la sonde conserve sa liste UDP quand
-/// le hub lui réécrit un profil (contrat § 25).
+/// ⚠️ **`udp_ports` monte aussi**, depuis que le hub le modélise : l'ingérer à
+/// moitié ferait réécrire le profil à la sonde sans son UDP au battement
+/// suivant, et détruirait un réglage que rien ne pourrait reconstituer.
 pub(crate) fn profiles_from_probe_config(config: &serde_json::Value) -> Vec<IncomingProfile> {
     let Some(entries) = config.get("portscan_profiles").and_then(|v| v.as_array()) else {
         return Vec::new();
@@ -176,18 +185,25 @@ pub(crate) fn profiles_from_entries(entries: &[serde_json::Value]) -> Vec<Incomi
                 return None;
             }
             let name = entry.get("name")?.as_str()?.trim().to_string();
-            let ports = entry
-                .get("tcp_ports")
-                .and_then(|v| v.as_array())
-                .map(|list| list.iter().filter_map(|p| p.as_i64()).collect())
-                .unwrap_or_default();
+            let ports = port_array(entry, "tcp_ports");
+            let udp_ports = port_array(entry, "udp_ports");
             Some(IncomingProfile {
                 profile_id,
                 name,
                 ports,
+                udp_ports,
             })
         })
         .collect()
+}
+
+/// Une liste de ports d'une entrée annoncée par une sonde.
+fn port_array(entry: &serde_json::Value, key: &str) -> Vec<i64> {
+    entry
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|list| list.iter().filter_map(|p| p.as_i64()).collect())
+        .unwrap_or_default()
 }
 
 fn poisoned() -> DbError {
@@ -198,7 +214,7 @@ fn poisoned() -> DbError {
 /// lit. Une seule liste : deux `SELECT` qui divergent d'une colonne se paient
 /// en panique au premier appel.
 const COLUMNS: &str =
-    "profile_id, name, ports, origin_probe, created_at, updated_at, deleted_at, rev";
+    "profile_id, name, ports, origin_probe, created_at, updated_at, deleted_at, rev, udp_ports";
 
 fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PortscanProfile> {
     let raw: String = row.get(2)?;
@@ -213,6 +229,10 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PortscanProfile
         updated_at: row.get(5)?,
         deleted_at: row.get(6)?,
         rev: row.get(7)?,
+        udp_ports: {
+            let raw: String = row.get(8)?;
+            serde_json::from_str(&raw).unwrap_or_default()
+        },
     })
 }
 
@@ -323,6 +343,7 @@ impl Db {
         &self,
         name: &str,
         ports: &[i64],
+        udp_ports: &[i64],
         origin_probe: Option<&str>,
     ) -> DbResult<PortscanProfile> {
         let name = name.trim();
@@ -330,7 +351,7 @@ impl Db {
             return Err(DbError::Conflict("le nom du profil est requis".into()));
         }
         let profile_id = new_profile_id();
-        self.insert_portscan_profile(&profile_id, name, ports, origin_probe)
+        self.insert_portscan_profile(&profile_id, name, ports, udp_ports, origin_probe)
     }
 
     fn insert_portscan_profile(
@@ -338,6 +359,7 @@ impl Db {
         profile_id: &str,
         name: &str,
         ports: &[i64],
+        udp_ports: &[i64],
         origin_probe: Option<&str>,
     ) -> DbResult<PortscanProfile> {
         let rev = self.bump_portscan_rev()?;
@@ -346,15 +368,17 @@ impl Db {
             let conn = self.conn().lock().map_err(|_| poisoned())?;
             conn.execute(
                 "INSERT INTO portscan_profiles
-                   (profile_id, name, ports, origin_probe, created_at, updated_at, rev)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                   (profile_id, name, ports, udp_ports, origin_probe, created_at, updated_at, rev)
+                 VALUES (?1, ?2, ?3, ?7, ?4, ?5, ?5, ?6)",
                 rusqlite::params![
                     profile_id,
                     name,
                     serde_json::to_string(&normalize_ports(ports)).unwrap_or_else(|_| "[]".into()),
                     origin_probe,
                     now,
-                    rev
+                    rev,
+                    serde_json::to_string(&normalize_ports(udp_ports))
+                        .unwrap_or_else(|_| "[]".into()),
                 ],
             )
             .map_err(|e| {
@@ -371,6 +395,7 @@ impl Db {
         profile_id: &str,
         name: Option<&str>,
         ports: Option<&[i64]>,
+        udp_ports: Option<&[i64]>,
     ) -> DbResult<PortscanProfile> {
         let existing = self.get_portscan_profile(profile_id)?;
         // ⚠️ Un profil supprimé ne se modifie pas : ce serait une résurrection
@@ -388,19 +413,26 @@ impl Db {
             Some(p) => normalize_ports(p),
             None => existing.ports.clone(),
         };
+        // ⚠️ Même règle : absent = inchangé. Renommer un profil ne doit pas
+        // vider ses ports UDP au passage.
+        let udp_ports = match udp_ports {
+            Some(p) => normalize_ports(p),
+            None => existing.udp_ports.clone(),
+        };
         let rev = self.bump_portscan_rev()?;
         {
             let conn = self.conn().lock().map_err(|_| poisoned())?;
             conn.execute(
                 "UPDATE portscan_profiles
-                    SET name = ?2, ports = ?3, updated_at = ?4, rev = ?5
+                    SET name = ?2, ports = ?3, udp_ports = ?6, updated_at = ?4, rev = ?5
                   WHERE profile_id = ?1",
                 rusqlite::params![
                     profile_id,
                     name,
                     serde_json::to_string(&ports).unwrap_or_else(|_| "[]".into()),
                     crate::db::now(),
-                    rev
+                    rev,
+                    serde_json::to_string(&udp_ports).unwrap_or_else(|_| "[]".into()),
                 ],
             )
             .map_err(|e| {
@@ -458,7 +490,13 @@ impl Db {
             // a pu créer « Caméras » pendant qu'on en créait un sur le hub. Le
             // hub garde le sien et le battement aboutit — faire échouer le
             // battement ferait passer une sonde saine pour hors ligne.
-            match self.insert_portscan_profile(id, name, &incoming.ports, Some(probe_id)) {
+            match self.insert_portscan_profile(
+                id,
+                name,
+                &incoming.ports,
+                &incoming.udp_ports,
+                Some(probe_id),
+            ) {
                 Ok(_) => ingested += 1,
                 Err(DbError::Conflict(e)) => {
                     tracing::debug!("profil {id} de {probe_id} non ingéré : {e}")
@@ -625,6 +663,9 @@ struct ProfileBody {
     /// explicitement vide, lui, dit « la sonde garde la sienne ».
     #[serde(default)]
     ports: Option<Vec<i64>>,
+    /// Les ports UDP, mêmes règles que `ports` : absent = inchangé.
+    #[serde(default)]
+    udp_ports: Option<Vec<i64>>,
 }
 
 async fn create_profile(
@@ -640,7 +681,12 @@ async fn create_profile(
         Some(name.trim()),
         state
             .db
-            .create_portscan_profile(&name, &body.ports.unwrap_or_default(), None),
+            .create_portscan_profile(
+                &name,
+                &body.ports.unwrap_or_default(),
+                &body.udp_ports.unwrap_or_default(),
+                None,
+            ),
     ) {
         Ok(profile) => (
             StatusCode::CREATED,
@@ -657,7 +703,7 @@ async fn update_profile(
     Path(id): Path<String>,
     Json(body): Json<ProfileBody>,
 ) -> Response {
-    if body.name.is_none() && body.ports.is_none() {
+    if body.name.is_none() && body.ports.is_none() && body.udp_ports.is_none() {
         // Rien à écrire : accepter ferait avancer la révision pour un
         // changement qui n'existe pas, donc voyager un delta vide dans tout le
         // parc.
@@ -670,7 +716,12 @@ async fn update_profile(
         Some(&id),
         state
             .db
-            .update_portscan_profile(&id, body.name.as_deref(), body.ports.as_deref()),
+            .update_portscan_profile(
+                &id,
+                body.name.as_deref(),
+                body.ports.as_deref(),
+                body.udp_ports.as_deref(),
+            ),
     ) {
         Ok(profile) => ok_json(serde_json::to_value(profile).unwrap_or(serde_json::Value::Null)),
         Err(e) => error_response(e),
@@ -763,6 +814,60 @@ mod tests {
     }
 
     #[test]
+    fn un_profil_porte_ses_ports_udp_tries_et_dedoublonnes() {
+        // ⚠️ Le hub ne modélisait QUE le TCP : un profil semé « Common » y
+        // valait 16 ports TCP et zéro UDP, alors que le même profil, sur la
+        // sonde, en scanne six en UDP. Deux listes pour un seul nom, et
+        // l'écart était impossible à rattraper depuis le hub.
+        let db = open_memory();
+        let cree = db
+            .create_portscan_profile("Caméras", &[554, 80, 554], &[5353, 1900, 5353], None)
+            .unwrap();
+        assert_eq!(cree.ports, vec![80, 554]);
+        assert_eq!(cree.udp_ports, vec![1900, 5353], "triés et dédoublonnés aussi");
+
+        let relu = profile(&db.list_portscan_profiles().unwrap(), &cree.profile_id).clone();
+        assert_eq!(relu.udp_ports, vec![1900, 5353], "et ils se relisent");
+    }
+
+    #[test]
+    fn renommer_un_profil_n_efface_pas_ses_ports_udp() {
+        // Même règle que pour le TCP : un champ absent de la requête n'est pas
+        // modifié. Renommer en effaçant l'UDP détruirait un réglage que rien ne
+        // pourrait reconstituer.
+        let db = open_memory();
+        let cree = db
+            .create_portscan_profile("Caméras", &[554], &[5353], None)
+            .unwrap();
+        let renomme = db
+            .update_portscan_profile(&cree.profile_id, Some("Vidéo"), None, None)
+            .unwrap();
+        assert_eq!(renomme.name, "Vidéo");
+        assert_eq!(renomme.ports, vec![554]);
+        assert_eq!(renomme.udp_ports, vec![5353]);
+    }
+
+    #[test]
+    fn la_montee_depuis_une_sonde_emporte_aussi_l_udp() {
+        // 🔴 Indispensable depuis que le hub fait autorité sur l'UDP : s'il
+        // ingérait un profil en laissant tomber ses ports UDP, il le
+        // réécrirait au battement suivant **sans UDP** — et la sonde perdrait
+        // un réglage que plus personne n'aurait. Le « Perso » de Benjamin
+        // porte deux ports UDP : ils doivent monter avec lui.
+        let (db, probe_id) = db_with_probe();
+        let montants = profiles_from_probe_config(&serde_json::json!({
+            "portscan_profiles": [
+                { "id": "perso", "name": "Perso", "tcp_ports": [8006], "udp_ports": [53, 123] }
+            ]
+        }));
+        assert_eq!(montants[0].udp_ports, vec![53, 123]);
+
+        db.ingest_probe_profiles(&probe_id, &montants).unwrap();
+        let perso = profile(&db.list_portscan_profiles().unwrap(), "perso").clone();
+        assert_eq!(perso.udp_ports, vec![53, 123]);
+    }
+
+    #[test]
     fn un_profil_supprime_ne_revient_pas_au_demarrage_suivant() {
         // 🔴 Reposer les quatre profils à chaque démarrage ressusciterait celui
         // qu'on vient de supprimer exprès — une suppression qui se défait toute
@@ -807,14 +912,14 @@ mod tests {
     #[test]
     fn deux_profils_de_meme_nom_ne_coexistent_pas() {
         let db = open_memory();
-        let err = db.create_portscan_profile("Web", &[80], None).unwrap_err();
+        let err = db.create_portscan_profile("Web", &[80], &[], None).unwrap_err();
         assert!(matches!(err, DbError::Conflict(_)), "{err:?}");
 
         // ⚠️ Un nom libéré par une suppression se réemploie : refuser ici
         // interdirait de recréer « Caméras » après l'avoir retiré, sans jamais
         // dire pourquoi.
         db.delete_portscan_profile("web").unwrap();
-        db.create_portscan_profile("Web", &[80], None).unwrap();
+        db.create_portscan_profile("Web", &[80], &[], None).unwrap();
     }
 
     #[test]
@@ -822,11 +927,11 @@ mod tests {
         let db = open_memory();
         let start = db.portscan_rev().unwrap();
 
-        let created = db.create_portscan_profile("Caméras", &[554], None).unwrap();
+        let created = db.create_portscan_profile("Caméras", &[554], &[], None).unwrap();
         assert!(created.rev > start, "une création avance le compteur");
 
         let renamed = db
-            .update_portscan_profile(&created.profile_id, Some("Caméras IP"), None)
+            .update_portscan_profile(&created.profile_id, Some("Caméras IP"), None, None)
             .unwrap();
         assert!(renamed.rev > created.rev, "une modification aussi");
         assert_eq!(renamed.ports, vec![554], "renommer ne touche pas aux ports");
@@ -851,7 +956,7 @@ mod tests {
     fn une_sonde_en_retard_recoit_le_delta_pierres_tombales_comprises() {
         let db = open_memory();
         let rev = db.portscan_rev().unwrap();
-        let created = db.create_portscan_profile("Caméras", &[554], None).unwrap();
+        let created = db.create_portscan_profile("Caméras", &[554], &[], None).unwrap();
         db.delete_portscan_profile("db").unwrap();
 
         let update = db.portscan_profiles_since(rev).unwrap().unwrap();
@@ -891,7 +996,7 @@ mod tests {
         let path = dir.join("hub.db");
         let high = {
             let db = Db::open(&path).unwrap();
-            let p = db.create_portscan_profile("Caméras", &[554], None).unwrap();
+            let p = db.create_portscan_profile("Caméras", &[554], &[], None).unwrap();
             // Ce que fait une sauvegarde restaurée : le compteur recule sous
             // ses propres lignes.
             db.set_setting(PORTSCAN_REV_KEY, "0").unwrap();
@@ -1018,16 +1123,19 @@ mod tests {
                         profile_id: "web".into(),
                         name: "Web renommé par la sonde".into(),
                         ports: vec![1234],
+                        udp_ports: Vec::new(),
                     },
                     IncomingProfile {
                         profile_id: "db".into(),
                         name: "Bases".into(),
                         ports: vec![3306],
+                        udp_ports: Vec::new(),
                     },
                     IncomingProfile {
                         profile_id: "cams".into(),
                         name: "Caméras".into(),
                         ports: vec![554, 80, 554],
+                        udp_ports: Vec::new(),
                     },
                 ],
             )

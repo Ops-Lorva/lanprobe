@@ -535,6 +535,14 @@ export interface PortscanProfile {
   name: string;
   ports: number[];
   /**
+   * Les ports UDP, que le hub modélise depuis le 02/10.
+   *
+   * ⚠️ Vide veut dire ici « ce profil ne scanne pas d'UDP », pas « la sonde
+   * garde la sienne » : c'est le cas de tous les profils d'avant la v27 du
+   * schéma, personne n'ayant jamais pu leur en donner.
+   */
+  udp_ports: number[];
+  /**
    * La sonde qui l'a créé, `null` quand il vient du hub.
    *
    * ⚠️ Une **trace**, pas un droit : elle répond « d'où sort celui-là » et ne
@@ -1132,21 +1140,26 @@ export const api = {
   portscanProfiles: () =>
     request<{ profiles: PortscanProfile[]; rev: number }>('/api/portscan-profiles'),
 
-  /** `ports` vide = « la sonde garde sa liste ». */
-  createPortscanProfile: (name: string, ports: number[]) =>
+  /** `ports` vide = « la sonde garde sa liste ». `udp_ports` vide = pas d'UDP. */
+  createPortscanProfile: (name: string, ports: number[], udp_ports: number[] = []) =>
     request<PortscanProfile>('/api/portscan-profiles', {
       method: 'POST',
-      body: JSON.stringify({ name, ports }),
+      body: JSON.stringify({ name, ports, udp_ports }),
     }),
 
   /**
    * ⚠️ **Un champ omis n'est pas modifié.** `JSON.stringify` retire les clés
    * `undefined` : renommer n'efface donc pas les ports au passage.
    */
-  updatePortscanProfile: (id: string, name?: string, ports?: number[]) =>
+  updatePortscanProfile: (
+    id: string,
+    name?: string,
+    ports?: number[],
+    udp_ports?: number[],
+  ) =>
     request<PortscanProfile>(`/api/portscan-profiles/${encodeURIComponent(id)}`, {
       method: 'PATCH',
-      body: JSON.stringify({ name, ports }),
+      body: JSON.stringify({ name, ports, udp_ports }),
     }),
 
   /**

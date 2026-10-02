@@ -66,12 +66,24 @@ export function formatPorts(ports: number[]): string {
  * 🔴 **`ports` est OMIS quand le profil n'en porte pas.** Voir l'en-tête : un
  * tableau vide ferait un scan complet. C'est aussi pourquoi un profil absent
  * — liste vide côté hub, tous supprimés — lance quand même un scan : la sonde
- * a la sienne.
+ * a la sienne. Même règle pour `udp_ports`.
+ *
+ * 🔴 **`profile_id` part avec la commande**, et c'est le correctif du 02/10 :
+ * un scan lancé depuis le hub ou depuis le téléphone s'affichait SANS aucun
+ * profil sur l'écran de la sonde, alors qu'un scan lancé dans sa fenêtre
+ * montrait le sien. La sonde range l'étiquette avec le résultat ; elle ne la
+ * valide pas — les ports font foi, et un scan qui marche ne doit pas tomber
+ * parce que le profil ne lui est pas encore descendu.
  */
 export function portScanArgs(
   ip: string,
   profile: PortscanProfile | undefined,
-): { ip: string; ports?: number[] } {
+): { ip: string; ports?: number[]; udp_ports?: number[]; profile_id?: string } {
+  const args: { ip: string; ports?: number[]; udp_ports?: number[]; profile_id?: string } = { ip };
   const ports = profile?.ports ?? [];
-  return ports.length > 0 ? { ip, ports } : { ip };
+  if (ports.length > 0) args.ports = ports;
+  if (profile) args.profile_id = profile.profile_id;
+  const udp = profile?.udp_ports ?? [];
+  if (udp.length > 0) args.udp_ports = udp;
+  return args;
 }

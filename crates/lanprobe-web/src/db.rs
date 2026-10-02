@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -805,6 +805,27 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE probe_commands ADD COLUMN origin             TEXT;
     ALTER TABLE probe_commands ADD COLUMN origin_device_id   TEXT;
     ALTER TABLE probe_commands ADD COLUMN origin_device_name TEXT;
+    "#,
+    // v26 → v27 : les ports UDP d'un profil de scan (contrat § 25).
+    //
+    // 🔴 Le hub ne modélisait que le TCP. Son profil « Common » valait donc 16
+    // ports TCP et zéro UDP, là où le MÊME profil, sur la sonde, en scanne six
+    // en UDP : deux listes pour un seul nom, et un écart qu'aucun écran du hub
+    // ne pouvait rattraper. C'était l'écart assumé du § 25 ; il n'a plus de
+    // raison d'être, et le supprimer vaut mieux que de le documenter encore.
+    //
+    // ⚠️ `DEFAULT '[]'` est ici honnête, contrairement au `DEFAULT 'hub'`
+    // refusé en v26 : il n'invente aucun fait. Un profil d'avant cette version
+    // n'avait vraiment PAS de ports UDP — personne n'a jamais pu lui en
+    // donner. On ne lui attribue donc pas une valeur qu'on ignore, on constate
+    // celle qu'il a.
+    //
+    // ⚠️ Et une liste vide se lit, côté sonde, « ce profil ne scanne pas
+    // d'UDP » — pas « garde la tienne ». L'UDP monte désormais avec le profil
+    // (`ingest_probe_profiles`), donc le hub peut en faire autorité sans
+    // détruire un réglage que personne ne pourrait reconstituer.
+    r#"
+    ALTER TABLE portscan_profiles ADD COLUMN udp_ports TEXT NOT NULL DEFAULT '[]';
     "#,
 ];
 

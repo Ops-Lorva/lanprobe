@@ -20,9 +20,11 @@
   let editing = $state('');
   let editName = $state('');
   let editPorts = $state('');
+  let editUdpPorts = $state('');
 
   let newName = $state('');
   let newPorts = $state('');
+  let newUdpPorts = $state('');
 
   async function load() {
     loadError = '';
@@ -54,22 +56,26 @@
     editing = p.profile_id;
     editName = p.name;
     editPorts = formatPorts(p.ports);
+    editUdpPorts = formatPorts(p.udp_ports);
   }
 
   function saveEdit() {
     const id = editing;
     const name = editName.trim();
     const ports = parsePorts(editPorts);
+    const udpPorts = parsePorts(editUdpPorts);
     editing = '';
-    void run(() => api.updatePortscanProfile(id, name, ports));
+    void run(() => api.updatePortscanProfile(id, name, ports, udpPorts));
   }
 
   function create() {
     const name = newName.trim();
     const ports = parsePorts(newPorts);
+    const udpPorts = parsePorts(newUdpPorts);
     newName = '';
     newPorts = '';
-    void run(() => api.createPortscanProfile(name, ports));
+    newUdpPorts = '';
+    void run(() => api.createPortscanProfile(name, ports, udpPorts));
   }
 
   function remove(p: PortscanProfile) {
@@ -111,6 +117,13 @@
               placeholder={$_('portscan.ports_placeholder')}
               aria-label={$_('portscan.ports')}
             />
+            <input
+              class="lp-input"
+              bind:value={editUdpPorts}
+              spellcheck="false"
+              placeholder={$_('portscan.udp_ports_placeholder')}
+              aria-label={$_('portscan.udp_ports')}
+            />
             <div class="acts">
               <button class="lp-btn primary" disabled={busy || !editName.trim()} onclick={saveEdit}>
                 {$_('common.save')}
@@ -131,6 +144,13 @@
               {:else}
                 {formatPorts(p.ports)}
                 <span class="muted">· {$_('portscan.count', { values: { n: p.ports.length } })}</span>
+              {/if}
+              <!--
+                ⚠️ L'UDP ne se dit que s'il y en a : « 0 UDP » n'apprendrait
+                rien, et la plupart des profils n'en portent pas.
+              -->
+              {#if p.udp_ports.length > 0}
+                <span class="muted">· {$_('portscan.udp_count', { values: { n: p.udp_ports.length } })}</span>
               {/if}
             </div>
             <div class="acts">
@@ -170,6 +190,13 @@
           spellcheck="false"
           placeholder={$_('portscan.ports_placeholder')}
           aria-label={$_('portscan.ports')}
+        />
+        <input
+          class="lp-input"
+          bind:value={newUdpPorts}
+          spellcheck="false"
+          placeholder={$_('portscan.udp_ports_placeholder')}
+          aria-label={$_('portscan.udp_ports')}
         />
         <div class="acts">
           <button class="lp-btn primary" disabled={busy || !newName.trim()} onclick={create}>

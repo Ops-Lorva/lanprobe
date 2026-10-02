@@ -2993,6 +2993,7 @@ CREATE TABLE portscan_profiles (
   profile_id   TEXT PRIMARY KEY,
   name         TEXT NOT NULL,
   ports        TEXT NOT NULL,   -- JSON [22,80,443]. Vide = la sonde garde sa liste
+  udp_ports    TEXT NOT NULL DEFAULT '[]',  -- JSON. Vide = ce profil ne fait pas d'UDP
   origin_probe TEXT REFERENCES probes(probe_id),  -- NULL = créé sur le hub
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
@@ -3005,6 +3006,17 @@ CREATE TABLE portscan_profiles (
 ⚠️ `ports` vide **n'est pas** une liste vide envoyée à la sonde : c'est « la
 sonde garde la sienne ». La sonde traite déjà `[]` comme une absence, et
 confondre les deux ferait un **scan complet** là où on croyait restreindre.
+
+⚠️ `udp_ports` vide se lit autrement, et il faut le savoir : « ce profil ne
+scanne pas d'UDP ». C'est le cas de **tous** les profils d'avant la v27 du
+schéma — personne n'avait pu leur en donner, la colonne n'existait pas. Le
+`DEFAULT '[]'` ne leur invente donc rien, contrairement au `DEFAULT 'hub'`
+refusé au § 26 : il constate.
+
+⚠️ Côté sonde, `udp_ports` **absent** de la réponse au battement veut dire « hub
+antérieur à l'UDP » et ne touche à rien. Présent, le hub en fait autorité, liste
+vide comprise — il peut le faire sans rien détruire puisque l'UDP monte avec le
+profil.
 
 ⚠️ `origin_probe` est une **trace**, pas un droit : la sonde qui a créé un
 profil n'a aucune autorité dessus.
@@ -3097,11 +3109,38 @@ de sa base, un profil dont la pierre tombale a disparu avec la restauration.
 « elle n'en a plus » : un profil ne se retire que par une pierre tombale posée
 sur le hub.
 
-⚠️ **Le hub ne modélise pas les ports UDP**, la sonde si. Un profil ingéré garde
-donc ses ports TCP dans `ports`, et la sonde **conserve sa liste UDP** quand le
-hub lui réécrit un profil. C'est le seul écart assumé au « elle l'écrit tel
-quel » : le hub ne peut pas faire autorité sur un champ qu'il n'a pas, et
-l'écraser détruirait un réglage que rien ne pourrait reconstituer.
+⚠️ **L'UDP monte avec le profil** (`udp_ports`). Le hub ne modélisait que le TCP
+jusqu'au 02/10 : son profil « Common » valait 16 ports TCP et zéro UDP là où le
+MÊME profil, sur la sonde, en scanne six en UDP. L'ingérer à moitié serait pire
+depuis que le hub en fait autorité — il réécrirait le profil **sans UDP** au
+battement suivant, et détruirait un réglage que plus personne ne pourrait
+reconstituer.
+
+### Ce que la commande `port_scan` porte
+
+```json
+{ "kind": "port_scan",
+  "args": { "ip": "10.0.0.12", "ports": [80,443], "udp_ports": [53],
+            "profile_id": "common" } }
+```
+
+| Argument | Absent veut dire |
+|---|---|
+| `ports` | la sonde garde sa liste TCP |
+| `udp_ports` | aucun scan UDP — **pas** « la liste UDP par défaut » |
+| `profile_id` | aucune étiquette : l'écran de la sonde n'affichera pas de profil |
+
+🔴 **`profile_id` est une étiquette, jamais une autorité.** La sonde la range
+avec le résultat — comme elle le fait pour un scan lancé dans sa fenêtre — et ne
+la valide **pas** : un identifiant qu'elle ne connaît pas encore (le profil
+descendra au battement suivant) ne doit pas faire échouer le scan. Les ports
+font foi.
+
+Sans elle, un scan lancé depuis le hub ou depuis le téléphone s'affichait sur
+l'écran de la sonde **sans aucun profil**, alors qu'un scan lancé dans sa
+fenêtre montrait le sien — constaté le 02/10. La sonde résout le NOM depuis sa
+propre liste : le hub n'a donc pas à l'envoyer, et un profil renommé s'affiche
+avec son nom du moment.
 
 ### Quand une pierre tombale peut partir
 
