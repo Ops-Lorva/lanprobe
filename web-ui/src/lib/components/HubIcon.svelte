@@ -2,22 +2,40 @@
   import Icons from '$desktop/components/Icons.svelte';
 
   /**
-   * Les trois pictogrammes que le hub ajoute au jeu partagé avec l'app desktop.
+   * Les pictogrammes que le hub ajoute au jeu partagé avec l'app desktop.
    *
    * Ils sont définis ici et non dans `src/lib/components/Icons.svelte` parce
    * que Comptes, Journal et Notifications sont des écrans de hub : l'app
    * desktop n'a ni comptes ni journal à montrer. Même grille 16×16, même trait
    * de 1,5 et même `currentColor` que le jeu partagé — la barre de navigation
    * doit se lire comme une seule série, pas comme deux familles côte à côte.
+   *
+   * ⚠️ `user` et `users` sont deux dessins et non une variante de taille :
+   * l'un est MON compte, l'autre les comptes du hub. Le même pictogramme pour
+   * les deux ferait chercher la gestion des comptes dans sa propre fiche.
    */
   /** Les noms du jeu partagé que la barre du hub utilise réellement. */
   type SharedName = 'server' | 'settings' | 'gear';
-  export type HubIconName = 'users' | 'journal' | 'bell' | SharedName;
+  export type HubIconName = 'user' | 'users' | 'journal' | 'bell' | SharedName;
 
   const { name, size = 16 } = $props<{ name: HubIconName; size?: number }>();
 </script>
 
-{#if name === 'users'}
+{#if name === 'user'}
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <circle cx="8" cy="5" r="2.8" />
+    <path d="M2.8 14v-.9A3.8 3.8 0 016.6 9.3h2.8a3.8 3.8 0 013.8 3.8v.9" />
+  </svg>
+{:else if name === 'users'}
   <svg
     width={size}
     height={size}

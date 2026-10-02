@@ -91,9 +91,33 @@
       {/each}
     </div>
 
-    <!-- Langue et thème sont partis dans Réglages → Général : ce sont des
-         préférences, pas de la navigation, et la barre n'a plus à les porter. -->
+    <!--
+      Langue et thème sont partis dans Réglages → Général : ce sont des
+      préférences, pas de la navigation, et la barre n'a plus à les porter.
+
+      ⚠️ **« Mon compte » est l'exception, et ce n'en est pas une.** Ce n'est
+      pas une préférence : c'est MON identité sur ce hub — mot de passe,
+      second facteur, clés d'accès, appareils appairés. On y va pour voir ce
+      qui peut entrer sous mon nom, parfois dans l'urgence d'un téléphone
+      perdu, et c'est un endroit où l'on VA (le critère de cette barre), pas
+      un réglage du hub qu'on prépare. Sa place est ici, contre « Se
+      déconnecter » : les deux parlent de la même session, et c'est là qu'on
+      les cherche dans toutes les consoles.
+
+      Le lien reste `#/settings/account` : cette adresse est dans des favoris
+      et des captures d'écran, et la casser pour déplacer une entrée de menu
+      serait payer cher un rangement.
+    -->
     <div class="nav-bottom">
+      <a
+        class="nav-item"
+        class:active={$route.name === 'settings' && $route.tab === 'account'}
+        href="#/settings/account"
+        title={$_('settings.tab_account')}
+      >
+        <HubIcon name="user" size={15} />
+        <span class="nav-label">{$_('settings.tab_account')}</span>
+      </a>
       <button class="nav-item logout" onclick={logout}>
         <Icons name="chevron-right" size={15} />
         <span class="nav-label">{$_('nav.logout')}</span>

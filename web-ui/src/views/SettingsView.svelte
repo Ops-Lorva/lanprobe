@@ -702,10 +702,11 @@
   });
 
   const ALL_TABS: { id: Tab; key: string; admin?: true }[] = [
-    // En tête : c'est le seul onglet que TOUS les rôles peuvent utiliser, et
-    // celui qu'un lecteur vient chercher. Le reléguer en fin de rangée le
-    // ferait chercher parmi des onglets qui ne le concernent pas.
-    { id: 'account', key: 'settings.tab_account' },
+    // ⚠️ « Mon compte » N'EST PLUS un onglet : il est passé dans la barre de
+    // gauche, contre « Se déconnecter » — `Shell.svelte` dit pourquoi. Son
+    // adresse `#/settings/account` ne change pas, elle est dans des favoris
+    // et des captures d'écran ; elle rend simplement un écran à elle, sans
+    // bande d'onglets.
     { id: 'general', key: 'settings.tab_general' },
     // Les trois réglages du mode se règlent ensemble : la durée était sur
     // « Général », les deux autres n'étaient nulle part. Un onglet qui porte
@@ -733,7 +734,23 @@
   // indisponible retombe sur le premier plutôt que d'afficher un panneau que la
   // rangée ne montre pas.
   const asked = $derived($route.name === 'settings' ? $route.tab : 'general');
-  const tab = $derived<Tab>(TABS.some((t) => t.id === asked) ? asked : 'general');
+  /**
+   * ⚠️ `account` est accepté **bien qu'il ne soit plus dans `TABS`**. Sans ce
+   * cas explicite, l'entrée « Mon compte » de la barre de gauche retomberait
+   * sur « Général » : la liste des onglets sert aussi de liste blanche des
+   * adresses valides, et `account` a quitté la première sans quitter la
+   * seconde.
+   */
+  const tab = $derived<Tab>(
+    asked === 'account' || TABS.some((t) => t.id === asked) ? asked : 'general',
+  );
+
+  /**
+   * « Mon compte » est un écran à lui, atteint par la barre de gauche. Ni
+   * titre « Réglages » ni bande d'onglets : une bande dont aucun onglet n'est
+   * actif se lit comme un écran cassé.
+   */
+  const accountOnly = $derived(tab === 'account');
 
   function openTab(id: Tab) {
     go(`#/settings/${id}`);
@@ -915,7 +932,7 @@
 </script>
 
 <header class="head">
-  <h1>{$_('settings.title')}</h1>
+  <h1>{accountOnly ? $_('settings.tab_account') : $_('settings.title')}</h1>
 </header>
 
 {#if loading}
@@ -926,6 +943,7 @@
   </StateBlock>
 {:else}
   <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+  {#if !accountOnly}
   <div
     class="tabs"
     role="tablist"
@@ -953,6 +971,7 @@
       </button>
     {/each}
   </div>
+  {/if}
 
   <!-- `GET /api/settings` est ouverte à `viewer`, son écriture est réservée à
        `admin` (contrat § 11). On montre donc les valeurs — c'est souvent ce
@@ -973,7 +992,11 @@
     obligerait à tout ouvrir, donc ne ferait rien gagner sur la pile qu'il
     remplace.
   -->
-  <div class="cards" role="tabpanel" id="panel-account" aria-labelledby="tab-account" tabindex="-1">
+  <!-- ⚠️ Ni `role="tabpanel"` ni `aria-labelledby` ici, contrairement aux
+       autres panneaux : il n'y a plus d'onglet « Mon compte » à désigner, et
+       un `aria-labelledby` qui pointe vers un élément absent laisse le
+       lecteur d'écran sans intitulé du tout. -->
+  <div class="cards" id="panel-account">
     {#each sections as s (s.id)}
       <AccountSection
         id={s.id}
