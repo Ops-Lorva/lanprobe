@@ -272,6 +272,11 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/notifications/test", post(test_notification))
             .route("/api/backup", post(create_backup))
             .route("/api/backups", get(list_backups))
+            // ⚠️ Sortir une archive du hub, c'est sortir ses secrets. La route
+            // vit ici et nulle part ailleurs : dans ce groupe elle hérite
+            // d'`admin` sans une ligne de code en plus, et une route posée
+            // plus haut par mégarde se verrait au premier coup d'œil.
+            .route("/api/backups/{file}", get(download_backup))
             .route("/api/backup/restore/{file}", post(restore_named_backup))
             .route(
                 "/api/backup/restore",
@@ -5367,34 +5372,144 @@ struct RestoreBody {
     confirm_overwrite: bool,
 }
 
+/// Résout un nom d'archive **venu du client** en chemin sur le volume.
+///
+/// 🔴 **Aucun chemin ne vient du client.** Le nom doit correspondre
+/// exactement à une entrée que `backup::list` a vue dans le répertoire de
+/// sauvegarde, et le chemin retenu est celui que `list` a construit —
+/// jamais un `join()` sur la chaîne reçue.
+///
+/// `is_plain_file_name` seul ne suffisait pas, et c'est ce qu'il laissait
+/// passer qui compte :
+///
+/// * un nom nu quelconque du volume (`hub.sqlite`, `secret.key`) ;
+/// * un **lien symbolique** posé dans le répertoire d'archives. `list` le
+///   montre, parce que `Path::is_file()` suit les liens — d'où la lecture par
+///   `symlink_metadata`, la seule qui dise ce que le nom désigne vraiment.
+///
+/// Sans cette garde, `GET /api/backups/{file}` est une lecture de fichier
+/// arbitraire sur le volume du hub. Elle ne protège pas de l'administrateur,
+/// qui a déjà tout : elle empêche la route de servir autre chose que ce
+/// qu'elle annonce.
+fn archive_in_backup_dir(state: &AppState, file: &str) -> Result<std::path::PathBuf, String> {
+    const ATTENDU: &str =
+        "nom d'archive invalide : attendu le nom d'une archive du répertoire de sauvegarde";
+    if !is_plain_file_name(file) {
+        return Err(ATTENDU.to_string());
+    }
+    let archives = crate::backup::list(&state.backup_dir).map_err(|e| e.to_string())?;
+    let found = archives
+        .into_iter()
+        .find(|a| a.file == file)
+        .ok_or_else(|| ATTENDU.to_string())?;
+    match std::fs::symlink_metadata(&found.path) {
+        Ok(meta) if meta.is_file() => Ok(found.path),
+        _ => Err(format!(
+            "« {file} » n'est pas un fichier du répertoire de sauvegarde : \
+             le hub ne suit pas un lien posé dans ses archives"
+        )),
+    }
+}
+
 /// Restaure une archive **déjà présente** dans le répertoire de sauvegarde.
 /// Le chemin de ligne de commande, pour qui a déposé son fichier dans le
 /// volume plutôt que de le téléverser.
+///
+/// ⚠️ L'archive doit porter le nom canonique d'une archive LanProbe, celui
+/// que `backup::list` reconnaît : un fichier déposé sous un nom libre ne se
+/// restaure pas par ici. C'est déjà ce que l'interface impose — elle ne
+/// propose que ce que `list` rend — et c'est le prix de la garde de chemin.
 async fn restore_named_backup(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
     Path(file): Path<String>,
     body: Option<Json<RestoreBody>>,
 ) -> Response {
-    // `{file}` nomme une archive DANS le répertoire de sauvegarde. Un nom qui
-    // en sort n'a pas à être ouvert, quel que soit ce qu'il désigne.
-    if !is_plain_file_name(&file) {
-        audit(
-            &state,
-            Some(&actor.username),
-            "backup.restore",
-            Some(&file),
-            Outcome::Failure,
-            Some("nom d'archive refusé"),
-        );
-        return fail(
-            StatusCode::BAD_REQUEST,
-            "nom d'archive invalide : attendu le nom d'un fichier du répertoire de sauvegarde",
-        );
-    }
+    let archive = match archive_in_backup_dir(&state, &file) {
+        Ok(path) => path,
+        Err(why) => {
+            audit(
+                &state,
+                Some(&actor.username),
+                "backup.restore",
+                Some(&file),
+                Outcome::Failure,
+                Some("nom d'archive refusé"),
+            );
+            return fail(StatusCode::BAD_REQUEST, &why);
+        }
+    };
     let confirm = body.map(|Json(b)| b.confirm_overwrite).unwrap_or(false);
-    let archive = state.backup_dir.join(&file);
     run_restore(&state, &actor, archive, &file, confirm).await
+}
+
+/// Sert une archive du volume, **en flux**.
+///
+/// ⚠️ Le fichier qui arrive dans les téléchargements est un secret : il porte
+/// la base entière, `secret.key`, le jeton opérateur d'InfluxDB, les clés
+/// privées TLS et `users.json`. Le hub refuse par ailleurs de rendre ces
+/// secrets par l'API — cette route est donc un chemin qui n'existait pas, et
+/// c'est un choix assumé : un administrateur peut déjà presque tout
+/// récupérer, et une sauvegarde qu'on ne peut pas sortir du hub ne protège de
+/// rien le jour où le hub est perdu. Le journal, lui, en garde la trace.
+async fn download_backup(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(file): Path<String>,
+) -> Response {
+    let archive = match archive_in_backup_dir(&state, &file) {
+        Ok(path) => path,
+        Err(why) => {
+            audit(
+                &state,
+                Some(&actor.username),
+                "backup.download",
+                Some(&file),
+                Outcome::Failure,
+                Some("nom d'archive refusé"),
+            );
+            return fail(StatusCode::BAD_REQUEST, &why);
+        }
+    };
+
+    let bytes = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
+    let handle = match tokio::fs::File::open(&archive).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            audit(
+                &state,
+                Some(&actor.username),
+                "backup.download",
+                Some(&file),
+                Outcome::Failure,
+                Some(&e.to_string()),
+            );
+            return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        }
+    };
+
+    audit(
+        &state,
+        Some(&actor.username),
+        "backup.download",
+        Some(&file),
+        Outcome::Success,
+        Some(&format!("archive servie à {} ({bytes} octets)", actor.username)),
+    );
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_LENGTH, bytes.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{file}\""),
+            ),
+        ],
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(handle)),
+    )
+        .into_response()
 }
 
 /// Restaure une archive **téléversée**. C'est le chemin principal : on remet
@@ -6112,6 +6227,31 @@ mod tests {
             (status, json, cookies)
         }
 
+        /// Même appel, mais le corps rendu **tel quel**. Une archive n'est pas
+        /// du JSON : `call` le ramènerait à `Value::Null` et le test
+        /// n'assertirait plus rien. Les en-têtes viennent avec, parce que
+        /// `Content-Disposition` fait partie de ce qu'on vérifie sur un
+        /// téléchargement.
+        async fn call_raw(
+            &self,
+            mut req: Request<Body>,
+        ) -> (StatusCode, HeaderMap, Vec<u8>) {
+            if req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .is_none()
+            {
+                req.extensions_mut().insert(axum::extract::ConnectInfo(
+                    "127.0.0.1:41000".parse::<std::net::SocketAddr>().unwrap(),
+                ));
+            }
+            let response = self.router.clone().oneshot(req).await.unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, headers, bytes.to_vec())
+        }
+
         async fn login(&self) -> String {
             self.login_as("admin").await
         }
@@ -6504,6 +6644,168 @@ mod tests {
                 ))
                 .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "« {name} » : {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_route_that_names_an_archive_ever_follows_a_path_out_of_the_backup_directory() {
+        // 🔴 Les deux routes qui prennent un nom d'archive dans l'URL —
+        // restauration et téléchargement — le font passer par la MÊME garde.
+        // Un nom de fichier nu ne suffit pas : il faut que le nom désigne une
+        // archive que `backup::list` a réellement vue. Sans ça, la route de
+        // téléchargement devient une lecture de fichier arbitraire sur le
+        // volume du hub, ce qui est bien pire que de servir une sauvegarde.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        for name in [
+            "..%2F..%2Fetc%2Fpasswd",
+            "..",
+            "%2Fetc%2Fpasswd",
+            // Un nom nu, acceptable pour `is_plain_file_name`, mais qui ne
+            // correspond à aucune archive du répertoire.
+            "hub.sqlite",
+        ] {
+            let (status, body, _) = h
+                .call(with_cookie(
+                    json_request(
+                        "POST",
+                        &format!("/api/backup/restore/{name}"),
+                        serde_json::json!({ "confirm_overwrite": true }),
+                    ),
+                    &session,
+                ))
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "restauration de « {name} » : {body}"
+            );
+
+            let (status, _, body) = h
+                .call_raw(with_cookie(
+                    empty_request("GET", &format!("/api/backups/{name}")),
+                    &session,
+                ))
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "téléchargement de « {name} » : {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_symlink_dropped_in_the_backup_directory_is_not_an_archive() {
+        // 🔴 **Le trou que `is_plain_file_name` ne ferme pas.** « secret »
+        // est un nom de fichier nu, et `Path::is_file()` suit les liens : un
+        // lien symbolique posé dans /backup — par une archive forgée, un
+        // volume partagé, un montage de travers — ferait servir ou restaurer
+        // la cible du lien. On lit donc `symlink_metadata`, qui ne suit rien.
+        //
+        // Le lien porte un nom d'archive CANONIQUE : c'est le pire cas, celui
+        // où `backup::list` le montre (son `is_file()` suit le lien lui aussi)
+        // et où la seule défense restante est la vérification du lien.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let cible = h.state.config_dir.join("secret.key");
+        std::fs::write(&cible, b"cle-du-hub-qui-ne-doit-pas-sortir").unwrap();
+        let piege = "lanprobe_backup_v9.9.9_2026.01.01_00.00.00.zip";
+        std::os::unix::fs::symlink(&cible, h.state.backup_dir.join(piege)).unwrap();
+
+        let (status, _, body) = h
+            .call_raw(with_cookie(
+                empty_request("GET", &format!("/api/backups/{piege}")),
+                &session,
+            ))
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "un lien symbolique ne se télécharge pas : {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            !String::from_utf8_lossy(&body).contains("cle-du-hub"),
+            "le contenu de la cible du lien ne doit jamais partir"
+        );
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    &format!("/api/backup/restore/{piege}"),
+                    serde_json::json!({ "confirm_overwrite": true }),
+                ),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_archive_is_downloaded_as_a_file_and_the_download_is_recorded() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+
+        let (status, created, _) = h
+            .call(with_cookie(empty_request("POST", "/api/backup"), &session))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let file = created["file"].as_str().unwrap().to_string();
+        let on_disk = std::fs::read(h.state.backup_dir.join(&file)).unwrap();
+
+        let (status, headers, body) = h
+            .call_raw(with_cookie(
+                empty_request("GET", &format!("/api/backups/{file}")),
+                &session,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(
+            body, on_disk,
+            "le hub doit servir l'archive telle qu'elle est sur le volume"
+        );
+        let disposition = headers
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(disposition.contains(&file), "{disposition}");
+        assert!(disposition.starts_with("attachment;"), "{disposition}");
+
+        // Le fichier qui part est un secret : le journal doit en garder la
+        // trace, avec le nom de l'archive en cible.
+        let lines = h.audit(&session, "backup.download").await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["actor"], "admin");
+        assert_eq!(lines[0]["outcome"], "success");
+        assert_eq!(lines[0]["target"], file);
+    }
+
+    #[tokio::test]
+    async fn downloading_an_archive_is_reserved_to_admins() {
+        let h = Harness::with_admin().await;
+        h.user("operateur", Role::Operator).await;
+        h.user("lecteur", Role::Viewer).await;
+
+        for username in ["operateur", "lecteur"] {
+            let session = h.login_as(username).await;
+            let (status, _, body) = h
+                .call_raw(with_cookie(
+                    empty_request("GET", "/api/backups/quelconque.zip"),
+                    &session,
+                ))
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{username} ne doit pas pouvoir télécharger une archive : {}",
+                String::from_utf8_lossy(&body)
+            );
         }
     }
 
