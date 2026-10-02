@@ -105,9 +105,52 @@
       <p class="err">{actionError}</p>
     {/if}
 
+    <!--
+      🔴 **Le formulaire est AVANT la liste, et c'est une règle.** Placé après,
+      il s'éloigne à mesure que la liste grandit : le geste le plus courant
+      devient le plus coûteux, et il empire tout seul. À trois mille profils, il
+      faudrait défiler pour en créer un.
+    -->
+    {#if $canOperate}
+      <div class="row new">
+        <input
+          class="lp-input"
+          bind:value={newName}
+          placeholder={$_('portscan.name')}
+          aria-label={$_('portscan.name')}
+        />
+        <input
+          class="lp-input"
+          bind:value={newPorts}
+          spellcheck="false"
+          placeholder={$_('portscan.ports_placeholder')}
+          aria-label={$_('portscan.ports')}
+        />
+        <input
+          class="lp-input"
+          bind:value={newUdpPorts}
+          spellcheck="false"
+          placeholder={$_('portscan.udp_ports_placeholder')}
+          aria-label={$_('portscan.udp_ports')}
+        />
+        <div class="acts">
+          <button class="lp-btn primary" disabled={busy || !newName.trim()} onclick={create}>
+            {$_('portscan.add')}
+          </button>
+        </div>
+      </div>
+      <!--
+        ⚠️ Le hub ne joint JAMAIS une sonde : c'est elle qui l'appelle. On dit
+        donc « c'est écrit côté hub, les sondes suivront », pas « c'est
+        appliqué » — ce serait affirmer ce que le hub ne peut pas savoir.
+      -->
+      <p class="hint">{$_('portscan.applies_next_beat')}</p>
+    {/if}
+
     <div class="rows">
       {#each profiles as p (p.profile_id)}
-        <div class="row">
+        <!-- Quatre colonnes en édition : nom, TCP, UDP, actions. -->
+        <div class="row" class:editing={editing === p.profile_id}>
           {#if editing === p.profile_id}
             <input class="lp-input" bind:value={editName} aria-label={$_('portscan.name')} />
             <input
@@ -175,42 +218,6 @@
         <p class="hint">{$_('portscan.empty')}</p>
       {/if}
     </div>
-
-    {#if $canOperate}
-      <div class="row new">
-        <input
-          class="lp-input"
-          bind:value={newName}
-          placeholder={$_('portscan.name')}
-          aria-label={$_('portscan.name')}
-        />
-        <input
-          class="lp-input"
-          bind:value={newPorts}
-          spellcheck="false"
-          placeholder={$_('portscan.ports_placeholder')}
-          aria-label={$_('portscan.ports')}
-        />
-        <input
-          class="lp-input"
-          bind:value={newUdpPorts}
-          spellcheck="false"
-          placeholder={$_('portscan.udp_ports_placeholder')}
-          aria-label={$_('portscan.udp_ports')}
-        />
-        <div class="acts">
-          <button class="lp-btn primary" disabled={busy || !newName.trim()} onclick={create}>
-            {$_('portscan.add')}
-          </button>
-        </div>
-      </div>
-      <!--
-        ⚠️ Le hub ne joint JAMAIS une sonde : c'est elle qui l'appelle. On dit
-        donc « c'est écrit côté hub, les sondes suivront », pas « c'est
-        appliqué » — ce serait affirmer ce que le hub ne peut pas savoir.
-      -->
-      <p class="hint">{$_('portscan.applies_next_beat')}</p>
-    {/if}
   {/if}
 </section>
 
@@ -242,6 +249,11 @@
   }
   .row.new {
     border-style: dashed;
+  }
+  /* Saisie : le nom, les deux listes de ports, les actions. */
+  .row.new,
+  .row.editing {
+    grid-template-columns: minmax(110px, 1fr) minmax(140px, 1.4fr) minmax(140px, 1.4fr) auto;
   }
   .name {
     font-size: 13px;
