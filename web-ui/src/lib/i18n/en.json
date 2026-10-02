@@ -564,6 +564,8 @@
     "profile_web": "Web",
     "profile_infra": "Infra",
     "profile_db": "Databases",
+    "profile_remote": "Remote access",
+    "profile_full": "Full (extended)",
     "discovery_ping": "Watch",
     "discovery_scan": "Scan ports",
     "ipHistoryEmpty": "Address history available since the hub was updated.",

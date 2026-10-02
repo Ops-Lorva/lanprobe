@@ -12,12 +12,21 @@
 
 import type { PortscanProfile } from './api';
 
-/** Les quatre profils posés par la migration, et eux seuls, restent traduits. */
+/**
+ * Les profils **de base** du hub, et eux seuls, restent traduits.
+ *
+ * ⚠️ `infra` n'y est plus semé depuis le 02/10 — l'application sonde n'en a
+ * pas — mais il reste traduit : les hubs déjà en service le portent, et on ne
+ * supprime rien ici. Lui retirer son libellé l'afficherait « Infra » en
+ * français à quelqu'un qui le lisait traduit.
+ */
 const SEEDED_LABELS: Record<string, string> = {
   common: 'probe.profile_common',
   web: 'probe.profile_web',
   infra: 'probe.profile_infra',
   db: 'probe.profile_db',
+  remote: 'probe.profile_remote',
+  full: 'probe.profile_full',
 };
 
 /**

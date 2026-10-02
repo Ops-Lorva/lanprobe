@@ -1585,9 +1585,13 @@ impl Db {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         migrate(&conn)?;
         let db = Self { conn: Mutex::new(conn) };
-        // Les quatre profils en dur deviennent des lignes au PREMIER démarrage
-        // de cette version, et jamais ensuite (contrat § 25).
+        // Les profils de base deviennent des lignes au PREMIER démarrage de
+        // cette version, et jamais ensuite (contrat § 25).
         db.seed_portscan_profiles()?;
+        // Et un hub déjà semé avec les anciennes listes passe à celles de
+        // l'application sonde — une seule fois, et seulement pour les profils
+        // que personne n'a touchés depuis.
+        db.refresh_seeded_portscan_profiles()?;
         // 🔴 Et le compteur de révision est relevé sous ses propres lignes :
         // une base restaurée depuis une sauvegarde ne doit pas resservir des
         // numéros déjà émis. C'est le RECUL, pas le débordement, qui menace.

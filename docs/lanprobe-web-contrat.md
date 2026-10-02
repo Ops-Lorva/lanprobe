@@ -3174,13 +3174,63 @@ rien : le hub lui répondrait « tu es à jour » pour toujours. Deux gardes :
    comme inconnue et reçoit la liste complète. Le cas se répare de lui-même au
    premier battement.
 
-### Migration des quatre profils en dur
+### Les profils de base sont ceux de l'application sonde
 
-`common` (ports vides), `web`, `infra`, `db` deviennent les quatre premières
-lignes, posées **au premier démarrage de cette version** et jamais reposées
-ensuite — les reposer ressusciterait un profil supprimé exprès. ⚠️ `infra`
-répétait `161` dans le code du hub : la ligne posée en base est triée et
-dédoublonnée.
+Demande de Benjamin (02/10) : « de base les profils en local et sur le hub
+doivent être les mêmes ». Le hub posait quatre listes maigres recopiées de son
+ancienne interface — `Common` **sans aucun port**, `Web` avec huit, `Databases`
+avec huit, plus un `Infra` — alors que l'application sonde en propose cinq, bien
+plus fournies, UDP compris. Deux vérités pour un seul nom, et l'écran de la
+sonde montrait les deux côte à côte.
+
+La source est donc désormais `BUILTIN_PROFILES`
+(`src/lib/stores/portscanProfiles.ts`) : `Common`, `Web`, `Databases`,
+`Remote access`, `Full (extended)`, posés **au premier démarrage** et jamais
+reposés ensuite — les reposer ressusciterait un profil supprimé exprès.
+
+⚠️ **Ce sont des points de départ, pas des intouchables** : ils se modifient et
+se suppriment comme les autres. Rien n'est verrouillé.
+
+⚠️ Les deux listes ne peuvent pas partager de source — un module TypeScript du
+bureau, une constante Rust du hub. Un test du hub
+(`les_profils_de_base_sont_exactement_ceux_de_l_application_sonde`) fige les
+listes attendues : s'il tombe après qu'on a touché aux profils de la sonde,
+c'est la constante du hub qu'il faut recopier.
+
+#### Mettre à niveau un hub DÉJÀ semé
+
+Un hub en service porte les anciennes listes et, peut-être, des profils que
+quelqu'un a créés ou retouchés. La mise à niveau ne touche donc que les lignes
+**restées exactement telles qu'elles ont été semées** : même identifiant, même
+nom, mêmes ports TCP, et pas un seul port UDP. C'est la comparaison avec la
+valeur d'origine qui le dit — pas une colonne « modifié par un humain » qu'il
+faudrait tenir à jour, et aucune supposition.
+
+| Ligne | Ce qu'il advient |
+|---|---|
+| encore telle qu'elle a été semée | mise aux listes de la sonde |
+| retouchée par quelqu'un | **laissée telle quelle** |
+| créée par quelqu'un | jamais touchée |
+| **supprimée** (`deleted_at`) | ni mise à niveau ni recréée |
+| `remote`, `full` (nouvelles) | posées, sauf si le nom est déjà pris |
+
+⚠️ Elle ne se rejoue **jamais** : après son passage, la ligne ne ressemble plus
+au semis d'origine, et la comparaison ne protégerait donc plus rien d'une
+seconde exécution — elle réécrirait un profil retouché depuis.
+
+⚠️ **`Infra` reste.** L'application sonde n'a pas d'équivalent, mais rien ne se
+supprime ici sans qu'on le demande : poser sa pierre tombale le ferait
+disparaître de tout le parc. Il n'est ni mis à niveau ni retiré, et qui n'en
+veut pas le supprime d'un clic.
+
+⚠️ `infra` répétait `161` dans le code du hub : la ligne posée en base était
+triée et dédoublonnée, et la comparaison se fait donc sur la liste normalisée.
+
+🔴 **`Common` change de sens au passage**, et c'est voulu : ses ports étaient
+**vides**, c'est-à-dire « la sonde garde sa liste ». Il porte maintenant les
+seize ports TCP et six UDP du `Common` de l'application — exactement ce que la
+sonde scannait avec son propre profil. Le comportement observé ne change pas,
+le hub cesse seulement de déléguer.
 
 ### Ce que l'écran de la sonde affiche
 

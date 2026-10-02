@@ -49,12 +49,22 @@ pub(crate) const PORTSCAN_REV_KEY: &str = "portscan_profiles_rev";
 /// le hub a retirés, et les remonterait. Elle reçoit donc la liste complète.
 pub(crate) const PORTSCAN_PURGED_KEY: &str = "portscan_purged_below_rev";
 
-/// Les quatre profils en dur ont-ils déjà été posés ?
+/// Les profils de base ont-ils déjà été posés ?
 ///
 /// 🔴 Les reposer à chaque démarrage ressusciterait celui qu'on vient de
 /// supprimer exprès — une suppression qui se défait toute seule au prochain
 /// redémarrage du conteneur.
 const PORTSCAN_SEEDED_KEY: &str = "portscan_profiles_seeded";
+
+/// Les profils de base ont-ils été mis à niveau sur les listes de
+/// l'application sonde ?
+///
+/// 🔴 Une seule fois, elle aussi. Rejouée à chaque démarrage, elle réécrirait
+/// un profil de base que quelqu'un vient de retoucher — et comme la
+/// comparaison avec la valeur d'origine ne vaut qu'une fois (après la mise à
+/// niveau, la ligne ne ressemble plus au semis d'origine), elle ne protégerait
+/// plus rien.
+const PORTSCAN_RESEEDED_KEY: &str = "portscan_profiles_seeded_probe_lists";
 
 /// Au-delà, une sonde cesse de retenir le nettoyage des pierres tombales.
 ///
@@ -63,17 +73,93 @@ const PORTSCAN_SEEDED_KEY: &str = "portscan_profiles_seeded";
 /// une machine oubliée dans un placard figerait la table pour toujours.
 const TOMBSTONE_GRACE_SECS: i64 = 90 * 86_400;
 
-/// Les quatre profils de l'interface du hub, repris **verbatim** de
-/// `PORT_PROFILES` (`web-ui/src/views/ProbeView.svelte`).
+/// Un profil de base, tel que le hub le pose à l'installation.
+struct SeededProfile {
+    id: &'static str,
+    name: &'static str,
+    ports: &'static [i64],
+    udp_ports: &'static [i64],
+}
+
+/// Les profils de base du hub, **repris de l'application sonde**
+/// (`BUILTIN_PROFILES` dans `src/lib/stores/portscanProfiles.ts`).
+///
+/// 🔴 Demande de Benjamin (02/10) : « de base les profils en local et sur le
+/// hub doivent être les mêmes ». Le hub posait jusque-là quatre listes maigres
+/// recopiées de son ancienne interface — `Common` sans aucun port, `Web` avec
+/// huit, `Databases` avec huit — alors que la sonde en propose cinq bien plus
+/// fournies, UDP compris. Deux vérités pour un seul nom, et l'écran de la
+/// sonde montrait les deux côte à côte.
+///
+/// ⚠️ **Ce sont des points de départ, pas des intouchables** : ils se modifient
+/// et se suppriment comme les autres. Rien n'est verrouillé.
+///
+/// ⚠️ Les deux listes ne peuvent pas partager de source — un module TypeScript
+/// du bureau, une constante Rust du hub. Le test
+/// `les_profils_de_base_sont_exactement_ceux_de_l_application_sonde` est donc
+/// le seul endroit qui dit à quoi elles doivent ressembler : s'il tombe après
+/// qu'on a touché aux profils de la sonde, c'est ICI qu'il faut recopier.
+const SEEDED_PROFILES: &[SeededProfile] = &[
+    SeededProfile {
+        id: "common",
+        name: "Common",
+        ports: &[
+            21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 3389, 5432, 5900, 8080, 8443,
+        ],
+        udp_ports: &[53, 123, 137, 161, 1900, 5353],
+    },
+    SeededProfile {
+        id: "web",
+        name: "Web",
+        ports: &[
+            80, 443, 8000, 8008, 8080, 8081, 8088, 8181, 8443, 8888, 3000, 5000, 9000,
+        ],
+        udp_ports: &[],
+    },
+    SeededProfile {
+        id: "db",
+        name: "Databases",
+        ports: &[
+            1433, 1521, 3306, 5432, 5984, 6379, 7000, 9042, 9200, 9300, 11211, 27017, 50000,
+        ],
+        udp_ports: &[1434],
+    },
+    SeededProfile {
+        id: "remote",
+        name: "Remote access",
+        ports: &[22, 23, 2222, 3389, 5900, 5901, 5902, 5938, 6000],
+        udp_ports: &[],
+    },
+    SeededProfile {
+        id: "full",
+        name: "Full (extended)",
+        ports: &[
+            21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 389, 443, 445, 465, 514, 587, 631,
+            636, 873, 993, 995, 1080, 1194, 1433, 1521, 2049, 2222, 2375, 2376, 3000, 3128, 3306,
+            3389, 5000, 5060, 5222, 5432, 5672, 5900, 5984, 6379, 6443, 7000, 8000, 8008, 8080,
+            8086, 8088, 8181, 8443, 8883, 9000, 9092, 9200, 9300, 11211, 27017, 50000,
+        ],
+        udp_ports: &[53, 67, 68, 69, 123, 137, 161, 500, 514, 1900, 4500, 5353],
+    },
+];
+
+/// Les quatre profils que la **première** version du semis (01/10) a posés,
+/// repris verbatim de l'ancienne interface du hub.
+///
+/// 🔴 Ils ne sont plus posés : ils servent à **reconnaître** une ligne que
+/// personne n'a touchée depuis. Un hub déjà en service les porte, et c'est le
+/// seul moyen honnête de distinguer « encore tel qu'il a été semé » — donc
+/// remplaçable — de « quelqu'un l'a modifié » — donc intouchable. Pas de
+/// colonne « modifié par un humain » à tenir à jour, aucune supposition.
 ///
 /// ⚠️ Le doublon de `161` dans `infra` est celui du code d'origine, laissé ici
-/// exprès : c'est [`normalize_ports`] qui le retire, et le test le vérifie. Le
-/// corriger ici ferait passer le test sans que la règle soit tenue — et la
-/// prochaine liste saisie à la main repasserait, doublon compris.
+/// exprès : c'est [`normalize_ports`] qui le retire, et la comparaison se fait
+/// donc sur la liste normalisée, comme en base.
 ///
-/// `common` a des ports **vides** : il voulait déjà dire « la liste par défaut
-/// de la sonde » (`null` dans le code d'origine).
-const SEEDED_PROFILES: &[(&str, &str, &[i64])] = &[
+/// ⚠️ `infra` n'a **aucun équivalent** dans l'application sonde. Il reste donc
+/// en place, ni mis à niveau ni supprimé : rien ne se supprime ici sans qu'on
+/// le demande, et une pierre tombale le ferait disparaître de tout le parc.
+const LEGACY_SEEDED_PROFILES: &[(&str, &str, &[i64])] = &[
     ("common", "Common", &[]),
     ("web", "Web", &[80, 443, 8080, 8443, 8000, 8888, 3000, 5000]),
     ("infra", "Infra", &[22, 23, 53, 123, 161, 389, 636, 3389, 5900, 161]),
@@ -206,6 +292,21 @@ fn port_array(entry: &serde_json::Value, key: &str) -> Vec<i64> {
         .unwrap_or_default()
 }
 
+/// La ligne est-elle encore **exactement** celle que le semis du 01/10 a
+/// posée ?
+///
+/// ⚠️ Les trois champs, pas un seul. Un nom retouché, un port ajouté ou un port
+/// UDP saisi depuis la v27 du schéma suffisent à dire « quelqu'un s'en est
+/// occupé », et le hub n'a alors rien à écraser.
+fn is_untouched_legacy(existing: &PortscanProfile) -> bool {
+    LEGACY_SEEDED_PROFILES.iter().any(|(id, name, ports)| {
+        *id == existing.profile_id
+            && *name == existing.name
+            && normalize_ports(ports) == existing.ports
+            && existing.udp_ports.is_empty()
+    })
+}
+
 fn poisoned() -> DbError {
     DbError::Internal("verrou SQLite empoisonné".into())
 }
@@ -274,31 +375,107 @@ impl Db {
         Ok(next)
     }
 
-    /// Pose les quatre profils en dur, **une seule fois dans la vie de la
-    /// base**. Sans effet s'ils l'ont déjà été.
+    /// Pose les profils de base, **une seule fois dans la vie de la base**.
+    /// Sans effet s'ils l'ont déjà été.
     pub(crate) fn seed_portscan_profiles(&self) -> DbResult<()> {
         if self.get_setting(PORTSCAN_SEEDED_KEY)?.is_some() {
             return Ok(());
         }
-        for (id, name, ports) in SEEDED_PROFILES {
-            let rev = self.bump_portscan_rev()?;
-            let now = crate::db::now();
-            let conn = self.conn().lock().map_err(|_| poisoned())?;
-            conn.execute(
-                "INSERT INTO portscan_profiles
-                   (profile_id, name, ports, origin_probe, created_at, updated_at, rev)
-                 VALUES (?1, ?2, ?3, NULL, ?4, ?4, ?5)",
-                rusqlite::params![
-                    id,
-                    name,
-                    serde_json::to_string(&normalize_ports(ports)).unwrap_or_else(|_| "[]".into()),
-                    now,
-                    rev
-                ],
+        for seeded in SEEDED_PROFILES {
+            // Un conflit de nom n'arrête pas le semis : une base neuve n'en
+            // aura pas, et une base bricolée à la main ne doit pas empêcher le
+            // hub de démarrer.
+            let _ = self.insert_portscan_profile(
+                seeded.id,
+                seeded.name,
+                seeded.ports,
+                seeded.udp_ports,
+                None,
             )?;
         }
         self.set_setting(PORTSCAN_SEEDED_KEY, "1")?;
+        // ⚠️ Une base neuve part déjà des bonnes listes : la mise à niveau
+        // n'aurait rien à y faire, et la marquer faite évite qu'elle aille
+        // comparer des lignes qu'elle vient d'écrire.
+        self.set_setting(PORTSCAN_RESEEDED_KEY, "1")?;
         Ok(())
+    }
+
+    /// Met les profils de base aux listes de l'application sonde, **une seule
+    /// fois**, et seulement ceux que personne n'a touchés.
+    ///
+    /// 🔴 Le critère est la **comparaison avec la valeur d'origine** : une
+    /// ligne encore identique à ce que le semis du 01/10 avait posé — nom,
+    /// ports TCP, et pas un seul port UDP — n'a été modifiée par personne. Tout
+    /// le reste est le travail de quelqu'un, et le hub n'y touche pas.
+    ///
+    /// ⚠️ Un profil de base **supprimé** n'est pas mis à niveau, et surtout pas
+    /// recréé : sa pierre tombale est un fait daté, et la ressusciter ferait se
+    /// défaire une suppression voulue au premier redémarrage.
+    pub(crate) fn refresh_seeded_portscan_profiles(&self) -> DbResult<()> {
+        if self.get_setting(PORTSCAN_RESEEDED_KEY)?.is_some() {
+            return Ok(());
+        }
+        for seeded in SEEDED_PROFILES {
+            match self.get_portscan_profile(seeded.id) {
+                Ok(existing) => {
+                    if existing.deleted_at.is_some() || !is_untouched_legacy(&existing) {
+                        continue;
+                    }
+                    self.update_portscan_profile(
+                        seeded.id,
+                        Some(seeded.name),
+                        Some(seeded.ports),
+                        Some(seeded.udp_ports),
+                    )?;
+                }
+                // Absent : c'est un profil de base que cette version ajoute
+                // (`Remote access`, `Full (extended)`). Un nom déjà pris par
+                // quelqu'un n'est pas une erreur — on laisse le sien.
+                Err(DbError::NotFound(_)) => {
+                    match self.insert_portscan_profile(
+                        seeded.id,
+                        seeded.name,
+                        seeded.ports,
+                        seeded.udp_ports,
+                        None,
+                    ) {
+                        Ok(_) => {}
+                        Err(DbError::Conflict(e)) => {
+                            tracing::info!("profil de base {} non posé : {e}", seeded.id)
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        self.set_setting(PORTSCAN_RESEEDED_KEY, "1")?;
+        Ok(())
+    }
+
+    /// Pose le semis **d'origine** (01/10). Les tests seuls : c'est l'état
+    /// d'un hub déjà en service, celui que la mise à niveau doit reconnaître.
+    #[cfg(test)]
+    pub(crate) fn pose_legacy_seed_for_tests(&self) {
+        for profile in self.portscan_profiles_with_tombstones().unwrap() {
+            let conn = self.conn().lock().unwrap();
+            conn.execute(
+                "DELETE FROM portscan_profiles WHERE profile_id = ?1",
+                [&profile.profile_id],
+            )
+            .unwrap();
+        }
+        for (id, name, ports) in LEGACY_SEEDED_PROFILES {
+            self.insert_portscan_profile(id, name, ports, &[], None).unwrap();
+        }
+        self.set_setting(PORTSCAN_RESEEDED_KEY, "").unwrap();
+        let conn = self.conn().lock().unwrap();
+        conn.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            [PORTSCAN_RESEEDED_KEY],
+        )
+        .unwrap();
     }
 
     /// La liste de l'interface : **supprimés exclus**, par nom.
@@ -796,20 +973,140 @@ mod tests {
     }
 
     #[test]
-    fn les_quatre_profils_en_dur_sont_poses_tries_et_dedoublonnes() {
+    fn les_profils_de_base_sont_exactement_ceux_de_l_application_sonde() {
+        // 🔴 Demande de Benjamin (02/10) : « de base les profils en local et
+        // sur le hub doivent être les mêmes ». Le hub semait quatre listes
+        // maigres recopiées de son ancienne interface (`Common` vide, `Web` 8
+        // ports, `Infra` 9, `Databases` 8) ; l'application sonde en propose
+        // cinq, bien plus fournies. Deux vérités pour un seul nom.
+        //
+        // ⚠️ Les listes sont copiées de `src/lib/stores/portscanProfiles.ts`,
+        // `BUILTIN_PROFILES`. Les deux ne peuvent pas partager de source — un
+        // module TypeScript du bureau et une constante Rust du hub — et ce test
+        // est donc le seul endroit qui dit à quoi elles doivent ressembler.
+        let db = open_memory();
+        let list = db.list_portscan_profiles().unwrap();
+
+        let common = profile(&list, "common");
+        assert_eq!(
+            common.ports,
+            vec![21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 3389, 5432, 5900, 8080, 8443]
+        );
+        assert_eq!(common.udp_ports, vec![53, 123, 137, 161, 1900, 5353]);
+
+        let web = profile(&list, "web");
+        assert_eq!(
+            web.ports,
+            vec![80, 443, 3000, 5000, 8000, 8008, 8080, 8081, 8088, 8181, 8443, 8888, 9000]
+        );
+        assert!(web.udp_ports.is_empty());
+
+        let db_profile = profile(&list, "db");
+        assert_eq!(
+            db_profile.ports,
+            vec![1433, 1521, 3306, 5432, 5984, 6379, 7000, 9042, 9200, 9300, 11211, 27017, 50000]
+        );
+        assert_eq!(db_profile.udp_ports, vec![1434]);
+
+        let remote = profile(&list, "remote");
+        assert_eq!(remote.name, "Remote access");
+        assert_eq!(remote.ports, vec![22, 23, 2222, 3389, 5900, 5901, 5902, 5938, 6000]);
+
+        let full = profile(&list, "full");
+        assert_eq!(full.name, "Full (extended)");
+        assert_eq!(full.ports.len(), 59, "{:?}", full.ports);
+        assert_eq!(full.udp_ports.len(), 12);
+
+        // Tous posés par le hub, aucun venu d'une sonde.
+        assert!(list.iter().all(|p| p.origin_probe.is_none()));
+    }
+
+    #[test]
+    fn la_mise_a_niveau_ne_touche_que_les_profils_restes_tels_qu_ils_ont_ete_semes() {
+        // ⚠️ Le hub de Benjamin est DÉJÀ semé avec les anciennes listes, et il
+        // y a ajouté un profil à lui. Mettre à niveau en aveugle écraserait son
+        // travail ; ne rien faire laisserait le hub et la sonde en désaccord.
+        //
+        // Le critère est une **comparaison avec la valeur d'origine** : une
+        // ligne encore identique à ce que le semis de la v1 avait posé n'a été
+        // touchée par personne. Pas de colonne « modifié par un humain » à
+        // tenir à jour, et aucune supposition.
+        let db = open_memory();
+        db.pose_legacy_seed_for_tests();
+
+        // Quelqu'un a retouché « Web », créé « Test », et laissé le reste.
+        db.update_portscan_profile("web", None, Some(&[8080]), None).unwrap();
+        let test = db.create_portscan_profile("Test", &[9999], &[], None).unwrap();
+
+        db.refresh_seeded_portscan_profiles().unwrap();
+        let list = db.list_portscan_profiles().unwrap();
+
+        // Resté tel quel → mis à niveau.
+        assert_eq!(profile(&list, "common").ports.len(), 16, "mis à niveau");
+        assert_eq!(profile(&list, "common").udp_ports.len(), 6);
+        // Retouché → laissé tranquille. C'est le travail de quelqu'un.
+        assert_eq!(profile(&list, "web").ports, vec![8080], "jamais écrasé");
+        // Créé par quelqu'un → intouchable, et il ne doit surtout pas
+        // disparaître au motif qu'il n'est pas dans la liste de base.
+        assert_eq!(profile(&list, &test.profile_id).ports, vec![9999]);
+        // ⚠️ `Infra` n'existe PAS dans l'application sonde. On ne le supprime
+        // pas pour autant : rien ne se supprime ici sans qu'on le demande, et
+        // une pierre tombale le ferait disparaître de tout le parc.
+        assert_eq!(profile(&list, "infra").ports.len(), 9, "ni touché ni supprimé");
+        // Les deux nouveaux profils de base arrivent.
+        assert_eq!(profile(&list, "remote").name, "Remote access");
+        assert_eq!(profile(&list, "full").udp_ports.len(), 12);
+    }
+
+    #[test]
+    fn la_mise_a_niveau_ne_ressuscite_pas_un_profil_de_base_supprime() {
+        // 🔴 Même leçon que le semis : reposer un profil ressusciterait celui
+        // qu'on vient de supprimer exprès. La pierre tombale doit survivre à la
+        // mise à niveau, sinon la suppression se défait au redémarrage suivant.
+        let db = open_memory();
+        db.pose_legacy_seed_for_tests();
+        db.delete_portscan_profile("db").unwrap();
+
+        db.refresh_seeded_portscan_profiles().unwrap();
+
+        let vivants = db.list_portscan_profiles().unwrap();
+        assert!(!vivants.iter().any(|p| p.profile_id == "db"), "{vivants:?}");
+        let tout = db.portscan_profiles_with_tombstones().unwrap();
+        assert!(profile(&tout, "db").deleted_at.is_some(), "la date reste");
+    }
+
+    #[test]
+    fn la_mise_a_niveau_ne_se_rejoue_pas_au_demarrage_suivant() {
+        // Sans quoi un profil de base retouché après la mise à niveau serait
+        // réécrit à chaque redémarrage du conteneur.
+        let db = open_memory();
+        db.pose_legacy_seed_for_tests();
+        db.refresh_seeded_portscan_profiles().unwrap();
+        db.update_portscan_profile("common", None, Some(&[22]), None).unwrap();
+
+        db.refresh_seeded_portscan_profiles().unwrap();
+
+        assert_eq!(profile(&db.list_portscan_profiles().unwrap(), "common").ports, vec![22]);
+    }
+
+    #[test]
+    fn le_semis_d_origine_reste_trie_et_dedoublonne() {
         // ⚠️ `infra` répétait `161` dans le code du hub. Posée telle quelle, la
         // ligne ferait annoncer « 10 ports » pour neuf, et deux listes
         // identiques à l'ordre près se liraient comme deux profils différents.
+        //
+        // On le vérifie sur le semis d'ORIGINE, celui que les hubs déjà en
+        // service portent : c'est lui que la mise à niveau doit savoir
+        // reconnaître, au port près.
         let db = open_memory();
+        db.pose_legacy_seed_for_tests();
         let posed = db.list_portscan_profiles().unwrap();
-        assert_eq!(posed.len(), 4, "{posed:?}");
 
         let infra = profile(&posed, "infra");
         assert_eq!(infra.ports, vec![22, 23, 53, 123, 161, 389, 636, 3389, 5900]);
 
-        // ⚠️ `common` a des ports VIDES, et ce n'est pas une liste vide envoyée
-        // à la sonde : c'est « la sonde garde la sienne ». Les confondre ferait
-        // un scan complet là où on croyait restreindre.
+        // ⚠️ `common` avait des ports VIDES, et ce n'était pas une liste vide
+        // envoyée à la sonde : c'était « la sonde garde la sienne ».
         assert!(profile(&posed, "common").ports.is_empty());
     }
 
@@ -886,7 +1183,7 @@ mod tests {
             .map(|p| p.profile_id)
             .collect();
         assert!(!ids.contains(&"web".to_string()), "{ids:?}");
-        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.len(), SEEDED_PROFILES.len() - 1);
     }
 
     #[test]
@@ -984,7 +1281,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(update.replace, "elle doit tout remplacer");
-        assert_eq!(update.profiles.len(), 4, "la liste complète");
+        assert_eq!(update.profiles.len(), SEEDED_PROFILES.len(), "la liste complète");
     }
 
     #[test]
@@ -1270,7 +1567,7 @@ mod routes_tests {
 
         let (status, body) = h.send("GET", "/api/portscan-profiles", &lecteur, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["profiles"].as_array().unwrap().len(), 4);
+        assert_eq!(body["profiles"].as_array().unwrap().len(), SEEDED_PROFILES.len());
 
         // Lancer un scan change ce qui frappe le réseau d'un client : ce n'est
         // pas une consultation.
@@ -1390,7 +1687,10 @@ mod routes_tests {
 
         let response = h.heartbeat(&id, &token, json!({ "profiles_rev": avance })).await;
         assert_eq!(response["portscan_profiles_replace"], json!(true), "{response}");
-        assert_eq!(response["portscan_profiles"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            response["portscan_profiles"].as_array().unwrap().len(),
+            SEEDED_PROFILES.len()
+        );
     }
 
     #[tokio::test]
