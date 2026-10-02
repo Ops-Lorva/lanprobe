@@ -538,4 +538,38 @@ describe('catalogues de traduction', () => {
       expect(REQUISES_ORIGINE_DES_COMMANDES.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+
+  /**
+   * Téléchargement d'une archive.
+   *
+   * ⚠️ `backup.dl_contents` n'est pas décoratif : le fichier qui arrive dans
+   * les téléchargements est un secret, et rien sur son icône ne le dit. C'est
+   * la seule phrase de l'écran qui l'annonce.
+   */
+  const REQUISES_TELECHARGEMENT = [
+    'backup.col_file',
+    'backup.download',
+    'backup.dl_title',
+    'backup.dl_contents',
+    'backup.dl_choice',
+    'backup.dl_plain',
+    'backup.dl_plain_hint',
+    'backup.dl_sealed',
+    'backup.dl_sealed_hint',
+    'backup.dl_password',
+    'backup.dl_password_forget',
+    'backup.dl_go',
+    'backup.pw_title',
+    'backup.pw_lead',
+    'backup.pw_label',
+    'backup.pw_go',
+    'backup.err_password_title',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés du téléchargement d'une archive`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_TELECHARGEMENT.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });

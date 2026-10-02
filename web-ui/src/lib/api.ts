@@ -845,6 +845,47 @@ export class ApiError extends Error {
   get isNetwork() {
     return this.status === 0;
   }
+
+  /**
+   * L'archive est scellée et aucun mot de passe n'a été donné.
+   *
+   * ⚠️ Lu dans le `code` du corps, **jamais** dans le texte du message : une
+   * reformulation casserait l'écran. Même motif que `totp_required`.
+   */
+  get needsArchivePassword() {
+    return this.backupCode === 'password_required';
+  }
+
+  /**
+   * Le mot de passe donné n'ouvre pas l'archive.
+   *
+   * ⚠️ À ne pas confondre avec « archive refusée » : à la lecture d'un ZIP les
+   * deux se ressemblent, et conclure « mauvais fichier » fait jeter une
+   * sauvegarde parfaitement valide.
+   */
+  get wrongArchivePassword() {
+    return this.backupCode === 'password_wrong';
+  }
+
+  private get backupCode(): string | null {
+    if (typeof this.body !== 'object' || this.body === null) return null;
+    const code = (this.body as { code?: unknown }).code;
+    return typeof code === 'string' ? code : null;
+  }
+}
+
+/**
+ * L'adresse qui sert une archive.
+ *
+ * Elle est construite ici et pas dans l'écran parce qu'elle est empruntée de
+ * deux façons : un lien `GET` pour l'archive en clair, et l'action d'un
+ * `<form method="POST">` pour l'archive scellée. ⚠️ **Le mot de passe ne va
+ * jamais dans cette URL** : `access_log` côté hub journalise la requête avec
+ * sa chaîne de requête, et un `?password=` finirait en clair dans les
+ * journaux du conteneur. Il voyage dans le corps du formulaire.
+ */
+export function backupDownloadUrl(file: string): string {
+  return `/api/backups/${encodeURIComponent(file)}`;
 }
 
 /**
@@ -1510,10 +1551,12 @@ export const api = {
    * exigé dès qu'il y a des données en place : sans lui le hub répond 409 et
    * ne touche à rien.
    */
-  restoreBackup: (file: string, confirm_overwrite: boolean) =>
+  restoreBackup: (file: string, confirm_overwrite: boolean, password?: string) =>
     request<RestoreReport>(`/api/backup/restore/${encodeURIComponent(file)}`, {
       method: 'POST',
-      body: JSON.stringify({ confirm_overwrite }),
+      // ⚠️ `password` n'est envoyé que s'il y en a un : une chaîne vide ferait
+      // tenter un déchiffrement sur une archive en clair.
+      body: JSON.stringify(password ? { confirm_overwrite, password } : { confirm_overwrite }),
     }),
 
   /**
@@ -1523,9 +1566,13 @@ export const api = {
    * poser la limite `multipart/boundary=…`. La fixer à la main produit un
    * corps que le hub lit comme « envoi illisible ».
    */
-  restoreUpload: (archive: File, confirm_overwrite: boolean) => {
+  restoreUpload: (archive: File, confirm_overwrite: boolean, password?: string) => {
     const form = new FormData();
     form.append('confirm_overwrite', String(confirm_overwrite));
+    // ⚠️ Avant le fichier : le hub lit les champs dans l'ordre d'arrivée, et
+    // une archive de plusieurs centaines de Mo placée devant retarderait la
+    // lecture du mot de passe jusqu'à la fin de l'envoi.
+    if (password) form.append('password', password);
     form.append('archive', archive, archive.name);
     return request<RestoreReport>('/api/backup/restore', { method: 'POST', body: form });
   },

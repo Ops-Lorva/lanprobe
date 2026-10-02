@@ -1,6 +1,14 @@
 <script lang="ts">
   import { _, locale } from 'svelte-i18n';
-  import { api, ApiError, type BackupCreated, type BackupList } from '$lib/api';
+  import {
+    api,
+    ApiError,
+    backupDownloadUrl,
+    type BackupArchive,
+    type BackupCreated,
+    type BackupList,
+  } from '$lib/api';
+  import Modal from '$lib/components/Modal.svelte';
   import { humanBytes } from '$lib/time';
 
   interface Props {
@@ -53,6 +61,32 @@
     } finally {
       busy = false;
     }
+  }
+
+  // ── Téléchargement ───────────────────────────────────────────────────────
+  //
+  // Un dialogue et pas un simple lien, parce qu'il y a un choix à faire : une
+  // archive s'ouvre partout ou se protège par un mot de passe, et le second
+  // cas ne se devine pas. Le dialogue est aussi le seul endroit où dire ce
+  // que le fichier contient au moment où on décide de le sortir du hub.
+  let download = $state<BackupArchive | null>(null);
+  let sealed = $state(false);
+  let password = $state('');
+  // Le formulaire est soumis à la main : c'est lui qui porte le mot de passe
+  // dans son CORPS. Un lien l'aurait mis dans l'URL, où le journal d'accès du
+  // hub l'écrirait en clair.
+  let form = $state<HTMLFormElement | null>(null);
+
+  function askDownload(a: BackupArchive) {
+    download = a;
+    sealed = false;
+    password = '';
+  }
+
+  function sendSealed() {
+    form?.submit();
+    download = null;
+    password = '';
   }
 </script>
 
@@ -154,6 +188,7 @@
               <th>{$_('backup.col_date')}</th>
               <th class="right">{$_('backup.col_size')}</th>
               <th class="right">{$_('backup.col_version')}</th>
+              <th class="right"><span class="lp-sr">{$_('backup.col_file')}</span></th>
             </tr>
           </thead>
           <tbody>
@@ -162,6 +197,11 @@
                 <td title={a.file}>{stamp.format(new Date(a.created_at_unix * 1000))}</td>
                 <td class="right lp-mono">{humanBytes(a.bytes, lang)}</td>
                 <td class="right lp-mono">{a.hub_version}</td>
+                <td class="right">
+                  <button class="lp-btn tiny" onclick={() => askDownload(a)}>
+                    {$_('backup.download')}
+                  </button>
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -177,6 +217,92 @@
        de webhook. Qui le copie sur un partage ouvert copie les secrets. -->
   <p class="secret">{$_('backup.secret')}</p>
 </section>
+
+<!--
+  Téléchargement. Deux chemins, et deux mécaniques différentes pour une
+  bonne raison :
+
+  * sans mot de passe, un simple lien en `GET` suffit — le navigateur
+    télécharge nativement, rien ne passe par la mémoire de l'onglet ;
+  * avec mot de passe, un `<form method="POST">` : le mot de passe doit
+    voyager dans le CORPS. Dans l'URL, le journal d'accès du hub l'écrirait
+    en clair dans les journaux du conteneur.
+
+  ⚠️ Le formulaire vise une iframe cachée. Sans elle, une réponse d'erreur
+  du hub (du JSON) remplacerait l'application dans l'onglet : on perdrait
+  l'écran pour afficher `{"error": …}`.
+-->
+<Modal open={download !== null} title={$_('backup.dl_title')} onclose={() => (download = null)}>
+  {#if download}
+    <p class="lp-mono id">{download.file}</p>
+
+    <!-- ⚠️ Cette phrase ne s'enlève pas. Le fichier qui arrive dans les
+         téléchargements est un secret, et rien sur son icône ne le dit : ni
+         son nom, ni son extension, ni sa taille. C'est le seul endroit de
+         l'interface où on l'annonce au moment où on décide de le sortir. -->
+    <p class="secret">{$_('backup.dl_contents')}</p>
+
+    <fieldset class="choice">
+      <legend>{$_('backup.dl_choice')}</legend>
+      <label class="opt">
+        <input type="radio" checked={!sealed} onchange={() => (sealed = false)} />
+        <span class="opt-name">{$_('backup.dl_plain')}</span>
+        <span class="opt-why">{$_('backup.dl_plain_hint')}</span>
+      </label>
+      <label class="opt">
+        <input type="radio" checked={sealed} onchange={() => (sealed = true)} />
+        <span class="opt-name">{$_('backup.dl_sealed')}</span>
+        <!-- ⚠️ Dire le prix de l'AES AVANT le clic : l'explorateur de Windows
+             et l'utilitaire d'archive de macOS ne le lisent pas. Le taire
+             donnerait une archive que son propriétaire n'arrive pas à
+             ouvrir, le jour où il en a besoin. -->
+        <span class="opt-why">{$_('backup.dl_sealed_hint')}</span>
+      </label>
+    </fieldset>
+
+    <form
+      bind:this={form}
+      method="POST"
+      action={backupDownloadUrl(download.file)}
+      target="lp-telechargement"
+    >
+      {#if sealed}
+        <label class="lp-field">
+          {$_('backup.dl_password')}
+          <input
+            class="lp-input"
+            type="password"
+            name="password"
+            bind:value={password}
+            autocomplete="new-password"
+            spellcheck="false"
+          />
+          <span class="hint">{$_('backup.dl_password_forget')}</span>
+        </label>
+      {/if}
+    </form>
+  {/if}
+
+  {#snippet footer()}
+    <button class="lp-btn" onclick={() => (download = null)}>{$_('common.cancel')}</button>
+    {#if sealed}
+      <button class="lp-btn accent" onclick={sendSealed} disabled={password === ''}>
+        {$_('backup.dl_go')}
+      </button>
+    {:else}
+      <a
+        class="lp-btn accent"
+        href={download ? backupDownloadUrl(download.file) : '#'}
+        download={download?.file}
+        onclick={() => (download = null)}
+      >
+        {$_('backup.dl_go')}
+      </a>
+    {/if}
+  {/snippet}
+</Modal>
+
+<iframe name="lp-telechargement" title="" class="sink" tabindex="-1"></iframe>
 
 <style>
   .card {
@@ -283,6 +409,66 @@
     padding-left: 10px;
     margin: 0;
     max-width: 74ch;
+  }
+
+  /* Un bouton par ligne de tableau : il doit tenir dans la hauteur d'une
+     ligne de 11,5 px sans la faire grandir, sinon le tableau double de
+     hauteur pour une action qu'on utilise rarement. */
+  .tiny {
+    padding: 3px 9px;
+    font-size: 11px;
+    min-height: 0;
+  }
+  .id {
+    font-size: 11.5px;
+    color: var(--ep-text-primary);
+    overflow-wrap: anywhere;
+    margin: 0;
+  }
+  .choice {
+    border: 1px solid var(--ep-border);
+    border-radius: var(--ep-radius-md);
+    padding: 10px 12px;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .choice legend {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--ep-text-dim);
+    padding: 0 4px;
+  }
+  /* Le POURQUOI de chaque option sous son intitulé, pas en infobulle : c'est
+     la compatibilité qui décide du choix, et elle doit se lire avant le clic. */
+  .opt {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: baseline;
+    column-gap: 8px;
+    cursor: pointer;
+  }
+  .opt input {
+    accent-color: var(--ep-accent);
+  }
+  .opt-name {
+    font-size: 12.5px;
+    color: var(--ep-text-primary);
+  }
+  .opt-why {
+    grid-column: 2;
+    font-size: 11px;
+    color: var(--ep-text-secondary);
+    line-height: 1.5;
+  }
+
+  /* La cible du formulaire. Elle n'affiche rien : elle existe pour que la
+     réponse du hub — le fichier, ou son refus en JSON — ne remplace pas
+     l'application dans l'onglet. */
+  .sink {
+    display: none;
   }
   .muted {
     color: var(--ep-text-muted);

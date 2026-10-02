@@ -3,6 +3,7 @@
   import { api, ApiError, type BackupArchive, type RestoreReport } from '$lib/api';
   import Modal from '$lib/components/Modal.svelte';
   import { humanBytes } from '$lib/time';
+  import { fileIsSealedZip } from '$lib/zip-sealed';
 
   interface Props {
     /** Archives déjà sur le hub, les plus récentes en tête. */
@@ -58,13 +59,35 @@
     });
   }
 
-  function onPick(e: Event) {
+  /**
+   * Mot de passe d'une archive scellée.
+   *
+   * ⚠️ Il est demandé **avant** l'envoi, pas après. Le hub ne peut dire
+   * « protégée » qu'une fois l'archive reçue, et une sauvegarde avec ses
+   * séries fait plusieurs centaines de Mo : découvrir au bout de l'envoi
+   * qu'il fallait un mot de passe obligerait à tout renvoyer. On lit donc les
+   * trente premiers octets du fichier choisi (`fileIsSealedZip`), et le refus
+   * du hub ne sert plus que de filet.
+   */
+  let sealed = $state(false);
+  let password = $state('');
+  let askPassword = $state(false);
+
+  async function onPick(e: Event) {
     file = (e.currentTarget as HTMLInputElement).files?.[0] ?? null;
+    password = '';
+    sealed = file ? await fileIsSealedZip(file) : false;
   }
 
   function ask(t: Target) {
     failure = null;
     ack = false;
+    // Une archive du hub n'est jamais scellée : le scellement se fait à la
+    // sortie, sur une copie. Seul un fichier venu de la machine peut l'être.
+    if (t.kind === 'file' && sealed && password === '') {
+      askPassword = true;
+      return;
+    }
     target = t;
   }
 
@@ -80,10 +103,11 @@
       // `confirm_overwrite` toujours vrai ici : c'est la case cochée juste
       // au-dessus qui l'a autorisé. L'envoyer à faux ferait répondre 409 au
       // hub pour une confirmation qui vient d'être donnée.
+      const pw = password === '' ? undefined : password;
       const r =
         target.kind === 'file'
-          ? await api.restoreUpload(target.file, true)
-          : await api.restoreBackup(target.name, true);
+          ? await api.restoreUpload(target.file, true, pw)
+          : await api.restoreBackup(target.name, true, pw);
       target = null;
       report = r;
       reportOpen = true;
@@ -92,6 +116,19 @@
       onReload();
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      // ⚠️ Les deux refus de mot de passe passent AVANT la lecture du code
+      // HTTP : ils sont des 409 comme « hub trop ancien », et les confondre
+      // enverrait mettre le hub à jour pour trois caractères mal tapés.
+      if (e instanceof ApiError && (e.needsArchivePassword || e.wrongArchivePassword)) {
+        target = null;
+        sealed = true;
+        password = '';
+        askPassword = true;
+        failure = e.wrongArchivePassword
+          ? { title: $_('backup.err_password_title'), body: e.message }
+          : null;
+        return;
+      }
       const status = e instanceof ApiError ? e.status : -1;
       const body = e instanceof ApiError ? e.message : String(e);
       const title =
@@ -109,6 +146,8 @@
 
   function clearFile() {
     file = null;
+    password = '';
+    sealed = false;
     if (input) input.value = '';
   }
 </script>
@@ -203,6 +242,45 @@
     </div>
   {/if}
 </section>
+
+<!--
+  Mot de passe de l'archive. Il se demande AVANT la confirmation de
+  remplacement : sans lui on ne peut même pas lire le manifeste, donc rien de
+  ce que la confirmation annonce n'est encore connu.
+-->
+<Modal open={askPassword} title={$_('backup.pw_title')} onclose={() => (askPassword = false)}>
+  <p>{$_('backup.pw_lead')}</p>
+  {#if failure}
+    <div class="warn" role="alert">
+      <strong>{failure.title}</strong>
+      <p>{failure.body}</p>
+    </div>
+  {/if}
+  <label class="lp-field">
+    {$_('backup.pw_label')}
+    <input
+      class="lp-input"
+      type="password"
+      bind:value={password}
+      autocomplete="off"
+      spellcheck="false"
+    />
+  </label>
+  {#snippet footer()}
+    <button class="lp-btn" onclick={() => (askPassword = false)}>{$_('common.cancel')}</button>
+    <button
+      class="lp-btn primary"
+      disabled={password === '' || !file}
+      onclick={() => {
+        askPassword = false;
+        failure = null;
+        if (file) ask({ kind: 'file', file });
+      }}
+    >
+      {$_('backup.pw_go')}
+    </button>
+  {/snippet}
+</Modal>
 
 <!-- Confirmation : elle nomme ce qui sera remplacé, dit où part l'état
      précédent, et annonce le redémarrage avant le clic plutôt qu'après. -->
