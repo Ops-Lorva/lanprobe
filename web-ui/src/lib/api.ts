@@ -563,6 +563,16 @@ export interface ScanHost {
   mac?: string | null;
   vendor?: string | null;
   latency_ms?: number | null;
+  /**
+   * Quand CETTE machine a été scannée, en secondes UNIX.
+   *
+   * ⚠️ À ne pas confondre avec `Scan.started_at`, qui date le LOT publié : la
+   * sonde envoie toutes les machines qu'elle connaît à chaque scan de ports.
+   *
+   * ⚠️ Absente ou nulle = **date inconnue**, et ça se dit à l'écran. Les
+   * lignes d'avant la v28 du schéma n'en ont pas.
+   */
+  scanned_at?: number | null;
 }
 
 export interface ScanPort {

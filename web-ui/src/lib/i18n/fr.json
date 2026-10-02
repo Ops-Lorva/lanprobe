@@ -524,6 +524,8 @@
     "discovery_never": "Aucune découverte lancée depuis cette sonde.",
     "discovery_empty": "Cette découverte n'a trouvé aucune machine.",
     "scan_at": "Scan du {when}",
+    "published_at": "Publié le {when}",
+    "scanned_unknown": "date inconnue",
     "col_ip": "Adresse",
     "col_port": "Port",
     "col_proto": "Protocole",

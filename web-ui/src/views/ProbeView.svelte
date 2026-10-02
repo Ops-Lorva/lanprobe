@@ -26,6 +26,7 @@
     type SpeedtestRow,
   } from '$lib/api';
   import { portScanArgs, profileLabel } from '$lib/portscan-profiles';
+  import { hostScanDates } from '$lib/scan-host-dates';
   import {
     MEASUREMENT,
     MetricsShapeError,
@@ -907,6 +908,17 @@
 
   /** IP dont les ports sont dépliés. Une seule à la fois : la liste est longue. */
   let openHost = $state('');
+
+  /**
+   * La date de scan de chaque machine, en une passe.
+   *
+   * 🔴 `portsScan.started_at` date le LOT publié : la sonde envoie toutes les
+   * machines qu'elle connaît à chaque scan de ports, sinon le hub — qui
+   * n'affiche que le dernier scan — perdait les précédentes. Dater les lignes
+   * avec lui ferait passer une machine scannée il y a une heure pour scannée à
+   * l'instant.
+   */
+  const portsScannedAt = $derived(hostScanDates(portsScan?.hosts));
 
   /** Ports groupés par machine — l'inventaire arrive à plat. */
   const portsByHost = $derived.by(() => {
@@ -2379,7 +2391,8 @@
                  pareil : le second est une conclusion sur le réseau. -->
             <p class="empty">{$_('probe.ports_never')}</p>
           {:else}
-            <p class="scanmeta">{$_('probe.scan_at', { values: { when: logTime(portsScan.started_at, lang) } })}</p>
+            <!-- Le lot, pas les machines : chaque ligne porte sa propre date. -->
+            <p class="scanmeta">{$_('probe.published_at', { values: { when: logTime(portsScan.started_at, lang) } })}</p>
             {#if portsByHost.length === 0}
               <p class="empty">{$_('probe.ports_empty')}</p>
             {:else}
@@ -2397,6 +2410,17 @@
                       <span class="caret" class:on={openHost === ip} aria-hidden="true">›</span>
                       <span class="lp-mono">{ip}</span>
                       <span class="hostn">{$_('probe.ports_count', { values: { n: list.length } })}</span>
+                      <!--
+                        ⚠️ La date de CETTE machine, pas celle du lot. Et quand
+                        elle manque — lignes d'avant la v28, sonde antérieure —
+                        on l'écrit : afficher l'heure de publication serait
+                        plausible et faux, ce qui est pire que « inconnue ».
+                      -->
+                      <span class="hostwhen">
+                        {portsScannedAt.has(ip)
+                          ? logTime(portsScannedAt.get(ip)!, lang)
+                          : $_('probe.scanned_unknown')}
+                      </span>
                     </button>
                     {#if openHost === ip}
                       <div class="tablewrap">
@@ -3376,6 +3400,12 @@
     margin-left: auto;
     font-size: 11px;
     color: var(--ep-text-dim);
+  }
+  /* La date de la machine, après son nombre de ports. */
+  .hostwhen {
+    font-size: 11px;
+    color: var(--ep-text-muted);
+    white-space: nowrap;
   }
   .hosts .tablewrap {
     padding: 4px 8px 10px 24px;

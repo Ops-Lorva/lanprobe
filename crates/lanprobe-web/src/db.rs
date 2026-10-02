@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 28;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -827,6 +827,26 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE portscan_profiles ADD COLUMN udp_ports TEXT NOT NULL DEFAULT '[]';
     "#,
+    // v27 → v28 : la date de scan **par machine** (contrat § 12).
+    //
+    // 🔴 Depuis que la sonde publie toutes les machines qu'elle connaît à
+    // chaque scan de ports — sans quoi le hub, qui n'affiche que le dernier
+    // scan, perdait les précédentes —, `scans.started_at` date le **LOT**.
+    // S'en servir pour dater une machine fait passer une machine scannée il y a
+    // une heure pour scannée à l'instant : plausible, et faux.
+    //
+    // Deux faits différents, deux colonnes : `scans.started_at` dit quand ce
+    // lot a été publié, `scan_hosts.scanned_at` dit quand CETTE machine a été
+    // scannée. Ne jamais les confondre, ni les « harmoniser ».
+    //
+    // ⚠️ **Aucun `DEFAULT`**, comme pour l'origine d'une commande en v26 : les
+    // lignes déjà en base n'ont pas de date, et il n'y a aucun moyen honnête de
+    // la retrouver. Elles restent à `NULL`, l'écran écrit « date inconnue ».
+    // Un `DEFAULT` les daterait toutes de la migration — un mensonge permanent
+    // sur des lignes qu'on ne pourra plus corriger.
+    r#"
+    ALTER TABLE scan_hosts ADD COLUMN scanned_at INTEGER;
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
@@ -902,6 +922,18 @@ pub struct ScanHost {
     pub vendor: Option<String>,
     #[serde(default)]
     pub latency_ms: Option<i64>,
+    /// Quand **cette** machine a été scannée, en secondes UNIX.
+    ///
+    /// ⚠️ À ne pas confondre avec `Scan::started_at`, qui date le LOT publié.
+    /// La sonde envoie toutes les machines qu'elle connaît à chaque scan de
+    /// ports : sans date par machine, une machine scannée il y a une heure
+    /// s'afficherait comme scannée à l'instant.
+    ///
+    /// ⚠️ `None` reste `None` : les lignes d'avant la v28 n'en ont pas, et une
+    /// sonde antérieure n'en envoie pas. L'écran dit « date inconnue » plutôt
+    /// que d'afficher une heure fausse.
+    #[serde(default)]
+    pub scanned_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3570,10 +3602,16 @@ impl Db {
             // réseau. On garde la dernière plutôt que de rejeter tout le scan.
             tx.execute(
                 "INSERT OR REPLACE INTO scan_hosts
-                    (scan_id, ip, hostname, mac, vendor, latency_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (scan_id, ip, hostname, mac, vendor, latency_ms, scanned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
-                    scan_id, host.ip, host.hostname, host.mac, host.vendor, host.latency_ms
+                    scan_id,
+                    host.ip,
+                    host.hostname,
+                    host.mac,
+                    host.vendor,
+                    host.latency_ms,
+                    host.scanned_at
                 ],
             )?;
         }
@@ -3622,7 +3660,7 @@ impl Db {
 
         let hosts = {
             let mut stmt = conn.prepare(
-                "SELECT ip, hostname, mac, vendor, latency_ms FROM scan_hosts
+                "SELECT ip, hostname, mac, vendor, latency_ms, scanned_at FROM scan_hosts
                   WHERE scan_id = ?1 ORDER BY ip",
             )?;
             let rows = stmt.query_map(rusqlite::params![&scan_id], |r| {
@@ -3632,6 +3670,7 @@ impl Db {
                     mac: r.get(2)?,
                     vendor: r.get(3)?,
                     latency_ms: r.get(4)?,
+                    scanned_at: r.get(5)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?

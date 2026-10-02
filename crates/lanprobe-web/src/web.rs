@@ -7546,6 +7546,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chaque_machine_garde_sa_date_de_scan_et_l_absence_reste_une_absence() {
+        // 🔴 La sonde publie TOUTES les machines qu'elle connaît à chaque scan
+        // de ports — sans quoi le hub, qui n'affiche que le dernier scan,
+        // perdait les précédentes. `scans.started_at` date donc le LOT : une
+        // machine scannée il y a une heure s'affichait comme scannée à
+        // l'instant. Deux faits différents, deux colonnes.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let (probe_id, token) = h.enroll(&session, "Durand", "Paris").await;
+
+        let (status, body, _) = h
+            .call(with_bearer(
+                json_request(
+                    "POST",
+                    &format!("/api/probes/{probe_id}/scans"),
+                    serde_json::json!({
+                        "kind": "ports",
+                        "started_at": 1_790_003_600,
+                        "hosts": [
+                            { "ip": "10.0.8.1", "scanned_at": 1_790_000_000 },
+                            // ⚠️ Sans date : les lignes déjà en base n'en ont
+                            // pas, et une sonde antérieure n'en envoie pas.
+                            { "ip": "10.0.8.50" }
+                        ],
+                        "ports": [{ "ip": "10.0.8.1", "port": 22, "proto": "tcp" }]
+                    }),
+                ),
+                &token,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (_, read, _) = h
+            .call(with_cookie(
+                json_request(
+                    "GET",
+                    &format!("/api/probes/{probe_id}/inventory?kind=ports"),
+                    serde_json::json!({}),
+                ),
+                &session,
+            ))
+            .await;
+        // Le lot garde son sens : c'est quand la publication a eu lieu.
+        assert_eq!(read["scan"]["started_at"], 1_790_003_600);
+        assert_eq!(read["scan"]["hosts"][0]["scanned_at"], 1_790_000_000);
+        // 🔴 Et l'absence reste une absence : inventer « maintenant » serait
+        // exactement le mensonge qu'on corrige. L'écran dira « date inconnue ».
+        assert!(
+            read["scan"]["hosts"][1]["scanned_at"].is_null(),
+            "{}",
+            read["scan"]["hosts"][1]
+        );
+    }
+
+    #[tokio::test]
     async fn a_scan_never_launched_is_null_not_an_empty_scan() {
         // « Jamais lancé » et « lancé, rien trouvé » appellent deux phrases
         // différentes à l'écran. Rendre un scan vide dans les deux cas ferait

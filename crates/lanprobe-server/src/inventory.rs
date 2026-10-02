@@ -29,6 +29,17 @@ pub struct ScanHost {
     pub vendor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<i64>,
+    /// Quand CETTE machine a été scannée, en secondes UNIX.
+    ///
+    /// ⚠️ À ne pas confondre avec le `started_at` du rapport, qui date le LOT.
+    /// La sonde publie toutes les machines qu'elle connaît à chaque scan : sans
+    /// date par machine, une machine scannée il y a une heure s'afficherait
+    /// comme scannée à l'instant.
+    ///
+    /// ⚠️ Omise plutôt que mise à zéro quand la sonde ne l'a pas : l'écran doit
+    /// pouvoir dire « date inconnue » au lieu d'afficher 1970.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanned_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]

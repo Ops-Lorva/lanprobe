@@ -166,6 +166,11 @@ pub async fn publish_discovery(state: &AppState, cidr: &str) {
             mac: h.mac,
             vendor: h.vendor,
             latency_ms: h.latency_ms.map(|v| v as i64),
+            // ⚠️ Une découverte date son lot et rien d'autre : toutes ses
+            // machines ont été vues dans le même balayage. Mettre ici le
+            // `started_at` du rapport n'apprendrait rien, et inventer une date
+            // par machine serait faux.
+            scanned_at: None,
         })
         .collect();
     crate::inventory::publish(
@@ -204,25 +209,7 @@ pub async fn publish_ports(state: &AppState, _just_scanned: &str) {
     // ⚠️ Seuls les ports OUVERTS partent : publier les milliers de ports fermés
     // d'un scan complet gonflerait l'inventaire sans rien apprendre.
     let entries = state.portscan.snapshot();
-    let mut hosts = Vec::new();
-    let mut ports = Vec::new();
-    for entry in &entries {
-        hosts.push(crate::inventory::ScanHost {
-            ip: entry.ip.clone(),
-            hostname: None,
-            mac: None,
-            vendor: None,
-            latency_ms: None,
-        });
-        for p in entry.tcp.iter().chain(entry.udp.iter()).filter(|p| p.open) {
-            ports.push(crate::inventory::ScanPort {
-                ip: entry.ip.clone(),
-                port: p.port,
-                proto: p.proto.clone(),
-                service: (!p.service.is_empty()).then(|| p.service.clone()),
-            });
-        }
-    }
+    let (hosts, ports) = inventory_from_entries(&entries);
     if hosts.is_empty() {
         return;
     }
@@ -244,6 +231,46 @@ pub async fn publish_ports(state: &AppState, _just_scanned: &str) {
         },
     )
     .await;
+}
+
+/// Les machines et les ports ouverts à publier, depuis l'état local des scans.
+///
+/// 🔴 **Chaque machine porte SA date.** Depuis que la sonde publie toutes les
+/// machines qu'elle connaît à chaque scan — sans quoi le hub, qui n'affiche que
+/// le dernier scan, perdait les précédentes —, le `started_at` du rapport est
+/// celui du LOT. S'en servir pour dater les machines ferait passer une machine
+/// scannée il y a une heure pour scannée à l'instant : une valeur plausible et
+/// fausse, c'est-à-dire la pire.
+///
+/// ⚠️ Une machine sans horodatage (entrée créée par un scan en cours) part
+/// **sans date**. Publier `0` la daterait du 1er janvier 1970 ; l'écran du hub
+/// doit pouvoir dire « date inconnue », et c'est l'absence qui le permet.
+fn inventory_from_entries(
+    entries: &[crate::state::PortScanEntry],
+) -> (Vec<crate::inventory::ScanHost>, Vec<crate::inventory::ScanPort>) {
+    let mut hosts = Vec::new();
+    let mut ports = Vec::new();
+    for entry in entries {
+        hosts.push(crate::inventory::ScanHost {
+            ip: entry.ip.clone(),
+            hostname: None,
+            mac: None,
+            vendor: None,
+            latency_ms: None,
+            scanned_at: (entry.timestamp > 0).then_some(entry.timestamp as i64),
+        });
+        // ⚠️ Seuls les ports OUVERTS : publier les milliers de ports fermés
+        // d'un scan complet gonflerait l'inventaire sans rien apprendre.
+        for p in entry.tcp.iter().chain(entry.udp.iter()).filter(|p| p.open) {
+            ports.push(crate::inventory::ScanPort {
+                ip: entry.ip.clone(),
+                port: p.port,
+                proto: p.proto.clone(),
+                service: (!p.service.is_empty()).then(|| p.service.clone()),
+            });
+        }
+    }
+    (hosts, ports)
 }
 
 fn sealing_key(state: &AppState) -> Option<crate::secrets::SecretKey> {
@@ -824,6 +851,57 @@ pub async fn run(state: AppState) {
 
 #[cfg(test)]
 mod tests {
+    use crate::state::PortScanEntry;
+    use lanprobe_core::ports::PortResult;
+
+    fn port(port: u16, open: bool) -> PortResult {
+        PortResult { port, service: "x".into(), proto: "tcp".into(), open }
+    }
+
+    #[test]
+    fn chaque_machine_publiee_porte_sa_propre_date_de_scan() {
+        // 🔴 Depuis que la sonde publie TOUTES les machines qu'elle connaît à
+        // chaque scan (sans quoi le hub, qui n'affiche que le dernier scan,
+        // perdait les précédentes), `scans.started_at` est unique pour tout le
+        // lot : une machine scannée il y a une heure s'affichait comme scannée
+        // à l'instant. Une valeur plausible et fausse.
+        let entries = vec![
+            PortScanEntry {
+                ip: "10.0.0.1".into(),
+                tcp: vec![port(22, true), port(23, false)],
+                timestamp: 1_790_000_000,
+                ..Default::default()
+            },
+            PortScanEntry {
+                ip: "10.0.0.2".into(),
+                tcp: vec![port(80, true)],
+                timestamp: 1_790_003_600,
+                ..Default::default()
+            },
+        ];
+
+        let (hosts, ports) = super::inventory_from_entries(&entries);
+        assert_eq!(hosts[0].scanned_at, Some(1_790_000_000));
+        assert_eq!(hosts[1].scanned_at, Some(1_790_003_600));
+        // ⚠️ Et seuls les ports OUVERTS partent : publier les milliers de ports
+        // fermés d'un scan complet gonflerait l'inventaire sans rien apprendre.
+        assert_eq!(ports.len(), 2, "{ports:?}");
+    }
+
+    #[test]
+    fn une_machine_jamais_scannee_part_sans_date_plutot_qu_avec_zero() {
+        // ⚠️ Une entrée créée par un scan en cours n'a pas encore d'horodatage.
+        // Publier `0` la daterait du 1er janvier 1970 ; l'écran doit pouvoir
+        // dire « date inconnue », et c'est `null` qui le lui permet.
+        let entries = vec![PortScanEntry {
+            ip: "10.0.0.3".into(),
+            in_progress: true,
+            ..Default::default()
+        }];
+        let (hosts, _) = super::inventory_from_entries(&entries);
+        assert_eq!(hosts[0].scanned_at, None);
+    }
+
     use crate::config::ConfigStore;
     use std::sync::Arc;
 

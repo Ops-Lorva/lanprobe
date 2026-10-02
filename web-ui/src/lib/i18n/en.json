@@ -524,6 +524,8 @@
     "discovery_never": "No discovery has been run from this probe.",
     "discovery_empty": "This discovery found no machine.",
     "scan_at": "Scan of {when}",
+    "published_at": "Published {when}",
+    "scanned_unknown": "date unknown",
     "col_ip": "Address",
     "col_port": "Port",
     "col_proto": "Protocol",

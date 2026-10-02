@@ -1429,6 +1429,41 @@ défaut `0` = illimité) — et comme pour la rétention Influx, **la réduire s
 des données** : même confirmation explicite exigée, côté serveur comme côté
 interface.
 
+### La date de scan est portée par CHAQUE machine
+
+```json
+"hosts": [
+  { "ip": "10.0.8.1",  "scanned_at": 1790000000 },
+  { "ip": "10.0.8.50", "scanned_at": null }
+]
+```
+
+🔴 **`scans.started_at` et `scan_hosts.scanned_at` sont deux faits différents,
+et il ne faut jamais les confondre :** le premier dit **quand ce lot a été
+publié**, le second **quand cette machine a été scannée**.
+
+La distinction est née d'un effet de bord : la sonde publie désormais **toutes**
+les machines qu'elle connaît à chaque scan de ports — sans quoi le hub, qui
+n'affiche que le dernier scan, perdait les précédentes. Le `started_at` du
+rapport est donc commun à tout le lot, et dater les lignes avec lui faisait
+afficher « scanné à l'instant » pour une machine scannée une heure plus tôt.
+Une valeur plausible et fausse, c'est-à-dire la pire.
+
+⚠️ **Une machine sans date reste sans date.** Les lignes d'avant la v28 du
+schéma n'en ont pas, et une sonde antérieure n'en envoie pas : la colonne est
+ajoutée **sans `DEFAULT`**, et l'écran écrit « date inconnue ». Même arbitrage
+qu'à l'origine d'une commande (§ 26) : inventer une valeur est pire que n'en
+donner aucune.
+
+⚠️ Une **découverte** ne date pas ses machines : elles ont toutes été vues dans
+le même balayage, et `started_at` répond déjà. `scanned_at` y reste nul plutôt
+que de recopier le lot — une recopie se mettrait à ressembler à un fait propre à
+la machine.
+
+⚠️ Côté interface, les dates sont résolues en **une passe** pour la page
+(`hostScanDates`). Un scan d'un /24 donne des centaines de machines : chercher
+la date dans `hosts` à chaque ligne affichée ferait un parcours par ligne.
+
 ## 13. Notifications
 
 ### Deux canaux, pas cinq
