@@ -590,6 +590,38 @@ pub fn applied_profiles_rev(state: &AppState) -> i64 {
         .unwrap_or(0)
 }
 
+/// Les profils de scan que la sonde **possède**, tels qu'ils montent au hub.
+///
+/// 🔴 Ils partent à CHAQUE battement, et c'est le correctif du 02/10 : la
+/// montée ne tenait qu'au dépôt de configuration, déclenché par l'interface du
+/// bureau à l'édition d'un profil. Un profil créé avant l'enrôlement, ou avant
+/// que le hub sache l'ingérer, n'avait plus aucune occasion de remonter — le
+/// profil « Perso » de la sonde « Macos » est resté invisible du hub pour cette
+/// seule raison, et rien dans le produit ne l'aurait jamais rattrapé.
+///
+/// ⚠️ **Ce qui vient du hub ne remonte pas** (`from_hub`) : il le connaît déjà
+/// et fait autorité. Le lui rendre gonflerait le battement pour rien et, après
+/// une restauration de sa base, ressusciterait un profil dont la pierre
+/// tombale a disparu avec la restauration.
+///
+/// ⚠️ **Les profils de BASE ne montent pas non plus** (décision 3) : ils vivent
+/// dans le code de l'application, le hub sème les mêmes, et les faire monter
+/// poserait autant de doublons dans la liste commune de tout le parc.
+pub(crate) fn outgoing_portscan_profiles(
+    state: &AppState,
+) -> Vec<crate::portscan_profiles::LocalProfile> {
+    let local: Vec<crate::portscan_profiles::LocalProfile> = state
+        .config
+        .get()
+        .get(crate::portscan_profiles::PROFILES_KEY)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    local
+        .into_iter()
+        .filter(|p| !p.from_hub && !crate::portscan_profiles::is_builtin(p))
+        .collect()
+}
+
 /// Aligne les profils de scan locaux sur ce que le hub vient de dire.
 ///
 /// ⚠️ **Un hub qui ne dit rien ne fait rien changer.** Pas de champ ≠ liste
@@ -814,6 +846,21 @@ struct HeartbeatRequest<'a> {
     /// ⚠️ Ce n'est pas une date. Elle vient du hub, on la range, on la rend.
     /// Aucune horloge n'entre dans l'affaire.
     profiles_rev: i64,
+    /// Les profils de scan que la sonde **possède**, pour que le hub ingère
+    /// ceux qu'il ne connaît pas (§ 25, « montée depuis les sondes »).
+    ///
+    /// 🔴 **C'est ce champ qui manquait**, et c'est tout le défaut constaté le
+    /// 02/10 : la montée n'était branchée que sur le DÉPÔT de configuration
+    /// (`POST /api/probes/{id}/config`), que seule l'interface du bureau
+    /// déclenche, et seulement quand on touche à un profil. Rien ne le rejoue.
+    /// Un profil créé avant l'enrôlement — ou avant que le hub sache l'ingérer
+    /// — ne remontait donc **jamais**. Le battement, lui, revient toutes les
+    /// soixante secondes : c'est le seul endroit où la montée est increvable.
+    ///
+    /// ⚠️ Omis quand il n'y a rien à faire monter — le cas courant d'une sonde
+    /// qui n'a créé aucun profil. Le battement ne grossit pas pour rien.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    portscan_profiles: Vec<crate::portscan_profiles::LocalProfile>,
 }
 
 /// Une cible surveillée, telle que la sonde la voit maintenant.
@@ -1388,6 +1435,7 @@ async fn beat(
             monitors: monitor_states(state),
             monitor_changes: outgoing_monitor_changes(state),
             profiles_rev: applied_profiles_rev(state),
+            portscan_profiles: outgoing_portscan_profiles(state),
             internet_state: internet_state(state),
             public_ip: public_ip.value(),
             interface: identity.interface.clone(),
@@ -1620,6 +1668,7 @@ mod tests {
             monitors: Vec::new(),
             monitor_changes: Vec::new(),
             profiles_rev: 0,
+            portscan_profiles: Vec::new(),
         }
     }
 
@@ -2040,6 +2089,7 @@ mod tests {
             monitors: Vec::new(),
             monitor_changes: Vec::new(),
             profiles_rev: 0,
+            portscan_profiles: Vec::new(),
             public_ip: None,
             interface: None,
             local_ips: Vec::new(),
@@ -2066,6 +2116,7 @@ mod tests {
             monitors: Vec::new(),
             monitor_changes: Vec::new(),
             profiles_rev: 0,
+            portscan_profiles: Vec::new(),
             public_ip: Some("88.120.0.1".into()),
             interface: Some("en0".into()),
             local_ips: vec!["10.6.8.42/24".into()],
@@ -2290,6 +2341,75 @@ mod tests {
         // jamais un seul profil.
         let json = serde_json::to_value(heartbeat_sans_surveillance()).unwrap();
         assert_eq!(json["profiles_rev"], 0, "{json}");
+    }
+
+    #[test]
+    fn les_profils_crees_sur_la_sonde_montent_a_chaque_battement() {
+        // 🔴 LE défaut constaté le 02/10 : la sonde « Macos » avait un profil
+        // local « Perso » que le hub n'a jamais connu. La montée n'était
+        // branchée que sur le DÉPÔT de configuration (`POST …/config`), que
+        // seule l'interface du bureau déclenche, et seulement quand on touche à
+        // un profil. Rien ne la rejoue : un profil créé avant l'enrôlement — ou
+        // avant que le hub sache l'ingérer — ne remontait JAMAIS.
+        //
+        // Le battement, lui, revient toutes les soixante secondes. C'est le
+        // seul endroit où la montée est increvable.
+        let state = state("profils-montee");
+        let mut root = state.config.get();
+        root.as_object_mut().unwrap().insert(
+            crate::portscan_profiles::PROFILES_KEY.into(),
+            serde_json::json!([
+                { "id": "perso", "name": "Perso", "tcp_ports": [8006, 22], "udp_ports": [53, 123] },
+                // Vient du hub : il le connaît déjà, et le lui rendre
+                // ressusciterait un profil dont il a perdu la pierre tombale
+                // dans une restauration.
+                { "id": "web", "name": "Web", "tcp_ports": [80], "from_hub": true },
+                // Profil de BASE (décision 3) : il est dans le code de
+                // l'application, le hub sème le même. Le faire monter poserait
+                // un doublon dans la liste commune de tout le parc.
+                { "id": "builtin:common", "name": "Common", "tcp_ports": [22], "builtin": true },
+            ]),
+        );
+        state.config.put(root).unwrap();
+
+        let montants = outgoing_portscan_profiles(&state);
+        let ids: Vec<&str> = montants.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["perso"], "seul ce que la sonde possède monte");
+        assert_eq!(montants[0].udp_ports, vec![53, 123]);
+    }
+
+    #[test]
+    fn les_profils_voyagent_dans_la_forme_que_le_hub_sait_lire() {
+        // ⚠️ Les deux crates ne partagent AUCUN type : la sonde sérialise, le
+        // hub relit à la main (`profiles_from_probe_config`). Si les noms de
+        // champs divergent, la montée redevient silencieusement muette — c'est
+        // exactement le genre de panne qu'on vient de corriger. Ce test fige la
+        // forme du côté qui émet.
+        let state = state("profils-forme");
+        let mut root = state.config.get();
+        root.as_object_mut().unwrap().insert(
+            crate::portscan_profiles::PROFILES_KEY.into(),
+            serde_json::json!([
+                { "id": "perso", "name": "Perso", "tcp_ports": [22], "udp_ports": [53] }
+            ]),
+        );
+        state.config.put(root).unwrap();
+
+        let mut requete = heartbeat_sans_surveillance();
+        requete.portscan_profiles = outgoing_portscan_profiles(&state);
+        let json = serde_json::to_value(requete).unwrap();
+        assert_eq!(json["portscan_profiles"][0]["id"], "perso", "{json}");
+        assert_eq!(json["portscan_profiles"][0]["name"], "Perso");
+        assert_eq!(json["portscan_profiles"][0]["tcp_ports"], serde_json::json!([22]));
+        assert_eq!(json["portscan_profiles"][0]["udp_ports"], serde_json::json!([53]));
+    }
+
+    #[test]
+    fn une_sonde_sans_profil_a_elle_n_alourdit_pas_le_battement() {
+        // Le cas courant. Un tableau vide à chaque battement n'apprendrait rien
+        // au hub et ferait voyager un champ pour rien.
+        let json = serde_json::to_value(heartbeat_sans_surveillance()).unwrap();
+        assert!(json.get("portscan_profiles").is_none(), "{json}");
     }
 
     #[test]

@@ -155,6 +155,18 @@ pub(crate) fn profiles_from_probe_config(config: &serde_json::Value) -> Vec<Inco
     let Some(entries) = config.get("portscan_profiles").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
+    profiles_from_entries(entries)
+}
+
+/// Les mêmes entrées, quand elles arrivent par le **battement** et non par le
+/// dépôt de configuration (§ 25, « montée depuis les sondes »).
+///
+/// 🔴 Les deux chemins lisent la même forme par la même fonction, et c'est
+/// voulu : le défaut du 02/10 est né de ce que la montée n'existait QUE sur le
+/// dépôt de configuration, déclenché par l'interface du bureau à l'édition d'un
+/// profil. Un profil créé avant l'enrôlement ne remontait jamais. Deux lectures
+/// différentes de la même forme auraient fini par diverger.
+pub(crate) fn profiles_from_entries(entries: &[serde_json::Value]) -> Vec<IncomingProfile> {
     entries
         .iter()
         .filter(|entry| entry.get("builtin").and_then(|v| v.as_bool()) != Some(true))
@@ -1304,6 +1316,65 @@ mod routes_tests {
         let cams = profile(&list, "cams");
         assert_eq!(cams.ports, vec![80, 554]);
         assert_eq!(cams.origin_probe.as_deref(), Some(id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn le_battement_fait_monter_un_profil_inconnu_avec_son_origine() {
+        // 🔴 LE défaut constaté en production le 02/10 : la sonde « Macos »
+        // avait un profil local « Perso » que le hub n'a jamais connu. La
+        // montée n'était branchée QUE sur le dépôt de configuration
+        // (`POST /api/probes/{id}/config`), que seule l'interface du bureau
+        // déclenche, et seulement quand on touche à un profil. Rien ne la
+        // rejoue : un profil créé avant l'enrôlement — ou avant que le hub
+        // sache l'ingérer — ne remontait jamais.
+        //
+        // Le battement revient toutes les soixante secondes : c'est là que la
+        // montée doit vivre, et c'est ce que ce test joue de bout en bout.
+        let h = Harness::new();
+        let (id, token) = h.probe();
+
+        let reponse = h
+            .heartbeat(
+                &id,
+                &token,
+                json!({
+                    "profiles_rev": 0,
+                    "portscan_profiles": [
+                        { "id": "perso", "name": "Perso", "tcp_ports": [8006, 22], "udp_ports": [53, 123] }
+                    ]
+                }),
+            )
+            .await;
+
+        let list = h.state.db.list_portscan_profiles().unwrap();
+        let perso = profile(&list, "perso");
+        assert_eq!(perso.ports, vec![22, 8006]);
+        // `origin_probe` répond « d'où sort celui-là » — c'est une trace, pas
+        // un droit.
+        assert_eq!(perso.origin_probe.as_deref(), Some(id.as_str()));
+
+        // ⚠️ Et il redescend dans le MÊME battement, marqué comme venant du
+        // hub : l'ingestion passe AVANT le calcul du delta. Sinon la sonde
+        // garderait une minute de plus un profil que le hub connaît déjà, et
+        // l'écran en montrerait deux.
+        let descendus = reponse["portscan_profiles"].as_array().unwrap();
+        assert!(
+            descendus.iter().any(|p| p["profile_id"] == "perso"),
+            "{reponse}"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_battement_sans_profils_ne_fait_rien_monter() {
+        // ⚠️ Pas de champ ≠ liste vide, dans ce sens-là aussi : une sonde
+        // antérieure à la montée au battement ne doit rien changer au hub.
+        let h = Harness::new();
+        let (id, token) = h.probe();
+        let avant = h.state.db.portscan_rev().unwrap();
+
+        h.heartbeat(&id, &token, json!({ "profiles_rev": avant })).await;
+
+        assert_eq!(h.state.db.portscan_rev().unwrap(), avant);
     }
 
     #[tokio::test]

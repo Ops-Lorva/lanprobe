@@ -2846,6 +2846,24 @@ struct HeartbeatBody {
     /// appliqué, et qui doit donc tout recevoir.
     #[serde(default)]
     profiles_rev: Option<i64>,
+    /// Les profils de scan que la sonde possède (§ 25, « montée depuis les
+    /// sondes »). Le hub ignore ceux qu'il connaît et ceux qu'il a supprimés,
+    /// et ingère les inconnus avec `origin_probe` = cette sonde.
+    ///
+    /// 🔴 **C'est ce champ qui manquait.** La montée n'était branchée que sur
+    /// le dépôt de configuration (`POST /api/probes/{id}/config`), que seule
+    /// l'interface du bureau de la sonde déclenche, et seulement quand on
+    /// touche à un profil. Rien ne le rejoue : un profil créé avant
+    /// l'enrôlement — ou avant que le hub sache l'ingérer — ne remontait
+    /// **jamais**, et c'est le défaut constaté le 02/10 sur la sonde « Macos »
+    /// et son profil « Perso ».
+    ///
+    /// ⚠️ `Option` : **absent** veut dire « cette sonde ne les annonce pas »,
+    /// jamais « elle n'en a plus ». Un profil ne se supprime que par une
+    /// pierre tombale posée sur le hub — en déduire un retrait d'une absence
+    /// est exactement l'erreur que le § 20 et le § 25 interdisent.
+    #[serde(default)]
+    portscan_profiles: Option<Vec<serde_json::Value>>,
     /// Identité réseau du site (contrat, section 15). Chaque champ est
     /// facultatif : une sonde sans accès internet bat **sans** IP publique
     /// plutôt que d'échouer, et un champ absent n'efface jamais ce que le hub
@@ -3193,6 +3211,23 @@ async fn heartbeat(
     // l'intérêt du compteur : le cas courant — une sonde à jour — ne fait
     // voyager ni la liste ni les pierres tombales. Côté sonde, pas de champ
     // veut dire « ne touche à rien », jamais « liste vide ».
+    //
+    // ⚠️ **L'ingestion passe AVANT le calcul du delta**, et dans le même
+    // battement : le profil qui vient de monter redescend aussitôt marqué
+    // comme venant du hub. Dans l'autre ordre, la sonde l'afficherait une
+    // minute de plus comme un profil à elle, et le hub comme un profil à lui.
+    if let Some(entries) = body.portscan_profiles.as_deref() {
+        let montants = crate::portscan::profiles_from_entries(entries);
+        if !montants.is_empty() {
+            match state.db.ingest_probe_profiles(&id, &montants) {
+                Ok(n) if n > 0 => tracing::info!("{n} profil(s) de scan ingéré(s) depuis {id}"),
+                Ok(_) => {}
+                // Un échec d'ingestion ne fait pas échouer le battement : une
+                // sonde saine passerait pour hors ligne à cause d'un profil.
+                Err(e) => tracing::warn!("profils de scan de {id} non ingérés : {e}"),
+            }
+        }
+    }
     if let Some(announced) = body.profiles_rev {
         if let Err(e) = state.db.note_portscan_rev(&id, announced, crate::db::now()) {
             tracing::warn!("révision de profils non rangée pour {id} : {e}");

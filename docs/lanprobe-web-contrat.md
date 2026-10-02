@@ -3068,10 +3068,34 @@ disparaîtrait une minute après sa création.
 
 ### Montée depuis les sondes
 
-La configuration remontée (§ 16) porte déjà les profils. Le hub **ignore** ceux
-qu'il connaît — il fait autorité — **ignore** ceux qu'il a supprimés, sinon la
-suppression se ferait annuler par la première sonde qui n'a pas encore battu, et
-**ingère** les inconnus avec `origin_probe` = cette sonde.
+La sonde annonce ses profils **dans le battement**, champ `portscan_profiles` de
+la requête, avec la même forme que dans sa configuration (`id`, `name`,
+`tcp_ports`, `udp_ports`). Le hub **ignore** ceux qu'il connaît — il fait
+autorité — **ignore** ceux qu'il a supprimés, sinon la suppression se ferait
+annuler par la première sonde qui n'a pas encore battu, et **ingère** les
+inconnus avec `origin_probe` = cette sonde.
+
+🔴 **Au battement, et pas seulement au dépôt de configuration.** La première
+version ne branchait la montée que sur `POST /api/probes/{id}/config`, que seule
+l'interface du bureau de la sonde déclenche, et seulement quand on touche à un
+profil. Rien ne le rejoue : le 02/10, la sonde « Macos » avait un profil
+« Perso » créé avant que le hub sache l'ingérer, et **rien dans le produit ne
+l'aurait jamais fait remonter**. Le battement, lui, revient toutes les soixante
+secondes — c'est le seul endroit où la montée est increvable.
+
+⚠️ **Le hub réutilise l'identifiant donné par la sonde.** C'est ce qui fait
+qu'un profil monté redescend sur la MÊME ligne, marqué comme venant du hub, au
+lieu d'apparaître deux fois à l'écran de la sonde. Générer un identifiant neuf
+à l'ingestion dédoublerait tout profil créé localement.
+
+⚠️ **Ne montent ni les profils de base de l'application, ni ceux qui viennent
+du hub.** Les premiers sont semés par le hub lui-même (décision 3) ; les seconds
+lui appartiennent déjà, et les lui rendre ressusciterait, après une restauration
+de sa base, un profil dont la pierre tombale a disparu avec la restauration.
+
+⚠️ Le champ **absent** veut dire « cette sonde ne les annonce pas », jamais
+« elle n'en a plus » : un profil ne se retire que par une pierre tombale posée
+sur le hub.
 
 ⚠️ **Le hub ne modélise pas les ports UDP**, la sonde si. Un profil ingéré garde
 donc ses ports TCP dans `ports`, et la sonde **conserve sa liste UDP** quand le

@@ -51,6 +51,23 @@ pub struct LocalProfile {
     pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Un profil **de base** de l'application ? Ceux-là ne montent pas au hub
+/// (décision 3) : ils vivent dans le code de l'interface, le hub sème les
+/// mêmes, et les faire monter poserait autant de doublons dans la liste
+/// commune de tout le parc.
+///
+/// ⚠️ Les deux critères, pas un seul : l'interface pose `builtin: true`, mais
+/// une liste écrite par une version antérieure peut ne porter que le préfixe
+/// d'identifiant. Se fier à un seul ferait monter la moitié des cas.
+pub fn is_builtin(profile: &LocalProfile) -> bool {
+    profile.id.starts_with("builtin:")
+        || profile
+            .rest
+            .get("builtin")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
 /// Un profil tel que le hub le rend au battement.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HubProfile {
@@ -182,6 +199,28 @@ mod tests {
         let out = merge(vec![local("cams", false)], &[from_hub("web", &[80])], false);
         let ids: Vec<&str> = out.iter().map(|p| p.id.as_str()).collect();
         assert!(ids.contains(&"cams"), "{ids:?}");
+    }
+
+    #[test]
+    fn un_profil_monte_puis_redescendu_ne_fait_pas_un_doublon() {
+        // 🔴 Ce qui rend la montée du § 25 sûre : le hub RÉUTILISE
+        // l'identifiant que la sonde a donné (`ingest_probe_profiles` insère
+        // avec `profile_id` tel quel). Le profil redescend donc sur la même
+        // ligne, marqué comme venant du hub, au lieu d'en créer une seconde.
+        //
+        // S'il recevait un identifiant neuf côté hub, « Perso » apparaîtrait
+        // DEUX fois à l'écran de la sonde — une fois à elle, une fois au hub —
+        // et les deux seraient éditables séparément.
+        let mut perso = local("perso", false);
+        perso.udp_ports = vec![53];
+        let out = merge(vec![perso], &[from_hub("perso", &[22, 8006])], false);
+
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].from_hub, "le hub en fait autorité désormais");
+        assert_eq!(out[0].tcp_ports, vec![22, 8006]);
+        // L'UDP n'est pas monté : le hub ne le modélise pas, il ne peut pas en
+        // faire autorité, et l'écraser détruirait un réglage irrécupérable.
+        assert_eq!(out[0].udp_ports, vec![53]);
     }
 
     #[test]
