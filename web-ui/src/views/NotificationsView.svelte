@@ -326,20 +326,34 @@
   }
 
   // ── Test ─────────────────────────────────────────────────────────────────
-  let outcomes = $state<ChannelOutcome[] | null>(null);
-  let testing = $state(false);
-  let testError = $state('');
+  //
+  // 🔴 Un bouton PAR CANAL, dans son accordéon. Le bouton unique d'autrefois
+  // appelait `dispatch`, donc tous les canaux : vérifier un serveur de
+  // messagerie faisait sonner le salon Discord de l'équipe, et on finissait
+  // par ne plus rien tester. Il vivait en plus dans une carte à part, qui
+  // flottait au milieu de l'écran dès qu'on dépliait SMTP.
+  //
+  // Le verdict est rangé PAR CANAL et non dans une variable unique : un test
+  // de webhook ne doit pas effacer sous les yeux le verdict SMTP qu'on venait
+  // de lire.
+  type ChannelName = 'webhook' | 'smtp';
+  let verdicts = $state<Partial<Record<ChannelName, ChannelOutcome>>>({});
+  let testErrors = $state<Partial<Record<ChannelName, string>>>({});
+  let testing = $state<ChannelName | null>(null);
 
-  async function runTest() {
-    testing = true;
-    testError = '';
-    outcomes = null;
+  async function runTest(channel: ChannelName) {
+    testing = channel;
+    testErrors = { ...testErrors, [channel]: '' };
+    verdicts = { ...verdicts, [channel]: undefined };
     try {
-      outcomes = (await api.testNotifications())?.channels ?? [];
+      const got = (await api.testChannel(channel))?.channels ?? [];
+      // Le hub rend une liste d'un élément. On ne garde que le canal demandé :
+      // afficher un verdict sous le mauvais accordéon serait pire que rien.
+      verdicts = { ...verdicts, [channel]: got.find((o) => o.channel === channel) };
     } catch (e) {
-      testError = handle(e);
+      testErrors = { ...testErrors, [channel]: handle(e) };
     } finally {
-      testing = false;
+      testing = null;
     }
   }
 
@@ -351,6 +365,48 @@
     }
   });
 </script>
+
+<!--
+  Le bloc « essayer ce canal », rendu à l'identique dans les deux accordéons.
+  Un seul gabarit : deux copies divergeraient, et c'est l'écran où la
+  différence entre « non essayé » et « essayé, échoué » doit se lire pareil
+  des deux côtés.
+-->
+{#snippet essai(channel: ChannelName)}
+  <div class="trial">
+    <div class="trial-head">
+      <span class="hint">{$_('notify.test_one_hint')}</span>
+      <button class="lp-btn accent" onclick={() => runTest(channel)} disabled={testing !== null}>
+        {testing === channel ? $_('notify.testing') : $_('notify.test_one')}
+      </button>
+    </div>
+
+    {#if testErrors[channel]}<p class="err" role="alert">{testErrors[channel]}</p>{/if}
+
+    {#if verdicts[channel]}
+      {@const o = verdicts[channel]}
+      <!-- Trois états, trois lectures. « Non configuré » n'est PAS un échec :
+           l'afficher comme tel enverrait chercher une panne de serveur là où
+           il n'y a qu'un formulaire vide. C'est cette distinction qui rend le
+           test honnête. -->
+      <p
+        class="verdict"
+        class:bad={o.attempted && !o.ok}
+        class:good={o.attempted && o.ok}
+        role="status"
+      >
+        {#if !o.attempted}
+          {$_('notify.test_skipped')}
+        {:else if o.ok}
+          {$_('notify.test_ok')}
+        {:else}
+          <span class="v">{$_('notify.test_failed')}</span>
+          {#if o.error}<span class="why">{o.error}</span>{/if}
+        {/if}
+      </p>
+    {/if}
+  </div>
+{/snippet}
 
 <!-- Le hub a refusé les canaux : on le dit une fois, en tête, et pas au fond
      d'un groupe qui peut lui-même être vide. -->
@@ -507,6 +563,8 @@
             {busy ? $_('common.saving') : $_('common.save')}
           </button>
         </div>
+
+        {@render essai('webhook')}
         {/if}
       </section>
 
@@ -619,41 +677,16 @@
             {busy ? $_('common.saving') : $_('common.save')}
           </button>
         </div>
+
+        {@render essai('smtp')}
         {/if}
       </section>
 
-      <!-- Test -->
-      <section class="card lp-card">
-        <h2 class="lp-title">{$_('notify.test_title')}</h2>
-        <p class="sub">{$_('notify.test_sub')}</p>
-        <div>
-          <button class="lp-btn accent" onclick={runTest} disabled={testing}>
-            {testing ? $_('notify.testing') : $_('notify.test_send')}
-          </button>
-        </div>
-
-        {#if testError}<p class="err" role="alert">{testError}</p>{/if}
-
-        {#if outcomes}
-          <!-- Verdict par canal : un canal en panne n'empêche pas l'autre, et
-               c'est le jour où l'un tombe qu'on a besoin de savoir lequel. -->
-          <ul class="verdicts">
-            {#each outcomes as o (o.channel)}
-              <li class:bad={o.attempted && !o.ok} class:good={o.attempted && o.ok}>
-                <span class="ch">{$_(`notify.channel_${o.channel}`)}</span>
-                {#if !o.attempted}
-                  <span class="v">{$_('notify.test_skipped')}</span>
-                {:else if o.ok}
-                  <span class="v">{$_('notify.test_ok')}</span>
-                {:else}
-                  <span class="v">{$_('notify.test_failed')}</span>
-                  {#if o.error}<span class="why">{o.error}</span>{/if}
-                {/if}
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </section>
+      <!-- ⚠️ La carte « Test » a disparu, et elle ne revient pas. Son bouton
+           unique envoyait sur TOUS les canaux — vérifier SMTP faisait sonner
+           le salon Discord — et la carte elle-même flottait au milieu de
+           l'écran dès qu'on dépliait un accordéon. Le test vit maintenant
+           dans le canal qu'il essaie. -->
     {/if}
   {/if}
 
@@ -1060,45 +1093,54 @@
     padding-top: 12px;
   }
 
-  .verdicts {
-    list-style: none;
-    margin: 0;
-    padding: 0;
+  /* L'essai du canal, au pied de son accordéon. Un filet le sépare du
+     formulaire : « enregistrer » et « essayer » sont deux gestes, et les
+     coller ferait cliquer sur l'un en visant l'autre. */
+  .trial {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
+    border-top: 1px solid var(--ep-border);
+    padding-top: 10px;
   }
-  .verdicts li {
+  .trial-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  /* Le verdict n'a plus à nommer son canal : il est DANS le canal. Ce qui
+     reste à distinguer, c'est « non essayé » (gris) de « essayé, échoué »
+     (rouge) — confondre les deux enverrait chercher une panne de serveur là
+     où il n'y a qu'un formulaire vide. */
+  .verdict {
     display: flex;
     align-items: baseline;
     gap: 10px;
     flex-wrap: wrap;
     font-size: 12px;
     padding: 8px 11px;
+    margin: 0;
     border: 1px solid var(--ep-border);
     border-left-width: 3px;
     border-radius: var(--ep-radius-md);
     background: var(--ep-bg-tertiary);
     color: var(--ep-text-muted);
   }
-  .verdicts li.good {
+  .verdict.good {
     border-left-color: var(--ep-success);
     color: var(--ep-text-secondary);
   }
-  .verdicts li.bad {
+  .verdict.bad {
     border-left-color: var(--ep-danger);
     background: color-mix(in srgb, var(--ep-danger) 7%, transparent);
   }
-  .verdicts .ch {
-    font-weight: 700;
-    color: var(--ep-text-primary);
-    min-width: 72px;
-  }
-  .verdicts li.bad .v {
+  .verdict.bad .v {
     color: var(--ep-danger);
     font-weight: 600;
   }
-  .verdicts .why {
+  .verdict .why {
     font-family: var(--ep-font-mono);
     font-size: 11px;
     overflow-wrap: anywhere;

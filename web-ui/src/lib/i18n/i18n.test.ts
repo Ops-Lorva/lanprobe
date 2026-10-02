@@ -572,4 +572,30 @@ describe('catalogues de traduction', () => {
       expect(REQUISES_TELECHARGEMENT.filter((k) => !keys.has(k))).toEqual([]);
     });
   }
+
+  /**
+   * Un bouton de test PAR CANAL.
+   *
+   * ⚠️ `notify.test_one` et `notify.test_one_hint` vivent dans l'accordéon du
+   * canal. Le bouton unique d'autrefois envoyait sur tous les canaux à la
+   * fois : la promesse « ce canal, et lui seul » est dans ces deux chaînes,
+   * et une clé manquante afficherait son identifiant brut à sa place.
+   */
+  const REQUISES_TEST_PAR_CANAL = [
+    'notify.test_one',
+    'notify.test_one_hint',
+    'notify.testing',
+    'notify.test_ok',
+    'notify.test_failed',
+    'notify.test_skipped',
+    'notify.channel_webhook',
+    'notify.channel_smtp',
+  ];
+
+  for (const [lang, catalog] of Object.entries(CATALOGS)) {
+    it(`${lang} porte les clés du test par canal`, () => {
+      const keys = new Set(flatten(catalog));
+      expect(REQUISES_TEST_PAR_CANAL.filter((k) => !keys.has(k))).toEqual([]);
+    });
+  }
 });

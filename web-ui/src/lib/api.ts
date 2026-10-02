@@ -1527,6 +1527,19 @@ export const api = {
   testNotifications: () =>
     request<{ channels: ChannelOutcome[] }>('/api/notifications/test', { method: 'POST' }),
 
+  /**
+   * Essaie **un seul** canal.
+   *
+   * 🔴 C'est ce que l'interface emploie. `testNotifications` part sur tous les
+   * canaux à la fois : tester un serveur de messagerie faisait sonner le salon
+   * Discord de l'équipe, et on finissait par ne plus tester du tout. La route
+   * globale reste pour un script de recette.
+   */
+  testChannel: (channel: 'webhook' | 'smtp') =>
+    request<{ channels: ChannelOutcome[] }>(`/api/notifications/test/${channel}`, {
+      method: 'POST',
+    }),
+
   /** Héritage déjà résolu par le hub — `enabled` est la valeur qui s'applique. */
   subscriptions: () => request<Subscriptions>('/api/notifications/subscriptions'),
 

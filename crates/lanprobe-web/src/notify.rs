@@ -652,16 +652,51 @@ impl Notifier {
     /// Message de test, envoyé pour de vrai. Une configuration qu'on ne peut
     /// pas essayer se découvre fausse le jour de la première panne.
     pub async fn send_test(&self) -> Vec<ChannelOutcome> {
-        let alert = Alert {
-            kind: AlertKind::Up,
-            probe_id: "test".into(),
-            probe: "Sonde de test".into(),
-            site_id: "test".into(),
-            site: "LanProbe".into(),
-            last_seen: crate::db::now(),
-            silence_secs: 0,
-        };
-        self.dispatch(&alert).await
+        self.dispatch(&test_alert()).await
+    }
+
+    /// Même message, sur **un seul** canal désigné.
+    ///
+    /// 🔴 `send_test` passe par `dispatch`, donc par TOUS les canaux :
+    /// vérifier un serveur de messagerie faisait sonner le salon Discord de
+    /// l'équipe, et on finissait par ne plus tester du tout. Chaque
+    /// accordéon a désormais son bouton, et il ne réveille que son canal.
+    ///
+    /// `None` = ce nom de canal n'existe pas. ⚠️ À ne pas confondre avec un
+    /// canal connu mais non configuré, qui rend un `ChannelOutcome` *non
+    /// essayé* : « je ne connais pas ce canal » est un défaut de l'appelant,
+    /// « ce canal n'est pas réglé » est un état normal du hub.
+    pub async fn send_test_to(&self, channel: &str) -> Option<ChannelOutcome> {
+        let alert = test_alert();
+        match channel {
+            "webhook" => Some(match self.webhook_config() {
+                Some(cfg) => ChannelOutcome::from("webhook", self.post_webhook(&cfg, &alert).await),
+                None => ChannelOutcome::skipped("webhook"),
+            }),
+            "smtp" => Some(match self.smtp_config() {
+                Some(cfg) => ChannelOutcome::from(
+                    "smtp",
+                    crate::smtp::send(&cfg, &alert.subject(), &alert.message()).await,
+                ),
+                None => ChannelOutcome::skipped("smtp"),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// L'alerte factice du message de test. Une seule définition : deux
+/// formulations divergeraient, et « le test ne ressemble pas à ce qu'on
+/// reçoit vraiment » est précisément ce qu'un test doit écarter.
+fn test_alert() -> Alert {
+    Alert {
+        kind: AlertKind::Up,
+        probe_id: "test".into(),
+        probe: "Sonde de test".into(),
+        site_id: "test".into(),
+        site: "LanProbe".into(),
+        last_seen: crate::db::now(),
+        silence_secs: 0,
     }
 }
 
@@ -1066,6 +1101,73 @@ mod tests {
         assert!(!smtp.attempted && !smtp.ok);
 
         assert_eq!(hook.received().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn testing_one_channel_leaves_the_other_alone() {
+        // 🔴 Tester SMTP ne doit pas réveiller le Discord de l'équipe. Le
+        // bouton unique d'autrefois envoyait sur TOUS les canaux : vérifier un
+        // serveur de messagerie faisait sonner le salon, et on finissait par
+        // ne plus tester du tout.
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let hook = FakeWebhook::start().await;
+        let notifier = notifier_over(db);
+        notifier
+            .set_webhook(&WebhookConfig {
+                url: hook.url.clone(),
+                template: WebhookTemplate::Generic,
+            })
+            .unwrap();
+        notifier
+            .set_smtp(&SmtpConfig {
+                // Rien n'écoute : l'envoi doit échouer, et c'est le but — on
+                // veut voir un verdict d'échec sur SMTP et RIEN sur l'autre.
+                host: "127.0.0.1".into(),
+                port: 1,
+                security: SmtpSecurity::None,
+                username: None,
+                password: None,
+                from: "hub@example.org".into(),
+                to: vec!["admin@example.org".into()],
+            })
+            .unwrap();
+
+        let verdict = notifier.send_test_to("smtp").await.expect("canal connu");
+        assert_eq!(verdict.channel, "smtp");
+        assert!(verdict.attempted, "le canal désigné doit être réellement essayé");
+        assert!(!verdict.ok && verdict.error.is_some(), "{verdict:?}");
+        assert!(
+            hook.received().is_empty(),
+            "🔴 tester SMTP a fait parler le webhook : {:?}",
+            hook.received()
+        );
+
+        let verdict = notifier.send_test_to("webhook").await.expect("canal connu");
+        assert_eq!(verdict.channel, "webhook");
+        assert!(verdict.attempted && verdict.ok, "{verdict:?}");
+        assert_eq!(hook.received().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn testing_an_unconfigured_channel_says_skipped_not_failed() {
+        // ⚠️ « Pas essayé » et « essayé, échoué » ne se confondent pas :
+        // c'est cette distinction qui rend le test honnête. Un canal non
+        // configuré affiché comme un échec enverrait chercher une panne de
+        // serveur là où il n'y a qu'un formulaire vide.
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let notifier = notifier_over(db);
+
+        for channel in ["webhook", "smtp"] {
+            let verdict = notifier.send_test_to(channel).await.expect("canal connu");
+            assert_eq!(verdict.channel, channel);
+            assert!(!verdict.attempted, "{verdict:?}");
+            assert!(!verdict.ok && verdict.error.is_none(), "{verdict:?}");
+        }
+
+        assert!(
+            notifier.send_test_to("pigeon-voyageur").await.is_none(),
+            "un canal inconnu n'est pas un canal non configuré"
+        );
     }
 
     #[tokio::test]

@@ -270,6 +270,9 @@ pub fn build_router(state: AppState) -> Router {
                 put(put_smtp).delete(clear_smtp),
             )
             .route("/api/notifications/test", post(test_notification))
+            // Le test d'UN canal. L'interface n'emprunte que celle-ci : un
+            // bouton par accordéon, et tester SMTP ne réveille pas Discord.
+            .route("/api/notifications/test/{channel}", post(test_one_channel))
             .route("/api/backup", post(create_backup))
             .route("/api/backups", get(list_backups))
             // ⚠️ Sortir une archive du hub, c'est sortir ses secrets. La route
@@ -2152,6 +2155,55 @@ async fn test_notification(
     );
     ok_json(json!({
         "channels": serde_json::to_value(&outcomes).unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+/// Même envoi, sur **un seul** canal.
+///
+/// 🔴 C'est le chemin que l'interface emprunte : chaque accordéon a son
+/// bouton. Tester SMTP ne doit pas réveiller le salon Discord de l'équipe —
+/// avec le bouton unique, vérifier un serveur de messagerie faisait sonner
+/// tout le monde, et on finissait par ne plus tester du tout.
+///
+/// La route globale reste : elle part sur tous les canaux à la fois, ce qui
+/// est encore ce qu'on veut depuis un script de recette.
+async fn test_one_channel(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    Path(channel): Path<String>,
+) -> Response {
+    let Some(outcome) = state.notifier.send_test_to(&channel).await else {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "canal inconnu : « webhook » ou « smtp » attendu",
+        );
+    };
+    // ⚠️ Le canal est la CIBLE de la ligne d'audit. « 1/1 canal » sans dire
+    // lequel ne se relit pas trois semaines plus tard, et c'est précisément
+    // à ce moment-là qu'on cherche qui a essayé quoi.
+    audit(
+        &state,
+        Some(&actor.username),
+        "notify.test",
+        Some(&channel),
+        if outcome.attempted && outcome.ok {
+            Outcome::Success
+        } else {
+            Outcome::Failure
+        },
+        Some(if !outcome.attempted {
+            "canal non configuré : rien n'a été envoyé"
+        } else if outcome.ok {
+            "message de test parti"
+        } else {
+            "envoi refusé par le canal"
+        }),
+    );
+    // Une liste d'un élément, et non un objet nu : l'interface affiche les
+    // verdicts de la même façon d'où qu'ils viennent, et deux formes de
+    // réponse pour la même chose finissent par en avoir deux rendus.
+    ok_json(json!({
+        "channels": serde_json::to_value([&outcome]).unwrap_or(serde_json::Value::Null),
     }))
 }
 
@@ -12507,6 +12559,91 @@ mod tests {
         assert_eq!(smtp["attempted"], false, "on ne prétend pas avoir essayé");
 
         assert_eq!(hook.received().len(), 1, "un vrai message doit partir");
+    }
+
+    #[tokio::test]
+    async fn each_channel_has_its_own_test_and_wakes_no_other() {
+        // 🔴 Le bouton unique envoyait sur TOUS les canaux : vérifier SMTP
+        // faisait sonner le salon Discord de l'équipe. Chaque accordéon a son
+        // bouton, et il ne touche que son canal.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let hook = crate::notify::testing::FakeWebhook::start().await;
+        h.call(with_cookie(
+            json_request(
+                "PUT",
+                "/api/notifications/webhook",
+                serde_json::json!({ "url": hook.url, "template": "slack" }),
+            ),
+            &admin,
+        ))
+        .await;
+
+        // SMTP n'est pas configuré : « pas essayé », et le webhook se taît.
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("POST", "/api/notifications/test/smtp"),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let channels = body["channels"].as_array().unwrap();
+        assert_eq!(channels.len(), 1, "un seul verdict : {body}");
+        assert_eq!(channels[0]["channel"], "smtp");
+        assert_eq!(channels[0]["attempted"], false);
+        assert!(
+            hook.received().is_empty(),
+            "🔴 tester SMTP a fait parler le webhook : {:?}",
+            hook.received()
+        );
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("POST", "/api/notifications/test/webhook"),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let channels = body["channels"].as_array().unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0]["channel"], "webhook");
+        assert_eq!(channels[0]["attempted"], true);
+        assert_eq!(channels[0]["ok"], true);
+        assert_eq!(hook.received().len(), 1);
+
+        // Le journal nomme le canal essayé : « 1/1 canal » sans dire lequel
+        // ne se relit pas.
+        let lines = h.audit(&admin, "notify.test").await;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let cibles: Vec<&str> = lines
+            .iter()
+            .map(|l| l["target"].as_str().unwrap_or(""))
+            .collect();
+        assert!(cibles.contains(&"smtp"), "{cibles:?}");
+        assert!(cibles.contains(&"webhook"), "{cibles:?}");
+
+        // Un canal inconnu est un défaut d'appel, pas un canal muet.
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("POST", "/api/notifications/test/pigeon-voyageur"),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn testing_one_channel_is_reserved_to_admins() {
+        let h = Harness::with_admin().await;
+        h.user("olivier", Role::Operator).await;
+        let operator = h.login_as("olivier").await;
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("POST", "/api/notifications/test/webhook"),
+                &operator,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
 
     #[tokio::test]

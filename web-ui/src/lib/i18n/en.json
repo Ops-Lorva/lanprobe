@@ -956,7 +956,9 @@
     "kind_internet_down": "Internet lost",
     "kind_internet_down_why": "the probe answers, but the link it measures is dead — invisible otherwise",
     "kind_internet_up": "Internet back",
-    "kind_internet_up_why": "the end of the link outage"
+    "kind_internet_up_why": "the end of the link outage",
+    "test_one": "Test this channel",
+    "test_one_hint": "Sends a real message on this channel, and on it alone."
   },
   "commands": {
     "col_by": "By",

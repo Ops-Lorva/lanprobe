@@ -956,7 +956,9 @@
     "kind_internet_down": "Pérdida de internet",
     "kind_internet_down_why": "la sonda responde, pero el enlace que mide está muerto — invisible de otro modo",
     "kind_internet_up": "Vuelta de internet",
-    "kind_internet_up_why": "el fin del corte del enlace"
+    "kind_internet_up_why": "el fin del corte del enlace",
+    "test_one": "Probar este canal",
+    "test_one_hint": "Envía un mensaje real por este canal, y solo por este."
   },
   "commands": {
     "col_by": "Por",
