@@ -30,6 +30,7 @@
   // Le décompte de ports ouverts dit sa famille, et avec la MÊME notation que
   // l'app iOS : deux surfaces du même produit ne comptent pas de deux façons.
   import { countPortFamilies, portCountWording } from '$lib/port-count';
+  import { portScanHosts, type PortScanHost } from '$lib/port-scan-hosts';
   import {
     MEASUREMENT,
     MetricsShapeError,
@@ -938,16 +939,20 @@
     new Map((portsScan?.hosts ?? []).map((h) => [h.ip, h] as const)),
   );
 
-  /** Ports groupés par machine — l'inventaire arrive à plat. */
-  const portsByHost = $derived.by(() => {
-    const map = new Map<string, { port: number; proto: string; service?: string | null }[]>();
-    for (const p of portsScan?.ports ?? []) {
-      const list = map.get(p.ip) ?? [];
-      list.push(p);
-      map.set(p.ip, list);
-    }
-    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  });
+  /**
+   * Les machines du scan, leurs ports rattachés — **pas l'inverse**.
+   *
+   * 🔴 Grouper par `ports` laissait muette une machine scannée sans port
+   * ouvert : elle n'apparaissait nulle part, indiscernable d'une machine
+   * jamais scannée, alors que la sonde l'avait publiée dans `hosts` avec sa
+   * date et son profil. C'est pourtant le résultat le plus rassurant qu'on
+   * puisse remettre à un client. La règle — et le piège de la sonde qui publie
+   * des ports sans publier ses machines — vit dans `portScanHosts`, avec ses
+   * tests.
+   */
+  const portsByHost = $derived(
+    portScanHosts(portsScan).sort((a, b) => a.ip.localeCompare(b.ip)),
+  );
 
   let iperfServer = $state('');
   let discoveryCidr = $state('');
@@ -2420,74 +2425,101 @@
             -->
             <p class="scanmeta">{$_('probe.published_at', { values: { when: logTime(portsScan.started_at, lang) } })}</p>
             {#if portsByHost.length === 0}
+              <!-- ⚠️ « Pas une machine dans l'inventaire » et « des machines,
+                   aucun port ouvert » sont deux choses : depuis que chaque
+                   machine scannée a sa ligne, ce vide-ci ne parle plus des
+                   ports mais de l'inventaire lui-même. -->
               <p class="empty">{$_('probe.ports_empty')}</p>
             {:else}
               <!-- Une machine par ligne, ses ports dépliés au clic : à plat,
                    un scan d'un /24 donne des centaines de lignes où l'on perd
                    quelle machine expose quoi. -->
+              {#snippet machine(row: PortScanHost)}
+                <span class="lp-mono">{row.ip}</span>
+                <!--
+                  ⚠️ Le compte dit aussi la FAMILLE. « 8 ports ouverts » ne
+                  distingue pas huit services TCP d'une machine qui ne répond
+                  qu'en UDP, et ça change ce qu'on va vérifier. Et sans port
+                  ouvert, il ne compte pas jusqu'à zéro : il conclut « aucun
+                  port ouvert », avec les mots du classeur. La notation est
+                  celle de l'app iOS — voir `port-count.ts`.
+                -->
+                <span class="hostn">
+                  {portCountWording(countPortFamilies(row.ports), (k, v) =>
+                    $_(k, { values: v }),
+                  )}
+                </span>
+                <!--
+                  Le profil employé pour CETTE machine. ⚠️ Un scan qui n'en
+                  avait pas écrit « sans profil » : afficher un profil par
+                  défaut dirait d'un scan qu'il a eu un réglage que personne ne
+                  lui a donné. Et un profil supprimé depuis n'affiche que son
+                  identifiant — la règle est dans `scanProfileLabel`, avec ses
+                  tests.
+                -->
+                <span class="hostprofile">
+                  {scanProfileLabel(portsProfiles.get(row.ip) ?? {}, (k) => $_(k))}
+                </span>
+                <!--
+                  ⚠️ La date de CETTE machine, pas celle du lot. Et quand elle
+                  manque — lignes d'avant la v28, sonde antérieure — on
+                  l'écrit : afficher l'heure de publication serait plausible et
+                  faux, ce qui est pire que « inconnue ».
+                -->
+                <span class="hostwhen">
+                  {portsScannedAt.has(row.ip)
+                    ? logTime(portsScannedAt.get(row.ip)!, lang)
+                    : $_('probe.scanned_unknown')}
+                </span>
+              {/snippet}
               <ul class="hosts">
-                {#each portsByHost as [ip, list] (ip)}
+                {#each portsByHost as row (row.ip)}
                   <li>
-                    <button
-                      class="hostrow"
-                      aria-expanded={openHost === ip}
-                      onclick={() => (openHost = openHost === ip ? '' : ip)}
-                    >
-                      <span class="caret" class:on={openHost === ip} aria-hidden="true">›</span>
-                      <span class="lp-mono">{ip}</span>
+                    {#if row.ports.length === 0}
                       <!--
-                        ⚠️ Le compte dit aussi la FAMILLE. « 8 ports ouverts »
-                        ne distingue pas huit services TCP d'une machine qui ne
-                        répond qu'en UDP, et ça change ce qu'on va vérifier.
-                        La notation est celle de l'app iOS — voir `port-count.ts`.
+                        🔴 **Scannée, aucun port ouvert.** Elle a sa ligne, avec
+                        sa date et son profil comme les autres : c'est ce qui
+                        permet de savoir si ce « rien d'ouvert » est frais ou
+                        vieux de trois semaines. Et c'est une ligne INERTE, pas
+                        un bouton : il n'y a rien à déplier, et un chevron qui
+                        ne mène nulle part se clique quand même.
                       -->
-                      <span class="hostn">
-                        {portCountWording(countPortFamilies(list), (k, v) => $_(k, { values: v }))}
-                      </span>
-                      <!--
-                        Le profil employé pour CETTE machine. ⚠️ Un scan qui
-                        n'en avait pas écrit « sans profil » : afficher un
-                        profil par défaut dirait d'un scan qu'il a eu un
-                        réglage que personne ne lui a donné. Et un profil
-                        supprimé depuis n'affiche que son identifiant — la
-                        règle est dans `scanProfileLabel`, avec ses tests.
-                      -->
-                      <span class="hostprofile">
-                        {scanProfileLabel(portsProfiles.get(ip) ?? {}, (k) => $_(k))}
-                      </span>
-                      <!--
-                        ⚠️ La date de CETTE machine, pas celle du lot. Et quand
-                        elle manque — lignes d'avant la v28, sonde antérieure —
-                        on l'écrit : afficher l'heure de publication serait
-                        plausible et faux, ce qui est pire que « inconnue ».
-                      -->
-                      <span class="hostwhen">
-                        {portsScannedAt.has(ip)
-                          ? logTime(portsScannedAt.get(ip)!, lang)
-                          : $_('probe.scanned_unknown')}
-                      </span>
-                    </button>
-                    {#if openHost === ip}
-                      <div class="tablewrap">
-                        <table class="grid">
-                          <thead>
-                            <tr>
-                              <th class="num">{$_('probe.col_port')}</th>
-                              <th>{$_('probe.col_proto')}</th>
-                              <th>{$_('probe.col_service')}</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {#each list as p (`${p.port}/${p.proto}`)}
-                              <tr>
-                                <td class="num lp-mono">{p.port}</td>
-                                <td class="lp-mono">{p.proto}</td>
-                                <td>{p.service ?? '—'}</td>
-                              </tr>
-                            {/each}
-                          </tbody>
-                        </table>
+                      <div class="hostrow inerte">
+                        <span class="caret vide" aria-hidden="true">›</span>
+                        {@render machine(row)}
                       </div>
+                    {:else}
+                      <button
+                        class="hostrow"
+                        aria-expanded={openHost === row.ip}
+                        onclick={() => (openHost = openHost === row.ip ? '' : row.ip)}
+                      >
+                        <span class="caret" class:on={openHost === row.ip} aria-hidden="true">›</span
+                        >
+                        {@render machine(row)}
+                      </button>
+                      {#if openHost === row.ip}
+                        <div class="tablewrap">
+                          <table class="grid">
+                            <thead>
+                              <tr>
+                                <th class="num">{$_('probe.col_port')}</th>
+                                <th>{$_('probe.col_proto')}</th>
+                                <th>{$_('probe.col_service')}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {#each row.ports as p (`${p.port}/${p.proto}`)}
+                                <tr>
+                                  <td class="num lp-mono">{p.port}</td>
+                                  <td class="lp-mono">{p.proto}</td>
+                                  <td>{p.service ?? '—'}</td>
+                                </tr>
+                              {/each}
+                            </tbody>
+                          </table>
+                        </div>
+                      {/if}
                     {/if}
                   </li>
                 {/each}
@@ -3420,12 +3452,17 @@
     text-align: left;
     cursor: pointer;
   }
-  .hostrow:hover {
+  /* ⚠️ Survol et focus sur le BOUTON seul : la ligne d'une machine sans port
+     ouvert n'ouvre rien, et la faire réagir au pointeur promettrait un dépli. */
+  button.hostrow:hover {
     background: var(--ep-bg-secondary);
   }
-  .hostrow:focus-visible {
+  button.hostrow:focus-visible {
     outline: 2px solid var(--ep-accent);
     outline-offset: -2px;
+  }
+  .hostrow.inerte {
+    cursor: default;
   }
   .caret {
     display: inline-block;
@@ -3434,6 +3471,11 @@
   }
   .caret.on {
     transform: rotate(90deg);
+  }
+  /* Le chevron garde sa place sans s'afficher : sans lui, l'adresse d'une
+     machine sans port ouvert se décalerait de celle de ses voisines. */
+  .caret.vide {
+    visibility: hidden;
   }
   .rowacts {
     display: inline-flex;

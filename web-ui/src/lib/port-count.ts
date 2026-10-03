@@ -11,6 +11,10 @@
  * comptent de deux façons font douter des deux — et c'est le genre d'écart qui
  * naît quand la règle est écrite à deux endroits.
  *
+ * ⚠️ **Zéro port ouvert n'est plus un décompte mais un constat** depuis que
+ * l'écran montre les machines scannées sans port ouvert : l'app iOS, qui
+ * groupait elle aussi par `scan.ports`, a la même correction à faire.
+ *
  * ⚠️ Ces règles vivent ici et pas dans le `.svelte` : le projet ne monte pas de
  * composants, une règle écrite dans un gabarit ne serait couverte par rien.
  */
@@ -67,13 +71,18 @@ export function countPortFamilies(ports: readonly { proto: string }[]): PortFami
  */
 export function portCountWording(families: PortFamilies, t: Translate): string {
   const { total, tcp, udp } = families;
-  // ⚠️ La garde du zéro passe AVANT les familles : sans elle, `tcp === total`
+  // 🔴 Une machine scannée sans port ouvert dit ce qu'elle EST, pas un
+  // décompte. « 0 port ouvert » se lit comme une case qu'on n'a pas su
+  // remplir ; c'est au contraire un constat, et le plus rassurant qu'un client
+  // puisse recevoir. Le classeur emploie la MÊME clé : deux formulations pour
+  // le même cas laisseraient croire à deux cas.
+  //
+  // ⚠️ Cette garde passe aussi avant les familles : sans elle, `tcp === total`
   // serait vrai pour deux zéros et l'écran attribuerait au TCP une absence de
   // port ouvert.
-  if (total > 0) {
-    if (tcp === total) return t('probe.ports_count_tcp', { n: total });
-    if (udp === total) return t('probe.ports_count_udp', { n: total });
-  }
+  if (total === 0) return t('probe.ports_none_open');
+  if (tcp === total) return t('probe.ports_count_tcp', { n: total });
+  if (udp === total) return t('probe.ports_count_udp', { n: total });
 
   const parts = [t('probe.ports_count', { n: total })];
   // Une famille absente ne s'écrit pas : « · 0 UDP » ferait chercher ce qui

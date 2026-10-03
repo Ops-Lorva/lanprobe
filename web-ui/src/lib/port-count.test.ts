@@ -60,9 +60,16 @@ describe('portCountWording', () => {
     expect(portCountWording({ total: 2, tcp: 0, udp: 0 }, t)).toBe('probe.ports_count(2)');
   });
 
-  it('dit « 0 port ouvert » sans famille, plutôt que « 0 port TCP »', () => {
-    // ⚠️ Sans cette garde, `tcp === total` serait vrai pour deux zéros et
-    // l'écran attribuerait au TCP une absence de port.
-    expect(portCountWording({ total: 0, tcp: 0, udp: 0 }, t)).toBe('probe.ports_count(0)');
+  it('conclut « aucun port ouvert » au lieu de compter jusqu’à zéro', () => {
+    // 🔴 Une machine sans port ouvert dit ce qu'elle EST, pas un décompte :
+    // « 0 port ouvert » se lit comme une case qu'on n'a pas su remplir, alors
+    // que c'est un constat — et le constat le plus rassurant qu'un client
+    // puisse recevoir. Le libellé est le même dans le classeur, pour qu'on ne
+    // croie pas à deux cas différents selon où on regarde.
+    //
+    // ⚠️ La garde du zéro passe aussi avant les familles : sans elle,
+    // `tcp === total` serait vrai pour deux zéros et l'écran attribuerait au
+    // TCP une absence de port.
+    expect(portCountWording({ total: 0, tcp: 0, udp: 0 }, t)).toBe('probe.ports_none_open');
   });
 });
