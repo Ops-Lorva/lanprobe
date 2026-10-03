@@ -39,6 +39,7 @@
 // un classeur qui daterait ou étiquetterait une machine autrement que la fiche
 // de la sonde donnerait deux réponses au même client selon l'endroit où il
 // regarde. Ces deux modules portent la règle ET ses tests.
+import { scanProfileLabel } from './portscan-profiles';
 import { hostScanDates } from './scan-host-dates';
 
 export interface Sample {
@@ -133,6 +134,18 @@ export interface ScanHost {
    * d'avant la v28 du schéma n'en ont pas. Voir `hostScanDates`.
    */
   scanned_at?: number | null;
+  /**
+   * Le profil de scan avec lequel CETTE machine a été scannée.
+   *
+   * ⚠️ Au niveau de la machine, pas du lot : deux machines du même lot ont pu
+   * être scannées avec deux profils différents.
+   *
+   * ⚠️ Absent ou nul = **aucun profil**. Les lignes d'avant la v30 du schéma
+   * n'en ont pas. Voir `scanProfileLabel`, qui porte la règle et ses tests.
+   */
+  profile_id?: string | null;
+  /** Le nom du profil, résolu par le hub à la lecture. Nul = supprimé depuis. */
+  profile_name?: string | null;
 }
 
 export interface ScanPort {
@@ -748,17 +761,39 @@ export async function buildSlaWorkbook(
   // ⚠️ `undefined` quand la machine n'a pas de date, pas la date du lot : la
   // cellule écrira « date inconnue ». Les lignes d'avant la v28 du schéma n'en
   // ont pas, et une sonde antérieure n'en envoie pas.
+  //
+  // ⚠️ Le profil suit la même logique que la date : il est porté par la
+  // MACHINE, et deux machines du même lot ont pu être scannées avec deux
+  // profils différents. La table est construite en une passe, pour la même
+  // raison.
   const openPorts = payloads.flatMap((p) => {
     const dates = hostScanDates(p.ports?.hosts);
-    return (p.ports?.ports ?? []).map((o) => ({ probe: p.probe, at: dates.get(o.ip), ...o }));
+    const profils = new Map((p.ports?.hosts ?? []).map((h) => [h.ip, h] as const));
+    return (p.ports?.ports ?? []).map((o) => ({
+      probe: p.probe,
+      at: dates.get(o.ip),
+      // 🔴 `scanProfileLabel` et pas une règle écrite ici : un profil de base
+      // reste traduit, un profil créé par quelqu'un garde son nom, un profil
+      // supprimé depuis n'affiche que son identifiant — on n'invente jamais un
+      // nom — et une absence se dit. Quatre branches, qui divergeraient entre
+      // l'écran et le classeur dès la première retouche si on les recopiait.
+      profil: scanProfileLabel(profils.get(o.ip) ?? {}, t),
+      ...o,
+    }));
   });
   if (openPorts.length) {
     const ws = wb.addWorksheet(t('sla.sheet_ports'));
     header(ws, payloads.length === 1 ? first.probe : undefined);
+    // ⚠️ Le profil est posé AVANT les colonnes de port, et ce n'est pas un
+    // détail de présentation : il qualifie ce que la liste de ports veut dire.
+    // « 443 seul » sous le profil Web et « 443 seul » sous le profil Complet ne
+    // disent pas du tout la même chose du réseau du client, et le lecteur doit
+    // le savoir avant de lire la liste, pas après.
     ws.addRow([
       t('sla.probe'),
       t('sla.col_scan_at'),
       t('sla.col_ip'),
+      t('sla.col_profile'),
       t('sla.col_port'),
       t('sla.col_proto'),
       t('sla.col_service'),
@@ -768,11 +803,13 @@ export async function buildSlaWorkbook(
       // dans un classeur, les deux se lisent comme un oubli d'export, et c'est
       // justement le genre de chiffre qu'un client vient contester. Le libellé
       // est celui de l'écran — deux formulations pour le même manque
-      // laisseraient croire à deux cas différents.
+      // laisseraient croire à deux cas différents. Même parti pris pour
+      // « sans profil », que `scanProfileLabel` rend déjà en toutes lettres.
       ws.addRow([
         o.probe,
         o.at == null ? t('probe.scanned_unknown') : dt(o.at, locale),
         o.ip,
+        o.profil,
         o.port,
         o.proto,
         o.service ?? '—',

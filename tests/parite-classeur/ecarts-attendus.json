@@ -920,6 +920,22 @@
     "hub": "texte \"31 août 2026, 06:00:00 UTC\""
   },
   {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "B9",
+    "navigateur": "texte \"31/08/2026 06:00:00\"",
+    "hub": "texte \"31 août 2026, 06:00:00 UTC\""
+  },
+  {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "B10",
+    "navigateur": "texte \"31/08/2026 06:00:00\"",
+    "hub": "texte \"31 août 2026, 06:00:00 UTC\""
+  },
+  {
     "nature": "largeur",
     "scenario": "solo",
     "feuille": "Ports ouverts",
@@ -948,6 +964,14 @@
     "scenario": "solo",
     "feuille": "Ports ouverts",
     "ou": "(largeur colonne 4)",
+    "navigateur": "17",
+    "hub": "17.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 5)",
     "navigateur": "10",
     "hub": "10.71"
   },
@@ -955,7 +979,7 @@
     "nature": "largeur",
     "scenario": "solo",
     "feuille": "Ports ouverts",
-    "ou": "(largeur colonne 5)",
+    "ou": "(largeur colonne 6)",
     "navigateur": "11",
     "hub": "11.71"
   },
@@ -963,7 +987,7 @@
     "nature": "largeur",
     "scenario": "solo",
     "feuille": "Ports ouverts",
-    "ou": "(largeur colonne 6)",
+    "ou": "(largeur colonne 7)",
     "navigateur": "10",
     "hub": "10.71"
   },
@@ -2220,6 +2244,14 @@
     "scenario": "multi",
     "feuille": "Ports ouverts",
     "ou": "(largeur colonne 4)",
+    "navigateur": "16",
+    "hub": "16.71"
+  },
+  {
+    "nature": "largeur",
+    "scenario": "multi",
+    "feuille": "Ports ouverts",
+    "ou": "(largeur colonne 5)",
     "navigateur": "10",
     "hub": "10.71"
   },
@@ -2227,7 +2259,7 @@
     "nature": "largeur",
     "scenario": "multi",
     "feuille": "Ports ouverts",
-    "ou": "(largeur colonne 5)",
+    "ou": "(largeur colonne 6)",
     "navigateur": "11",
     "hub": "11.71"
   },
@@ -2235,7 +2267,7 @@
     "nature": "largeur",
     "scenario": "multi",
     "feuille": "Ports ouverts",
-    "ou": "(largeur colonne 6)",
+    "ou": "(largeur colonne 7)",
     "navigateur": "10",
     "hub": "10.71"
   },

@@ -263,10 +263,24 @@
         "hosts": [
           {
             "ip": "192.168.1.1",
-            "scanned_at": 1788156000
+            "scanned_at": 1788156000,
+            "profile_id": "web",
+            "profile_name": "Web"
           },
           {
             "ip": "192.168.1.42"
+          },
+          {
+            "ip": "192.168.1.60",
+            "scanned_at": 1788156000,
+            "profile_id": "cams",
+            "profile_name": "Caméras"
+          },
+          {
+            "ip": "192.168.1.61",
+            "scanned_at": 1788156000,
+            "profile_id": "profil-supprime",
+            "profile_name": null
           }
         ],
         "ports": [
@@ -279,6 +293,18 @@
           {
             "ip": "192.168.1.42",
             "port": 22,
+            "proto": "tcp",
+            "service": null
+          },
+          {
+            "ip": "192.168.1.60",
+            "port": 554,
+            "proto": "tcp",
+            "service": "rtsp"
+          },
+          {
+            "ip": "192.168.1.61",
+            "port": 8080,
             "proto": "tcp",
             "service": null
           }

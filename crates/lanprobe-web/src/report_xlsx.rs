@@ -151,6 +151,19 @@ pub(crate) struct ScanHost {
     /// envoie pas. Voir [`dates_par_machine`].
     #[serde(default)]
     pub scanned_at: Option<i64>,
+    /// Le profil de scan avec lequel **cette** machine a été scannée.
+    ///
+    /// ⚠️ Au niveau de la machine, pas du lot : deux machines du même lot ont
+    /// pu être scannées avec deux profils différents.
+    ///
+    /// ⚠️ `None` = **aucun profil**. Les lignes d'avant la v30 du schéma n'en
+    /// ont pas. Voir [`libelle_profil`].
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// Le nom du profil, résolu par le hub à la lecture. `None` = supprimé
+    /// depuis, et on n'invente alors aucun nom.
+    #[serde(default)]
+    pub profile_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -603,6 +616,63 @@ fn dates_par_machine(hosts: &[ScanHost]) -> std::collections::HashMap<&str, i64>
         .collect()
 }
 
+/// Les profils **de base** du hub, et eux seuls, restent traduits.
+///
+/// 🔴 Recopié de `SEEDED_LABELS` (`web-ui/src/lib/portscan-profiles.ts`) : les
+/// profils d'origine étaient traduits du temps où ils vivaient dans le code,
+/// et les passer en base ne doit pas rendre le classeur anglais pour qui
+/// l'avait en français. **Toucher l'un des deux, c'est toucher les deux** —
+/// l'épreuve de parité est ce qui le rappelle.
+const PROFILS_DE_BASE: [(&str, &str); 6] = [
+    ("common", "probe.profile_common"),
+    ("web", "probe.profile_web"),
+    ("infra", "probe.profile_infra"),
+    ("db", "probe.profile_db"),
+    ("remote", "probe.profile_remote"),
+    ("full", "probe.profile_full"),
+];
+
+/// Le profil avec lequel une machine a été scannée, tel qu'on l'écrit.
+///
+/// 🔴 Jumelle de `scanProfileLabel` (`web-ui/src/lib/portscan-profiles.ts`), et
+/// les quatre branches sont les siennes :
+///
+/// - **profil de base** : traduit, voir [`PROFILS_DE_BASE`] ;
+/// - **profil nommé par quelqu'un** : son nom, tel qu'il l'a écrit — le
+///   traduire serait lui en inventer un autre ;
+/// - **profil supprimé depuis** (`profile_name` absent) : l'identifiant SEUL.
+///   On ne rend pas le nom de la pierre tombale : l'unicité du nom ne vaut que
+///   parmi les profils vivants, donc un profil neuf peut l'avoir repris avec
+///   une autre liste de ports derrière, et le lecteur irait vérifier la
+///   mauvaise liste ;
+/// - **aucun profil** : on le dit. Un scan d'avant la v30 du schéma, ou lancé
+///   depuis la fenêtre de la sonde sans en choisir, n'en avait pas. Écrire un
+///   profil par défaut prêterait à ce scan un réglage que personne ne lui a
+///   donné.
+fn libelle_profil(host: Option<&ScanHost>, catalog: &Catalog) -> String {
+    // ⚠️ Un identifiant ou un nom réduit à des espaces est une absence
+    // déguisée, pas une valeur : écrit tel quel, il remplirait une cellule qui
+    // ne dit rien. Même garde que côté navigateur.
+    let id = host
+        .and_then(|h| h.profile_id.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(id) = id else {
+        return catalog.t("probe.profile_none", &[]);
+    };
+    let nom = host
+        .and_then(|h| h.profile_name.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(nom) = nom else {
+        return id.to_string();
+    };
+    match PROFILS_DE_BASE.iter().find(|(base, _)| *base == id) {
+        Some((_, cle)) => catalog.t(cle, &[]),
+        None => nom.to_string(),
+    }
+}
+
 /// Une ligne de la synthèse : une cible d'une sonde.
 struct Ligne {
     probe: String,
@@ -923,44 +993,70 @@ pub(crate) fn build(workbook: &Workbook, catalog: &Catalog) -> Result<BuiltFile,
     //
     // ⚠️ Un port n'a pas de date à lui : il tient la sienne de la machine.
     // `None` quand la machine n'en a pas — jamais celle du lot.
-    let ports: Vec<(&str, Option<i64>, &ScanPort)> = payloads
+    //
+    // ⚠️ Le profil suit la même logique, et pour la même raison : il est porté
+    // par la MACHINE, et deux machines du même lot ont pu être scannées avec
+    // deux profils différents.
+    let ports: Vec<(&str, Option<i64>, String, &ScanPort)> = payloads
         .iter()
         .flat_map(|p| {
             let dates = p.ports.as_ref().map(|s| dates_par_machine(&s.hosts)).unwrap_or_default();
-            // ⚠️ Rassemblé ici, sonde par sonde : la table des dates ne vit que
-            // le temps de cette sonde, et un itérateur paresseux la ferait
-            // survivre à son emprunt.
+            let machines: std::collections::HashMap<&str, &ScanHost> = p
+                .ports
+                .iter()
+                .flat_map(|s| s.hosts.iter())
+                .map(|h| (h.ip.as_str(), h))
+                .collect();
+            // ⚠️ Rassemblé ici, sonde par sonde : les deux tables ne vivent que
+            // le temps de cette sonde, et un itérateur paresseux les ferait
+            // survivre à leur emprunt.
             p.ports
                 .iter()
                 .flat_map(|s| s.ports.iter())
-                .map(|o| (p.probe.as_str(), dates.get(o.ip.as_str()).copied(), o))
+                .map(|o| {
+                    (
+                        p.probe.as_str(),
+                        dates.get(o.ip.as_str()).copied(),
+                        libelle_profil(machines.get(o.ip.as_str()).copied(), catalog),
+                        o,
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
     if !ports.is_empty() {
         let mut f = Feuille::nouvelle(&noms.retenir(&catalog.t("sla.sheet_ports", &[])))?;
         entete(&mut f, sonde_unique.as_deref())?;
+        // ⚠️ Le profil est posé AVANT les colonnes de port, et ce n'est pas un
+        // détail de présentation : il qualifie ce que la liste de ports veut
+        // dire. « 443 seul » sous le profil Web et « 443 seul » sous le profil
+        // Complet ne disent pas du tout la même chose du réseau du client, et
+        // le lecteur doit le savoir avant de lire la liste, pas après.
         f.ecrire(&[
             Cell::texte(catalog.t("sla.probe", &[])),
             Cell::texte(catalog.t("sla.col_scan_at", &[])),
             Cell::texte(catalog.t("sla.col_ip", &[])),
+            Cell::texte(catalog.t("sla.col_profile", &[])),
             Cell::texte(catalog.t("sla.col_port", &[])),
             Cell::texte(catalog.t("sla.col_proto", &[])),
             Cell::texte(catalog.t("sla.col_service", &[])),
         ])?;
-        for (probe, at, o) in &ports {
+        for (probe, at, profil, o) in &ports {
             f.ecrire(&[
                 Cell::texte(*probe),
                 // ⚠️ « date inconnue » en toutes lettres, pas un tiret ni une
                 // case vide : dans un classeur, les deux se lisent comme un
                 // oubli d'export. Une absence de date est un fait, elle
                 // s'écrit — avec le libellé de l'écran, pour qu'un client ne
-                // croie pas à deux cas différents selon où il regarde.
+                // croie pas à deux cas différents selon où il regarde. Même
+                // parti pris pour « sans profil », que `libelle_profil` rend
+                // déjà en toutes lettres.
                 Cell::texte(match at {
                     Some(d) => catalog.date(*d),
                     None => catalog.t("probe.scanned_unknown", &[]),
                 }),
                 Cell::texte(o.ip.clone()),
+                Cell::texte(profil.clone()),
                 Cell::Nombre(o.port as f64),
                 Cell::texte(o.proto.clone()),
                 texte_ou_tiret(o.service.as_deref()),
@@ -1616,16 +1712,23 @@ mod tests {
             "started_at": T0,
             "cidr": null,
             "hosts": [
-                { "ip": "192.168.1.1", "scanned_at": T_ROUTEUR },
-                { "ip": "192.168.1.10", "scanned_at": T_NAS },
-                // Une machine d'avant la v28 du schéma, ou publiée par une
-                // sonde antérieure : pas de date, et ça doit se lire.
+                // Un profil de BASE : il reste traduit, parce qu'il l'était du
+                // temps où les profils d'origine vivaient dans le code.
+                { "ip": "192.168.1.1", "scanned_at": T_ROUTEUR, "profile_id": "web", "profile_name": "Web" },
+                // Un profil créé par quelqu'un : son nom, tel qu'il l'a écrit.
+                { "ip": "192.168.1.10", "scanned_at": T_NAS, "profile_id": "cams", "profile_name": "Caméras" },
+                // Une machine d'avant la v28 / v30 du schéma, ou publiée par
+                // une sonde antérieure : ni date ni profil, et ça doit se lire.
                 { "ip": "192.168.1.99" },
+                // Un profil SUPPRIMÉ depuis le scan : le hub ne résout plus
+                // son nom, et on n'en invente pas un.
+                { "ip": "192.168.1.7", "scanned_at": T_NAS, "profile_id": "vieux", "profile_name": null },
             ],
             "ports": [
                 { "ip": "192.168.1.1", "port": 443, "proto": "tcp", "service": "https" },
                 { "ip": "192.168.1.10", "port": 22, "proto": "tcp", "service": null },
                 { "ip": "192.168.1.99", "port": 80, "proto": "tcp", "service": "http" },
+                { "ip": "192.168.1.7", "port": 8080, "proto": "tcp", "service": null },
             ],
         });
         p
@@ -1667,6 +1770,70 @@ mod tests {
         let (c, _) = classeur(vec![payload_ports_dates()], "fr");
         let col = colonne_scan_du_ports(&c);
         assert_eq!(col[2], Lu::Texte(cat.t("probe.scanned_unknown", &[])), "{col:?}");
+    }
+
+    #[test]
+    fn la_colonne_du_profil_dit_les_quatre_cas_comme_lecran() {
+        // 🔴 Les quatre branches de `scanProfileLabel`
+        // (`web-ui/src/lib/portscan-profiles.ts`), portées ici à l'identique :
+        // un profil de base reste TRADUIT, un profil créé par quelqu'un garde
+        // son nom, un profil supprimé depuis n'affiche que son identifiant —
+        // on n'invente jamais un nom, car un profil neuf a pu reprendre
+        // celui-là avec une autre liste de ports derrière —, et une absence se
+        // dit. Le classeur et l'écran doivent répondre la même chose.
+        let cat = Catalog::load("fr");
+        let (c, _) = classeur(vec![payload_ports_dates()], "fr");
+        // ⚠️ Colonne D : le profil est posé AVANT les colonnes de port, parce
+        // qu'il qualifie ce que la liste de ports veut dire.
+        let col = c.colonne("Ports ouverts", 'D', 7);
+        assert_eq!(col[0], Lu::Texte(cat.t("probe.profile_web", &[])), "{col:?}");
+        assert_eq!(col[1], Lu::Texte("Caméras".into()), "{col:?}");
+        assert_eq!(col[2], Lu::Texte(cat.t("probe.profile_none", &[])), "{col:?}");
+        assert_eq!(col[3], Lu::Texte("vieux".into()), "{col:?}");
+    }
+
+    #[test]
+    fn la_colonne_du_profil_porte_son_titre() {
+        // Un classeur remis au client ne s'accompagne de personne : une
+        // colonne sans titre est une colonne qu'il faudra expliquer au
+        // téléphone.
+        let cat = Catalog::load("fr");
+        let (c, _) = classeur(vec![payload_ports_dates()], "fr");
+        assert_eq!(
+            c.cell("Ports ouverts", "D6"),
+            Some(&Lu::Texte(cat.t("sla.col_profile", &[])))
+        );
+    }
+
+    #[test]
+    fn un_profil_reduit_a_des_espaces_vaut_une_absence() {
+        // ⚠️ La même garde que `scanProfileLabel` côté navigateur, qui la teste
+        // aussi : un identifiant ou un nom réduit à des espaces n'est pas une
+        // valeur, c'est une absence déguisée. Sans elle, le classeur écrirait
+        // une cellule qui a l'air remplie et ne dit rien — et le hub et le
+        // navigateur ne diraient pas la même chose du même scan.
+        let cat = Catalog::load("fr");
+        let hote = |id: Option<&str>, nom: Option<&str>| ScanHost {
+            ip: "10.0.0.1".into(),
+            hostname: None,
+            mac: None,
+            vendor: None,
+            latency_ms: None,
+            scanned_at: None,
+            profile_id: id.map(str::to_string),
+            profile_name: nom.map(str::to_string),
+        };
+        assert_eq!(
+            libelle_profil(Some(&hote(Some("  "), None)), &cat),
+            cat.t("probe.profile_none", &[])
+        );
+        // Un nom vide se comporte comme un profil supprimé : l'identifiant seul.
+        assert_eq!(libelle_profil(Some(&hote(Some("cams"), Some("   "))), &cat), "cams");
+        // Et une machine absente de l'inventaire n'a pas de profil non plus.
+        assert_eq!(
+            libelle_profil(None, &cat),
+            cat.t("probe.profile_none", &[])
+        );
     }
 
     // ── La langue ────────────────────────────────────────────────────────

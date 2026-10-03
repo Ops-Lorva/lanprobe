@@ -1044,6 +1044,7 @@
     "col_hostname": "Hostname",
     "col_mac": "MAC",
     "col_vendor": "Vendor",
+    "col_profile": "Scan profile",
     "col_port": "Port",
     "col_proto": "Protocol",
     "col_service": "Service",

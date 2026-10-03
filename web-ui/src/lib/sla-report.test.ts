@@ -247,16 +247,22 @@ function payloadPorts(): SlaPayload {
       started_at: T_LOT,
       cidr: null,
       hosts: [
-        { ip: '192.168.1.1', scanned_at: T_ROUTEUR },
-        { ip: '192.168.1.42', scanned_at: T_NAS },
+        // Un profil de base : il reste TRADUIT, parce qu'il l'était du temps
+        // où les quatre profils d'origine vivaient dans le code.
+        { ip: '192.168.1.1', scanned_at: T_ROUTEUR, profile_id: 'web', profile_name: 'Web' },
+        // Un profil créé par quelqu'un : son nom, tel qu'il l'a écrit.
+        { ip: '192.168.1.42', scanned_at: T_NAS, profile_id: 'cams', profile_name: 'Caméras' },
         // Une machine d'avant la v28 du schéma, ou publiée par une sonde
-        // antérieure : elle n'a pas de date, et ça doit se lire.
+        // antérieure : elle n'a ni date ni profil, et les deux doivent se lire.
         { ip: '192.168.1.99' },
+        // Un profil SUPPRIMÉ depuis le scan : le hub ne résout plus son nom.
+        { ip: '192.168.1.7', scanned_at: T_NAS, profile_id: 'vieux', profile_name: null },
       ],
       ports: [
         { ip: '192.168.1.1', port: 443, proto: 'tcp', service: 'https' },
         { ip: '192.168.1.42', port: 22, proto: 'tcp', service: null },
         { ip: '192.168.1.99', port: 80, proto: 'tcp', service: 'http' },
+        { ip: '192.168.1.7', port: 8080, proto: 'tcp', service: null },
       ],
     },
     public_ip_history: [],
@@ -316,6 +322,47 @@ describe('onglet des ports — la date est celle de la MACHINE', () => {
     // deux formulations pour le même manque laisseraient croire à deux cas.
     const col = await colonneScanDuPorts(payloadPorts());
     expect(col[2]).toBe(t('probe.scanned_unknown'));
+  });
+});
+
+describe('onglet des ports — le profil de scan', () => {
+  beforeAll(async () => {
+    await import('exceljs');
+  }, 60_000);
+
+  /**
+   * ⚠️ Le profil est posé en colonne 4, AVANT les colonnes de port.
+   * Il qualifie ce que la liste de ports veut dire : « 443 seul » sous le
+   * profil Web et « 443 seul » sous le profil Complet ne disent pas la même
+   * chose du tout, et le lecteur doit le savoir avant de lire la liste.
+   */
+  const colonneProfil = (payload: SlaPayload) => colonnePorts(payload, 4);
+
+  it('réemploie la règle de l’écran, sans en écrire une deuxième', async () => {
+    // 🔴 La règle vit dans `scanProfileLabel` avec ses tests : un profil de
+    // base reste traduit, un profil créé par quelqu'un garde son nom, un
+    // profil supprimé n'affiche que son identifiant, et une absence se dit.
+    // L'écrire une seconde fois ici ferait divergier l'écran et le classeur au
+    // premier changement de l'une des quatre branches.
+    const col = await colonneProfil(payloadPorts());
+    expect(col[0]).toBe(t('probe.profile_web'));
+    expect(col[1]).toBe('Caméras');
+    expect(col[2]).toBe(t('probe.profile_none'));
+    expect(col[3]).toBe('vieux');
+  });
+
+  it('nomme sa colonne, pour qu’elle se défende seule', async () => {
+    // Un classeur remis au client ne s'accompagne de personne : une colonne
+    // sans titre est une colonne qu'il faudra expliquer au téléphone.
+    const wb = await buildSlaWorkbook([payloadPorts()], t, 'fr');
+    const sheet = wb.getWorksheet(t('sla.sheet_ports'))!;
+    let titre = '';
+    sheet.eachRow((row) => {
+      if (String(row.getCell(2).value ?? '') === t('sla.col_scan_at')) {
+        titre = String(row.getCell(4).value ?? '');
+      }
+    });
+    expect(titre).toBe(t('sla.col_profile'));
   });
 });
 
