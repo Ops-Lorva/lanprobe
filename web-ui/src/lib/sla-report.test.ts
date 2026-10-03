@@ -366,6 +366,78 @@ describe('onglet des ports — le profil de scan', () => {
   });
 });
 
+describe('onglet des ports — une machine scannée sans aucun port ouvert', () => {
+  beforeAll(async () => {
+    await import('exceljs');
+  }, 60_000);
+
+  /**
+   * Une sonde qui a scanné deux machines et n'a rien trouvé d'ouvert sur la
+   * seconde. 🔴 C'est le résultat le plus rassurant qu'on remette à un client,
+   * et il n'apparaissait nulle part : le générateur partait de `ports`, donc
+   * une machine sans port ouvert était indiscernable d'une machine jamais
+   * scannée.
+   */
+  function payloadRienDOuvert(): SlaPayload {
+    return {
+      ...payloadPorts(),
+      ports: {
+        started_at: T_LOT,
+        cidr: null,
+        hosts: [
+          { ip: '192.168.1.1', scanned_at: T_ROUTEUR, profile_id: 'web', profile_name: 'Web' },
+          { ip: '192.168.1.80', scanned_at: T_NAS, profile_id: 'cams', profile_name: 'Caméras' },
+        ],
+        ports: [{ ip: '192.168.1.1', port: 443, proto: 'tcp', service: 'https' }],
+      },
+    };
+  }
+
+  it('lui donne sa ligne au lieu de la taire', async () => {
+    const col = await colonnePorts(payloadRienDOuvert(), 3);
+    expect(col).toEqual(['192.168.1.1', '192.168.1.80']);
+  });
+
+  it('écrit « aucun port ouvert » là où se lit le port, avec les mots de l’écran', async () => {
+    // ⚠️ Ni case vide ni tiret : dans un classeur, les deux se lisent comme un
+    // oubli d'export, et « rien d'ouvert » redeviendrait indiscernable de
+    // « jamais scannée ». Le libellé est celui de l'écran
+    // (`probe.ports_none_open`) : deux formulations pour le même cas
+    // laisseraient croire à deux cas.
+    const col = await colonnePorts(payloadRienDOuvert(), 5);
+    expect(col[1]).toBe(t('probe.ports_none_open'));
+  });
+
+  it('lui garde sa date et son profil, comme aux autres', async () => {
+    // 🔴 C'est ce qui permet de savoir si ce « rien d'ouvert » est frais ou
+    // vieux de trois semaines. Sans eux, la ligne rassure sans rien prouver.
+    const quand = await colonnePorts(payloadRienDOuvert(), 2);
+    expect(quand[1]).toBe(
+      new Intl.DateTimeFormat('fr', { dateStyle: 'short', timeStyle: 'medium' }).format(
+        new Date(T_NAS * 1000),
+      ),
+    );
+    expect((await colonnePorts(payloadRienDOuvert(), 4))[1]).toBe('Caméras');
+  });
+
+  it('ne nomme ni protocole ni service qui n’existent pas', async () => {
+    expect((await colonnePorts(payloadRienDOuvert(), 6))[1]).toBe('—');
+    expect((await colonnePorts(payloadRienDOuvert(), 7))[1]).toBe('—');
+  });
+
+  it('ne pose AUCUN onglet quand la sonde n’a scanné aucune machine', async () => {
+    // ⚠️ « Scannée, rien d'ouvert » et « jamais scannée » restent deux choses :
+    // sans machine dans l'inventaire, il n'y a rien à dire, et une feuille
+    // vide dirait qu'on a regardé.
+    const payload: SlaPayload = {
+      ...payloadPorts(),
+      ports: { started_at: T_LOT, cidr: null, hosts: [], ports: [] },
+    };
+    const wb = await buildSlaWorkbook([payload], t, 'fr');
+    expect(wb.getWorksheet(t('sla.sheet_ports'))).toBeUndefined();
+  });
+});
+
 describe('stats — latences impossibles', () => {
   it('écarte une latence au-delà du délai sans toucher à la disponibilité', () => {
     // ⚠️ Le cas réel : un portable endormi pendant la mesure a publié

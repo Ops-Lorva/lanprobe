@@ -40,6 +40,7 @@
 // de la sonde donnerait deux réponses au même client selon l'endroit où il
 // regarde. Ces deux modules portent la règle ET ses tests.
 import { scanProfileLabel } from './portscan-profiles';
+import { portScanHosts } from './port-scan-hosts';
 import { hostScanDates } from './scan-host-dates';
 
 export interface Sample {
@@ -746,7 +747,9 @@ export async function buildSlaWorkbook(
     autoFit(ws);
   }
 
-  // 🔴 **Chaque ligne de port porte la date de SA machine, pas celle du lot.**
+  // ── Ports : une machine par groupe de lignes, pas un inventaire à plat ──
+  //
+  // 🔴 **Chaque ligne porte la date de SA machine, pas celle du lot.**
   // La sonde republie tout son inventaire à chaque scan de ports — sans quoi le
   // hub, qui n'affiche que le dernier scan, perdait les machines précédentes —,
   // donc `ports.started_at` ne date que la PUBLICATION. L'écrire sur une ligne
@@ -766,22 +769,28 @@ export async function buildSlaWorkbook(
   // MACHINE, et deux machines du même lot ont pu être scannées avec deux
   // profils différents. La table est construite en une passe, pour la même
   // raison.
-  const openPorts = payloads.flatMap((p) => {
+  //
+  // 🔴 **On part des MACHINES, et les ports s'y rattachent.** Grouper par
+  // `ports` taisait une machine scannée dont rien n'est ouvert : elle était
+  // indiscernable d'une machine jamais scannée, alors que la sonde l'avait
+  // publiée dans `hosts`. C'est pourtant le résultat le plus rassurant qu'on
+  // remette à un client. La règle vit dans `portScanHosts`, avec ses tests.
+  const machinesScannees = payloads.flatMap((p) => {
     const dates = hostScanDates(p.ports?.hosts);
     const profils = new Map((p.ports?.hosts ?? []).map((h) => [h.ip, h] as const));
-    return (p.ports?.ports ?? []).map((o) => ({
+    return portScanHosts(p.ports).map((m) => ({
       probe: p.probe,
-      at: dates.get(o.ip),
+      at: dates.get(m.ip),
       // 🔴 `scanProfileLabel` et pas une règle écrite ici : un profil de base
       // reste traduit, un profil créé par quelqu'un garde son nom, un profil
       // supprimé depuis n'affiche que son identifiant — on n'invente jamais un
       // nom — et une absence se dit. Quatre branches, qui divergeraient entre
       // l'écran et le classeur dès la première retouche si on les recopiait.
-      profil: scanProfileLabel(profils.get(o.ip) ?? {}, t),
-      ...o,
+      profil: scanProfileLabel(profils.get(m.ip) ?? {}, t),
+      ...m,
     }));
   });
-  if (openPorts.length) {
+  if (machinesScannees.length) {
     const ws = wb.addWorksheet(t('sla.sheet_ports'));
     header(ws, payloads.length === 1 ? first.probe : undefined);
     // ⚠️ Le profil est posé AVANT les colonnes de port, et ce n'est pas un
@@ -798,22 +807,31 @@ export async function buildSlaWorkbook(
       t('sla.col_proto'),
       t('sla.col_service'),
     ]);
-    for (const o of openPorts) {
+    for (const m of machinesScannees) {
       // ⚠️ « date inconnue » en toutes lettres, pas un tiret ni une case vide :
       // dans un classeur, les deux se lisent comme un oubli d'export, et c'est
       // justement le genre de chiffre qu'un client vient contester. Le libellé
       // est celui de l'écran — deux formulations pour le même manque
       // laisseraient croire à deux cas différents. Même parti pris pour
       // « sans profil », que `scanProfileLabel` rend déjà en toutes lettres.
-      ws.addRow([
-        o.probe,
-        o.at == null ? t('probe.scanned_unknown') : dt(o.at, locale),
-        o.ip,
-        o.profil,
-        o.port,
-        o.proto,
-        o.service ?? '—',
-      ]);
+      //
+      // ⚠️ La date et le profil sont répétés sur CHAQUE ligne de port de la
+      // machine : un classeur se trie et se filtre, et une valeur posée une
+      // seule fois en tête de groupe suivrait la mauvaise ligne au premier tri.
+      const quand = m.at == null ? t('probe.scanned_unknown') : dt(m.at, locale);
+      const tete = [m.probe, quand, m.ip, m.profil];
+      // 🔴 Scannée, aucun port ouvert : elle le DIT, et garde sa date et son
+      // profil comme les autres — c'est ce qui permet de savoir si ce « rien
+      // d'ouvert » est frais ou vieux de trois semaines. Le libellé est celui
+      // de l'écran. Protocole et service restent au tiret : il n'y a pas de
+      // port dont on ne saurait pas le protocole, il n'y a pas de port.
+      if (m.ports.length === 0) {
+        ws.addRow([...tete, t('probe.ports_none_open'), '—', '—']);
+        continue;
+      }
+      for (const o of m.ports) {
+        ws.addRow([...tete, o.port, o.proto, o.service ?? '—']);
+      }
     }
     autoFit(ws);
   }
