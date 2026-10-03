@@ -1537,11 +1537,32 @@ d'un coup : son dernier résultat est la réponse entière, et une machine absen
 y veut dire « elle n'a pas répondu », pas « on ne l'a pas regardée ». Un scan de
 ports, lui, s'accumule machine par machine.
 
-⚠️ **Le rapport SLA, lui, reste sur `latest_scan`** : son onglet « ports » date
-chaque ligne avec le `started_at` du LOT (`sla-report.ts`), pas avec la date de
-la machine. Lui servir l'inventaire fusionné ferait passer une machine vue il y
-a trois semaines pour fraîchement scannée — la fusion exige d'abord que le
-rapport date ses lignes machine par machine.
+✅ **Le rapport SLA lit le même inventaire fusionné depuis le 02/10**, et
+l'ordre dans lequel il y est venu fait partie de la règle : son onglet « ports »
+datait chaque ligne avec le `started_at` du LOT, donc lui servir la fusion
+d'abord aurait fait passer une machine vue il y a trois semaines pour
+fraîchement scannée — la fusion ramène justement de vieilles machines. Les
+lignes ont donc été datées **machine par machine** d'abord, la fusion branchée
+ensuite. Qui refait ce chemin ailleurs doit le refaire dans cet ordre.
+
+Le branchement tient dans `sla_payload::build`, **producteur unique** du corps
+du rapport : les deux générateurs de classeur — `web-ui/src/lib/sla-report.ts`
+et `crates/lanprobe-web/src/report_xlsx.rs` — reçoivent le même ensemble de
+machines sans qu'aucun des deux ne connaisse la fusion.
+
+⚠️ Une machine **sans date** écrit « date inconnue » (`probe.scanned_unknown`)
+dans la cellule, pas un tiret ni une case vide : dans un classeur remis à un
+client, les deux se lisent comme un oubli d'export. Même parti pris pour
+« sans profil ». Le classeur emploie **les libellés de l'écran** — deux
+formulations pour le même manque laisseraient croire à deux cas différents.
+
+⚠️ L'onglet « ports » porte aussi le **profil de scan**, en colonne 4, **avant**
+les colonnes de port : il qualifie ce que la liste de ports veut dire. « 443
+seul » sous le profil Web et « 443 seul » sous le profil Complet ne disent pas
+la même chose, et le lecteur doit le savoir avant de lire la liste. La règle des
+quatre cas est `scanProfileLabel` (`web-ui/src/lib/portscan-profiles.ts`), que
+le navigateur appelle et dont le hub porte la jumelle `libelle_profil` — leur
+accord est tenu par l'épreuve de parité des classeurs.
 
 ### La date de scan est portée par CHAQUE machine
 
