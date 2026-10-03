@@ -897,12 +897,15 @@ export class ApiError extends Error {
 /**
  * L'adresse qui sert une archive.
  *
- * Elle est construite ici et pas dans l'écran parce qu'elle est empruntée de
- * deux façons : un lien `GET` pour l'archive en clair, et l'action d'un
- * `<form method="POST">` pour l'archive scellée. ⚠️ **Le mot de passe ne va
- * jamais dans cette URL** : `access_log` côté hub journalise la requête avec
- * sa chaîne de requête, et un `?password=` finirait en clair dans les
- * journaux du conteneur. Il voyage dans le corps du formulaire.
+ * Elle est construite ici et pas dans l'écran parce que le hub la sert en deux
+ * méthodes sur une seule route : `GET` pour l'archive telle quelle, `POST`
+ * pour l'archive scellée. C'est `backup-download.ts` qui choisit laquelle, et
+ * qui dit pourquoi les deux passent désormais par un formulaire.
+ *
+ * ⚠️ **Le mot de passe ne va jamais dans cette URL** : `access_log` côté hub
+ * journalise la requête avec sa chaîne de requête, et un `?password=`
+ * finirait en clair dans les journaux du conteneur. Il voyage dans le corps
+ * du formulaire.
  */
 export function backupDownloadUrl(file: string): string {
   return `/api/backups/${encodeURIComponent(file)}`;

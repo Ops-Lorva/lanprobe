@@ -3,11 +3,11 @@
   import {
     api,
     ApiError,
-    backupDownloadUrl,
     type BackupArchive,
     type BackupCreated,
     type BackupList,
   } from '$lib/api';
+  import { downloadRequest } from '$lib/backup-download';
   import Modal from '$lib/components/Modal.svelte';
   import { humanBytes } from '$lib/time';
 
@@ -66,16 +66,23 @@
   // ── Téléchargement ───────────────────────────────────────────────────────
   //
   // Un dialogue et pas un simple lien, parce qu'il y a un choix à faire : une
-  // archive s'ouvre partout ou se protège par un mot de passe, et le second
+  // archive sort telle quelle ou protégée par un mot de passe, et le second
   // cas ne se devine pas. Le dialogue est aussi le seul endroit où dire ce
   // que le fichier contient au moment où on décide de le sortir du hub.
   let download = $state<BackupArchive | null>(null);
   let sealed = $state(false);
   let password = $state('');
-  // Le formulaire est soumis à la main : c'est lui qui porte le mot de passe
-  // dans son CORPS. Un lien l'aurait mis dans l'URL, où le journal d'accès du
-  // hub l'écrirait en clair.
+  // Le formulaire est soumis à la main, pour les DEUX chemins. C'est lui qui
+  // porte le mot de passe dans son CORPS — un lien l'aurait mis dans l'URL, où
+  // le journal d'accès du hub l'écrirait en clair.
+  //
+  // 🔴 Et c'est aussi ce qui corrige le téléchargement SANS mot de passe, qui
+  // ne produisait aucun fichier : il passait par un `<a href>` du gabarit, et
+  // la fermeture du dialogue remettait son `href` à « # » avant que le
+  // navigateur ne l'ait lu. `backup-download.ts` détaille la course.
   let form = $state<HTMLFormElement | null>(null);
+
+  const request = $derived(download ? downloadRequest(download.file, sealed) : null);
 
   function askDownload(a: BackupArchive) {
     download = a;
@@ -83,7 +90,10 @@
     password = '';
   }
 
-  function sendSealed() {
+  // ⚠️ `submit()` d'abord, l'état ensuite : la méthode et l'adresse sont lues
+  // sur le formulaire au moment de la soumission, pas après. L'ordre inverse
+  // est précisément ce qui cassait le chemin sans mot de passe.
+  function send() {
     form?.submit();
     download = null;
     password = '';
@@ -219,14 +229,14 @@
 </section>
 
 <!--
-  Téléchargement. Deux chemins, et deux mécaniques différentes pour une
-  bonne raison :
+  Téléchargement. Deux chemins, UNE mécanique : le même formulaire, soumis à
+  la main, en `GET` sans mot de passe et en `POST` avec — le mot de passe doit
+  voyager dans le CORPS, où le journal d'accès du hub ne l'écrira pas.
 
-  * sans mot de passe, un simple lien en `GET` suffit — le navigateur
-    télécharge nativement, rien ne passe par la mémoire de l'onglet ;
-  * avec mot de passe, un `<form method="POST">` : le mot de passe doit
-    voyager dans le CORPS. Dans l'URL, le journal d'accès du hub l'écrirait
-    en clair dans les journaux du conteneur.
+  🔴 Une seule mécanique parce que deux ne marchaient pas : le chemin sans mot
+  de passe était un `<a href>`, et la fermeture du dialogue réécrivait son
+  `href` avant que le navigateur ne l'ait lu. `backup-download.ts` détaille la
+  course et pourquoi un formulaire ne l'a pas.
 
   ⚠️ Le formulaire vise une iframe cachée. Sans elle, une réponse d'erreur
   du hub (du JSON) remplacerait l'application dans l'onglet : on perdrait
@@ -262,8 +272,8 @@
 
     <form
       bind:this={form}
-      method="POST"
-      action={backupDownloadUrl(download.file)}
+      method={request?.method}
+      action={request?.action}
       target="lp-telechargement"
     >
       {#if sealed}
@@ -285,20 +295,11 @@
 
   {#snippet footer()}
     <button class="lp-btn" onclick={() => (download = null)}>{$_('common.cancel')}</button>
-    {#if sealed}
-      <button class="lp-btn accent" onclick={sendSealed} disabled={password === ''}>
-        {$_('backup.dl_go')}
-      </button>
-    {:else}
-      <a
-        class="lp-btn accent"
-        href={download ? backupDownloadUrl(download.file) : '#'}
-        download={download?.file}
-        onclick={() => (download = null)}
-      >
-        {$_('backup.dl_go')}
-      </a>
-    {/if}
+    <!-- Un seul bouton pour les deux chemins : c'est le formulaire qui porte
+         le choix. Un `<a href>` pour le cas simple était ce qui le cassait. -->
+    <button class="lp-btn accent" onclick={send} disabled={sealed && password === ''}>
+      {$_('backup.dl_go')}
+    </button>
   {/snippet}
 </Modal>
 
