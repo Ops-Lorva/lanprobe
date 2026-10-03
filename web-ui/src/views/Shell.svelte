@@ -4,6 +4,7 @@
   import Icons from '$desktop/components/Icons.svelte';
   import HubIcon, { type HubIconName } from '$lib/components/HubIcon.svelte';
   import { route } from '$lib/router';
+  import { activeNavId } from '$lib/nav-active';
   import { isAdmin } from '$lib/session';
   import FleetView from './FleetView.svelte';
   import ProbeView from './ProbeView.svelte';
@@ -45,6 +46,11 @@
 
   const visible = $derived(items.filter((i) => !i.admin || $isAdmin));
 
+  // Quelle entrée est surlignée : la règle est dans `nav-active.ts`, où elle
+  // est testée. Écrite ici, dans un `class:active={…}`, elle n'était couverte
+  // par rien — et c'est là qu'elle s'est trompée sur « Mon compte ».
+  const activeNav = $derived(activeNavId($route));
+
   // C'est `main` qui défile désormais, pas le document : un changement d'écran
   // doit donc le remonter à la main, sinon on arrive au milieu de la fiche
   // suivante avec le défilement de la précédente.
@@ -81,7 +87,7 @@
       {#each visible as item (item.id)}
         <a
           class="nav-item"
-          class:active={$route.name === item.id}
+          class:active={activeNav === item.id}
           href={item.href}
           title={$_(item.key)}
         >
@@ -104,15 +110,18 @@
       déconnecter » : les deux parlent de la même session, et c'est là qu'on
       les cherche dans toutes les consoles.
 
-      Le lien reste `#/settings/account` : cette adresse est dans des favoris
-      et des captures d'écran, et la casser pour déplacer une entrée de menu
-      serait payer cher un rangement.
+      🔴 **Et son adresse a suivi : `#/account`, plus `#/settings/account`.**
+      Elle était restée sous `settings/` au nom de favoris que personne n'a
+      (Benjamin, 02/10) — et une route qui désigne un écran dont elle ne fait
+      plus partie se paie partout où on la lit : c'est elle qui faisait
+      surligner « Réglages » ici. L'ancienne adresse redirige (`router.ts`),
+      pour l'onglet resté ouvert.
     -->
     <div class="nav-bottom">
       <a
         class="nav-item"
-        class:active={$route.name === 'settings' && $route.tab === 'account'}
-        href="#/settings/account"
+        class:active={activeNav === 'account'}
+        href="#/account"
         title={$_('settings.tab_account')}
       >
         <HubIcon name="user" size={15} />
@@ -130,7 +139,12 @@
       <ProbeView id={$route.id} {onExpired} />
     {:else if $route.name === 'audit'}
       <AuditView {onExpired} />
-    {:else if $route.name === 'settings'}
+      <!-- « Mon compte » n'est plus un onglet de Réglages, mais c'est encore
+           `SettingsView` qui dessine son écran (sans titre « Réglages » ni
+           bande d'onglets, il le sait). Le découper en vue à part serait un
+           déplacement de plusieurs centaines de lignes qui ne corrigerait
+           rien de plus. -->
+    {:else if $route.name === 'settings' || $route.name === 'account'}
       <SettingsView {onExpired} />
     {:else}
       <FleetView {onExpired} />

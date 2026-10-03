@@ -13,16 +13,23 @@ Object.defineProperty(globalThis, 'location', {
 const { SETTINGS_TABS, href, parse } = await import('./router');
 
 describe('adresses du hub', () => {
-  it('garde « Mon compte » adressable après son départ des onglets', () => {
+  it('donne à « Mon compte » son adresse propre, hors des réglages', () => {
     // 🔴 « Mon compte » a quitté la bande d'onglets de Réglages pour la barre
-    // de gauche, mais SON ADRESSE N'A PAS CHANGÉ : elle est dans des favoris
-    // et des captures d'écran. Elle doit donc rester dans `SETTINGS_TABS`,
-    // qui sert de liste blanche à `parse` — l'en retirer « puisque ce n'est
-    // plus un onglet » ferait silencieusement retomber l'entrée de la barre
-    // de gauche sur « Général ».
-    expect(SETTINGS_TABS).toContain('account');
-    expect(parse('#/settings/account')).toEqual({ name: 'settings', tab: 'account' });
-    expect(href({ name: 'settings', tab: 'account' })).toBe('#/settings/account');
+    // de gauche (`07d69a9`), et son adresse a suivi le 02/10 : elle était
+    // restée `#/settings/account` au nom de favoris que personne n'a, ce qui
+    // faisait surligner « Réglages » sur un écran qui n'en est plus un. Une
+    // route qui ment sur l'endroit où elle mène force un cas particulier dans
+    // tout ce qui la lit — c'est ce cas particulier qu'on supprime ici.
+    expect(SETTINGS_TABS).not.toContain('account');
+    expect(parse('#/account')).toEqual({ name: 'account' });
+    expect(href({ name: 'account' })).toBe('#/account');
+  });
+
+  it('redirige l’ancienne adresse de « Mon compte » plutôt que d’afficher du vide', () => {
+    // ⚠️ Un onglet resté ouvert sur `#/settings/account`, ou rechargé après la
+    // mise à jour du hub, ne doit pas tomber sur « Général » — ni sur une page
+    // blanche. La redirection ne coûte rien.
+    expect(parse('#/settings/account')).toEqual({ name: 'account' });
   });
 
   it('retombe sur « Général » pour un onglet inconnu, et sur le parc pour le reste', () => {

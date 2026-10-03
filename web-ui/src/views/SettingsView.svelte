@@ -382,7 +382,15 @@
   // PATCH, le découper en formulaires mentirait sur ce qui part au hub.
   // La pastille sur un onglet dit où sont les modifications en attente — sans
   // elle, on enregistrerait une valeur saisie sur un onglet qu'on ne voit plus.
-  type Tab = SettingsTab;
+  /**
+   * Le panneau affiché — pas tout à fait « l'onglet ».
+   *
+   * ⚠️ `account` n'est plus un onglet de Réglages : il a son entrée dans la
+   * barre de gauche et son adresse `#/account`, et ne figure donc plus dans
+   * `SETTINGS_TABS`. C'est pourtant encore ce composant qui dessine son
+   * écran : le type des panneaux le couvre, la liste des onglets non.
+   */
+  type Tab = SettingsTab | 'account';
   // ── Mon compte ───────────────────────────────────────────────────────────
   let pwCurrent = $state('');
   let pwNext = $state('');
@@ -701,12 +709,13 @@
     devices: false,
   });
 
-  const ALL_TABS: { id: Tab; key: string; admin?: true }[] = [
+  // ⚠️ `SettingsTab` : la rangée ne porte que de vrais onglets. C'est ce qui
+  // garantit qu'on ne fabriquera pas un `#/settings/account`.
+  const ALL_TABS: { id: SettingsTab; key: string; admin?: true }[] = [
     // ⚠️ « Mon compte » N'EST PLUS un onglet : il est passé dans la barre de
-    // gauche, contre « Se déconnecter » — `Shell.svelte` dit pourquoi. Son
-    // adresse `#/settings/account` ne change pas, elle est dans des favoris
-    // et des captures d'écran ; elle rend simplement un écran à elle, sans
-    // bande d'onglets.
+    // gauche, contre « Se déconnecter » — `Shell.svelte` dit pourquoi — et son
+    // adresse a suivi, `#/account`. Ce composant dessine toujours son écran,
+    // mais sans titre « Réglages » ni bande d'onglets.
     { id: 'general', key: 'settings.tab_general' },
     // Les trois réglages du mode se règlent ensemble : la durée était sur
     // « Général », les deux autres n'étaient nulle part. Un onglet qui porte
@@ -733,13 +742,17 @@
   // se dicte au téléphone, « le troisième onglet » non. Un onglet demandé mais
   // indisponible retombe sur le premier plutôt que d'afficher un panneau que la
   // rangée ne montre pas.
-  const asked = $derived($route.name === 'settings' ? $route.tab : 'general');
+  const asked = $derived<Tab>(
+    // « Mon compte » arrive par SA route, pas par un onglet : c'est ce qui
+    // permet de ne plus avoir de cas particulier ailleurs (voir
+    // `nav-active.ts`).
+    $route.name === 'account' ? 'account' : $route.name === 'settings' ? $route.tab : 'general',
+  );
   /**
-   * ⚠️ `account` est accepté **bien qu'il ne soit plus dans `TABS`**. Sans ce
-   * cas explicite, l'entrée « Mon compte » de la barre de gauche retomberait
-   * sur « Général » : la liste des onglets sert aussi de liste blanche des
-   * adresses valides, et `account` a quitté la première sans quitter la
-   * seconde.
+   * ⚠️ `account` ne passe pas par `TABS` — il n'y est plus. Le filtre sert aux
+   * onglets réservés à `admin` : un `viewer` qui ouvre `#/settings/accounts`
+   * retombe sur « Général » plutôt que sur un panneau que la rangée ne montre
+   * pas.
    */
   const tab = $derived<Tab>(
     asked === 'account' || TABS.some((t) => t.id === asked) ? asked : 'general',
@@ -752,7 +765,9 @@
    */
   const accountOnly = $derived(tab === 'account');
 
-  function openTab(id: Tab) {
+  // ⚠️ `SettingsTab` et non `Tab` : `#/settings/account` n'est plus une
+  // adresse qu'on fabrique, c'est une redirection qu'on honore.
+  function openTab(id: SettingsTab) {
     go(`#/settings/${id}`);
   }
 
@@ -804,7 +819,7 @@
 
   function onTabKey(e: KeyboardEvent) {
     const i = TABS.findIndex((t) => t.id === tab);
-    let next: Tab;
+    let next: SettingsTab;
     if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length].id;
     else if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length].id;
     else return;
@@ -822,7 +837,7 @@
 
   /** Le message ET l'onglet où se trouve le champ fautif : une erreur sur un
       onglet fermé serait invisible, donc incompréhensible. */
-  function validate(): { msg: string; tab: Tab } | null {
+  function validate(): { msg: string; tab: SettingsTab } | null {
     if (!influxUrl.trim() || !org.trim() || !bucket.trim())
       return { msg: $_('settings.required'), tab: 'storage' };
     try {
