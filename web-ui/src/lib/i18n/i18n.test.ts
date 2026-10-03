@@ -545,6 +545,13 @@ describe('catalogues de traduction', () => {
    * ⚠️ `backup.dl_contents` n'est pas décoratif : le fichier qui arrive dans
    * les téléchargements est un secret, et rien sur son icône ne le dit. C'est
    * la seule phrase de l'écran qui l'annonce.
+   *
+   * 🔴 En revanche, plus de `dl_plain_hint` ni de `dl_sealed_hint` : ces deux
+   * phrases expliquaient le PRIX de chaque choix (« s'ouvre partout », « il
+   * faudra 7-Zip »). Le pourquoi va dans le code et dans les notes, jamais
+   * dans l'écran — et un technicien qui télécharge une sauvegarde le sait.
+   * Les deux intitulés restent, eux : ils nomment ce que fait le bouton, et
+   * `dl_sealed` nomme même le chiffrement employé.
    */
   const REQUISES_TELECHARGEMENT = [
     'backup.col_file',
@@ -553,9 +560,7 @@ describe('catalogues de traduction', () => {
     'backup.dl_contents',
     'backup.dl_choice',
     'backup.dl_plain',
-    'backup.dl_plain_hint',
     'backup.dl_sealed',
-    'backup.dl_sealed_hint',
     'backup.dl_password',
     'backup.dl_password_forget',
     'backup.dl_go',

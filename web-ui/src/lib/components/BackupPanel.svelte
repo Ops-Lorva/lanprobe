@@ -254,19 +254,18 @@
 
     <fieldset class="choice">
       <legend>{$_('backup.dl_choice')}</legend>
+      <!-- ⚠️ Les deux intitulés NOMMENT ce qui va se passer, et l'un d'eux
+           nomme le chiffrement employé : c'est la qualification du fait, elle
+           reste. Ce qui est parti, ce sont les deux phrases qui expliquaient
+           le prix de chaque choix (« s'ouvre partout », « il faudra
+           7-Zip ») : le pourquoi va dans le code, jamais dans l'écran. -->
       <label class="opt">
         <input type="radio" checked={!sealed} onchange={() => (sealed = false)} />
         <span class="opt-name">{$_('backup.dl_plain')}</span>
-        <span class="opt-why">{$_('backup.dl_plain_hint')}</span>
       </label>
       <label class="opt">
         <input type="radio" checked={sealed} onchange={() => (sealed = true)} />
         <span class="opt-name">{$_('backup.dl_sealed')}</span>
-        <!-- ⚠️ Dire le prix de l'AES AVANT le clic : l'explorateur de Windows
-             et l'utilitaire d'archive de macOS ne le lisent pas. Le taire
-             donnerait une archive que son propriétaire n'arrive pas à
-             ouvrir, le jour où il en a besoin. -->
-        <span class="opt-why">{$_('backup.dl_sealed_hint')}</span>
       </label>
     </fieldset>
 
@@ -442,13 +441,13 @@
     color: var(--ep-text-dim);
     padding: 0 4px;
   }
-  /* Le POURQUOI de chaque option sous son intitulé, pas en infobulle : c'est
-     la compatibilité qui décide du choix, et elle doit se lire avant le clic. */
+  /* Une ligne par option, l'intitulé seul : les deux phrases qui expliquaient
+     le prix de chaque choix sont parties avec la grille à deux rangées
+     qu'elles occupaient. */
   .opt {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: baseline;
-    column-gap: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
     cursor: pointer;
   }
   .opt input {
@@ -457,12 +456,6 @@
   .opt-name {
     font-size: 12.5px;
     color: var(--ep-text-primary);
-  }
-  .opt-why {
-    grid-column: 2;
-    font-size: 11px;
-    color: var(--ep-text-secondary);
-    line-height: 1.5;
   }
 
   /* La cible du formulaire. Elle n'affiche rien : elle existe pour que la
