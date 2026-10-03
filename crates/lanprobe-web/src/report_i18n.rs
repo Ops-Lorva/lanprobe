@@ -121,6 +121,11 @@ pub(crate) const REPORT_KEYS: &[&str] = &[
     "sla.col_port",
     "sla.col_proto",
     "sla.col_service",
+    // Ce que le classeur dit d'une machine scannée sans aucun port ouvert. La
+    // clé est celle de l'ÉCRAN : deux formulations pour le même cas feraient
+    // croire à deux cas, et une clé disparue d'un seul catalogue ne se verrait
+    // qu'à l'ouverture du document, dans la langue de quelqu'un d'autre.
+    "probe.ports_none_open",
     // SLA par adresse publique.
     "report.ipSheet",
     "report.ipLabel",

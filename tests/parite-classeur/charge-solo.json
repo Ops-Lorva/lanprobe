@@ -281,6 +281,12 @@
             "scanned_at": 1788156000,
             "profile_id": "profil-supprime",
             "profile_name": null
+          },
+          {
+            "ip": "192.168.1.70",
+            "scanned_at": 1788156000,
+            "profile_id": "web",
+            "profile_name": "Web"
           }
         ],
         "ports": [

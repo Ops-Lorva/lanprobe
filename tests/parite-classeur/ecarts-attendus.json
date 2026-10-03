@@ -936,6 +936,14 @@
     "hub": "texte \"31 août 2026, 06:00:00 UTC\""
   },
   {
+    "nature": "date",
+    "scenario": "solo",
+    "feuille": "Ports ouverts",
+    "ou": "B11",
+    "navigateur": "texte \"31/08/2026 06:00:00\"",
+    "hub": "texte \"31 août 2026, 06:00:00 UTC\""
+  },
+  {
     "nature": "largeur",
     "scenario": "solo",
     "feuille": "Ports ouverts",
@@ -972,8 +980,8 @@
     "scenario": "solo",
     "feuille": "Ports ouverts",
     "ou": "(largeur colonne 5)",
-    "navigateur": "10",
-    "hub": "10.71"
+    "navigateur": "19",
+    "hub": "19.71"
   },
   {
     "nature": "largeur",

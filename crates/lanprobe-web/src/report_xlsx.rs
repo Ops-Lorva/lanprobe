@@ -616,6 +616,44 @@ fn dates_par_machine(hosts: &[ScanHost]) -> std::collections::HashMap<&str, i64>
         .collect()
 }
 
+/// Les machines d'un scan de ports, **chacune avec ses ports ouverts**.
+///
+/// 🔴 Jumelle de `portScanHosts` (`web-ui/src/lib/port-scan-hosts.ts`), et pour
+/// la même raison : grouper par `ports` taisait une machine que la sonde avait
+/// scannée sans rien y trouver d'ouvert. Elle n'apparaissait nulle part, donc
+/// indiscernable d'une machine jamais scannée — alors que c'est le résultat le
+/// plus rassurant qu'on puisse remettre à un client.
+///
+/// ⚠️ Sans jamais inventer de machine : une adresse absente de `hosts` ET sans
+/// port ouvert n'a pas été scannée, elle reste absente.
+///
+/// ⚠️ Une machine dont on ne connaît QUE les ports compte quand même. Une sonde
+/// d'avant la v28 du schéma publie ses ports sans publier ses machines, et
+/// partir strictement de `hosts` ferait disparaître du classeur des ports
+/// ouverts bel et bien relevés.
+///
+/// ⚠️ L'ordre est celui de la SONDE — ses machines d'abord, puis celles que
+/// seuls les ports révèlent. Trier ici changerait l'ordre des lignes de
+/// documents déjà remis à des clients.
+fn machines_du_scan(scan: Option<&Scan>) -> Vec<(&str, Vec<&ScanPort>)> {
+    let mut rang: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut out: Vec<(&str, Vec<&ScanPort>)> = Vec::new();
+    for h in scan.map(|s| s.hosts.as_slice()).unwrap_or_default() {
+        rang.entry(h.ip.as_str()).or_insert_with(|| {
+            out.push((h.ip.as_str(), Vec::new()));
+            out.len() - 1
+        });
+    }
+    for p in scan.map(|s| s.ports.as_slice()).unwrap_or_default() {
+        let i = *rang.entry(p.ip.as_str()).or_insert_with(|| {
+            out.push((p.ip.as_str(), Vec::new()));
+            out.len() - 1
+        });
+        out[i].1.push(p);
+    }
+    out
+}
+
 /// Les profils **de base** du hub, et eux seuls, restent traduits.
 ///
 /// 🔴 Recopié de `SEEDED_LABELS` (`web-ui/src/lib/portscan-profiles.ts`) : les
@@ -997,11 +1035,14 @@ pub(crate) fn build(workbook: &Workbook, catalog: &Catalog) -> Result<BuiltFile,
     // ⚠️ Le profil suit la même logique, et pour la même raison : il est porté
     // par la MACHINE, et deux machines du même lot ont pu être scannées avec
     // deux profils différents.
-    let ports: Vec<(&str, Option<i64>, String, &ScanPort)> = payloads
+    // 🔴 **On part des MACHINES, et les ports s'y rattachent.** La règle, et le
+    // piège de la sonde qui publie des ports sans publier ses machines, vivent
+    // dans `machines_du_scan`.
+    let machines_ports: Vec<(&str, Option<i64>, String, &str, Vec<&ScanPort>)> = payloads
         .iter()
         .flat_map(|p| {
             let dates = p.ports.as_ref().map(|s| dates_par_machine(&s.hosts)).unwrap_or_default();
-            let machines: std::collections::HashMap<&str, &ScanHost> = p
+            let hotes: std::collections::HashMap<&str, &ScanHost> = p
                 .ports
                 .iter()
                 .flat_map(|s| s.hosts.iter())
@@ -1010,21 +1051,21 @@ pub(crate) fn build(workbook: &Workbook, catalog: &Catalog) -> Result<BuiltFile,
             // ⚠️ Rassemblé ici, sonde par sonde : les deux tables ne vivent que
             // le temps de cette sonde, et un itérateur paresseux les ferait
             // survivre à leur emprunt.
-            p.ports
-                .iter()
-                .flat_map(|s| s.ports.iter())
-                .map(|o| {
+            machines_du_scan(p.ports.as_ref())
+                .into_iter()
+                .map(|(ip, ouverts)| {
                     (
                         p.probe.as_str(),
-                        dates.get(o.ip.as_str()).copied(),
-                        libelle_profil(machines.get(o.ip.as_str()).copied(), catalog),
-                        o,
+                        dates.get(ip).copied(),
+                        libelle_profil(hotes.get(ip).copied(), catalog),
+                        ip,
+                        ouverts,
                     )
                 })
                 .collect::<Vec<_>>()
         })
         .collect();
-    if !ports.is_empty() {
+    if !machines_ports.is_empty() {
         let mut f = Feuille::nouvelle(&noms.retenir(&catalog.t("sla.sheet_ports", &[])))?;
         entete(&mut f, sonde_unique.as_deref())?;
         // ⚠️ Le profil est posé AVANT les colonnes de port, et ce n'est pas un
@@ -1041,26 +1082,51 @@ pub(crate) fn build(workbook: &Workbook, catalog: &Catalog) -> Result<BuiltFile,
             Cell::texte(catalog.t("sla.col_proto", &[])),
             Cell::texte(catalog.t("sla.col_service", &[])),
         ])?;
-        for (probe, at, profil, o) in &ports {
-            f.ecrire(&[
-                Cell::texte(*probe),
-                // ⚠️ « date inconnue » en toutes lettres, pas un tiret ni une
-                // case vide : dans un classeur, les deux se lisent comme un
-                // oubli d'export. Une absence de date est un fait, elle
-                // s'écrit — avec le libellé de l'écran, pour qu'un client ne
-                // croie pas à deux cas différents selon où il regarde. Même
-                // parti pris pour « sans profil », que `libelle_profil` rend
-                // déjà en toutes lettres.
-                Cell::texte(match at {
-                    Some(d) => catalog.date(*d),
-                    None => catalog.t("probe.scanned_unknown", &[]),
-                }),
-                Cell::texte(o.ip.clone()),
-                Cell::texte(profil.clone()),
-                Cell::Nombre(o.port as f64),
-                Cell::texte(o.proto.clone()),
-                texte_ou_tiret(o.service.as_deref()),
-            ])?;
+        for (probe, at, profil, ip, ouverts) in &machines_ports {
+            // ⚠️ « date inconnue » en toutes lettres, pas un tiret ni une case
+            // vide : dans un classeur, les deux se lisent comme un oubli
+            // d'export. Une absence de date est un fait, elle s'écrit — avec le
+            // libellé de l'écran, pour qu'un client ne croie pas à deux cas
+            // différents selon où il regarde. Même parti pris pour « sans
+            // profil », que `libelle_profil` rend déjà en toutes lettres.
+            //
+            // ⚠️ La date et le profil sont répétés sur CHAQUE ligne de port de
+            // la machine : un classeur se trie et se filtre, et une valeur
+            // posée une seule fois en tête de groupe suivrait la mauvaise ligne
+            // au premier tri.
+            let quand = match at {
+                Some(d) => catalog.date(*d),
+                None => catalog.t("probe.scanned_unknown", &[]),
+            };
+            // 🔴 Scannée, aucun port ouvert : elle le DIT, et garde sa date et
+            // son profil comme les autres — c'est ce qui permet de savoir si ce
+            // « rien d'ouvert » est frais ou vieux de trois semaines. Le
+            // libellé est celui de l'écran. Protocole et service restent au
+            // tiret : il n'y a pas de port dont on ignorerait le protocole, il
+            // n'y a pas de port.
+            if ouverts.is_empty() {
+                f.ecrire(&[
+                    Cell::texte(*probe),
+                    Cell::texte(quand),
+                    Cell::texte(*ip),
+                    Cell::texte(profil.clone()),
+                    Cell::texte(catalog.t("probe.ports_none_open", &[])),
+                    texte_ou_tiret(None),
+                    texte_ou_tiret(None),
+                ])?;
+                continue;
+            }
+            for o in ouverts {
+                f.ecrire(&[
+                    Cell::texte(*probe),
+                    Cell::texte(quand.clone()),
+                    Cell::texte(*ip),
+                    Cell::texte(profil.clone()),
+                    Cell::Nombre(o.port as f64),
+                    Cell::texte(o.proto.clone()),
+                    texte_ou_tiret(o.service.as_deref()),
+                ])?;
+            }
         }
         f.poser(&mut wb)?;
     }
@@ -1833,6 +1899,122 @@ mod tests {
         assert_eq!(
             libelle_profil(None, &cat),
             cat.t("probe.profile_none", &[])
+        );
+    }
+
+    // ── Une machine scannée sans aucun port ouvert ───────────────────────
+    //
+    // 🔴 Le générateur partait de `ports` : une machine que la sonde avait
+    // scannée sans rien y trouver d'ouvert n'apparaissait NULLE PART, alors
+    // qu'elle est bien dans `hosts` avec sa date et son profil. Elle était
+    // donc indiscernable d'une machine jamais scannée — et c'est pourtant le
+    // résultat le plus rassurant qu'on puisse remettre à un client.
+
+    /// Une sonde qui a scanné deux machines et n'a rien trouvé d'ouvert sur la
+    /// seconde.
+    fn payload_ports_rien_douvert() -> serde_json::Value {
+        let mut p = payload_complet();
+        p["ports"] = json!({
+            "started_at": T0,
+            "cidr": null,
+            "hosts": [
+                { "ip": "192.168.1.1", "scanned_at": T_ROUTEUR, "profile_id": "web", "profile_name": "Web" },
+                { "ip": "192.168.1.80", "scanned_at": T_NAS, "profile_id": "cams", "profile_name": "Caméras" },
+            ],
+            "ports": [
+                { "ip": "192.168.1.1", "port": 443, "proto": "tcp", "service": "https" },
+            ],
+        });
+        p
+    }
+
+    #[test]
+    fn une_machine_sans_port_ouvert_a_sa_ligne_et_dit_ce_quelle_est() {
+        // ⚠️ Ni case vide ni tiret là où se lit le port : dans un classeur, les
+        // deux se lisent comme un oubli d'export, et « rien d'ouvert »
+        // redeviendrait indiscernable de « jamais scannée ». Le libellé est
+        // celui de l'écran (`probe.ports_none_open`) : deux formulations pour
+        // le même cas laisseraient croire à deux cas.
+        let cat = Catalog::load("fr");
+        let (c, _) = classeur(vec![payload_ports_rien_douvert()], "fr");
+        assert_eq!(
+            c.colonne("Ports ouverts", 'C', 7),
+            vec![
+                Lu::Texte("192.168.1.1".into()),
+                Lu::Texte("192.168.1.80".into())
+            ]
+        );
+        let ports = c.colonne("Ports ouverts", 'E', 7);
+        assert_eq!(ports[0], Lu::Nombre(443.0), "{ports:?}");
+        assert_eq!(
+            ports[1],
+            Lu::Texte(cat.t("probe.ports_none_open", &[])),
+            "{ports:?}"
+        );
+        // Protocole et service restent au tiret : il n'y a pas de port dont on
+        // ignorerait le protocole, il n'y a pas de port.
+        assert_eq!(c.cell("Ports ouverts", "F8"), Some(&Lu::Texte("—".into())));
+        assert_eq!(c.cell("Ports ouverts", "G8"), Some(&Lu::Texte("—".into())));
+    }
+
+    #[test]
+    fn une_machine_sans_port_ouvert_garde_sa_date_et_son_profil() {
+        // 🔴 C'est ce qui permet de savoir si ce « rien d'ouvert » est frais ou
+        // vieux de trois semaines. Sans eux, la ligne rassure sans rien prouver.
+        let cat = Catalog::load("fr");
+        let (c, _) = classeur(vec![payload_ports_rien_douvert()], "fr");
+        assert_eq!(
+            c.cell("Ports ouverts", "B8"),
+            Some(&Lu::Texte(cat.date(T_NAS)))
+        );
+        assert_eq!(
+            c.cell("Ports ouverts", "D8"),
+            Some(&Lu::Texte("Caméras".into()))
+        );
+    }
+
+    #[test]
+    fn un_inventaire_vide_ne_produit_aucun_onglet_de_ports() {
+        // ⚠️ « Scannée, rien d'ouvert » et « jamais scannée » restent deux
+        // choses : sans machine dans l'inventaire, il n'y a rien à dire, et une
+        // feuille vide affirmerait qu'on a regardé.
+        let mut p = payload_complet();
+        p["ports"] = json!({ "started_at": T0, "cidr": null, "hosts": [], "ports": [] });
+        let (c, _) = classeur(vec![p], "fr");
+        assert!(
+            !c.onglets.iter().any(|o| o == "Ports ouverts"),
+            "{:?}",
+            c.onglets
+        );
+    }
+
+    #[test]
+    fn une_machine_connue_par_ses_seuls_ports_nest_pas_perdue() {
+        // ⚠️ Une sonde d'avant la v28 publie ses ports sans publier ses
+        // machines. Partir strictement de `hosts` ferait disparaître du
+        // classeur des ports ouverts bel et bien relevés.
+        let cat = Catalog::load("fr");
+        let mut p = payload_complet();
+        p["ports"] = json!({
+            "started_at": T0,
+            "cidr": null,
+            "hosts": [],
+            "ports": [{ "ip": "192.168.1.9", "port": 8080, "proto": "tcp", "service": null }],
+        });
+        let (c, _) = classeur(vec![p], "fr");
+        assert_eq!(
+            c.cell("Ports ouverts", "C7"),
+            Some(&Lu::Texte("192.168.1.9".into()))
+        );
+        assert_eq!(c.cell("Ports ouverts", "E7"), Some(&Lu::Nombre(8080.0)));
+        // Sans `hosts`, ni date ni profil ne s'inventent.
+        assert_eq!(
+            c.cell("Ports ouverts", "B7"),
+            Some(&Lu::Texte(cat.t("probe.scanned_unknown", &[])))
+        );
+        assert_eq!(
+            c.cell("Ports ouverts", "D7"),
+            Some(&Lu::Texte(cat.t("probe.profile_none", &[])))
         );
     }
 

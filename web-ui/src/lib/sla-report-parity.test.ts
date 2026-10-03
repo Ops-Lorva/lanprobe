@@ -208,6 +208,21 @@ describe('parité du classeur SLA — relevé du navigateur', () => {
     expect(adresses.cellules['H4']).toEqual({ s: '100.00 %' });
   });
 
+  it('dit d’une machine scannée sans port ouvert ce qu’elle EST', () => {
+    // 🔴 La charge figée porte le cas (`192.168.1.70`, dans `hosts` et dans
+    // aucun port) : sans lui, l'épreuve de parité ne prouverait rien de la
+    // ligne la plus rassurante qu'on puisse remettre à un client — « scannée,
+    // rien d'ouvert » —, celle qui était justement indiscernable de « jamais
+    // scannée ».
+    const ports = releve.scenarios.solo.find((f) => f.nom === 'Ports ouverts')!;
+    expect(ports.cellules['C11']).toEqual({ s: '192.168.1.70' });
+    expect(ports.cellules['E11']).toEqual({ s: 'aucun port ouvert' });
+    // ⚠️ Sa date et son profil comme aux autres : c'est ce qui dit si ce
+    // « rien d'ouvert » est frais ou vieux de trois semaines.
+    expect(ports.cellules['D11']).toEqual({ s: 'Web' });
+    expect(ports.cellules['B11']).toEqual({ s: '31/08/2026 06:00:00' });
+  });
+
   it('n’embarque aucun graphique hors navigateur — la parité des images n’est pas prouvée ici', () => {
     // ⚠️ En production le classeur du navigateur PORTE des images. Ce test ne
     // peut pas les comparer : il n'y a pas de `<canvas>` sous Node. Le dire

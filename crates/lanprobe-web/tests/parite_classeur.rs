@@ -615,6 +615,43 @@ fn le_hub_ecrit_lindetermine_et_la_couverture_en_chaines_jamais_en_nombres() {
 }
 
 #[test]
+fn le_hub_dit_dune_machine_scannee_sans_port_ouvert_ce_quelle_est() {
+    // 🔴 La charge figée porte le cas (`192.168.1.70`, dans `hosts` et dans
+    // aucun port) : sans lui, cette épreuve ne prouverait rien de la ligne la
+    // plus rassurante qu'on puisse remettre à un client — « scannée, rien
+    // d'ouvert » —, celle qui était justement indiscernable de « jamais
+    // scannée ».
+    let feuilles = construire(&charge("solo"));
+    let ports = feuilles
+        .iter()
+        .find(|f| f.nom == "Ports ouverts")
+        .expect("la feuille des ports ouverts");
+    assert_eq!(
+        ports.cellules.get("C11"),
+        Some(&Cellule::Texte {
+            s: "192.168.1.70".into()
+        })
+    );
+    assert_eq!(
+        ports.cellules.get("E11"),
+        Some(&Cellule::Texte {
+            s: "aucun port ouvert".into()
+        }),
+        "le libellé est celui de l'écran : deux formulations feraient croire à deux cas"
+    );
+    // ⚠️ Sa date et son profil comme aux autres : c'est ce qui dit si ce
+    // « rien d'ouvert » est frais ou vieux de trois semaines.
+    assert_eq!(
+        ports.cellules.get("D11"),
+        Some(&Cellule::Texte { s: "Web".into() })
+    );
+    match ports.cellules.get("B11") {
+        Some(Cellule::Texte { s }) => assert!(s.ends_with(" UTC"), "{s:?}"),
+        autre => panic!("une date doit être du texte datée, pas {autre:?}"),
+    }
+}
+
+#[test]
 fn le_hub_date_ses_coupures_et_nomme_son_fuseau() {
     // ⚠️ C'est l'écart assumé, pris par le bon bout : une heure sans fuseau,
     // dans un document qui liste des coupures datées, se conteste au premier
