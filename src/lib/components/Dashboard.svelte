@@ -308,7 +308,7 @@
             {/if}
           </div>
           {#if !readOnly}
-            <button class="dhcp-btn" onclick={enableDhcp} disabled={dhcpBusy || activeInterface.dhcp_enabled}>
+            <button class="dhcp-btn" class:on={activeInterface.dhcp_enabled} onclick={enableDhcp} disabled={dhcpBusy || activeInterface.dhcp_enabled}>
               {dhcpBusy ? '…' : (activeInterface.dhcp_enabled ? $_('dashboard.dhcp_active') : $_('dashboard.dhcp_enable'))}
             </button>
           {/if}
@@ -318,7 +318,7 @@
           <div class="info-item"><span class="info-label">{$_('dashboard.mask')}</span><span class="info-val">{activeInterface.subnet ?? '—'}</span></div>
           <div class="info-item"><span class="info-label">{$_('dashboard.gateway')}</span><span class="info-val">{activeInterface.gateway ?? '—'}</span></div>
           <div class="info-item"><span class="info-label">{$_('dashboard.dns')}</span><span class="info-val">{activeInterface.dns.join(', ') || '—'}</span></div>
-          <div class="info-item"><span class="info-label">{$_('dashboard.dhcp')}</span><span class="info-val">{activeInterface.dhcp_enabled ? $_('dashboard.dhcp_yes') : $_('dashboard.dhcp_no')}</span></div>
+          <div class="info-item"><span class="info-label">{$_('dashboard.dhcp')}</span><span class="info-val" class:dhcp-on={activeInterface.dhcp_enabled}>{activeInterface.dhcp_enabled ? $_('dashboard.dhcp_yes') : $_('dashboard.dhcp_no')}</span></div>
           <div class="info-item public-ip-item">
             <span class="info-label">Public IP</span>
             {#if publicIpLoading}
@@ -459,12 +459,14 @@
     padding: 3px 8px; border-radius: 10px; border: 1px solid transparent;
     white-space: nowrap;
   }
-  .profile-badge.dhcp { background: color-mix(in srgb, var(--ep-accent) 15%, transparent); color: var(--ep-accent); border-color: color-mix(in srgb, var(--ep-accent) 30%, transparent); }
+  .profile-badge.dhcp { background: color-mix(in srgb, var(--ep-success) 15%, transparent); color: var(--ep-success); border-color: color-mix(in srgb, var(--ep-success) 30%, transparent); }
   .profile-badge.profile { background: color-mix(in srgb, var(--ep-success) 15%, transparent); color: var(--ep-success); border-color: color-mix(in srgb, var(--ep-success) 30%, transparent); }
   .profile-badge.custom { background: var(--ep-bg-tertiary); color: var(--ep-text-muted); border-color: var(--ep-border); }
   .dhcp-btn { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); font-size: 11px; font-weight: 600; cursor: pointer; }
   .dhcp-btn:hover:not(:disabled) { border-color: var(--ep-accent); color: var(--ep-accent); }
   .dhcp-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .dhcp-btn.on:disabled { opacity: 1; color: var(--ep-success); border-color: color-mix(in srgb, var(--ep-success) 40%, transparent); background: color-mix(in srgb, var(--ep-success) 12%, transparent); }
+  .info-val.dhcp-on { color: var(--ep-success); }
   .status-line { margin-top: 10px; font-size: 12px; color: var(--ep-success); font-family: var(--ep-font-mono); }
   .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .info-item { display: flex; flex-direction: column; gap: 2px; }
