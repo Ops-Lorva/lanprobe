@@ -58,6 +58,28 @@ pub fn list_interfaces() -> Vec<String> {
     { list_interfaces_linux() }
 }
 
+/// Interfaces dont le **lien** est actif (niveau 2), pour le choix d'interface
+/// de l'application de bureau.
+///
+/// Demande de Benjamin (12/11) : ne proposer que les interfaces « up », sans
+/// exiger d'adresse IP — juste le lien. Une carte Wi-Fi éteinte ou un port
+/// Ethernet débranché n'a rien à faire dans la liste.
+///
+/// ⚠️ La sonde sans écran (`lanprobe-server`) garde `list_interfaces()` : une
+/// interface configurée qui tombe doit y rester désignable, pas disparaître.
+///
+/// ⚠️ Si l'état des liens ne peut pas être lu (commande absente), on rend la
+/// liste complète plutôt qu'une liste vide : « aucune interface » serait une
+/// panne inventée.
+pub fn list_interfaces_up() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    { list_interfaces_up_windows() }
+    #[cfg(target_os = "macos")]
+    { list_interfaces_up_macos() }
+    #[cfg(target_os = "linux")]
+    { list_interfaces_up_linux() }
+}
+
 pub fn get_interface_details(name: &str) -> InterfaceDetails {
     #[cfg(target_os = "windows")]
     { get_details_windows(name) }
@@ -127,6 +149,31 @@ fn list_interfaces_macos() -> Vec<String> {
 }
 
 #[cfg(target_os = "linux")]
+fn list_interfaces_up_linux() -> Vec<String> {
+    let text = sync_cmd("ip").args(["link", "show"]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        return list_interfaces_linux();
+    }
+    linux_links_up(&text)
+}
+
+/// Noms (hors `lo`) dont le lien est opérationnel, lus dans `ip link show`.
+/// Même lecture que `link_states` : `state UP` ou `UNKNOWN` (tun, WireGuard).
+#[cfg(any(target_os = "linux", test))]
+fn linux_links_up(ip_link_output: &str) -> Vec<String> {
+    ip_link_output
+        .lines()
+        .filter(|l| !l.starts_with(' ') && l.contains(": "))
+        .filter_map(|l| {
+            let name = l.split(':').nth(1)?.trim().split('@').next()?.to_string();
+            (name != "lo" && link_states(l).1).then_some(name)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn list_interfaces_linux() -> Vec<String> {
     let text = sync_cmd("ip").args(["link", "show"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -138,6 +185,28 @@ fn list_interfaces_linux() -> Vec<String> {
             if name != "lo" { Some(name) } else { None }
         })
         .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn list_interfaces_up_windows() -> Vec<String> {
+    // `Status` vaut Up / Disconnected / Disabled… : valeurs d'énumération,
+    // indépendantes de la langue du système. « Up » = lien établi (câble
+    // branché, Wi-Fi associé), adresse IP ou pas.
+    let ps = r#"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-NetAdapter | Where-Object { $_.HardwareInterface -eq $true -and $_.Status -eq 'Up' } | Select-Object -ExpandProperty Name"#;
+    let out = sync_cmd("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+        .output();
+    match out {
+        // PowerShell a répondu : sa liste fait foi, même vide (rien de branché).
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        // Sans PowerShell, l'état de `netsh` est traduit selon la langue :
+        // on ne filtre pas plutôt que de deviner.
+        _ => list_interfaces_windows(),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -198,6 +267,85 @@ Write-Output "$($a.IPAddress)|$($a.PrefixLength)|$g|$dns|$dhcp""#,
         }
     }
     d
+}
+
+#[cfg(target_os = "macos")]
+fn list_interfaces_up_macos() -> Vec<String> {
+    let services = list_interfaces_macos();
+    let ports = sync_cmd("networksetup").arg("-listallhardwareports").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let ifconfig = sync_cmd("ifconfig").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    if ifconfig.trim().is_empty() {
+        return services;
+    }
+    macos_services_up(&services, &ports, &ifconfig)
+}
+
+/// Services networksetup dont l'interface BSD a un lien actif.
+///
+/// Un service sans interface connue (VPN, PPPoE…) n'a pas de lien à lire : il
+/// sort de la liste, comme un port débranché.
+#[cfg(any(target_os = "macos", test))]
+fn macos_services_up(services: &[String], hardware_ports: &str, ifconfig: &str) -> Vec<String> {
+    let mut port_dev: Vec<(String, String)> = Vec::new();
+    let mut port: Option<String> = None;
+    for line in hardware_ports.lines() {
+        if let Some(p) = line.strip_prefix("Hardware Port:") {
+            port = Some(p.trim().to_string());
+        } else if let Some(dev) = line.strip_prefix("Device:") {
+            if let Some(p) = port.take() {
+                port_dev.push((p, dev.trim().to_string()));
+            }
+        }
+    }
+    let up = macos_links_up(ifconfig);
+    services
+        .iter()
+        .filter(|svc| {
+            port_dev
+                .iter()
+                .find(|(p, _)| p == *svc)
+                .is_some_and(|(_, dev)| up.iter().any(|u| u == dev))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Noms BSD dont le lien est actif, lus dans la sortie de `ifconfig`.
+///
+/// `status: active` / `status: inactive` fait foi quand il est là (Ethernet,
+/// Wi-Fi). Sans ligne `status` (ponts, certaines interfaces virtuelles), on
+/// retombe sur les drapeaux : `UP` ET `RUNNING`, comparés un à un.
+#[cfg(any(target_os = "macos", test))]
+fn macos_links_up(ifconfig: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut flush = |name: &Option<String>, status: Option<bool>, flags_up: bool| {
+        if let Some(n) = name {
+            if status.unwrap_or(flags_up) { out.push(n.clone()); }
+        }
+    };
+    let (mut name, mut status, mut flags_up): (Option<String>, Option<bool>, bool) = (None, None, false);
+    for line in ifconfig.lines() {
+        if !line.starts_with(char::is_whitespace) && line.contains(": flags=") {
+            flush(&name, status, flags_up);
+            name = line.split(':').next().map(|n| n.trim().to_string());
+            status = None;
+            flags_up = line
+                .split_once('<')
+                .and_then(|(_, r)| r.split_once('>'))
+                .is_some_and(|(f, _)| {
+                    let f: Vec<&str> = f.split(',').map(str::trim).collect();
+                    f.contains(&"UP") && f.contains(&"RUNNING")
+                });
+        } else if let Some(st) = line.trim().strip_prefix("status:") {
+            status = Some(st.trim() == "active");
+        }
+    }
+    flush(&name, status, flags_up);
+    out
 }
 
 #[cfg(target_os = "macos")]
@@ -540,6 +688,59 @@ mod tests {
         assert_eq!(gateway_for_device("", "ens18"), None);
         assert_eq!(gateway_for_device("default dev tun0 scope link\n", "tun0"), None);
         assert_eq!(gateway_for_device("10.0.0.0/8 via 10.0.30.1 dev ens18\n", "ens18"), None);
+    }
+
+    #[test]
+    fn only_linux_links_with_a_carrier_are_offered() {
+        // Lignes réelles de HOU-DEV : ens18 branché, docker0 UP sans porteuse,
+        // un veth suffixé, wg0 en UNKNOWN (pas de détection de porteuse).
+        let ip = "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: ens18: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
+    link/ether bc:24:11:00:00:01 brd ff:ff:ff:ff:ff:ff
+3: ens19: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+6: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default
+8: veth912ca4b@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master docker0 state UP mode DEFAULT group default
+9: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+";
+        assert_eq!(linux_links_up(ip), vec!["ens18", "veth912ca4b", "wg0"]);
+    }
+
+    #[test]
+    fn a_mac_offers_only_services_whose_link_is_active() {
+        // Pas d'IP exigée : en7 a un lien actif sans adresse, il reste.
+        let services: Vec<String> = ["Wi-Fi", "Ethernet", "USB 10/100/1000 LAN", "Thunderbolt Bridge", "Mon VPN"]
+            .iter().map(|s| s.to_string()).collect();
+        let ports = "\nHardware Port: Ethernet\nDevice: en0\nEthernet Address: aa\n\nHardware Port: Wi-Fi\nDevice: en1\nEthernet Address: bb\n\nHardware Port: USB 10/100/1000 LAN\nDevice: en7\nEthernet Address: cc\n\nHardware Port: Thunderbolt Bridge\nDevice: bridge0\nEthernet Address: dd\n";
+        let ifconfig = "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\tinet 127.0.0.1 netmask 0xff000000
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tether aa:aa:aa:aa:aa:aa
+\tmedia: autoselect (none)
+\tstatus: inactive
+en1: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tinet 192.168.1.20 netmask 0xffffff00 broadcast 192.168.1.255
+\tstatus: active
+en7: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tmedia: autoselect (1000baseT <full-duplex>)
+\tstatus: active
+bridge0: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
+\tmember: en2 flags=3<LEARNING,DISCOVER>
+";
+        assert_eq!(
+            macos_services_up(&services, ports, ifconfig),
+            vec!["Wi-Fi", "USB 10/100/1000 LAN"],
+            "Ethernet débranché, pont inactif et VPN sans interface sortent"
+        );
+    }
+
+    #[test]
+    fn without_a_status_line_a_mac_link_is_read_from_its_flags() {
+        let ifconfig = "bridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tid 0:0:0:0:0:0 priority 0 hellotime 0
+utun3: flags=8051<UP,POINTOPOINT,MULTICAST> mtu 1380
+";
+        assert_eq!(macos_links_up(ifconfig), vec!["bridge0"]);
     }
 
     #[test]
