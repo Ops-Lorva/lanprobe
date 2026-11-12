@@ -6,6 +6,23 @@ All notable changes to LanProbe are documented here (EN/FR).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.8] - 2026-11-12
+
+### English
+
+- **Changed: the interface picker only lists interfaces whose link is up**
+  (cable plugged in, Wi-Fi associated — no IP address required). The chosen
+  interface stays selected if its link drops, marked "disconnected".
+- **Changed: an active DHCP shows in green** on the dashboard.
+
+### Français
+
+- **Modifié : le choix d'interface ne liste que les interfaces dont le lien
+  est actif** (câble branché, Wi-Fi associé — sans exiger d'adresse IP).
+  L'interface choisie reste sélectionnée si son lien tombe, marquée
+  « déconnectée ».
+- **Modifié : un DHCP actif s'affiche en vert** sur le tableau de bord.
+
 ## [2.4.7] - 2026-10-02
 
 ### English
