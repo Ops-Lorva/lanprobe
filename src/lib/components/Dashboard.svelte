@@ -18,6 +18,10 @@
   let interfaces = $state<string[]>([]);
   let selected = $state<string>($selectedInterface);
   let activeInterface = $state<InterfaceDetails | null>(null);
+  // L'interface choisie n'a plus de lien : elle sort de la liste mais reste
+  // proposée, en tête, marquée déconnectée.
+  const selectedDown = $derived(!!selected && !interfaces.includes(selected));
+  const ifaceOptions = $derived(selectedDown ? [selected, ...interfaces] : interfaces);
   let loading = $state(false);
   let dhcpBusy = $state(false);
   let status = $state('');
@@ -114,7 +118,10 @@
     status = '';
     if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
     interfaces = await invoke<string[]>('cmd_list_interfaces');
-    if (!interfaces.includes(selected)) {
+    // La liste ne porte que les liens actifs. L'interface choisie qui tombe
+    // reste sélectionnée (marquée déconnectée) : on ne bascule pas en douce
+    // sur une autre, la mesure changerait de lien sans qu'on le voie.
+    if (!selected) {
       selected = interfaces[0] ?? '';
       await selectedInterface.select(selected);
     }
@@ -165,7 +172,8 @@
       selected = backend ?? $selectedInterface ?? (interfaces[0] ?? '');
     } else {
       // Desktop ou headless : on choisit l'interface et on le pousse au backend.
-      selected = interfaces.includes($selectedInterface) ? $selectedInterface : (interfaces[0] ?? '');
+      // Un choix enregistré est gardé même si son lien est tombé.
+      selected = $selectedInterface || (interfaces[0] ?? '');
       await selectedInterface.select(selected);
     }
     await loadDetails(selected);
@@ -291,10 +299,10 @@
     <div class="card wide">
       <div class="card-label-row">
         <span class="card-label">{$_('dashboard.active_interface')}</span>
-        {#if interfaces.length > 1 && !readOnly}
+        {#if ifaceOptions.length > 1 && !readOnly}
           <select class="iface-select" value={selected} onchange={onSelect}>
-            {#each interfaces as name}
-              <option value={name}>{name}</option>
+            {#each ifaceOptions as name}
+              <option value={name}>{name === selected && selectedDown ? `${name} (${$_('dashboard.iface_disconnected')})` : name}</option>
             {/each}
           </select>
         {/if}
@@ -303,6 +311,9 @@
         <div class="card-title-row">
           <div class="title-with-badge">
             <div class="card-title">{activeInterface.name}</div>
+            {#if selectedDown}
+              <span class="iface-down">{$_('dashboard.iface_disconnected')}</span>
+            {/if}
             {#if activeProfile}
               <span class="profile-badge {activeProfile.kind}">{activeProfile.label}</span>
             {/if}
@@ -430,6 +441,11 @@
      LE réglage qui décide de tout ce que l'app mesure — le rater, c'est
      mesurer la mauvaise interface sans le savoir. On lui donne donc un
      chevron, une bordure lisible et une réaction au survol. */
+  .iface-down {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--ep-danger);
+  }
   .iface-select {
     -webkit-appearance: none;
     appearance: none;

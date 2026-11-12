@@ -1,7 +1,7 @@
 mod updater;
 
 use updater::UpdateInfo;
-use lanprobe_core::interfaces::{get_interface_details, list_interfaces, InterfaceDetails};
+use lanprobe_core::interfaces::{get_interface_details, list_interfaces_up, InterfaceDetails};
 use lanprobe_core::configure::{apply_dhcp, apply_static, NetworkConfig};
 use lanprobe_core::permissions::{has_permissions, install_permissions};
 
@@ -135,7 +135,8 @@ fn list_interfaces_cached() -> Vec<String> {
             }
         }
     }
-    let list = list_interfaces();
+    // Seulement les liens actifs (niveau 2) : voir `list_interfaces_up`.
+    let list = list_interfaces_up();
     if let Ok(mut guard) = cell.lock() {
         *guard = Some((std::time::Instant::now(), list.clone()));
     }
