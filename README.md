@@ -4,11 +4,11 @@
 
 # LanProbe
 
-**Network monitoring and diagnostics — probes, and a hub to drive them**
+**Self-hosted network monitoring and diagnostics — a probe inside each network, one hub to watch them all.**
 
 *Interface Profiles · Ping Monitor · SLA · Discovery · Port Scan · Speed Test · Self-hosted Hub*
 
-[![Latest release](https://img.shields.io/github/v/release/Benjamin-Chianese/lanprobe?label=release&style=flat-square)](https://github.com/Benjamin-Chianese/lanprobe/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/Ops-Lorva/lanprobe?label=release&style=flat-square)](https://github.com/Ops-Lorva/lanprobe/releases/latest)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri&logoColor=white&style=flat-square)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-1.85+-CE422B?logo=rust&logoColor=white&style=flat-square)](https://rustlang.org)
 [![Svelte](https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte&logoColor=white&style=flat-square)](https://svelte.dev)
@@ -17,11 +17,17 @@
 
 </div>
 
+<!-- screenshot: hub dashboard — fleet overview with several sites and probes -->
+
 ---
 
-## 🖧 What is LanProbe?
+## 🧭 The problem
 
-LanProbe replaces a handful of separate network utilities with one coherent tool, for people who switch interfaces often, debug connectivity, or watch several hosts at once.
+Watching a network usually means a trade-off. Heavy monitoring suites are overkill for a handful of sites. Cloud services want an agent reporting out to someone else's servers — and they assume you can open a way in. On a client's site, a lab, or a home network behind CGNAT, you often can't, and you may not want your topology living in a vendor's cloud either. Day-to-day diagnostics, meanwhile, stay scattered across a dozen single-purpose utilities: one to ping, one to scan ports, one to sweep the subnet, one to measure throughput.
+
+## 🖧 What LanProbe does
+
+LanProbe folds those utilities into one tool and watches hosts **from inside the network itself**. It is **self-hosted and open source**: the probes run on your machines, the hub runs on a server you control, and the measurements never leave your infrastructure.
 
 It comes in **two pieces**, and the split is worth knowing before installing anything:
 
@@ -33,6 +39,20 @@ It comes in **two pieces**, and the split is worth knowing before installing any
 A probe on its own is perfectly usable: open the window, it measures. The hub earns its place as soon as there are several sites, several machines, or a need to look without sitting in front of the screen.
 
 ⚠️ **The direction of the connection matters.** The hub never reaches into a probe — it has no route to its network, and that is the point. The probe calls the hub, outbound. So there is **no inbound port to open** on the monitored network, and no VPN to set up.
+
+## 👥 Who it's for
+
+- **Freelance IT and small MSPs** watching several client sites from one place — with per-site accounts so a client sees their fleet and no one else's.
+- **Network and system admins** who want uptime history, SLA figures and a fleet view without wiring up a heavyweight monitoring stack.
+- **Self-hosters and home labs**, including networks behind CGNAT or NAT where nothing inbound can be opened.
+- **Anyone doing field diagnostics** who switches interfaces often and wants ping, scan, discovery and speed test in one window instead of a drawer full of tools.
+
+## 📋 At a glance
+
+- **Measure** — multi-host ping monitor with live latency, async CIDR discovery (IP / hostname / MAC), TCP port scan with built-in and custom profiles, interface-bound speed test (Ookla or iperf3), dual ICMP + HTTP internet status, and named interface profiles applied in one click.
+- **Report** — uptime % per host, avg / min / max / P95 latency, exported to CSV and XLSX.
+- **Fleet** — a self-hosted hub gathering every probe behind one address, organised by site, with per-site account scope and archiving that removes a client from the fleet without deleting their history.
+- **Secure and operate** — accounts with `admin` / `operator` / `viewer` roles, full audit log, TOTP and passkeys, e-mail and webhook alerts (Slack, Discord, ntfy…), and automatic self-contained backup and restore.
 
 ---
 
@@ -67,7 +87,7 @@ The consequence to know: if the selected interface loses its address, the probe 
 
 ### 💻 Desktop app
 
-From the [releases](https://github.com/Benjamin-Chianese/lanprobe/releases/latest):
+From the [releases](https://github.com/Ops-Lorva/lanprobe/releases/latest):
 
 | Platform | File |
 |---|---|
@@ -84,7 +104,7 @@ On macOS the `.pkg` provisions the sudoers rights needed to change an IP. On Lin
 For a Raspberry Pi, a VM, or a server with no desktop.
 
 ```bash
-curl -fsSL -o install-server.sh https://raw.githubusercontent.com/Benjamin-Chianese/lanprobe/main/install-server.sh
+curl -fsSL -o install-server.sh https://raw.githubusercontent.com/Ops-Lorva/lanprobe/main/install-server.sh
 sudo bash install-server.sh
 ```
 
@@ -176,7 +196,7 @@ head -c 32 /dev/urandom | base64        # 32 random bytes
 One container: the hub, its SQLite database, and an embedded InfluxDB. **We host nothing** — it all runs on a machine you control.
 
 ```bash
-git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
+git clone https://github.com/Ops-Lorva/lanprobe.git && cd lanprobe
 docker compose up -d
 docker compose logs lanprobe-web | grep -i "setup token"
 ```
@@ -301,7 +321,7 @@ labels:
 - **Windows:** [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (preinstalled on Windows 11)
 
 ```bash
-git clone https://github.com/Benjamin-Chianese/lanprobe.git
+git clone https://github.com/Ops-Lorva/lanprobe.git
 cd lanprobe
 npm install
 ```
@@ -423,8 +443,8 @@ you skip a major version without noticing.
 - [x] **All traffic bound to the selected interface**, heartbeat included
 - [x] Removal of the probe's web server — one place to secure
 - [ ] The five per-probe tabs in the hub, and remote triggering
-- [ ] Per-site scoping on accounts
-- [ ] 2FA and passkeys on hub accounts
+- [x] Per-site scoping on accounts
+- [x] 2FA and passkeys on hub accounts
 
 ---
 

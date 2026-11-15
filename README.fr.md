@@ -8,7 +8,7 @@
 
 *Profils réseau · Ping Monitor · SLA · Découverte · Port Scan · Speed Test · Hub auto-hébergé*
 
-[![Dernière version](https://img.shields.io/github/v/release/Benjamin-Chianese/lanprobe?label=release&style=flat-square)](https://github.com/Benjamin-Chianese/lanprobe/releases/latest)
+[![Dernière version](https://img.shields.io/github/v/release/Ops-Lorva/lanprobe?label=release&style=flat-square)](https://github.com/Ops-Lorva/lanprobe/releases/latest)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri&logoColor=white&style=flat-square)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-1.85+-CE422B?logo=rust&logoColor=white&style=flat-square)](https://rustlang.org)
 [![Svelte](https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte&logoColor=white&style=flat-square)](https://svelte.dev)
@@ -67,7 +67,7 @@ Conséquence à connaître : si l'interface sélectionnée n'a plus d'adresse, l
 
 ### 💻 Application de bureau
 
-Téléchargez depuis les [releases](https://github.com/Benjamin-Chianese/lanprobe/releases/latest) :
+Téléchargez depuis les [releases](https://github.com/Ops-Lorva/lanprobe/releases/latest) :
 
 | Plateforme | Fichier |
 |---|---|
@@ -84,7 +84,7 @@ Sur macOS, le `.pkg` provisionne les droits sudoers nécessaires au changement d
 Pour un Raspberry Pi, une VM ou un serveur sans interface graphique.
 
 ```bash
-curl -fsSL -o install-server.sh https://raw.githubusercontent.com/Benjamin-Chianese/lanprobe/main/install-server.sh
+curl -fsSL -o install-server.sh https://raw.githubusercontent.com/Ops-Lorva/lanprobe/main/install-server.sh
 sudo bash install-server.sh
 ```
 
@@ -154,7 +154,7 @@ head -c 32 /dev/urandom | base64        # 32 octets aléatoires
 Un seul conteneur : le hub, sa base SQLite, et un InfluxDB embarqué. **Nous n'hébergeons rien** — tout tourne sur une machine que vous contrôlez.
 
 ```bash
-git clone https://github.com/Benjamin-Chianese/lanprobe.git && cd lanprobe
+git clone https://github.com/Ops-Lorva/lanprobe.git && cd lanprobe
 docker compose up -d
 docker compose logs lanprobe-web | grep -i "jeton de configuration"
 ```
@@ -280,7 +280,7 @@ labels:
 - **Windows :** [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pré-installé sur Windows 11)
 
 ```bash
-git clone https://github.com/Benjamin-Chianese/lanprobe.git
+git clone https://github.com/Ops-Lorva/lanprobe.git
 cd lanprobe
 npm install
 ```

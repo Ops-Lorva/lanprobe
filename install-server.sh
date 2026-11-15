@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-server.sh — Install or update lanprobe-server on Debian/Ubuntu (headless)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Benjamin-Chianese/lanprobe/main/install-server.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/Ops-Lorva/lanprobe/main/install-server.sh | sudo bash
 #   or: sudo bash install-server.sh [--version v0.6.10]
 #
 # What it does:
@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-REPO="Benjamin-Chianese/lanprobe"
+REPO="Ops-Lorva/lanprobe"
 SERVICE="lanprobe-server"
 ARCH="amd64"
 INSTALL_VERSION=""
