@@ -1,0 +1,161 @@
+# Changelog — hub
+
+Modifications notables du hub LanProbe (image Docker `ghcr.io/ops-lorva/lanprobe-web`, tags `hub-X.Y.Z`).
+Notable changes to the LanProbe hub (Docker image `ghcr.io/ops-lorva/lanprobe-web`, `hub-X.Y.Z` tags).
+
+La sonde (application de bureau et sonde headless) a son propre journal : [CHANGELOG.md](CHANGELOG.md).
+The probe (desktop app and headless probe) has its own log: [CHANGELOG.md](CHANGELOG.md).
+
+Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
+`### English` et `### Français` par version. Les versions antérieures à 1.6.0
+sont décrites dans les [releases GitHub](https://github.com/Ops-Lorva/lanprobe/releases).
+
+## [1.6.12] - 2026-10-02
+
+### English
+
+- **Added: machines scanned with no open port now show up**, on screen and in the SLA workbook.
+- **Changed: a port scan is grouped by machine**, not by port.
+
+### Français
+
+- **Ajouté : les machines scannées sans aucun port ouvert apparaissent**, à l'écran et dans le classeur SLA.
+- **Modifié : un scan de ports se lit par machine**, et non plus par port.
+
+## [1.6.11] - 2026-10-02
+
+### English
+
+- **Fixed: downloading a backup archive without a password.**
+- **Changed: "My account" has its own address.**
+
+### Français
+
+- **Corrigé : le téléchargement d'une archive de sauvegarde sans mot de passe.**
+- **Modifié : « Mon compte » a sa propre adresse.**
+
+## [1.6.10] - 2026-10-02
+
+### English
+
+- **Added: the SLA workbook's ports tab shows each machine's scan profile and date**, from the merged port inventory.
+
+### Français
+
+- **Ajouté : l'onglet des ports du classeur SLA montre le profil et la date de scan de chaque machine**, à partir de l'inventaire fusionné.
+
+## [1.6.9] - 2026-10-02
+
+### English
+
+- **Changed: the port inventory is merged machine by machine** instead of being replaced by the latest scan.
+- **Added: open ports are counted by family**, not only in total.
+
+### Français
+
+- **Modifié : l'inventaire des ports se fusionne machine par machine** au lieu d'être remplacé par le dernier scan.
+- **Ajouté : les ports ouverts sont comptés par famille**, plus seulement au total.
+
+## [1.6.8] - 2026-10-02
+
+### English
+
+- **Added: every backup archive can be downloaded**, optionally sealed with AES-256.
+- **Added: a test button on each notification channel.**
+- **Changed: "My account" moves to the side bar.**
+
+### Français
+
+- **Ajouté : chaque archive de sauvegarde se télécharge**, scellée en AES-256 au choix.
+- **Ajouté : un bouton de test sur chaque canal de notification.**
+- **Modifié : « Mon compte » passe dans la barre de gauche.**
+
+## [1.6.7] - 2026-10-02
+
+### English
+
+- **Added: UDP in scan profiles**, and each scan command says which profile it comes from.
+- **Added: the probe's built-in scan profiles are seeded on the hub.**
+- **Changed: the audit log names the target, and scheduled backups are signed "system".**
+
+### Français
+
+- **Ajouté : l'UDP dans les profils de scan**, et chaque commande de scan dit de quel profil elle vient.
+- **Ajouté : les profils de scan de base de la sonde sont semés sur le hub.**
+- **Modifié : le journal d'audit nomme la cible, et une sauvegarde planifiée est signée « système ».**
+
+## [1.6.6] - 2026-10-01
+
+### English
+
+- **Added: shared port-scan profiles**, managed in the hub and synchronised with probes at each heartbeat.
+- **Added: the hub shows where each command came from** (hub or paired device).
+
+### Français
+
+- **Ajouté : profils de scan de ports partagés**, gérés dans le hub et synchronisés avec les sondes à chaque battement.
+- **Ajouté : le hub montre d'où part chaque commande** (le hub ou un appareil appairé).
+
+## [1.6.5] - 2026-09-30
+
+### English
+
+- **Added: a probe running an outdated version is highlighted**, against the latest release published on GitHub.
+
+### Français
+
+- **Ajouté : une sonde en retard de version est signalée**, par rapport à la dernière version publiée sur GitHub.
+
+## [1.6.4] - 2026-09-03
+
+### English
+
+- **Changed: the interface language follows the account, and the report language follows the site.**
+
+### Français
+
+- **Modifié : la langue de l'interface suit le compte, et celle du rapport suit le site.**
+
+## [1.6.3] - 2026-09-03
+
+### English
+
+- **Fixed: the "armed" colour no longer changes with the accent palette.**
+
+### Français
+
+- **Corrigé : la couleur de l'état « armé » ne change plus avec la palette d'accent.**
+
+## [1.6.2] - 2026-09-03
+
+### English
+
+- **Added: the hub serves the probe packages**, for download where they are needed.
+- **Changed: a revoked device is hidden, like an archived site.**
+
+### Français
+
+- **Ajouté : le hub distribue les paquets de la sonde**, à télécharger là où on en a besoin.
+- **Modifié : un appareil révoqué est masqué, comme un site archivé.**
+
+## [1.6.1] - 2026-09-03
+
+### English
+
+- **Fixed: the Docker image now includes the translation catalogues.**
+
+### Français
+
+- **Corrigé : l'image Docker embarque les catalogues de traduction.**
+
+## [1.6.0] - 2026-09-03
+
+### English
+
+- **Added: pairing a phone** with the LanProbe iOS app, by QR code with a pinned certificate fingerprint; device identity with no expiry, revoked explicitly.
+- **Added: SLA workbooks produced by the hub**, with charts that show outages, report history and purge.
+
+### Français
+
+- **Ajouté : appairage d'un téléphone** avec l'app iOS LanProbe, par QR avec empreinte de certificat épinglée ; identité d'appareil sans expiration, révoquée explicitement.
+- **Ajouté : classeurs SLA produits par le hub**, avec des graphiques qui montrent les coupures, un historique des rapports et leur purge.

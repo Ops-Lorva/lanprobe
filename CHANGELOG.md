@@ -1,7 +1,10 @@
 # Changelog
 
-Toutes les modifications notables de LanProbe sont documentées ici (EN/FR).
-All notable changes to LanProbe are documented here (EN/FR).
+Modifications notables de la sonde LanProbe : application de bureau et sonde headless (EN/FR).
+Notable changes to the LanProbe probe: desktop app and headless probe (EN/FR).
+
+Le hub a son propre journal : [CHANGELOG-hub.md](CHANGELOG-hub.md).
+The hub has its own log: [CHANGELOG-hub.md](CHANGELOG-hub.md).
 
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
