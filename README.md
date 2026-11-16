@@ -7,7 +7,8 @@
 
 # LanProbe
 
-[![Latest release](https://img.shields.io/github/v/release/Ops-Lorva/lanprobe?style=flat-square&label=release&color=0462d3)](https://github.com/Ops-Lorva/lanprobe/releases/latest)
+[![Latest release (probe)](https://img.shields.io/github/v/release/Ops-Lorva/lanprobe?filter=v%2A&sort=semver&style=flat-square&label=probe&color=0462d3)](https://github.com/Ops-Lorva/lanprobe/releases?q=v2&expanded=true)
+[![Latest release (hub)](https://img.shields.io/github/v/release/Ops-Lorva/lanprobe?filter=hub-%2A&sort=semver&style=flat-square&label=hub&color=0462d3)](https://github.com/Ops-Lorva/lanprobe/releases?q=hub&expanded=true)
 [![License: MIT](https://img.shields.io/badge/license-MIT-0462d3?style=flat-square)](#license)
 
 **Self-hosted network monitoring and diagnostics — a probe inside each network, one hub to watch them all.**

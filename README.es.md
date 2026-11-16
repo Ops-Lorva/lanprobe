@@ -7,7 +7,8 @@
 
 # LanProbe
 
-[![Última versión](https://img.shields.io/github/v/release/Ops-Lorva/lanprobe?style=flat-square&label=release&color=0462d3)](https://github.com/Ops-Lorva/lanprobe/releases/latest)
+[![Última versión (sonda)](https://img.shields.io/github/v/release/Ops-Lorva/lanprobe?filter=v%2A&sort=semver&style=flat-square&label=sonda&color=0462d3)](https://github.com/Ops-Lorva/lanprobe/releases?q=v2&expanded=true)
+[![Última versión (hub)](https://img.shields.io/github/v/release/Ops-Lorva/lanprobe?filter=hub-%2A&sort=semver&style=flat-square&label=hub&color=0462d3)](https://github.com/Ops-Lorva/lanprobe/releases?q=hub&expanded=true)
 [![Licencia: MIT](https://img.shields.io/badge/license-MIT-0462d3?style=flat-square)](#licencia)
 
 **Supervisión y diagnóstico de red, autoalojados: una sonda en cada red, un hub para vigilarlas todas.**
