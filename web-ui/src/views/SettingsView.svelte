@@ -1035,7 +1035,6 @@
               <dd>{$identity ? $_(`accounts.role_${$identity.role}`) : '—'}</dd>
             </div>
           </dl>
-          <p class="hint">{$_('account.role_hint')}</p>
           <!-- Compte partagé : le hub refuse ces réglages, l'écran le dit
                avant qu'on essaie (contrat § 27). -->
           {#if $identity?.demo}
@@ -1050,7 +1049,6 @@
           <!-- ⚠️ L'ancien mot de passe est exigé par le hub, pas seulement demandé
                ici : une session volée suffirait sinon à s'approprier le compte
                définitivement, sans aucun chemin de retour pour son titulaire. -->
-          <p class="hint">{$_('account.password_hint')}</p>
           <!-- 🔴 Le point contre-intuitif du § 22, et il exige cette phrase. Sur le
                web, changer son mot de passe est le geste réflexe de « j'ai perdu
                mon téléphone ». Ici il ne fait RIEN : le mot de passe n'authentifie

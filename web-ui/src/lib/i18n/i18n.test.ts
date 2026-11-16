@@ -581,14 +581,14 @@ describe('catalogues de traduction', () => {
   /**
    * Un bouton de test PAR CANAL.
    *
-   * ⚠️ `notify.test_one` et `notify.test_one_hint` vivent dans l'accordéon du
-   * canal. Le bouton unique d'autrefois envoyait sur tous les canaux à la
-   * fois : la promesse « ce canal, et lui seul » est dans ces deux chaînes,
-   * et une clé manquante afficherait son identifiant brut à sa place.
+   * ⚠️ `notify.test_one` vit dans l'accordéon du canal. Le bouton unique
+   * d'autrefois envoyait sur tous les canaux à la fois : la promesse « ce
+   * canal, et lui seul » est dans son libellé (la phrase d'aide sous le
+   * bouton est retirée, le libellé suffit), et une clé manquante afficherait
+   * son identifiant brut à sa place.
    */
   const REQUISES_TEST_PAR_CANAL = [
     'notify.test_one',
-    'notify.test_one_hint',
     'notify.testing',
     'notify.test_ok',
     'notify.test_failed',

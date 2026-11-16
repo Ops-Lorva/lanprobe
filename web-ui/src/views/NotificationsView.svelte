@@ -375,7 +375,6 @@
 {#snippet essai(channel: ChannelName)}
   <div class="trial">
     <div class="trial-head">
-      <span class="hint">{$_('notify.test_one_hint')}</span>
       <button class="lp-btn accent" onclick={() => runTest(channel)} disabled={testing !== null}>
         {testing === channel ? $_('notify.testing') : $_('notify.test_one')}
       </button>

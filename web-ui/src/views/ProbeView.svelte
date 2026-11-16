@@ -2696,7 +2696,6 @@
           <header class="bh">
             <div>
               <h2 class="lp-title">{$_('commands.title')}</h2>
-              <p class="bsub">{$_('commands.sub')}</p>
             </div>
           </header>
           {#if commandLog.length === 0}
