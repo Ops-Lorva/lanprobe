@@ -646,12 +646,13 @@ async fn login(
     // 🔴 Le frein passe AVANT toute vérification (audit RSSI, F3) : par
     // adresse, et par compte visé — c'est le second qui borne les six
     // chiffres d'un TOTP, qu'aucun budget par adresse ne protège d'un
-    // dictionnaire réparti. On compte les ÉCHECS : qui se connecte vingt fois
-    // dans la journée ne voit jamais de `429`.
+    // dictionnaire réparti. L'essai est RÉSERVÉ avant argon2 et rendu s'il
+    // réussit (revue RSSI, N1) : qui se connecte vingt fois dans la journée
+    // ne voit jamais de `429`, et une rafale simultanée ne passe pas à côté.
     let ip = client_ip_key(&state, &extensions, &headers);
     let account = account_key(&body.username);
     let keys = [(Class::AuthIp, ip.as_str()), (Class::AuthAccount, account.as_str())];
-    if let Err(wait) = state.limits.check(&keys) {
+    if let Err(wait) = state.limits.take(&keys) {
         return too_many(&state, "/api/login", wait);
     }
 
@@ -661,11 +662,20 @@ async fn login(
     let verified = {
         let db = state.db.clone();
         let (username, password) = (body.username.clone(), body.password.clone());
-        off_reactor(move || db.verify_credentials(&username, &password)).await
+        match off_reactor_argon2(&state, move || db.verify_credentials(&username, &password)).await
+        {
+            Ok(verified) => verified,
+            Err(wait) => {
+                state.limits.refund(&keys);
+                return too_many(&state, "/api/login", wait);
+            }
+        }
     };
     if let Ok(username) = &verified {
         if state.db.totp_enabled(username).unwrap_or(false) {
             let Some(code) = body.code.as_deref().filter(|c| !c.trim().is_empty()) else {
+                // Le mot de passe était bon : rien n'a été raté.
+                state.limits.refund(&keys);
                 // Pas une ligne d'audit : c'est la moitié normale d'une
                 // connexion à deux facteurs, pas un échec. La journaliser
                 // remplirait le journal d'échecs qui n'en sont pas, et
@@ -678,6 +688,7 @@ async fn login(
             };
             let stored: Option<StoredTotp> = state.secrets.get_json(&totp_key(username));
             let Some(stored) = stored else {
+                state.limits.refund(&keys);
                 // 🔴 Fail **closed**. Le drapeau dit que ce compte exige un
                 // second facteur ; le secret ne s'ouvre pas — volume restauré
                 // sans son `secret.key`, typiquement. Laisser passer sur le
@@ -706,7 +717,7 @@ async fn login(
                     let _ = state.db.set_totp_last_step(username, step);
                 }
                 None => {
-                    state.limits.fail(&keys);
+                    // Déjà compté par la réservation.
                     audit(
                         &state,
                         Some(username.as_str()),
@@ -723,6 +734,7 @@ async fn login(
 
     match verified.and_then(|username| state.auth.start_session(username)) {
         Ok(token) => {
+            state.limits.refund(&keys);
             audit(
                 &state,
                 Some(body.username.trim()),
@@ -738,7 +750,7 @@ async fn login(
                 .into_response()
         }
         Err(e) => {
-            state.limits.fail(&keys);
+            // L'échec est déjà compté : la réservation le reste.
             // Le champ « identifiant » reçoit ce que quelqu'un a tapé : un
             // jour, ce sera un mot de passe entré dans la mauvaise case. On ne
             // le recopie donc que si le compte existe — sinon la tentative est
@@ -1175,7 +1187,8 @@ async fn passkey_login_finish(
     let ip = client_ip_key(&state, &extensions, &headers);
     let account = account_key(&body.username);
     let keys = [(Class::AuthIp, ip.as_str()), (Class::AuthAccount, account.as_str())];
-    if let Err(wait) = state.limits.check(&keys) {
+    // Réservé avant la vérification, comme `/api/login` (N1).
+    if let Err(wait) = state.limits.take(&keys) {
         return too_many(&state, "/api/login/passkey/finish", wait);
     }
     let host = host_header(&headers).unwrap_or_default();
@@ -1187,6 +1200,8 @@ async fn passkey_login_finish(
     };
     let username = body.username.trim().to_string();
     let Some(pending) = state.ceremonies.take_authentication(&username) else {
+        // Aucune signature n'a été essayée.
+        state.limits.refund(&keys);
         return fail(
             StatusCode::UNAUTHORIZED,
             "aucune authentification en cours, ou elle a expiré",
@@ -1196,7 +1211,6 @@ async fn passkey_login_finish(
     let result = match webauthn.finish_passkey_authentication(&body.credential, &pending) {
         Ok(r) => r,
         Err(e) => {
-            state.limits.fail(&keys);
             audit(
                 &state,
                 Some(&username),
@@ -1250,6 +1264,7 @@ async fn passkey_login_finish(
 
     match state.auth.start_session(username.clone()) {
         Ok(token) => {
+            state.limits.refund(&keys);
             audit(
                 &state,
                 Some(&username),
@@ -1796,6 +1811,27 @@ where
         .map_err(|e| DbError::Internal(format!("calcul interrompu : {e}")))?
 }
 
+/// [`off_reactor`] sous le portail argon2 du hub (revue RSSI, N1).
+///
+/// `Err` : le portail est plein, RIEN n'a été calculé — l'appelant répond
+/// `429` et rend sa réservation. La place voyage avec le calcul : elle n'est
+/// libérée qu'à sa fin, même si le client a raccroché entre-temps.
+pub(crate) async fn off_reactor_argon2<T, F>(
+    state: &AppState,
+    work: F,
+) -> Result<DbResult<T>, RetryAfter>
+where
+    F: FnOnce() -> DbResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = state.limits.argon2_permit()?;
+    Ok(off_reactor(move || {
+        let _permit = permit;
+        work()
+    })
+    .await)
+}
+
 /// Ce compte a-t-il un second facteur — TOTP ou clé d'accès ?
 ///
 /// ⚠️ Une lecture en échec répond OUI : c'est ce qui ferme le `Basic`, et un
@@ -1852,12 +1888,25 @@ async fn session_or_credentials(
         let ip = client_ip_key(&state, req.extensions(), &headers);
         let account = account_key(&username);
         let keys = [(Class::AuthIp, ip.as_str()), (Class::AuthAccount, account.as_str())];
-        if let Err(wait) = state.limits.check(&keys) {
+        if let Err(wait) = state.limits.take(&keys) {
             return too_many(&state, "GET /api/sites (Basic)", wait);
         }
         let db = state.db.clone();
         let candidate = username.clone();
-        match off_reactor(move || db.verify_credentials(&candidate, &password)).await {
+        let verified =
+            match off_reactor_argon2(&state, move || db.verify_credentials(&candidate, &password))
+                .await
+            {
+                Ok(verified) => verified,
+                Err(wait) => {
+                    state.limits.refund(&keys);
+                    return too_many(&state, "GET /api/sites (Basic)", wait);
+                }
+            };
+        if verified.is_ok() {
+            state.limits.refund(&keys);
+        }
+        match verified {
             // 🔴 **Refusé à un compte qui a un second facteur** (F3). Le
             // `Basic` vérifiait le mot de passe SEUL : avec le mot de passe,
             // un attaquant listait les sites d'un compte protégé par TOTP, et
@@ -1879,7 +1928,8 @@ async fn session_or_credentials(
                 );
             }
             Ok(canonical) => identity = identity_of(&state, &canonical, None),
-            Err(_) => state.limits.fail(&keys),
+            // Déjà compté par la réservation.
+            Err(_) => {}
         }
     }
     match identity {
@@ -2980,22 +3030,29 @@ async fn enroll(
     if let Some(account) = account.as_deref() {
         keys.push((Class::AuthAccount, account));
     }
-    if let Err(wait) = state.limits.check(&keys) {
+    // Réservé avant argon2, rendu sauf refus d'identifiants (N1).
+    if let Err(wait) = state.limits.take(&keys) {
         return too_many(&state, "/api/probes/enroll", wait);
     }
 
     // 1. Qui a le droit d'enrôler, et dans quel site. Hors du réacteur : le
     // code comme le mot de passe se vérifient en argon2.
     let target = {
-        let (state, body) = (state.clone(), body.clone());
-        off_reactor(move || resolve_enrollment_target(&state, &body)).await
+        let (state2, body) = (state.clone(), body.clone());
+        match off_reactor_argon2(&state, move || resolve_enrollment_target(&state2, &body)).await {
+            Ok(target) => target,
+            Err(wait) => {
+                state.limits.refund(&keys);
+                return too_many(&state, "/api/probes/enroll", wait);
+            }
+        }
     };
+    if !matches!(target, Err(DbError::Unauthorized(_))) {
+        state.limits.refund(&keys);
+    }
     let (site, site_created, repairing) = match target {
         Ok(target) => target,
         Err(e) => {
-            if matches!(e, DbError::Unauthorized(_)) {
-                state.limits.fail(&keys);
-            }
             audit(
                 &state,
                 actor
@@ -14592,6 +14649,88 @@ mod tests {
             ))
             .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_wrong_logins_cannot_outrun_the_budget() {
+        // 🔴 N1 (revue RSSI) : 60 connexions simultanées passaient toutes le
+        // contrôle avant qu'un seul échec soit compté — « 401=60 429=0 ».
+        let h = std::sync::Arc::new(Harness::with_admin().await);
+        let mut handles = Vec::new();
+        for _ in 0..60 {
+            let h = h.clone();
+            handles.push(tokio::spawn(async move {
+                h.call(with_peer(login_request("admin", "mauvais-mot-de-passe"), "203.0.113.51"))
+                    .await
+                    .0
+            }));
+        }
+        let (mut c401, mut c429) = (0, 0);
+        for j in handles {
+            match j.await.unwrap() {
+                StatusCode::UNAUTHORIZED => c401 += 1,
+                StatusCode::TOO_MANY_REQUESTS => c429 += 1,
+                other => panic!("statut inattendu : {other}"),
+            }
+        }
+        assert!(c401 <= 10, "401={c401} 429={c429}");
+        assert_eq!(c401 + c429, 60);
+    }
+
+    #[tokio::test]
+    async fn a_successful_login_gives_its_reservation_back() {
+        // Le budget est réservé AVANT argon2 : un succès doit le rendre, sinon
+        // un technicien qui se connecte souvent finirait en `429`.
+        let h = Harness::with_admin().await;
+        for _ in 0..9 {
+            let (status, _, _) = h.call(login_request("admin", "mauvais-mot-de-passe")).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        for _ in 0..5 {
+            let (status, body, _) = h.call(login_request("admin", PASSWORD)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+    }
+
+    /// Prend toutes les places du portail argon2 : ce que ferait une rafale.
+    fn saturate_argon2(h: &Harness) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+        (0..crate::ratelimit::ARGON2_CONCURRENCY)
+            .map(|_| h.state.limits.argon2_permit().expect("place libre"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn argon2_beyond_the_ceiling_answers_429_instead_of_piling_up() {
+        // 🔴 N1 : `spawn_blocking` laissait 512 argon2 de 19 Mio tourner
+        // ensemble. Au-delà du plafond, le hub refuse au lieu d'empiler.
+        let h = Harness::with_admin().await;
+        let tenus = saturate_argon2(&h);
+
+        let (status, headers, _) = h.call_raw(login_request("admin", PASSWORD)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(headers.get(header::RETRY_AFTER).is_some(), "{headers:?}");
+
+        let (status, body, _) = h.call(basic_request("admin", PASSWORD)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "Basic : {body}");
+
+        for corps in [
+            serde_json::json!({ "code": "ZZZZ-ZZZZ", "name": "Paris" }),
+            serde_json::json!({
+                "username": "admin", "password": PASSWORD, "name": "Paris", "site": "Durand"
+            }),
+        ] {
+            let (status, body, _) = h
+                .call(json_request("POST", "/api/probes/enroll", corps))
+                .await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "enrôlement : {body}");
+        }
+
+        // Un refus du portail n'a rien essayé : il ne coûte pas le budget.
+        drop(tenus);
+        for _ in 0..10 {
+            let (status, _, _) = h.call(login_request("admin", "mauvais-mot-de-passe")).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
     }
 
     #[tokio::test]

@@ -46,7 +46,7 @@ use rusqlite::OptionalExtension;
 
 use crate::db::{Db, DbError, DbResult, Outcome, Role};
 use crate::ratelimit::Class;
-use crate::web::{guarded, off_reactor, AppState, Identity};
+use crate::web::{guarded, off_reactor, off_reactor_argon2, AppState, Identity};
 
 /// Durée de vie d'un jeton d'accès. Quinze minutes : il vit en mémoire vive et
 /// se renouvelle en silence, son expiration n'a aucune conséquence visible.
@@ -980,18 +980,29 @@ async fn pair(
     // 🔴 Frein par adresse AVANT la vérification (audit RSSI, F4) : la route
     // est publique, et chaque essai coûte un argon2.
     let ip = crate::web::client_ip_key(&state, &extensions, &headers);
+    // Réservé avant argon2, rendu sur un code bon (revue RSSI, N1).
     let keys = [(Class::Pair, ip.as_str())];
-    if let Err(wait) = state.limits.check(&keys) {
+    if let Err(wait) = state.limits.take(&keys) {
         return crate::web::too_many(&state, "/api/pair", wait);
     }
     let consumed = {
         let (db, code) = (state.db.clone(), body.code.trim().to_string());
-        off_reactor(move || db.consume_pair_code(&code, crate::db::now())).await
+        match off_reactor_argon2(&state, move || db.consume_pair_code(&code, crate::db::now()))
+            .await
+        {
+            Ok(consumed) => consumed,
+            Err(wait) => {
+                state.limits.refund(&keys);
+                return crate::web::too_many(&state, "/api/pair", wait);
+            }
+        }
     };
     let username = match consumed {
-        Ok(username) => username,
+        Ok(username) => {
+            state.limits.refund(&keys);
+            username
+        }
         Err(e) => {
-            state.limits.fail(&keys);
             // 🔴 **Bruyamment.** Un code réessayé — parce qu'il a déjà servi,
             // ou parce que quelqu'un en essaie au hasard — est exactement ce
             // qu'un journal doit montrer. L'acteur est inconnu : personne ne
@@ -1106,22 +1117,36 @@ async fn issue_token(
 ) -> Response {
     // 🔴 Frein par adresse (audit RSSI, F3) : chaque refus coûte un argon2.
     let ip = crate::web::client_ip_key(&state, &extensions, &headers);
+    // Réservé avant argon2, rendu sur un succès (revue RSSI, N1).
     let keys = [(Class::DeviceToken, ip.as_str())];
-    if let Err(wait) = state.limits.check(&keys) {
+    if let Err(wait) = state.limits.take(&keys) {
         return crate::web::too_many(&state, "/api/devices/token", wait);
     }
     let Some(secret) = bearer(&headers) else {
-        state.limits.fail(&keys);
         return refusal_response(Refusal::Unknown);
+    };
+    // Sous le portail argon2 du hub, comme les autres routes publiques.
+    let permit = match state.limits.argon2_permit() {
+        Ok(permit) => permit,
+        Err(wait) => {
+            state.limits.refund(&keys);
+            return crate::web::too_many(&state, "/api/devices/token", wait);
+        }
     };
     let checked = {
         let (db, device_id) = (state.db.clone(), body.device_id.trim().to_string());
-        tokio::task::spawn_blocking(move || db.authenticate_device(&device_id, &secret)).await
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            db.authenticate_device(&device_id, &secret)
+        })
+        .await
     };
     let device = match checked.unwrap_or(Err(Refusal::Unknown)) {
-        Ok(device) => device,
+        Ok(device) => {
+            state.limits.refund(&keys);
+            device
+        }
         Err(refusal) => {
-            state.limits.fail(&keys);
             crate::web::audit(
                 &state,
                 None,
@@ -2629,6 +2654,47 @@ mod routes_tests {
         }
         let (status, body) = h.refresh("appareil-invente", "secret-invente").await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    }
+
+    #[tokio::test]
+    async fn pairing_and_token_refresh_answer_429_when_argon2_is_saturated() {
+        // 🔴 N1 (revue RSSI) : au-delà du plafond d'argon2 simultanés, refus
+        // immédiat plutôt qu'une file de calculs de 19 Mio chacun.
+        let h = Harness::new();
+        let (device_id, secret, _) = h.pair("admin").await;
+        let cookie = h.session("admin");
+        let (_, code) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
+
+        let tenus: Vec<_> = (0..crate::ratelimit::ARGON2_CONCURRENCY)
+            .map(|_| h.state.limits.argon2_permit().expect("place libre"))
+            .collect();
+        let (status, body) = h
+            .post("/api/pair", "", serde_json::json!({ "code": code["code"] }))
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "pair : {body}");
+        let (status, body) = h.refresh(&device_id, &secret).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "token : {body}");
+
+        // Le code n'a pas été brûlé, le secret reste bon.
+        drop(tenus);
+        let (status, body) = h
+            .post("/api/pair", "", serde_json::json!({ "code": code["code"] }))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (status, body) = h.refresh(&device_id, &secret).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn token_refreshes_that_succeed_do_not_spend_the_budget() {
+        // Le budget est réservé avant argon2 ; un renouvellement réussi le
+        // rend — un téléphone en renouvelle quatre-vingt-seize par jour.
+        let h = Harness::new();
+        let (device_id, secret, _) = h.pair("admin").await;
+        for _ in 0..40 {
+            let (status, body) = h.refresh(&device_id, &secret).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
     }
 
     #[tokio::test]

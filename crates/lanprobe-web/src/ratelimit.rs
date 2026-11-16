@@ -11,6 +11,11 @@
 //! Un technicien qui se connecte vingt fois dans la journée ne doit jamais
 //! voir un `429` ; celui qui se trompe dix fois de suite, si.
 //!
+//! 🔴 **Réservé avant, rendu après** (revue RSSI, N1) : chaque essai prend
+//! son jeton AVANT la vérification ([`Limits::take`]) et le rend s'il réussit
+//! ([`Limits::refund`]). Compter l'échec après argon2 laissait une rafale
+//! simultanée passer tout entière avant le premier décompte.
+//!
 //! ⚠️ **En mémoire, et c'est assumé.** Un redémarrage remet les compteurs à
 //! zéro : pour qu'il serve à un attaquant, il faudrait qu'il sache redémarrer
 //! le hub. Une table SQLite aurait ajouté une écriture par échec — c'est-à-dire
@@ -76,9 +81,10 @@ const SWEEP_ABOVE: usize = 10_000;
 
 /// Les compteurs. Un seul verrou : chaque opération est un accès de table, et
 /// les routes concernées sont rares devant le reste du trafic.
-#[derive(Default)]
 pub struct Limits {
     windows: Mutex<HashMap<(Class, String), (Instant, u32)>>,
+    /// Le portail argon2 : voir [`Limits::argon2_permit`].
+    argon2: std::sync::Arc<tokio::sync::Semaphore>,
     /// Les échecs anonymes du journal d'audit, regroupés. Voir
     /// [`FailureDigest`].
     pub digest: FailureDigest,
@@ -87,6 +93,20 @@ pub struct Limits {
 /// Refus : combien de secondes attendre. Va dans `Retry-After`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryAfter(pub u64);
+
+/// Argon2 simultanés, pour tout le hub. Quatre fois 19 Mio : borné, et
+/// largement assez pour les connexions d'une équipe.
+pub const ARGON2_CONCURRENCY: usize = 4;
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            windows: Mutex::default(),
+            argon2: std::sync::Arc::new(tokio::sync::Semaphore::new(ARGON2_CONCURRENCY)),
+            digest: FailureDigest::default(),
+        }
+    }
+}
 
 impl Limits {
     pub fn new() -> Self {
@@ -103,13 +123,52 @@ impl Limits {
         self.fail_at(keys, Instant::now());
     }
 
-    /// Compte un appel et refuse au-delà du budget — pour les routes qui
-    /// n'ont pas d'échec à compter.
+    /// Réserve un essai : refuse au-delà du budget, sinon le compte tout de
+    /// suite — **avant** la vérification.
+    ///
+    /// 🔴 Contrôle et décompte sous le MÊME verrou (revue RSSI, N1). Avec
+    /// `check` puis `fail` après argon2, K requêtes simultanées passaient
+    /// toutes le contrôle avant qu'un seul échec soit compté : le budget de
+    /// dix devenait K. Une route qui réussit rend son jeton par
+    /// [`Limits::refund`] ; c'est ce qui garde « on compte les échecs ».
+    ///
+    /// Sert aussi, tel quel, aux routes qui n'ont pas d'échec à compter.
     pub fn take(&self, keys: &[(Class, &str)]) -> Result<(), RetryAfter> {
         let now = Instant::now();
-        self.check_at(keys, now)?;
-        self.fail_at(keys, now);
+        let Ok(mut windows) = self.windows.lock() else {
+            return Err(RetryAfter(60));
+        };
+        Self::refusal(&windows, keys, now)?;
+        Self::count(&mut windows, keys, now);
         Ok(())
+    }
+
+    /// Rend le jeton réservé par [`Limits::take`] : l'essai a réussi, ou il
+    /// n'a rien essayé (portail argon2 plein). Jamais en dessous de zéro, et
+    /// rien si la fenêtre a changé entre-temps.
+    pub fn refund(&self, keys: &[(Class, &str)]) {
+        let now = Instant::now();
+        let Ok(mut windows) = self.windows.lock() else {
+            return;
+        };
+        for (class, key) in keys {
+            if let Some((start, count)) = windows.get_mut(&(*class, key.to_string()))
+                && now.saturating_duration_since(*start) < class.budget().1
+            {
+                *count = count.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Une place pour un calcul argon2, ou un refus immédiat.
+    ///
+    /// 🔴 Revue RSSI, N1 : `spawn_blocking` laissait jusqu'à 512 argon2
+    /// tourner ensemble, 19 Mio chacun — de quoi mettre la VM du hub à genoux
+    /// sans s'authentifier. Le plafond vaut pour tout le hub ; au-delà, on
+    /// répond `429` plutôt que d'empiler. La place est rendue quand le
+    /// calcul se termine, pas quand le client raccroche.
+    pub fn argon2_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, RetryAfter> {
+        self.argon2.clone().try_acquire_owned().map_err(|_| RetryAfter(1))
     }
 
     fn check_at(&self, keys: &[(Class, &str)], now: Instant) -> Result<(), RetryAfter> {
@@ -118,6 +177,14 @@ impl Limits {
             // seul frein des routes publiques.
             return Err(RetryAfter(60));
         };
+        Self::refusal(&windows, keys, now)
+    }
+
+    fn refusal(
+        windows: &HashMap<(Class, String), (Instant, u32)>,
+        keys: &[(Class, &str)],
+        now: Instant,
+    ) -> Result<(), RetryAfter> {
         let mut wait = 0;
         for (class, key) in keys {
             let (max, period) = class.budget();
@@ -135,6 +202,14 @@ impl Limits {
         let Ok(mut windows) = self.windows.lock() else {
             return;
         };
+        Self::count(&mut windows, keys, now);
+    }
+
+    fn count(
+        windows: &mut HashMap<(Class, String), (Instant, u32)>,
+        keys: &[(Class, &str)],
+        now: Instant,
+    ) {
         if windows.len() > SWEEP_ABOVE {
             windows.retain(|(class, _), (start, _)| {
                 now.saturating_duration_since(*start) < class.budget().1
@@ -328,6 +403,76 @@ mod tests {
             assert!(limits.take(&keys).is_ok());
         }
         assert!(limits.take(&keys).is_err());
+    }
+
+    #[test]
+    fn take_reserve_sous_le_meme_verrou_que_le_controle() {
+        // 🔴 N1 : `check` puis `fail` laissaient passer K requêtes
+        // simultanées avant qu'un seul échec soit compté.
+        let limits = std::sync::Arc::new(Limits::new());
+        let accordes = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let fils: Vec<_> = (0..8)
+            .map(|_| {
+                let (limits, accordes) = (limits.clone(), accordes.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        if limits.take(&[(Class::AuthIp, "203.0.113.7")]).is_ok() {
+                            accordes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for fil in fils {
+            fil.join().unwrap();
+        }
+        assert_eq!(accordes.load(std::sync::atomic::Ordering::SeqCst), 10);
+    }
+
+    #[test]
+    fn take_ne_compte_rien_quand_il_refuse() {
+        let limits = Limits::new();
+        for _ in 0..10 {
+            limits.fail(&[(Class::AuthAccount, "admin")]);
+        }
+        let keys = [(Class::AuthIp, "203.0.113.7"), (Class::AuthAccount, "admin")];
+        assert!(limits.take(&keys).is_err());
+        // L'adresse n'a rien perdu au refus du compte.
+        for _ in 0..10 {
+            assert!(limits.take(&[(Class::AuthIp, "203.0.113.7")]).is_ok());
+        }
+    }
+
+    #[test]
+    fn refund_rend_le_jeton_d_un_succes() {
+        let limits = Limits::new();
+        let keys = [(Class::AuthIp, "203.0.113.7")];
+        for _ in 0..10 {
+            limits.take(&keys).unwrap();
+        }
+        assert!(limits.take(&keys).is_err());
+        limits.refund(&keys);
+        assert!(limits.take(&keys).is_ok());
+        assert!(limits.take(&keys).is_err());
+        // Rendre plus qu'on n'a pris ne crée pas de crédit.
+        let autre = [(Class::Pair, "198.51.100.1")];
+        limits.refund(&autre);
+        limits.refund(&autre);
+        for _ in 0..10 {
+            limits.take(&autre).unwrap();
+        }
+        assert!(limits.take(&autre).is_err());
+    }
+
+    #[test]
+    fn le_portail_argon2_plafonne_les_calculs_simultanes() {
+        let limits = Limits::new();
+        let tenus: Vec<_> = (0..ARGON2_CONCURRENCY)
+            .map(|_| limits.argon2_permit().expect("sous le plafond"))
+            .collect();
+        assert!(limits.argon2_permit().is_err(), "au-delà du plafond : refus, pas d'attente");
+        drop(tenus);
+        assert!(limits.argon2_permit().is_ok());
     }
 
     #[test]
