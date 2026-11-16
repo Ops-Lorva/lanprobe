@@ -2844,6 +2844,22 @@ async fn create_site(
     Extension(actor): Extension<Identity>,
     Json(body): Json<SiteBody>,
 ) -> Response {
+    // Un compte restreint ne crée pas de site : il naîtrait hors de sa
+    // portée, invisible et inutilisable pour lui (revue RSSI, suite de N4).
+    if !matches!(actor.scope, crate::db::Scope::All) {
+        audit(
+            &state,
+            Some(&actor.username),
+            "site.create",
+            Some(body.name.trim()),
+            Outcome::Failure,
+            Some("compte restreint à des sites"),
+        );
+        return fail(
+            StatusCode::FORBIDDEN,
+            "créer un site demande un compte « tous les sites »",
+        );
+    }
     match audited(
         &state,
         Some(&actor.username),
@@ -11409,6 +11425,37 @@ mod tests {
             ))
             .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_restricted_operator_does_not_create_a_site() {
+        // Le site créé sortirait de sa portée dès sa naissance : il ne
+        // pourrait ni le voir ni s'en servir, seulement encombrer le parc.
+        let h = Harness::with_admin().await;
+        h.state
+            .db
+            .create_user_scoped("olivier", PASSWORD, Role::Operator, Some(&[]))
+            .unwrap();
+        h.user("claire", Role::Operator).await;
+        let restreint = h.login_as("olivier").await;
+        let partout = h.login_as("claire").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/sites", serde_json::json!({ "name": "Durand" })),
+                &restreint,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(h.state.db.find_site_by_name("Durand").unwrap().is_none());
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("POST", "/api/sites", serde_json::json!({ "name": "Durand" })),
+                &partout,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
     }
 
     #[tokio::test]
