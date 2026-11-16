@@ -841,8 +841,8 @@
   },
   "audit": {
     "title": "Registro de auditoría",
-    "loaded": "{n, plural, =0 {ninguna entrada} one {# entrada cargada} other {# entradas cargadas}}",
-    "failures": "{n} con error",
+    "loaded": "{n, plural, one {# entrada} other {# entradas}}",
+    "failures": "{n} fallidas",
     "refresh": "Actualizar",
     "error_title": "Registro de auditoría no disponible",
     "filter_actor": "Autor",
@@ -954,7 +954,13 @@
       "package": "Paquetes",
       "portscan_profile": "Perfiles de escaneo",
       "report": "Informes"
-    }
+    },
+    "col_detail": "Detalles",
+    "show_all": "Todos",
+    "show_failures": "Fallos",
+    "period_days": "últimos {n} días",
+    "period_hours": "últimas {n} horas",
+    "archive_of": "Archivo del {date}"
   },
   "notify": {
     "title": "Notificaciones",

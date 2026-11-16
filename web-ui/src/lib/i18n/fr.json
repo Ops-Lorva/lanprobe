@@ -841,7 +841,7 @@
   },
   "audit": {
     "title": "Journal d'audit",
-    "loaded": "{n, plural, =0 {aucune entrée} one {# entrée chargée} other {# entrées chargées}}",
+    "loaded": "{n, plural, one {# entrée} other {# entrées}}",
     "failures": "dont {n} en échec",
     "refresh": "Rafraîchir",
     "error_title": "Journal indisponible",
@@ -954,7 +954,13 @@
       "package": "Paquets",
       "portscan_profile": "Profils de scan",
       "report": "Rapports"
-    }
+    },
+    "col_detail": "Détails",
+    "show_all": "Tous",
+    "show_failures": "Échecs",
+    "period_days": "{n} derniers jours",
+    "period_hours": "{n} dernières heures",
+    "archive_of": "Archive du {date}"
   },
   "notify": {
     "title": "Notifications",

@@ -841,7 +841,7 @@
   },
   "audit": {
     "title": "Audit log",
-    "loaded": "{n, plural, =0 {no entries} one {# entry loaded} other {# entries loaded}}",
+    "loaded": "{n, plural, one {# entry} other {# entries}}",
     "failures": "{n} failed",
     "refresh": "Refresh",
     "error_title": "Audit log unavailable",
@@ -954,7 +954,13 @@
       "package": "Packages",
       "portscan_profile": "Scan profiles",
       "report": "Reports"
-    }
+    },
+    "col_detail": "Details",
+    "show_all": "All",
+    "show_failures": "Failures",
+    "period_days": "last {n} days",
+    "period_hours": "last {n} hours",
+    "archive_of": "Archive of {date}"
   },
   "notify": {
     "title": "Notifications",
