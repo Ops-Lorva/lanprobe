@@ -21,9 +21,9 @@
 import type { Route } from './router';
 
 /** L'identifiant d'une entrée de la barre — `items` de `Shell.svelte`. */
-export type NavId = 'fleet' | 'audit' | 'settings' | 'account';
+export type NavId = 'fleet' | 'notifications' | 'accounts' | 'audit' | 'settings' | 'account';
 
-const NAV_IDS: NavId[] = ['fleet', 'audit', 'settings', 'account'];
+const NAV_IDS: NavId[] = ['fleet', 'notifications', 'accounts', 'audit', 'settings', 'account'];
 
 /**
  * L'entrée à surligner, ou `null` quand aucune ne correspond.
@@ -33,5 +33,8 @@ const NAV_IDS: NavId[] = ['fleet', 'audit', 'settings', 'account'];
  * sur une fiche.
  */
 export function activeNavId(route: Route): NavId | null {
+  // « Ajouter une sonde » se lance depuis le parc et y ramène : c'est une
+  // étape du parc, pas une destination à elle.
+  if (route.name === 'add') return 'fleet';
   return NAV_IDS.find((id) => id === route.name) ?? null;
 }

@@ -39,11 +39,32 @@ describe('adresses du hub', () => {
     expect(parse('')).toEqual({ name: 'fleet' });
   });
 
-  it('redirige les anciennes entrées de navigation plutôt que de les perdre', () => {
-    // Une URL qui retombe en silence sur le parc laisse croire que l'écran a
-    // disparu.
-    expect(parse('#/notifications')).toEqual({ name: 'settings', tab: 'alerts' });
-    expect(parse('#/accounts')).toEqual({ name: 'settings', tab: 'accounts' });
+  it('donne à Notifications et Comptes leur adresse propre, dans la barre haute', () => {
+    // DA « Relevé » : la barre haute porte cinq destinations — Parc,
+    // Notifications, Comptes, Journal, Réglages. Les deux écrans quittent la
+    // bande d'onglets de Réglages, et leur adresse suit, comme « Mon compte ».
+    expect(SETTINGS_TABS).not.toContain('alerts');
+    expect(SETTINGS_TABS).not.toContain('accounts');
+    expect(parse('#/notifications')).toEqual({ name: 'notifications' });
+    expect(parse('#/accounts')).toEqual({ name: 'accounts' });
+    expect(href({ name: 'notifications' })).toBe('#/notifications');
+    expect(href({ name: 'accounts' })).toBe('#/accounts');
+  });
+
+  it('redirige les anciens onglets de Réglages plutôt que de les perdre', () => {
+    // Une URL qui retombe en silence sur « Général » laisse croire que
+    // l'écran a disparu.
+    expect(parse('#/settings/alerts')).toEqual({ name: 'notifications' });
+    expect(parse('#/settings/accounts')).toEqual({ name: 'accounts' });
+  });
+
+  it('donne à « Ajouter une sonde » son adresse', () => {
+    // L'enrôlement et l'installeur tiennent sur un écran : il s'atteint depuis
+    // le parc, et peut arriver avec son site déjà choisi.
+    expect(parse('#/add')).toEqual({ name: 'add', site: null });
+    expect(parse('#/add/s%201')).toEqual({ name: 'add', site: 's 1' });
+    expect(href({ name: 'add', site: null })).toBe('#/add');
+    expect(href({ name: 'add', site: 's 1' })).toBe('#/add/s%201');
   });
 
   it('garde la fiche d’une sonde collable dans un ticket', () => {

@@ -20,8 +20,6 @@
   import BackupPanel from '$lib/components/BackupPanel.svelte';
   import RestoreCard from '$lib/components/RestoreCard.svelte';
   import PortscanProfilesPanel from '$lib/components/PortscanProfilesPanel.svelte';
-  import AccountsView from './AccountsView.svelte';
-  import NotificationsView from './NotificationsView.svelte';
   import { go, route, type SettingsTab } from '$lib/router';
   import { canOperate, identity, isAdmin } from '$lib/session';
   import { countdown, dateOnly, humanBytes, now, secondsLeft } from '$lib/time';
@@ -724,7 +722,8 @@
     // la question — « comment se comporte le temps réel ? » — plutôt qu'un
     // champ isolé au milieu de la cadence normale, avec lequel on le confond.
     { id: 'realtime', key: 'settings.tab_realtime' },
-    { id: 'alerts', key: 'settings.tab_alerts' },
+    // Notifications et Comptes sont partis dans la barre haute (DA « Relevé ») :
+    // `#/notifications` et `#/accounts`, rendus par `Shell.svelte`.
     // Deux onglets et non deux cartes : la base de mesures et la politique
     // d'archivage ne se consultent ni au même moment ni pour la même raison.
     { id: 'storage', key: 'settings.tab_measures' },
@@ -732,7 +731,6 @@
     // éditer depuis l'une d'elles ferait croire qu'ils lui appartiennent.
     { id: 'portscan', key: 'settings.tab_portscan' },
     { id: 'backups', key: 'settings.tab_backups', admin: true },
-    { id: 'accounts', key: 'settings.tab_accounts', admin: true },
   ];
 
   // Un onglet qu'un rôle ne peut pas utiliser ne s'affiche pas pour lui — les
@@ -805,8 +803,6 @@
       'backup_interval_hours' in patch ||
       'backup_keep_last' in patch,
     // Chaque geste s'y applique seul, rien n'y attend « Enregistrer ».
-    alerts: false,
-    accounts: false,
     portscan: false,
   });
 
@@ -1614,17 +1610,6 @@
            son prochain battement normal, pas à l'appui. -->
       <p class="hint">{$_('settings.realtime_delay_note')}</p>
     </section>
-  </div>
-  {:else if tab === 'alerts'}
-  <div class="cards" role="tabpanel" id="panel-alerts" aria-labelledby="tab-alerts" tabindex="-1">
-    <!-- Écran d'origine repris tel quel, sans ses onglets internes : il devient
-         le contenu de celui-ci. Les abonnements se lisent dès `viewer`, les
-         canaux sont réservés à `admin` — le panneau s'en charge lui-même. -->
-    <NotificationsView {onExpired} />
-  </div>
-  {:else if tab === 'accounts'}
-  <div class="cards" role="tabpanel" id="panel-accounts" aria-labelledby="tab-accounts" tabindex="-1">
-    <AccountsView {onExpired} />
   </div>
   {:else if tab === 'portscan'}
   <div class="cards" role="tabpanel" id="panel-portscan" aria-labelledby="tab-portscan" tabindex="-1">

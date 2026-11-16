@@ -391,11 +391,20 @@
     "offline": "Offline",
     "online_help": "Heartbeat received recently.",
     "stale_help": "Silent for more than three intervals, less than two hours.",
-    "offline_help": "Silent for more than two hours.",
+    "offline_help": "No heartbeat for more than two hours.",
     "never_seen": "No heartbeat received since enrolment.",
     "silent": "Silent",
     "silent_for": "Last heartbeat {ago} ago",
-    "silent_help": "No heartbeat for more than one interval, but not long enough to be offline. The hub cannot know whether the probe is there: it reports when it last heard from it rather than claiming availability."
+    "silent_help": "No heartbeat for more than one interval, less than two hours.",
+    "degraded": "Degraded",
+    "degraded_help": "The probe is beating, but its internet access is limited or down.",
+    "never": "Never seen",
+    "never_help": "Enrolled, no heartbeat received.",
+    "since": "since {when}",
+    "degraded_since": "internet {net} for {when}",
+    "net_limited": "limited",
+    "net_offline": "down",
+    "enrolled_at": "enrolled {when}"
   },
   "buffer": {
     "empty": "up to date",

@@ -1,12 +1,12 @@
 <script lang="ts">
   import { _ } from 'svelte-i18n';
   import LogoMark from '$desktop/components/LogoMark.svelte';
-  import Icons from '$desktop/components/Icons.svelte';
-  import HubIcon, { type HubIconName } from '$lib/components/HubIcon.svelte';
   import { route } from '$lib/router';
   import { activeNavId } from '$lib/nav-active';
-  import { isAdmin } from '$lib/session';
+  import { identity, isAdmin } from '$lib/session';
   import FleetView from './FleetView.svelte';
+  import NotificationsView from './NotificationsView.svelte';
+  import AccountsView from './AccountsView.svelte';
   import ProbeView from './ProbeView.svelte';
   import SettingsView from './SettingsView.svelte';
   import AuditView from './AuditView.svelte';
@@ -17,31 +17,21 @@
     logout: () => void;
   }>();
 
-  // « Enrôler » a disparu de la navigation parce que l'enrôlement n'est plus un
-  // endroit où aller : c'est le « + » de la ligne du site, là où le site est
-  // déjà connu. Une entrée de menu aurait ramené le choix du site que ce « + »
-  // supprime.
+  // DA « Relevé » : une barre haute, cinq destinations. Notifications et
+  // Comptes quittent la bande d'onglets de Réglages — on y va pour constater
+  // (qui est prévenu, qui peut entrer), pas pour préparer.
   //
-  // Trois entrées, et une seule question à se poser pour chacune : est-ce un
-  // endroit où l'on VA, ou un endroit où l'on RÈGLE ?
+  // « Enrôler » n'y figure pas : c'est le bouton « Ajouter une sonde » du parc,
+  // et le « + » de chaque site, là où le site est déjà connu.
   //
-  //   Parc     — ce qu'on regarde ; l'écran par défaut.
-  //   Journal  — ce qu'on ouvre SOUS PRESSION, quand quelque chose vient de se
-  //              passer. Il garde son entrée propre pour deux raisons : sous un
-  //              onglet, il coûterait un geste de plus au pire moment ; et son
-  //              intitulé dans la barre est ce par quoi on apprend que le hub
-  //              tient un journal.
-  //   Réglages — tout ce qui se configure, Comptes et Notifications compris.
-  //              Ce sont des réglages : on y va pour préparer, jamais pour
-  //              constater.
-  const items: { id: string; href: string; icon: HubIconName; key: string; admin?: true }[] = [
-    { id: 'fleet', href: '#/', icon: 'server', key: 'nav.fleet' },
-    { id: 'audit', href: '#/audit', icon: 'journal', key: 'nav.audit', admin: true },
-    // ⚠️ `gear`, pas `settings` : cette dernière est un cercle entouré de rayons,
-    // c'est-à-dire le symbole universel du mode clair. Benjamin l'a prise pour un
-    // sélecteur de thème sur mobile. Le dépôt distingue déjà les deux dessins pour
-    // cette raison exacte (voir le commentaire dans `Icons.svelte`).
-    { id: 'settings', href: '#/settings', icon: 'gear', key: 'nav.settings' },
+  // ⚠️ Journal et Comptes restent réservés à `admin`, comme leurs routes côté
+  // hub : le masquage est du confort, la vérification est serveur (§ 18).
+  const items: { id: string; href: string; key: string; admin?: true }[] = [
+    { id: 'fleet', href: '#/', key: 'nav.fleet' },
+    { id: 'notifications', href: '#/notifications', key: 'nav.notifications' },
+    { id: 'accounts', href: '#/accounts', key: 'nav.accounts', admin: true },
+    { id: 'audit', href: '#/audit', key: 'nav.audit', admin: true },
+    { id: 'settings', href: '#/settings', key: 'nav.settings' },
   ];
 
   const visible = $derived(items.filter((i) => !i.admin || $isAdmin));
@@ -50,6 +40,11 @@
   // est testée. Écrite ici, dans un `class:active={…}`, elle n'était couverte
   // par rien — et c'est là qu'elle s'est trompée sur « Mon compte ».
   const activeNav = $derived(activeNavId($route));
+
+  let menuOpen = $state(false);
+
+  /** Les deux premières lettres du compte, comme l'app iOS. */
+  const initials = $derived(($identity?.username ?? '').slice(0, 2).toUpperCase());
 
   // C'est `main` qui défile désormais, pas le document : un changement d'écran
   // doit donc le remonter à la main, sinon on arrive au milieu de la fiche
@@ -69,253 +64,236 @@
 </script>
 
 <!--
-  Même ossature que l'app desktop : barre latérale de 168 px, logo en haut,
-  réglages en bas. Elle devient une barre horizontale sous 900 px — une colonne
-  de 168 px sur un téléphone coûterait le tiers de la largeur pour rien — puis
-  une rangée de pictogrammes seuls sous 620 px, où les trois entrées tiennent
-  très largement sur 390 px.
+  Barre haute collante, contenu centré à 1440 px. C'est le document qui
+  défile (voir `web.css`) : la barre colle, et la barre d'outils des
+  navigateurs mobiles se replie. Sous 60 rem les destinations passent dans un
+  menu.
 -->
-<div class="shell">
-  <nav class="sidebar">
-    <a class="logo" href="#/">
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="#/">
       <LogoMark size={24} />
-      <span class="logo-text">{$_('common.app_name')}</span>
-      <span class="tag">{$_('common.hub')}</span>
+      <span>{$_('common.app_name')}</span>
     </a>
 
-    <div class="nav-main">
+    <button
+      class="lp-btn ghost sm menu-btn"
+      aria-expanded={menuOpen}
+      aria-controls="mainnav"
+      onclick={() => (menuOpen = !menuOpen)}
+    >
+      {$_('nav.menu')}
+    </button>
+
+    <nav class="mainnav" class:open={menuOpen} id="mainnav" aria-label={$_('nav.menu')}>
       {#each visible as item (item.id)}
         <a
-          class="nav-item"
-          class:active={activeNav === item.id}
           href={item.href}
-          title={$_(item.key)}
+          aria-current={activeNav === item.id ? 'page' : undefined}
+          onclick={() => (menuOpen = false)}
         >
-          <HubIcon name={item.icon} size={15} />
-          <span class="nav-label">{$_(item.key)}</span>
+          {$_(item.key)}
         </a>
       {/each}
-    </div>
+    </nav>
+
+    <span class="spacer"></span>
 
     <!--
-      Langue et thème sont partis dans Réglages → Général : ce sont des
-      préférences, pas de la navigation, et la barre n'a plus à les porter.
-
-      ⚠️ **« Mon compte » est l'exception, et ce n'en est pas une.** Ce n'est
-      pas une préférence : c'est MON identité sur ce hub — mot de passe,
-      second facteur, clés d'accès, appareils appairés. On y va pour voir ce
-      qui peut entrer sous mon nom, parfois dans l'urgence d'un téléphone
-      perdu, et c'est un endroit où l'on VA (le critère de cette barre), pas
-      un réglage du hub qu'on prépare. Sa place est ici, contre « Se
-      déconnecter » : les deux parlent de la même session, et c'est là qu'on
-      les cherche dans toutes les consoles.
-
-      🔴 **Et son adresse a suivi : `#/account`, plus `#/settings/account`.**
-      Elle était restée sous `settings/` au nom de favoris que personne n'a
-      (Benjamin, 02/10) — et une route qui désigne un écran dont elle ne fait
-      plus partie se paie partout où on la lit : c'est elle qui faisait
-      surligner « Réglages » ici. L'ancienne adresse redirige (`router.ts`),
-      pour l'onglet resté ouvert.
+      « Mon compte » : MON identité sur ce hub — mot de passe, second facteur,
+      clés d'accès, appareils appairés. Sa place est contre « Se
+      déconnecter » : les deux parlent de la même session.
     -->
-    <div class="nav-bottom">
-      <a
-        class="nav-item"
-        class:active={activeNav === 'account'}
-        href="#/account"
-        title={$_('settings.tab_account')}
-      >
-        <HubIcon name="user" size={15} />
-        <span class="nav-label">{$_('settings.tab_account')}</span>
-      </a>
-      <button class="nav-item logout" onclick={logout}>
-        <Icons name="chevron-right" size={15} />
-        <span class="nav-label">{$_('nav.logout')}</span>
-      </button>
-    </div>
-  </nav>
+    <a
+      class="who"
+      href="#/account"
+      aria-current={activeNav === 'account' ? 'page' : undefined}
+      title={$_('settings.tab_account')}
+    >
+      <span class="av" aria-hidden="true">{initials}</span>
+      <span class="name">
+        {$identity?.username ?? ''}{#if $identity?.role}, {$_(
+            `accounts.role_${$identity.role}`,
+          ).toLowerCase()}{/if}
+      </span>
+    </a>
+    <button class="lp-btn ghost sm" onclick={logout}>{$_('nav.logout')}</button>
+  </div>
+</header>
 
-  <main bind:this={mainEl}>
-    {#if $route.name === 'probe'}
-      <ProbeView id={$route.id} {onExpired} />
-    {:else if $route.name === 'audit'}
-      <AuditView {onExpired} />
-      <!-- « Mon compte » n'est plus un onglet de Réglages, mais c'est encore
-           `SettingsView` qui dessine son écran (sans titre « Réglages » ni
-           bande d'onglets, il le sait). Le découper en vue à part serait un
-           déplacement de plusieurs centaines de lignes qui ne corrigerait
-           rien de plus. -->
-    {:else if $route.name === 'settings' || $route.name === 'account'}
-      <SettingsView {onExpired} />
-    {:else}
-      <FleetView {onExpired} />
-    {/if}
-  </main>
-</div>
+<main class="page" bind:this={mainEl}>
+  {#if $route.name === 'probe'}
+    <ProbeView id={$route.id} {onExpired} />
+  {:else if $route.name === 'audit'}
+    <AuditView {onExpired} />
+  {:else if $route.name === 'notifications'}
+    <header class="lp-head"><h1>{$_('nav.notifications')}</h1></header>
+    <NotificationsView {onExpired} />
+  {:else if $route.name === 'accounts' && $isAdmin}
+    <AccountsView {onExpired} />
+    <!-- « Mon compte » n'est pas un onglet de Réglages, mais c'est encore
+         `SettingsView` qui dessine son écran (sans bande d'onglets, il le
+         sait). -->
+  {:else if $route.name === 'settings' || $route.name === 'account'}
+    <SettingsView {onExpired} />
+  {:else}
+    <FleetView {onExpired} />
+  {/if}
+  {#if version}
+    <p class="ver">{$_('nav.version', { values: { version } })}</p>
+  {/if}
+</main>
 
 <style>
-  /* Sur grand écran, c'est le panneau de droite qui défile, pas la page : la
-     barre latérale n'est alors pas « collée », elle est structurellement hors
-     du flux défilant. Aucun `position: sticky` à faire fonctionner, donc rien
-     qui puisse se décoller — c'est le modèle des consoles denses (Proxmox,
-     Grafana) et le seul qui tienne dans tous les moteurs. */
-  .shell {
-    display: flex;
-    height: 100dvh;
-    overflow: hidden;
-    background: var(--ep-bg-primary);
+  .top {
+    position: sticky;
+    top: 0;
+    z-index: 300;
+    background: color-mix(in oklab, var(--color-paper) 92%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--color-rule);
   }
-
-  .sidebar {
-    width: 168px;
-    flex-shrink: 0;
-    background: var(--ep-glass-bg);
-    border-right: 1px solid var(--ep-glass-border);
+  .top-in {
+    max-width: 1440px;
+    margin-inline: auto;
+    padding: 0 32px;
     display: flex;
-    flex-direction: column;
-    padding: 10px 8px;
-    gap: 2px;
-    height: 100%;
-    overflow-y: auto;
+    align-items: center;
+    gap: 24px;
+    height: 52px;
   }
-
-  .logo {
-    display: flex;
+  .brand {
+    display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px 14px;
-    border-bottom: 1px solid var(--ep-glass-border);
-    margin-bottom: 6px;
+    font-weight: 600;
+    font-size: 1rem;
+    letter-spacing: -0.01em;
+    color: var(--color-ink);
     text-decoration: none;
-    flex-wrap: wrap;
   }
-  .logo-text {
-    font-size: 12px;
-    font-weight: 800;
-    color: var(--ep-text-primary);
-    letter-spacing: 0.4px;
-  }
-  .tag {
-    font-size: 8px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--ep-accent-bright);
-    border: 1px solid var(--ep-accent-glow);
-    background: var(--ep-accent-dim);
-    border-radius: 999px;
-    padding: 1px 5px;
-  }
-
-  .nav-main {
-    flex: 1;
+  .mainnav {
     display: flex;
-    flex-direction: column;
     gap: 2px;
   }
-  .nav-bottom {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding-top: 8px;
-    border-top: 1px solid var(--ep-glass-border);
-  }
-
-  .nav-item {
-    display: flex;
+  .mainnav a {
+    position: relative;
+    display: inline-flex;
     align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 8px 10px;
-    border: none;
-    background: transparent;
-    border-radius: var(--ep-radius-md);
-    color: var(--ep-text-secondary);
-    cursor: pointer;
-    font-family: var(--ep-font-sans);
-    font-size: 12.5px;
-    font-weight: 500;
-    text-align: left;
+    height: 52px;
+    padding: 0 12px;
+    color: var(--color-ink-2);
     text-decoration: none;
-    transition:
-      background 0.12s,
-      color 0.12s;
+    font-weight: 500;
+    transition: color 120ms cubic-bezier(0.16, 1, 0.3, 1);
   }
-  .nav-item:hover {
-    background: var(--ep-glass-bg-md);
-    color: var(--ep-text-primary);
+  .mainnav a:hover,
+  .mainnav a[aria-current='page'] {
+    color: var(--color-ink);
   }
-  .nav-item.active {
-    background: var(--ep-accent-dim);
-    border: 1px solid var(--ep-accent-glow);
-    color: var(--ep-accent-bright);
+  .mainnav a[aria-current='page']::after {
+    content: '';
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: -1px;
+    height: 2px;
+    background: var(--color-accent);
+  }
+  .mainnav a:focus-visible {
+    outline-offset: -6px;
+  }
+  .spacer {
+    flex: 1;
+  }
+  .who {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8125rem;
+    color: var(--color-ink-2);
+    text-decoration: none;
+    border-radius: 5px;
+    padding: 4px 6px;
+  }
+  .who:hover,
+  .who[aria-current='page'] {
+    color: var(--color-ink);
+    background: var(--color-paper-3);
+  }
+  .av {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--color-paper-4);
+    color: var(--color-ink);
     font-weight: 600;
+    font-size: 0.75rem;
   }
-  .nav-label {
-    flex: 1;
-  }
-
-  main {
-    flex: 1;
-    min-width: 0; /* sans ça, une cellule large pousse la page en défilement horizontal */
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 18px 20px 40px;
+  .menu-btn {
+    display: none;
   }
 
-  /* Sous 900 px la barre devient horizontale : là, le document reprend le
-     défilement (la barre d'outils des navigateurs mobiles ne se replie que si
-     c'est la page qui bouge) et la barre colle en haut. */
-  @media (max-width: 900px) {
-    .shell {
+  .page {
+    display: block;
+    max-width: 1440px;
+    margin-inline: auto;
+    padding: 24px 32px 96px;
+    min-width: 0;
+  }
+  .ver {
+    margin-top: 64px;
+    font-size: 0.75rem;
+    color: var(--color-muted);
+  }
+
+  @media (max-width: 60rem) {
+    .top-in {
+      padding: 0 24px;
+      gap: 12px;
+    }
+    .menu-btn {
+      display: inline-flex;
+      order: 3;
+    }
+    .mainnav {
+      display: none;
+      position: absolute;
+      top: 52px;
+      left: 0;
+      right: 0;
       flex-direction: column;
+      background: var(--color-paper-2);
+      border-bottom: 1px solid var(--color-rule);
+      padding: 8px 24px;
+    }
+    .mainnav.open {
+      display: flex;
+    }
+    .mainnav a {
+      height: 44px;
+    }
+    .mainnav a[aria-current='page']::after {
+      left: -12px;
+      right: auto;
+      top: 10px;
+      bottom: 10px;
+      width: 2px;
       height: auto;
-      min-height: 100dvh;
-      overflow: visible;
     }
-    main {
-      overflow: visible;
+    .who .name {
+      display: none;
     }
-    .sidebar {
-      width: auto;
-      height: auto;
-      overflow: visible;
-      position: sticky;
-      top: 0;
-      flex-direction: row;
-      align-items: center;
-      gap: 10px;
-      border-right: none;
-      border-bottom: 1px solid var(--ep-glass-border);
-      padding: 8px 12px;
-      background: var(--ep-bg-secondary);
-      z-index: 5;
-    }
-    .logo {
-      border-bottom: none;
-      margin: 0;
-      padding: 0;
-      flex-wrap: nowrap;
-    }
-    .nav-main {
-      flex-direction: row;
-      flex: 1;
-    }
-    .nav-bottom {
-      flex-direction: row;
-      align-items: center;
-      border-top: none;
-      padding-top: 0;
-    }
-    main {
-      padding: 14px 12px 36px;
+    .page {
+      padding: 16px 24px 72px;
     }
   }
-  @media (max-width: 620px) {
-    .nav-label {
-      display: none;
-    }
-    .logo-text,
-    .tag {
-      display: none;
+  @media (max-width: 40rem) {
+    .top-in,
+    .page {
+      padding-inline: 16px;
     }
   }
 </style>

@@ -391,11 +391,20 @@
     "offline": "Fuera de línea",
     "online_help": "Latido recibido recientemente.",
     "stale_help": "En silencio desde hace más de tres intervalos, menos de dos horas.",
-    "offline_help": "En silencio desde hace más de dos horas.",
+    "offline_help": "Ningún latido desde hace más de dos horas.",
     "never_seen": "Ningún latido recibido desde el alta.",
     "silent": "En silencio",
     "silent_for": "Último latido hace {ago}",
-    "silent_help": "Sin latido desde hace más de una cadencia, sin alcanzar el umbral de «fuera de línea». El hub no puede saber si la sonda está ahí: indica cuándo fue el último latido en lugar de afirmar una disponibilidad."
+    "silent_help": "Ningún latido desde hace más de una cadencia, menos de dos horas.",
+    "degraded": "Degradada",
+    "degraded_help": "La sonda late, pero su acceso a internet está limitado o cortado.",
+    "never": "Nunca vista",
+    "never_help": "Inscrita, ningún latido recibido.",
+    "since": "desde {when}",
+    "degraded_since": "internet {net} desde hace {when}",
+    "net_limited": "limitado",
+    "net_offline": "cortado",
+    "enrolled_at": "inscrita {when}"
   },
   "buffer": {
     "empty": "al día",

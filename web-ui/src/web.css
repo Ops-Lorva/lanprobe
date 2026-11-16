@@ -1,14 +1,180 @@
 /* ─────────────────────────────────────────────────────────────
-   LanProbe Hub — couche web.
+   LanProbe Hub — couche web, direction « Relevé ».
 
-   Les tokens (couleurs, rayons, typo) viennent de `src/app.css`,
-   partagé tel quel avec l'app desktop : une seule source de vérité
-   pour la palette. Ce fichier n'ajoute que ce que le desktop n'a
-   pas besoin de connaître :
+   Les tokens historiques (`--ep-*`) viennent de `src/app.css`, partagé
+   avec l'app desktop. Le hub ne le modifie pas : il pose ses propres
+   tokens (`--color-*`, `--st-*`, `--strip-*`, `--loss-*`, repris de la
+   maquette `design/lanprobe-da-releve/lanprobe-da/tokens.css`) et
+   RABAT les `--ep-*` dessus au niveau de `body`. Une variable posée sur
+   `body` l'emporte pour tous ses descendants, quelle que soit la
+   spécificité des blocs de palette d'app.css posés sur `html` : l'app
+   desktop garde sa palette, le hub prend la sienne.
+
+   Ce fichier ajoute aussi ce que le desktop n'a pas besoin de connaître :
      1. le comportement de défilement d'une page web,
      2. les couleurs de séries des graphiques,
      3. les classes d'éléments réutilisées par tous les écrans.
    ───────────────────────────────────────────────────────────── */
+
+/* 0 — Tokens « Relevé ». La santé se tait : seuls le défaut, l'action et le
+   temps réel portent une couleur franche. */
+:root {
+  --color-paper: #080c14;
+  --color-paper-2: #0d1220;
+  --color-paper-3: #131929;
+  --color-paper-4: #1a2133;
+  --color-ink: #e8eaf0;
+  --color-ink-2: #b8c0cf;
+  --color-muted: #8892a4;
+  --color-rule: #1c2434;
+  --color-rule-2: #2a3347;
+  --color-field: #66728c;
+  --color-accent: #4f46e5;
+  --color-accent-hi: #5b52f0;
+  --color-accent-ink: #ffffff;
+  --color-accent-text: #a5b4fc;
+  --color-accent-wash: rgba(99, 102, 241, 0.14);
+  --color-focus: #a5b4fc;
+  --st-ok: #22c55e;
+  --st-warn: #f59e0b;
+  --st-bad: #f87171;
+  --st-none: #55627a;
+  --st-ok-wash: rgba(34, 197, 94, 0.12);
+  --st-warn-wash: rgba(245, 158, 11, 0.13);
+  --st-bad-wash: rgba(248, 113, 113, 0.13);
+  --on-bad: #080c14;
+  --loss-0: #131929;
+  --loss-1: #2d3650;
+  --loss-2: #56607a;
+  --loss-3: #98a1b5;
+  --loss-4: #e8eaf0;
+  --strip-ok: #1d3b2c;
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --ctl: 34px;
+  --row: 40px;
+}
+[data-theme='light'] {
+  --color-paper: #f3f5f9;
+  --color-paper-2: #ffffff;
+  --color-paper-3: #eaeef5;
+  --color-paper-4: #dfe4ee;
+  --color-ink: #0f1220;
+  --color-ink-2: #39404f;
+  --color-muted: #5b6578;
+  --color-rule: #dde2ec;
+  --color-rule-2: #c5ccda;
+  --color-field: #737d93;
+  --color-accent-hi: #4338ca;
+  --color-accent-text: #4338ca;
+  --color-accent-wash: rgba(79, 70, 229, 0.08);
+  --color-focus: #4f46e5;
+  --st-ok: #15803d;
+  --st-warn: #b45309;
+  --st-bad: #c42020;
+  --st-none: #8a93a8;
+  --st-ok-wash: #e6f4ea;
+  --st-warn-wash: #fbf0e1;
+  --st-bad-wash: #fde8e8;
+  --on-bad: #ffffff;
+  --loss-0: #eaeef5;
+  --loss-1: #c9d0dd;
+  --loss-2: #8f99ad;
+  --loss-3: #4d566a;
+  --loss-4: #0f1220;
+  --strip-ok: #d2e4d8;
+  --shadow-pop: 0 12px 32px rgba(15, 18, 32, 0.16);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --color-paper: #f3f5f9;
+    --color-paper-2: #ffffff;
+    --color-paper-3: #eaeef5;
+    --color-paper-4: #dfe4ee;
+    --color-ink: #0f1220;
+    --color-ink-2: #39404f;
+    --color-muted: #5b6578;
+    --color-rule: #dde2ec;
+    --color-rule-2: #c5ccda;
+    --color-field: #737d93;
+    --color-accent-hi: #4338ca;
+    --color-accent-text: #4338ca;
+    --color-accent-wash: rgba(79, 70, 229, 0.08);
+    --color-focus: #4f46e5;
+    --st-ok: #15803d;
+    --st-warn: #b45309;
+    --st-bad: #c42020;
+    --st-none: #8a93a8;
+    --st-ok-wash: #e6f4ea;
+    --st-warn-wash: #fbf0e1;
+    --st-bad-wash: #fde8e8;
+    --on-bad: #ffffff;
+    --loss-0: #eaeef5;
+    --loss-1: #c9d0dd;
+    --loss-2: #8f99ad;
+    --loss-3: #4d566a;
+    --loss-4: #0f1220;
+    --strip-ok: #d2e4d8;
+    --shadow-pop: 0 12px 32px rgba(15, 18, 32, 0.16);
+  }
+}
+
+/* Les palettes autres qu'indigo restent un choix de l'utilisateur : leur
+   accent remplace celui de la maquette, sans toucher aux fonds ni aux états. */
+:root[data-palette]:not([data-palette='indigo']) body {
+  --color-accent: var(--ep-accent);
+  --color-accent-hi: var(--ep-accent-bright);
+  --color-accent-text: var(--ep-accent-bright);
+  --color-accent-wash: var(--ep-accent-dim);
+  --color-focus: var(--ep-accent-bright);
+}
+:root:not([data-palette]) body,
+:root[data-palette='indigo'] body {
+  --ep-accent: var(--color-accent);
+  --ep-accent-bright: var(--color-accent-text);
+  --ep-accent-dim: var(--color-accent-wash);
+  --ep-accent-glow: color-mix(in oklab, var(--color-accent) 35%, transparent);
+}
+
+/* Les `--ep-*` des écrans existants, rabattus sur la maquette. ⚠️ Sur `body`
+   et non `:root` : c'est ce qui les fait passer devant les fonds teintés des
+   palettes d'app.css. `--ep-text-dim` rejoint `--color-muted` : l'ancien gris
+   (#3d4a5c) ne passait pas le contraste sur le fond de nuit. */
+body {
+  --ep-bg-primary: var(--color-paper);
+  --ep-bg-secondary: var(--color-paper-2);
+  --ep-bg-tertiary: var(--color-paper-3);
+  --ep-bg-hover: var(--color-paper-3);
+  --ep-glass-bg: var(--color-paper-2);
+  --ep-glass-bg-md: var(--color-paper-3);
+  --ep-glass-border: var(--color-rule);
+  --ep-glass-border-strong: var(--color-rule-2);
+  --ep-border: var(--color-rule);
+  --ep-border-strong: var(--color-rule-2);
+  --ep-text-primary: var(--color-ink);
+  --ep-text-secondary: var(--color-ink-2);
+  --ep-text-muted: var(--color-muted);
+  --ep-text-dim: var(--color-muted);
+  --ep-success: var(--st-ok);
+  --ep-warning: var(--st-warn);
+  --ep-danger: var(--st-bad);
+  --ep-radius-sm: 3px;
+  --ep-radius-md: 5px;
+  --ep-radius-lg: 6px;
+  /* ⚠️ `Geist Sans` : c'est le nom que déclare @fontsource/geist-sans. Le
+     `Geist` d'app.css ne correspondait à aucune police chargée, et le hub
+     s'affichait en police système. */
+  --ep-font-sans: 'Geist Sans', 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --ep-font-mono: 'Geist Mono', ui-monospace, 'SF Mono', monospace;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--ep-font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  caret-color: var(--color-accent);
+}
+html {
+  background: var(--color-paper);
+}
 
 /* 1 — Défilement.
    app.css verrouille `html, body { overflow: hidden }` : c'est correct pour une
@@ -58,12 +224,12 @@ body {
   /* Étendues au-delà du couple validé : la sonde peut surveiller plusieurs
      cibles, et chacune veut sa courbe. Teintes espacées en ton pour rester
      distinguables en deutéranopie. */
-  --lp-series-3: #d97757;
+  --lp-series-3: #cf6f50;
   --lp-series-4: #16a34a;
   --lp-series-5: #a855f7;
-  --lp-chart-surface: var(--ep-bg-secondary);
+  --lp-chart-surface: var(--color-paper-2);
   --lp-grid: rgba(255, 255, 255, 0.07);
-  --lp-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --lp-shadow: none;
 
   /* Le mode terrain ARMÉ — fixe, comme les couleurs de séries et pour la même
      raison. Le temps réel portait `--ep-accent` : en palette « emerald » il
@@ -94,7 +260,7 @@ body {
   --lp-series-4: #15803d;
   --lp-series-5: #7e22ce;
   --lp-grid: rgba(15, 18, 32, 0.1);
-  --lp-shadow: 0 1px 2px rgba(15, 18, 32, 0.06);
+  --lp-shadow: none;
 
   /* Le même bleu, assombri pour rester lisible sur blanc : `#818cf8` n'y donne
      que 2,66. La teinte ne change pas, la clarté oui. */
@@ -111,7 +277,7 @@ body {
     --lp-series-4: #15803d;
     --lp-series-5: #7e22ce;
     --lp-grid: rgba(15, 18, 32, 0.1);
-    --lp-shadow: 0 1px 2px rgba(15, 18, 32, 0.06);
+    --lp-shadow: none;
     --lp-armed: #4f46e5;
     --lp-armed-line: rgba(79, 70, 229, 0.45);
     --lp-armed-dim: rgba(79, 70, 229, 0.1);
@@ -120,160 +286,536 @@ body {
 
 /* 3 — Éléments partagés ------------------------------------------------- */
 
+/* Panneau : un filet, pas d'ombre, pas de boîte dans la boîte. */
 .lp-card {
-  background: var(--ep-bg-secondary);
-  border: 1px solid var(--ep-border);
-  border-radius: var(--ep-radius-lg);
-  box-shadow: var(--lp-shadow);
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+  border-radius: 6px;
+  box-shadow: none;
 }
 
 .lp-title {
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 1rem;
+  font-weight: 600;
   letter-spacing: -0.01em;
-  color: var(--ep-text-primary);
+  color: var(--color-ink);
 }
 
 .lp-label {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  color: var(--ep-text-dim);
+  font-size: 0.75rem;
+  color: var(--color-muted);
 }
 
 .lp-mono {
   font-family: var(--ep-font-mono);
   font-variant-numeric: tabular-nums;
 }
+/* Les chiffres mesurés restent en Geist, à chasse tabulaire : la mono est
+   réservée à ce qu'une machine a écrit (adresse, MAC, port, code). */
+.lp-num {
+  font-variant-numeric: tabular-nums;
+}
+.lp-u {
+  color: var(--color-muted);
+  font-size: 0.8em;
+  margin-left: 0.15em;
+}
 
+/* Boutons : un seul plein par écran. */
 .lp-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-height: 34px;
-  padding: 8px 14px;
-  border-radius: var(--ep-radius-md);
-  border: 1px solid var(--ep-border-strong);
-  background: var(--ep-bg-tertiary);
-  color: var(--ep-text-primary);
+  gap: 8px;
+  min-height: var(--ctl);
+  padding: 0 16px;
+  border-radius: 5px;
+  border: 1px solid var(--color-rule-2);
+  background: var(--color-paper-2);
+  color: var(--color-ink);
   font-family: var(--ep-font-sans);
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
   cursor: pointer;
   transition:
-    background 0.12s,
-    border-color 0.12s,
-    color 0.12s;
+    background-color 120ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 120ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 120ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .lp-btn:hover:not(:disabled) {
-  border-color: var(--ep-accent);
-  color: var(--ep-accent-bright);
+  background: var(--color-paper-3);
+  border-color: var(--color-field);
+}
+.lp-btn:active:not(:disabled) {
+  background: var(--color-paper-4);
 }
 .lp-btn:disabled {
-  opacity: 0.55;
+  color: var(--color-muted);
+  background: var(--color-paper-3);
+  border-color: var(--color-rule);
   cursor: not-allowed;
 }
+.lp-btn[aria-busy='true'] {
+  color: var(--color-muted);
+  cursor: progress;
+}
+.lp-btn svg {
+  flex: none;
+}
 .lp-btn.primary {
-  background: var(--ep-accent);
-  border-color: var(--ep-accent);
-  color: #fff;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-ink);
 }
 .lp-btn.primary:hover:not(:disabled) {
-  background: var(--ep-accent-bright);
-  border-color: var(--ep-accent-bright);
-  color: #fff;
+  background: var(--color-accent-hi);
+  border-color: var(--color-accent-hi);
+  color: var(--color-accent-ink);
+}
+.lp-btn.primary:disabled {
+  background: var(--color-paper-4);
+  border-color: var(--color-paper-4);
+  color: var(--color-muted);
 }
 .lp-btn.ghost {
   background: transparent;
   border-color: transparent;
-  color: var(--ep-text-secondary);
-  font-weight: 500;
+  color: var(--color-ink-2);
 }
 .lp-btn.ghost:hover:not(:disabled) {
-  background: var(--ep-glass-bg-md);
-  color: var(--ep-text-primary);
+  background: var(--color-paper-3);
+  border-color: transparent;
+  color: var(--color-ink);
 }
-/* Variante d'accent : une action importante mais sans conséquence destructrice.
-   Elle doit se distinguer au premier regard des boutons neutres ET des rouges. */
+/* L'ancienne variante d'accent devient un bouton contourné : l'indigo plein
+   est réservé à l'action principale de l'écran. */
 .lp-btn.accent {
-  border-color: var(--ep-accent);
-  color: var(--ep-accent-bright);
-  background: var(--ep-accent-dim);
+  border-color: color-mix(in oklab, var(--color-accent) 55%, var(--color-rule-2));
+  color: var(--color-accent-text);
+  background: var(--color-paper-2);
 }
 .lp-btn.accent:hover:not(:disabled) {
-  background: var(--ep-accent);
-  color: #fff;
+  background: var(--color-accent-wash);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
 }
 .lp-btn.danger {
-  border-color: var(--ep-danger);
-  color: var(--ep-danger);
+  color: var(--st-bad);
+  border-color: color-mix(in oklab, var(--st-bad) 45%, var(--color-rule-2));
   background: transparent;
 }
 .lp-btn.danger:hover:not(:disabled) {
-  background: var(--ep-danger);
-  color: #fff;
+  background: var(--st-bad-wash);
+  border-color: var(--st-bad);
+  color: var(--st-bad);
+}
+.lp-btn.danger.fill {
+  background: var(--st-bad);
+  border-color: var(--st-bad);
+  color: var(--on-bad);
 }
 .lp-btn.sm {
-  min-height: 28px;
-  padding: 5px 10px;
-  font-size: 11.5px;
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.8125rem;
+}
+.lp-btn.icon {
+  padding: 0;
+  width: var(--ctl);
+}
+.lp-btn.sm.icon {
+  width: 32px;
+}
+
+.lp-link {
+  color: var(--color-accent-text);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--color-accent-text) 40%, transparent);
+  text-underline-offset: 0.16em;
+}
+.lp-link:hover {
+  text-decoration-color: currentColor;
 }
 
 .lp-input {
   width: 100%;
-  background: var(--ep-bg-tertiary);
-  border: 1px solid var(--ep-border);
-  border-radius: var(--ep-radius-md);
-  padding: 9px 11px;
-  color: var(--ep-text-primary);
+  background: var(--color-paper);
+  border: 1px solid var(--color-field);
+  border-radius: 5px;
+  padding: 0 12px;
+  color: var(--color-ink);
+  font-family: var(--ep-font-sans);
+  font-size: 0.875rem;
+  min-height: var(--ctl);
+  transition: border-color 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+textarea.lp-input {
+  padding: 8px 12px;
+}
+.lp-input.mono {
   font-family: var(--ep-font-mono);
-  font-size: 13px;
-  min-height: 36px;
 }
 .lp-input::placeholder {
-  color: var(--ep-text-dim);
+  color: var(--color-muted);
+}
+.lp-input:hover:not(:disabled) {
+  border-color: var(--color-ink-2);
 }
 /* Un champ qu'on n'a pas le droit de modifier doit le dire AVANT qu'on tape
-   dedans : filet en pointillés et curseur barré. La valeur, elle, garde sa
-   couleur de lecture — c'est souvent elle qu'on est venu vérifier, la griser
-   la rendrait illisible pour rien. Pas d'`opacity` non plus : elle emporterait
-   le libellé avec le champ. */
+   dedans : filet en pointillés et curseur barré. */
 .lp-input:disabled {
+  background: var(--color-paper-3);
   border-style: dashed;
-  color: var(--ep-text-secondary);
+  color: var(--color-ink-2);
   cursor: not-allowed;
 }
+.lp-input:focus,
+.lp-input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 0;
+  border-color: var(--color-focus);
+  box-shadow: none;
+}
+.lp-input[aria-invalid='true'] {
+  border-color: var(--st-bad);
+}
 
-.lp-input:focus {
-  outline: none;
-  border-color: var(--ep-accent);
-  box-shadow: 0 0 0 3px var(--ep-accent-dim);
+/* Les `select` du hub prennent l'allure des champs. */
+body select {
+  min-height: var(--ctl);
+  padding: 0 32px 0 12px;
+  border: 1px solid var(--color-field);
+  border-radius: 5px;
+  background-color: var(--color-paper);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%238892a4' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='4,6 8,10 12,6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  color: var(--color-ink);
+  font-size: 0.875rem;
+}
+body select option {
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+}
+body select:focus {
+  border-color: var(--color-focus);
 }
 
 .lp-field {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  font-size: 12px;
-  color: var(--ep-text-secondary);
+  gap: 8px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-ink-2);
 }
 
 .lp-code {
   font-family: var(--ep-font-mono);
-  font-size: 12px;
-  background: var(--ep-bg-tertiary);
-  border: 1px solid var(--ep-border);
-  border-radius: var(--ep-radius-sm);
+  font-size: 0.92em;
+  background: var(--color-paper-3);
+  border: 1px solid var(--color-rule);
+  border-radius: 3px;
   padding: 1px 5px;
-  color: var(--ep-text-primary);
+  color: var(--color-ink);
+}
+
+/* Interrupteur, comme la maquette : piste, pastille, indigo une fois armé. */
+.lp-switch {
+  appearance: none;
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--color-paper-4);
+  border: 1px solid var(--color-field);
+  position: relative;
+  margin: 0;
+  flex: none;
+  cursor: pointer;
+  transition: background-color 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.lp-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-ink-2);
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.lp-switch:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.lp-switch:checked::after {
+  transform: translateX(14px);
+  background: var(--color-accent-ink);
+}
+
+/* Contrôle segmenté : filtres et fenêtres de temps. */
+.lp-seg {
+  display: inline-flex;
+  border: 1px solid var(--color-rule-2);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--color-paper-2);
+  flex-wrap: wrap;
+}
+.lp-seg > a,
+.lp-seg > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: calc(var(--ctl) - 2px);
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--color-rule);
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-ink-2);
+  font: 400 0.8125rem/1 var(--ep-font-sans);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.lp-seg > :last-child {
+  border-right: 0;
+}
+.lp-seg > a:hover,
+.lp-seg > button:hover {
+  background: var(--color-paper-3);
+  color: var(--color-ink);
+}
+.lp-seg > [aria-current],
+.lp-seg > [aria-pressed='true'] {
+  background: var(--color-accent-wash);
+  color: var(--color-accent-text);
+  font-weight: 600;
+}
+.lp-seg > a:focus-visible,
+.lp-seg > button:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Étiquettes. `upd` = « mise à jour disponible » : un contour, pas une alerte. */
+.lp-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 3px;
+  background: var(--color-paper-3);
+  color: var(--color-ink-2);
+  font-size: 0.75rem;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.lp-tag.warn {
+  background: var(--st-warn-wash);
+  color: var(--st-warn);
+}
+.lp-tag.upd {
+  background: transparent;
+  color: var(--color-ink);
+  box-shadow: inset 0 0 0 1px var(--color-rule-2);
+}
+
+/* Le temps réel : bleu figé, pilule contournée. Un état, pas un lien. */
+.lp-armed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--lp-armed-line);
+  border-radius: 999px;
+  background: var(--lp-armed-dim);
+  color: var(--lp-armed);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* En-tête de page : titre, sous-titre discret, actions à droite. */
+.lp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  margin-bottom: 24px;
+}
+.lp-head h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  color: var(--color-ink);
+}
+.lp-head .lp-sub {
+  color: var(--color-muted);
+  font-size: 0.875rem;
+}
+.lp-head .lp-acts {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.lp-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.8125rem;
+  color: var(--color-muted);
+  margin-bottom: 8px;
+}
+.lp-crumbs a {
+  color: var(--color-ink-2);
+  text-decoration: none;
+}
+.lp-crumbs a:hover {
+  text-decoration: underline;
+}
+.lp-crumbs .sep {
+  color: var(--color-rule-2);
+}
+.lp-sec-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  margin: 40px 0 12px;
+}
+.lp-sec-head h2 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.lp-sec-head .lp-sub {
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+}
+.lp-sec-head .lp-acts {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Tableaux : rangées de 40 px, filets, chiffres alignés à droite. */
+.lp-tbl-wrap {
+  position: relative;
+  overflow-x: auto;
+  border: 1px solid var(--color-rule);
+  border-radius: 6px;
+  background: var(--color-paper-2);
+}
+table.lp-t {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+.lp-t th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.8125rem;
+  color: var(--color-muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-rule-2);
+  white-space: nowrap;
+  background: var(--color-paper-2);
+}
+.lp-t td {
+  padding: 0 12px;
+  height: var(--row);
+  border-bottom: 1px solid var(--color-rule);
+  vertical-align: middle;
+}
+.lp-t tbody tr:last-child td {
+  border-bottom: 0;
+}
+.lp-t tbody tr:hover td {
+  background: color-mix(in oklab, var(--color-paper-3) 60%, var(--color-paper-2));
+}
+.lp-t td.num,
+.lp-t th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.lp-t td.act {
+  text-align: right;
+  width: 1%;
+  white-space: nowrap;
+}
+.lp-t .nm {
+  font-weight: 500;
+  color: var(--color-ink);
+  text-decoration: none;
+}
+.lp-t a.nm:hover {
+  text-decoration: underline;
+}
+.lp-t .sub2 {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--color-muted);
+  font-weight: 400;
+}
+
+/* Bandeau : avertissement, défaut, information. */
+.lp-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--color-rule-2);
+  border-radius: 6px;
+  background: var(--st-warn-wash);
+  margin-bottom: 16px;
+  color: var(--color-ink);
+}
+.lp-banner.bad {
+  background: var(--st-bad-wash);
+  border-color: color-mix(in oklab, var(--st-bad) 35%, var(--color-rule-2));
+}
+.lp-banner.info {
+  background: var(--color-paper-2);
+}
+.lp-banner .grow {
+  flex: 1;
+  min-width: 200px;
+}
+
+/* Coins à repères : réservés au panneau qui porte l'action de l'écran. */
+.lp-ticks {
+  position: relative;
+}
+.lp-ticks::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  border: 1px solid var(--color-field);
+  border-radius: 6px;
+  -webkit-mask: conic-gradient(at 8px 8px, transparent 75%, #000 0) 0 0 / calc(100% - 8px)
+    calc(100% - 8px);
+  mask: conic-gradient(at 8px 8px, transparent 75%, #000 0) 0 0 / calc(100% - 8px)
+    calc(100% - 8px);
 }
 
 /* Anneau de focus visible partout — le hub s'utilise au clavier sur un parc. */
 :where(a, button, input, select, [tabindex]):focus-visible {
-  outline: 2px solid var(--ep-accent-bright);
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
-  border-radius: var(--ep-radius-sm);
 }
 
 .lp-sr {

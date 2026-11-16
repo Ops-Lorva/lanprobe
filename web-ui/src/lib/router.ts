@@ -25,7 +25,8 @@ export const SETTINGS_TABS = [
   // onglet dans la bande, et surligner « Réglages » sur son écran.
   'general',
   'realtime',
-  'alerts',
+  // ⚠️ Ni `alerts` ni `accounts` : Notifications et Comptes ont quitté la
+  // bande pour la barre haute (DA « Relevé »), avec leur adresse propre.
   'storage',
   // Les profils de scan de ports, partagés par tout le hub (contrat § 25).
   // Ils vivent dans les Réglages et non sur la fiche d'une sonde : ils ne sont
@@ -33,7 +34,6 @@ export const SETTINGS_TABS = [
   // croire le contraire.
   'portscan',
   'backups',
-  'accounts',
 ] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 
@@ -47,6 +47,11 @@ export type Route =
   // n'affichait plus — et tout ce qui lit la route devait le rattraper par un
   // cas particulier (c'est ce qui surlignait « Réglages » sur cet écran).
   | { name: 'account' }
+  | { name: 'notifications' }
+  | { name: 'accounts' }
+  // L'enrôlement et l'installeur sur un seul écran. `site` vient du « + »
+  // d'un site, qui le choisit d'avance.
+  | { name: 'add'; site: string | null }
   | { name: 'settings'; tab: SettingsTab };
 
 /**
@@ -62,9 +67,9 @@ export type Route =
  * dessus, qui elle existe toujours.
  */
 const MOVED: Record<string, Route> = {
-  accounts: { name: 'settings', tab: 'accounts' },
-  notifications: { name: 'settings', tab: 'alerts' },
   'settings/account': { name: 'account' },
+  'settings/alerts': { name: 'notifications' },
+  'settings/accounts': { name: 'accounts' },
 };
 
 /** Le chemin d'un hash, découpé — sans le `#`, sans la requête, sans les vides. */
@@ -95,6 +100,9 @@ export function parse(hash: string): Route {
   if (parts[0] === 'probes' && parts[1]) return { name: 'probe', id: decodeURIComponent(parts[1]) };
   if (parts[0] === 'audit') return { name: 'audit' };
   if (parts[0] === 'account') return { name: 'account' };
+  if (parts[0] === 'notifications') return { name: 'notifications' };
+  if (parts[0] === 'accounts') return { name: 'accounts' };
+  if (parts[0] === 'add') return { name: 'add', site: parts[1] ? decodeURIComponent(parts[1]) : null };
   if (parts[0] === 'settings') return { name: 'settings', tab: isTab(parts[1]) ? parts[1] : 'general' };
   // `#/enroll` n'existe plus : l'enrôlement se fait sur la ligne du site, dans
   // le parc. Un ancien lien y retombe donc, plutôt que sur un écran vide.
@@ -110,6 +118,12 @@ export function href(r: Route): string {
       return '#/audit';
     case 'account':
       return '#/account';
+    case 'notifications':
+      return '#/notifications';
+    case 'accounts':
+      return '#/accounts';
+    case 'add':
+      return r.site ? `#/add/${encodeURIComponent(r.site)}` : '#/add';
     case 'settings':
       return `#/settings/${r.tab}`;
     default:

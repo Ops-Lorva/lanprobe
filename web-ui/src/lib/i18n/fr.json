@@ -391,11 +391,20 @@
     "offline": "Hors ligne",
     "online_help": "Battement reçu récemment.",
     "stale_help": "Silencieuse depuis plus de trois intervalles, moins de deux heures.",
-    "offline_help": "Silencieuse depuis plus de deux heures.",
+    "offline_help": "Aucun battement depuis plus de deux heures.",
     "never_seen": "Aucun battement reçu depuis l'enrôlement.",
     "silent": "Silencieuse",
     "silent_for": "Dernier battement il y a {ago}",
-    "silent_help": "Plus de battement depuis plus d'une cadence, sans atteindre le seuil de « hors ligne ». Le hub ne peut pas savoir si la sonde est là : il donne la date du dernier battement plutôt que d'affirmer une disponibilité."
+    "silent_help": "Aucun battement depuis plus d'une cadence, moins de deux heures.",
+    "degraded": "Dégradée",
+    "degraded_help": "La sonde bat, mais son accès internet est limité ou coupé.",
+    "never": "Jamais vue",
+    "never_help": "Enrôlée, aucun battement reçu.",
+    "since": "depuis {when}",
+    "degraded_since": "internet {net} depuis {when}",
+    "net_limited": "limité",
+    "net_offline": "coupé",
+    "enrolled_at": "enrôlée {when}"
   },
   "buffer": {
     "empty": "à jour",

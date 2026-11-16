@@ -16,6 +16,7 @@
 
 import type { Probe } from './api';
 import { probeLiveness, type LivenessState } from './probe-liveness';
+import { probeDisplay } from './probe-state';
 
 /**
  * Ce que la barre de filtres peut demander.
@@ -24,7 +25,17 @@ import { probeLiveness, type LivenessState } from './probe-liveness';
  * peut accumuler des points qu'elle n'arrive pas à écrire. Le filtre coexiste
  * donc avec les trois autres au lieu de s'y substituer.
  */
-export type FleetFilter = LivenessState | 'all' | 'buffering';
+export type FleetFilter =
+  | LivenessState
+  | 'all'
+  | 'buffering'
+  // DA « Relevé » : tout ce qui n'est pas en ligne, dégradées comprises.
+  | 'problems'
+  // Les sondes dont le mode temps réel tourne encore.
+  | 'realtime'
+  // Les cases du relevé chiffré : dégradées ou silencieuses, jamais vues.
+  | 'attention'
+  | 'never';
 
 /**
  * Ordre de lecture : ce qui appelle une action d'abord. Sur trente lignes,
@@ -47,6 +58,13 @@ export function livenessOf(probe: Probe, atMs: number): LivenessState {
 export function matchesFleetFilter(probe: Probe, filter: FleetFilter, atMs: number): boolean {
   if (filter === 'all') return true;
   if (filter === 'buffering') return probe.buffered_points > 0;
+  if (filter === 'realtime') return (probe.realtime_until ?? 0) * 1000 > atMs;
+  if (filter === 'problems' || filter === 'attention' || filter === 'never') {
+    const state = probeDisplay(probe, atMs).state;
+    if (filter === 'problems') return state !== 'online';
+    if (filter === 'never') return state === 'never';
+    return state === 'degraded' || state === 'silent';
+  }
   return livenessOf(probe, atMs) === filter;
 }
 

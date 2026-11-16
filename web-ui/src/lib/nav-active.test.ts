@@ -22,8 +22,16 @@ describe('activeNavId', () => {
 
   it('surligne « Réglages » sur les autres onglets de réglages', () => {
     expect(activeNavId({ name: 'settings', tab: 'storage' })).toBe('settings');
-    expect(activeNavId({ name: 'settings', tab: 'accounts' })).toBe('settings');
     expect(activeNavId({ name: 'settings', tab: 'portscan' })).toBe('settings');
+  });
+
+  it('surligne Notifications et Comptes sur leur propre écran', () => {
+    expect(activeNavId({ name: 'notifications' })).toBe('notifications');
+    expect(activeNavId({ name: 'accounts' })).toBe('accounts');
+  });
+
+  it('surligne « Parc » sur « Ajouter une sonde », qui en part', () => {
+    expect(activeNavId({ name: 'add', site: null })).toBe('fleet');
   });
 
   it('surligne « Mon compte », et PAS « Réglages », sur son écran', () => {
