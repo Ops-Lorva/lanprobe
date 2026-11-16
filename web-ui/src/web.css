@@ -918,3 +918,25 @@ table.lp-t {
 .lp-sw.l4 {
   background: var(--loss-4);
 }
+
+/* Item d'un menu d'actions (ActionMenu) : une ligne de texte, pas un bouton. */
+.lp-mi {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-ink);
+  font: 500 0.875rem/1.3 var(--ep-font-sans);
+  cursor: pointer;
+}
+.lp-mi:hover,
+.lp-mi:focus-visible {
+  background: var(--color-paper-3);
+  outline: none;
+}
+.lp-mi.danger {
+  color: var(--st-bad);
+}

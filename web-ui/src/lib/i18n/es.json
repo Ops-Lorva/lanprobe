@@ -784,7 +784,7 @@
   },
   "accounts": {
     "title": "Cuentas",
-    "count": "{active, plural, one {# cuenta activa} other {# cuentas activas}} de {total}",
+    "count": "{active} activas de {total}",
     "new": "Nueva cuenta",
     "new_title": "Nueva cuenta",
     "error_title": "Cuentas no disponibles",
@@ -806,8 +806,8 @@
     "create": "Crear",
     "creating": "Creando…",
     "err_username": "Usuario obligatorio.",
-    "change_role": "Rol…",
-    "change_password": "Contraseña…",
+    "change_role": "Rol",
+    "change_password": "Cambiar la contraseña",
     "disable": "Desactivar",
     "enable": "Reactivar",
     "disabled_on": "Desactivada el {date}",
@@ -826,9 +826,9 @@
     "col_scope": "Alcance",
     "change_scope": "Alcance",
     "scope": "Alcance",
-    "scope_admin": "Todos los sitios (administrador)",
+    "scope_admin": "Todos los sitios",
     "scope_all": "Todos los sitios",
-    "scope_n": "{n} sitio(s)",
+    "scope_n": "{n, plural, one {# sitio} other {# sitios}}",
     "scope_title": "Alcance de {name}",
     "scope_lead": "Elija lo que esta cuenta puede ver. El filtrado ocurre en el hub: un sitio fuera de su alcance no existe para ella, ni sus sondas.",
     "scope_no_site": "Todavía no hay ningún sitio en el parque.",
@@ -837,7 +837,8 @@
     "scope_nothing": "Ningún sitio",
     "scope_empty_means_nothing": "Ninguna casilla marcada: esta cuenta no verá NADA. Un sitio eliminado sale del alcance sin ampliarlo nunca.",
     "scope_selected": "{n} sitio(s) seleccionado(s). Esta cuenta no verá nada más.",
-    "scope_probe_count": "{n, plural, =0 {ninguna sonda} one {# sonda} other {# sondas}}"
+    "scope_probe_count": "{n, plural, =0 {ninguna sonda} one {# sonda} other {# sondas}}",
+    "more": "Más acciones para {name}"
   },
   "audit": {
     "title": "Registro de auditoría",

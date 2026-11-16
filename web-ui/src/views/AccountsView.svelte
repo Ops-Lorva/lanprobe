@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { _, locale } from 'svelte-i18n';
   import { api, ApiError, type Account, type Role, type Site } from '$lib/api';
+  import ActionMenu from '$lib/components/ActionMenu.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import RoleChoice from '$lib/components/RoleChoice.svelte';
@@ -263,22 +264,21 @@
   }
 </script>
 
-<!--
-  Panneau de Réglages → Comptes : le titre de l'écran est « Réglages », et
-  l'onglet dit déjà « Comptes ». Un second titre ici ne ferait que répéter
-  l'onglet qu'on vient de cliquer — on garde ce qu'il n'annonce pas, le
-  décompte des comptes actifs, et l'action.
--->
-<div class="head">
-  {#if !loading && !denied && !loadError}
-    <p class="count">
-      {$_('accounts.count', { values: { active: activeCount, total: accounts.length } })}
-    </p>
-  {/if}
+<header class="lp-head">
+  <div>
+    <h1>{$_('nav.accounts')}</h1>
+    {#if !loading && !denied && !loadError}
+      <p class="lp-sub">
+        {$_('accounts.count', { values: { active: activeCount, total: accounts.length } })}
+      </p>
+    {/if}
+  </div>
   {#if !denied && !loadError}
-    <button class="lp-btn primary" onclick={openCreate}>{$_('accounts.new')}</button>
+    <div class="lp-acts">
+      <button class="lp-btn primary" onclick={openCreate}>{$_('accounts.new')}</button>
+    </div>
   {/if}
-</div>
+</header>
 
 {#if loading}
   <StateBlock tone="loading" title={$_('common.loading')} />
@@ -294,75 +294,73 @@
   {#if rowError}<p class="err" role="alert">{rowError}</p>{/if}
   {#if pwDone}<p class="ok" role="status">{pwDone}</p>{/if}
 
-  <div class="list lp-card">
-    <div class="row header" aria-hidden="true">
-      <span>{$_('accounts.col_account')}</span>
-      <span>{$_('accounts.col_role')}</span>
-      <span>{$_('accounts.col_scope')}</span>
-      <span>{$_('accounts.col_created')}</span>
-      <span class="right">{$_('accounts.col_actions')}</span>
-    </div>
-
-    {#each sorted as a (a.username)}
-      <div class="row" class:off={a.disabled_at != null}>
-        <span class="who">
-          <span class="nm">{a.username}</span>
-          {#if a.demo}
-            <span class="pill">{$_('accounts.demo_pill')}</span>
-          {/if}
-          {#if a.disabled_at != null}
-            <span class="pill off-pill">
-              {$_('accounts.disabled_on', { values: { date: dateOnly(a.disabled_at, lang) } })}
-            </span>
-          {/if}
-        </span>
-
-        <span class="role">
-          <span class="pill role-{a.role}">{$_(`accounts.role_${a.role}`)}</span>
-        </span>
-
-        <span class="scope">{scopeLabel(a)}</span>
-
-        <span class="created lp-mono">{dateOnly(a.created_at, lang)}</span>
-
-        <!--
-          Aucun bouton n'est masqué ni grisé pour anticiper un refus : le hub
-          protège le dernier administrateur actif et interdit de se désactiver
-          soi-même, et son message explique la règle. Un bouton absent aurait
-          laissé chercher pourquoi.
-        -->
-        <span class="acts">
-          <button class="lp-btn sm" onclick={() => openRole(a)}>{$_('accounts.change_role')}</button>
-          <!-- Masqué pour un `admin` : le hub refuse de le restreindre, parce
-               qu'il lèverait sa propre limite en trois clics. Un bouton qui
-               n'aurait jamais qu'un refus à offrir n'apprend rien. -->
-          {#if a.role !== 'admin'}
-            <button class="lp-btn sm" onclick={() => openScope(a)}>
-              {$_('accounts.change_scope')}
-            </button>
-          {/if}
-          <!-- Mode démo : un compte partagé entre inconnus, verrouillé par le
-               hub (contrat § 27). Jamais sur un `admin`, que le hub refuse. -->
-          {#if a.role !== 'admin'}
-            <button class="lp-btn sm" disabled={busy} onclick={() => toggleDemo(a)}>
-              {a.demo ? $_('accounts.demo_off') : $_('accounts.demo_on')}
-            </button>
-          {/if}
-          <button class="lp-btn sm" onclick={() => openPassword(a)}>
-            {$_('accounts.change_password')}
-          </button>
-          {#if a.disabled_at == null}
-            <button class="lp-btn danger sm" onclick={() => (offTarget = a)}>
-              {$_('accounts.disable')}
-            </button>
-          {:else}
-            <button class="lp-btn accent sm" disabled={busy} onclick={() => enable(a)}>
-              {$_('accounts.enable')}
-            </button>
-          {/if}
-        </span>
-      </div>
-    {/each}
+  <div class="lp-tbl-wrap">
+    <table class="lp-t">
+      <thead>
+        <tr>
+          <th>{$_('accounts.col_account')}</th>
+          <th>{$_('accounts.col_role')}</th>
+          <th>{$_('accounts.col_scope')}</th>
+          <th>{$_('accounts.col_created')}</th>
+          <th class="act">{$_('accounts.col_actions')}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each sorted as a (a.username)}
+          <tr class:off={a.disabled_at != null}>
+            <td>
+              <span class="nm">{a.username}</span>
+              {#if a.demo}<span class="lp-tag">{$_('accounts.demo_pill')}</span>{/if}
+              {#if a.disabled_at != null}
+                <span class="sub2">
+                  {$_('accounts.disabled_on', { values: { date: dateOnly(a.disabled_at, lang) } })}
+                </span>
+              {/if}
+            </td>
+            <td>{$_(`accounts.role_${a.role}`)}</td>
+            <td class="scope">{scopeLabel(a)}</td>
+            <td class="num">{dateOnly(a.created_at, lang)}</td>
+            <!--
+              Aucun bouton n'est masqué ni grisé pour anticiper un refus : le hub
+              protège le dernier administrateur actif et interdit de se
+              désactiver soi-même, et son message explique la règle.
+            -->
+            <td class="act">
+              <button class="lp-btn ghost sm" onclick={() => openRole(a)}>{$_('accounts.change_role')}</button>
+              <!-- Masqué pour un `admin` : le hub refuse de le restreindre. -->
+              {#if a.role !== 'admin'}
+                <button class="lp-btn ghost sm" onclick={() => openScope(a)}>
+                  {$_('accounts.change_scope')}
+                </button>
+              {/if}
+              {#if a.disabled_at == null}
+                <button class="lp-btn ghost sm dis" onclick={() => (offTarget = a)}>
+                  {$_('accounts.disable')}
+                </button>
+              {:else}
+                <button class="lp-btn ghost sm" disabled={busy} onclick={() => enable(a)}>
+                  {$_('accounts.enable')}
+                </button>
+              {/if}
+              <ActionMenu icon="more" label={$_('accounts.more', { values: { name: a.username } })}>
+                {#snippet children(close)}
+                  <button class="lp-mi" role="menuitem" onclick={() => (close(), openPassword(a))}>
+                    {$_('accounts.change_password')}
+                  </button>
+                  <!-- Mode démo : un compte partagé entre inconnus, verrouillé
+                       par le hub (contrat § 27). Jamais sur un `admin`. -->
+                  {#if a.role !== 'admin'}
+                    <button class="lp-mi" role="menuitem" disabled={busy} onclick={() => (close(), toggleDemo(a))}>
+                      {a.demo ? $_('accounts.demo_off') : $_('accounts.demo_on')}
+                    </button>
+                  {/if}
+                {/snippet}
+              </ActionMenu>
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
   </div>
 {/if}
 
@@ -547,27 +545,31 @@
 </Modal>
 
 <style>
+  .nm {
+    font-weight: 500;
+  }
+  .lp-tag {
+    margin-left: 8px;
+  }
+  tr.off .nm {
+    color: var(--color-muted);
+  }
+  .scope {
+    white-space: normal;
+  }
+  .act {
+    white-space: nowrap;
+  }
+  .act > :global(*) {
+    vertical-align: middle;
+  }
+  .act :global(.lp-btn.dis) {
+    color: var(--st-bad);
+  }
   /* Le décompte à gauche, l'action à droite, et rien entre les deux : la ligne
      tient sur une seule à 390 px, et se replie proprement si la traduction
      s'allonge. */
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
-    min-height: 30px;
-  }
-  .count {
-    font-size: 12px;
-    color: var(--ep-text-secondary);
-    margin: 0;
-  }
 
-  .list {
-    overflow: hidden;
-  }
 
   /* Grille et non <table> : c'est le gabarit déjà utilisé par le parc, et il
      laisse une colonne se replier au lieu de pousser la page en défilement
@@ -578,24 +580,6 @@
      grilles indépendantes, et une colonne `auto` s'y dimensionnerait sur son
      propre contenu — les intitulés se seraient posés à côté de leurs valeurs
      au lieu d'au-dessus. */
-  .row {
-    display: grid;
-    /* La colonne d'actions se dimensionne sur SON contenu (`max-content`) et
-       non sur une largeur devinée : à 300 px figés, le bouton « Portée »
-       ajouté par le périmètre par site faisait passer « Désactiver » à la
-       ligne suivante. Le nom du compte absorbe le reste, il est le seul dont
-       la longueur soit imprévisible. */
-    grid-template-columns: minmax(0, 1fr) 120px 140px 108px max-content;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--ep-border);
-    font-size: 12.5px;
-  }
-  .scope {
-    font-size: 11.5px;
-    color: var(--ep-text-secondary);
-  }
   .scope-list {
     display: flex;
     flex-direction: column;
@@ -653,83 +637,14 @@
     color: var(--ep-accent, #b8860b);
     font-weight: 600;
   }
-  .row:last-child {
-    border-bottom: none;
-  }
-  .row.header {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--ep-text-dim);
-    background: var(--ep-bg-tertiary);
-    padding: 7px 14px;
-  }
   /* Atténué, jamais barré : un texte rayé se lit « supprimé », et c'est
      précisément ce qui n'arrive pas ici. */
-  .row.off .nm,
-  .row.off .created {
-    color: var(--ep-text-muted);
-  }
 
-  .who {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    min-width: 0;
-  }
-  .nm {
-    font-weight: 600;
-    color: var(--ep-text-primary);
-    overflow-wrap: anywhere;
-  }
-  .created {
-    color: var(--ep-text-secondary);
-    font-size: 11.5px;
-  }
-  .right {
-    text-align: right;
-  }
 
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.3px;
-    padding: 2px 7px;
-    border-radius: 999px;
-    border: 1px solid var(--ep-border-strong);
-    color: var(--ep-text-secondary);
-    white-space: nowrap;
-  }
   /* Seul `admin` est saturé. La question qu'on vient poser à cet écran est
      « qui peut tout faire ? » : si les trois rôles étaient colorés, il faudrait
      lire les libellés pour compter. Là, la réponse se compte à l'œil. */
-  .pill.role-admin {
-    border-color: var(--ep-accent);
-    background: var(--ep-accent-dim);
-    color: var(--ep-accent-bright);
-  }
-  .pill.role-operator {
-    color: var(--ep-text-primary);
-  }
-  .pill.role-viewer {
-    border-color: var(--ep-border);
-    color: var(--ep-text-muted);
-  }
-  .pill.off-pill {
-    border-color: color-mix(in srgb, var(--ep-danger) 45%, var(--ep-border));
-    color: var(--ep-danger);
-    background: color-mix(in srgb, var(--ep-danger) 8%, transparent);
-  }
 
-  .acts {
-    display: flex;
-    gap: 6px;
-    justify-content: flex-end;
-    flex-wrap: wrap;
-  }
 
   .hint {
     font-size: 11px;
@@ -755,45 +670,13 @@
     margin: 0;
   }
 
-  /* Sous 760 px, la date de création part la première : c'est du contexte, pas
-     une décision. Sous 560 px, la ligne se replie en deux étages plutôt que de
-     comprimer les boutons jusqu'à l'illisible — à 390 px, « Désactiver » doit
-     rester lisible en entier. */
-  /* ⚠️ Les `nth-child` de l'en-tête doivent suivre EXACTEMENT l'ordre des
-     colonnes d'une ligne. La portée s'est insérée en 3e position : masquer le
-     mauvais rang décalerait tous les intitulés d'un cran, et la colonne
-     « Créé le » porterait le titre « Portée ». */
-  @media (max-width: 900px) {
-    .row {
-      grid-template-columns: minmax(0, 1fr) 120px 140px max-content;
-    }
-    .created,
-    .row.header span:nth-child(4) {
-      display: none;
-    }
-  }
+  /* Sous 760 px, la date de création part la première : c'est du contexte,
+     pas une décision. Le tableau défile ensuite plutôt que de comprimer les
+     boutons. */
   @media (max-width: 760px) {
-    .row {
-      grid-template-columns: minmax(0, 1fr) max-content;
-    }
-    .scope,
-    .role,
-    .row.header span:nth-child(2),
-    .row.header span:nth-child(3) {
+    .lp-t th:nth-child(4),
+    .lp-t td:nth-child(4) {
       display: none;
-    }
-  }
-  @media (max-width: 560px) {
-    .row {
-      grid-template-columns: minmax(0, 1fr) auto;
-      row-gap: 8px;
-    }
-    .row.header {
-      display: none;
-    }
-    .acts {
-      grid-column: 1 / -1;
-      justify-content: flex-start;
     }
   }
 </style>

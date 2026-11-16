@@ -784,7 +784,7 @@
   },
   "accounts": {
     "title": "Comptes",
-    "count": "{active, plural, one {# compte actif} other {# comptes actifs}} sur {total}",
+    "count": "{active} actifs sur {total}",
     "new": "Nouveau compte",
     "new_title": "Nouveau compte",
     "error_title": "Comptes indisponibles",
@@ -806,8 +806,8 @@
     "create": "Créer",
     "creating": "Création…",
     "err_username": "Identifiant requis.",
-    "change_role": "Rôle…",
-    "change_password": "Mot de passe…",
+    "change_role": "Rôle",
+    "change_password": "Changer le mot de passe",
     "disable": "Désactiver",
     "enable": "Réactiver",
     "disabled_on": "Désactivé le {date}",
@@ -826,9 +826,9 @@
     "col_scope": "Portée",
     "change_scope": "Portée",
     "scope": "Portée",
-    "scope_admin": "Tous les sites (administrateur)",
+    "scope_admin": "Tous les sites",
     "scope_all": "Tous les sites",
-    "scope_n": "{n} site(s)",
+    "scope_n": "{n, plural, one {# site} other {# sites}}",
     "scope_title": "Portée de {name}",
     "scope_lead": "Choisissez ce que ce compte a le droit de voir. Le filtrage se fait dans le hub : un site hors de sa portée n'existe pas pour lui, ses sondes non plus.",
     "scope_no_site": "Aucun site dans le parc pour l'instant.",
@@ -837,7 +837,8 @@
     "scope_nothing": "Aucun site",
     "scope_empty_means_nothing": "Aucune case cochée : ce compte ne verra RIEN. Un site supprimé sort de la portée sans jamais l'élargir.",
     "scope_selected": "{n} site(s) sélectionné(s). Ce compte ne verra rien d'autre.",
-    "scope_probe_count": "{n, plural, =0 {aucune sonde} one {# sonde} other {# sondes}}"
+    "scope_probe_count": "{n, plural, =0 {aucune sonde} one {# sonde} other {# sondes}}",
+    "more": "Autres actions pour {name}"
   },
   "audit": {
     "title": "Journal d'audit",

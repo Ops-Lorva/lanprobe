@@ -121,24 +121,24 @@
       {/if}
       <ActionMenu icon="more" label={$_('fleet.site_menu', { values: { name: siteName } })}>
         {#snippet children(close)}
-          <button class="mi" role="menuitem" onclick={() => (close(), onfocusSite())}>
+          <button class="lp-mi" role="menuitem" onclick={() => (close(), onfocusSite())}>
             {$_('fleet.site_open')}
           </button>
           <!-- Le rapport se demande depuis le SITE : c'est l'unité qu'on remet
                à un client. Il reste ouvert à un lecteur : le produire ne
                change rien au parc. -->
-          <button class="mi" role="menuitem" onclick={() => (close(), onexportSla())}>
+          <button class="lp-mi" role="menuitem" onclick={() => (close(), onexportSla())}>
             {$_('sla.export')}
           </button>
           {#if $canOperate}
             <!-- ⚠️ Masquage ET vérification serveur (§ 18). -->
-            <button class="mi" role="menuitem" onclick={() => (close(), onalerts())}>
+            <button class="lp-mi" role="menuitem" onclick={() => (close(), onalerts())}>
               {$_('notify.site_alerts')}
             </button>
-            <button class="mi" role="menuitem" onclick={() => (close(), onrename())}>
+            <button class="lp-mi" role="menuitem" onclick={() => (close(), onrename())}>
               {$_('fleet.site_rename')}
             </button>
-            <button class="mi" role="menuitem" onclick={() => (close(), onarchive())}>
+            <button class="lp-mi" role="menuitem" onclick={() => (close(), onarchive())}>
               {archived ? $_('site.unarchive') : $_('site.archive')}
             </button>
           {/if}
@@ -233,22 +233,5 @@
   }
   tr.empty a {
     margin-left: 8px;
-  }
-  .mi {
-    display: block;
-    width: 100%;
-    text-align: left;
-    padding: 8px 10px;
-    border: 0;
-    border-radius: 5px;
-    background: transparent;
-    color: var(--color-ink);
-    font: 500 0.875rem/1.3 var(--ep-font-sans);
-    cursor: pointer;
-  }
-  .mi:hover,
-  .mi:focus-visible {
-    background: var(--color-paper-3);
-    outline: none;
   }
 </style>

@@ -784,7 +784,7 @@
   },
   "accounts": {
     "title": "Accounts",
-    "count": "{active, plural, one {# active account} other {# active accounts}} of {total}",
+    "count": "{active} active of {total}",
     "new": "New account",
     "new_title": "New account",
     "error_title": "Accounts unavailable",
@@ -806,8 +806,8 @@
     "create": "Create",
     "creating": "Creating…",
     "err_username": "Username required.",
-    "change_role": "Role…",
-    "change_password": "Password…",
+    "change_role": "Role",
+    "change_password": "Change password",
     "disable": "Disable",
     "enable": "Re-enable",
     "disabled_on": "Disabled on {date}",
@@ -826,9 +826,9 @@
     "col_scope": "Scope",
     "change_scope": "Scope",
     "scope": "Scope",
-    "scope_admin": "All sites (administrator)",
+    "scope_admin": "All sites",
     "scope_all": "All sites",
-    "scope_n": "{n} site(s)",
+    "scope_n": "{n, plural, one {# site} other {# sites}}",
     "scope_title": "Scope of {name}",
     "scope_lead": "Choose what this account may see. Filtering happens in the hub: a site outside its scope does not exist for them, nor do its probes.",
     "scope_no_site": "No site in the fleet yet.",
@@ -837,7 +837,8 @@
     "scope_nothing": "No site",
     "scope_empty_means_nothing": "Nothing ticked: this account will see NOTHING. A deleted site leaves the scope without ever widening it.",
     "scope_selected": "{n} site(s) selected. This account will see nothing else.",
-    "scope_probe_count": "{n, plural, =0 {no probe} one {# probe} other {# probes}}"
+    "scope_probe_count": "{n, plural, =0 {no probe} one {# probe} other {# probes}}",
+    "more": "More actions for {name}"
   },
   "audit": {
     "title": "Audit log",
