@@ -46,6 +46,7 @@
   // sonde annonce sur sa propre fenêtre glissante (`card.monitor.uptime_pct`).
   // Les deux répondent à des questions différentes et sont affichés séparément.
   import { normalizeUptime, unmeasuredLabel, uptimeOf, type TargetUptime } from '$lib/uptime';
+  import { probeCycle } from '$lib/probe-cycle';
   // ⚠️ Une seule fenêtre pour toute la fiche, tenue dans un store partagé :
   // avant, elle n'existait que sur le tableau de bord et les quatre autres
   // onglets affichaient son choix sans le dire.
@@ -561,16 +562,21 @@
     // ⚠️ La fenêtre est figée pour tout le tour : lue trois fois, un clic
     // pendant le chargement donnerait trois graphiques sur trois périodes.
     const choice = win;
+    const cycle = probeCycle(() => id);
     const [p, i, s] = await Promise.all([
       fetchOne(MEASUREMENT.ping, 'latency_ms', choice),
       fetchOne(MEASUREMENT.internet, 'state', choice),
       fetchOne(MEASUREMENT.speedtest, 'download_mbps', choice),
     ]);
+    if (annonce) clearTimeout(annonce);
+    // La fiche a changé de sonde, ou n'existe plus, pendant la lecture : ces
+    // courbes ne sont plus les siennes, et les deux lectures qui suivent
+    // partiraient vers `/api/probes/undefined/…`.
+    if (cycle.stale()) return;
     ping = p;
     inet = i;
     speed = s;
     loadedAt = Date.now();
-    if (annonce) clearTimeout(annonce);
     refreshing = false;
     // Même fenêtre que les courbes, lue dans la foulée : le graphe et le
     // tableau par adresse doivent parler de la même période, sinon un repère
@@ -581,7 +587,7 @@
     // `uptimeByTarget`, et aucune des deux ne lit ce que l'autre écrit. Les
     // enchaîner ne servait qu'à faire arriver le taux sur la période un tour
     // de réseau après le reste, sur une fiche qui se relit toutes les 3 s.
-    await Promise.all([loadPublicIps(choice), loadUptime(choice)]);
+    await Promise.all([loadPublicIps(choice, cycle.id), loadUptime(choice, cycle.id)]);
   }
 
   // ── Adresses publiques traversées (contrat § 15) ─────────────────────────
@@ -597,10 +603,11 @@
   let ipIntervals = $state<PublicIpInterval[] | null>(null);
   let ipHistoryError = $state('');
 
-  async function loadPublicIps(choice: WindowChoice = win) {
+  async function loadPublicIps(choice: WindowChoice = win, probeId: string | undefined = id) {
+    if (!probeId) return;
     try {
       // Celui-ci accepte les bornes absolues : il passe par `flux_range`.
-      ipIntervals = (await api.publicIps(id, toMetricsWindow(choice, Date.now()))).intervals ?? [];
+      ipIntervals = (await api.publicIps(probeId, toMetricsWindow(choice, Date.now()))).intervals ?? [];
       ipHistoryError = '';
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
@@ -616,9 +623,10 @@
    * ⚠️ Un échec laisse le taux ABSENT, jamais à zéro : l'indicateur disparaît
    * plutôt que d'affirmer une disponibilité qu'on n'a pas obtenue.
    */
-  async function loadUptime(choice: WindowChoice = win) {
+  async function loadUptime(choice: WindowChoice = win, probeId: string | undefined = id) {
+    if (!probeId) return;
     try {
-      uptimeByTarget = normalizeUptime(await api.uptime(id, toMetricsWindow(choice, Date.now())));
+      uptimeByTarget = normalizeUptime(await api.uptime(probeId, toMetricsWindow(choice, Date.now())));
     } catch (e) {
       if (e instanceof ApiError && e.isUnauthorized) return onExpired();
       uptimeByTarget = {};
