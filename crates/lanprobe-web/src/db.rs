@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 30;
+pub const SCHEMA_VERSION: i64 = 31;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -904,14 +904,41 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE scan_hosts ADD COLUMN profile_id TEXT;
     "#,
+    // v30 → v31 : « tous les sites » devient un choix EXPLICITE (audit RSSI du
+    // 16/11, F1).
+    //
+    // 🔴 **Une portée vide valait « tout ».** Or `user_sites.site_id` est en
+    // `ON DELETE CASCADE` : supprimer le dernier site d'un compte restreint
+    // vidait sa portée, et le compte voyait alors TOUT le parc — sans message,
+    // et pour toujours sur un téléphone appairé, dont l'identité n'expire pas.
+    // Un opérateur restreint à un site vide pouvait même s'élargir lui-même en
+    // supprimant ce site.
+    //
+    // Désormais `scope_all = 1` dit « tous les sites » ; `scope_all = 0` dit
+    // « les sites de `user_sites`, et RIEN s'il n'y en a aucun ». Une portée
+    // qui se vide se ferme au lieu de s'ouvrir.
+    //
+    // ⚠️ **Les comptes existants ne changent pas de comportement** : ceux qui
+    // n'ont aucune ligne `user_sites` voyaient tout, ils passent à
+    // `scope_all = 1` ; ceux qui en ont restent restreints. Le `DEFAULT 0`
+    // ne vaut donc que pour une ligne écrite sans passer par `create_user`,
+    // et c'est la valeur sûre.
+    //
+    // ⚠️ **La cascade reste**, faute de pouvoir la retirer sans reconstruire
+    // la table (migration additive seulement). Elle n'ouvre plus rien.
+    r#"
+    ALTER TABLE users ADD COLUMN scope_all INTEGER NOT NULL DEFAULT 0;
+    UPDATE users SET scope_all = 1
+     WHERE username NOT IN (SELECT DISTINCT username FROM user_sites);
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
 ///
-/// ⚠️ **`All` n'est pas « aucun site », c'est « tous ».** L'absence de ligne
-/// dans `user_sites` vaut accès complet (contrat § 17) : c'est le cas courant,
-/// et le codage inverse aurait enfermé tous les comptes existants hors de leur
-/// parc à la première migration.
+/// ⚠️ **`All` n'est pas « aucun site », c'est « tous »**, et il ne se déduit
+/// plus d'une absence : il vient de `users.scope_all` (migration v31).
+/// `Sites(vec![])` existe et ne montre RIEN — c'est ce que devient un compte
+/// restreint dont le dernier site a été supprimé.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     All,
@@ -933,10 +960,10 @@ impl Scope {
     fn sql_and_params<'a>(&'a self, column: &str) -> (String, Vec<&'a str>) {
         match self {
             Scope::All => (String::new(), Vec::new()),
-            // Une portée vide ne peut pas exister — `user_scope` rend `All`
-            // quand la table est vide — mais si elle arrivait ici, `IN ()`
-            // est une erreur de syntaxe SQLite. `1 = 0` ne montre rien, ce
-            // qui est le comportement sûr.
+            // Une portée restreinte vide existe depuis la v31 : un compte dont
+            // le dernier site a disparu. `IN ()` est une erreur de syntaxe
+            // SQLite ; `1 = 0` ne montre rien, ce qui est exactement le sens
+            // de cette portée.
             Scope::Sites(ids) if ids.is_empty() => (" 1 = 0".into(), Vec::new()),
             Scope::Sites(ids) => {
                 let holes = (0..ids.len())
@@ -1379,6 +1406,10 @@ pub struct UserRecord {
     pub created_at: i64,
     /// Renseigné quand le compte est désactivé. On ne supprime pas un compte.
     pub disabled_at: Option<i64>,
+    /// « Tous les sites », explicitement (migration v31). Faux = la liste de
+    /// `user_sites`, **et rien si elle est vide**. Toujours vrai pour un
+    /// `admin`, qui n'est jamais restreint.
+    pub all_sites: bool,
 }
 
 /// Une clé d'accès enregistrée, telle qu'elle sort de la base.
@@ -1654,12 +1685,17 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
     })
 }
 
+/// Colonnes de `users`, dans l'ordre où [`user_from_row`] les lit.
+const USER_COLUMNS: &str = "username, role, created_at, disabled_at, scope_all";
+
 fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
+    let role = Role::from_stored(&r.get::<_, String>(1)?);
     Ok(UserRecord {
         username: r.get(0)?,
-        role: Role::from_stored(&r.get::<_, String>(1)?),
+        role,
         created_at: r.get(2)?,
         disabled_at: r.get(3)?,
+        all_sites: role == Role::Admin || r.get::<_, i64>(4)? != 0,
     })
 }
 
@@ -1969,7 +2005,8 @@ impl Db {
             .map_err(|e| DbError::Internal(e.to_string()))?;
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO users (username, password_hash, role, created_at) VALUES (?1, ?2, 'admin', ?3)",
+            "INSERT INTO users (username, password_hash, role, created_at, scope_all)
+             VALUES (?1, ?2, 'admin', ?3, 1)",
             rusqlite::params![username, hash, now()],
         )
         .map_err(|e| conflict_on_constraint(e, "le compte initial existe déjà".into()))?;
@@ -1980,10 +2017,9 @@ impl Db {
     /// on doit pouvoir le voir pour le réactiver.
     pub fn list_users(&self) -> DbResult<Vec<UserRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT username, role, created_at, disabled_at FROM users
-             ORDER BY username COLLATE NOCASE",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {USER_COLUMNS} FROM users ORDER BY username COLLATE NOCASE"
+        ))?;
         let rows = stmt.query_map([], user_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -1991,7 +2027,7 @@ impl Db {
     pub fn get_user(&self, username: &str) -> DbResult<UserRecord> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT username, role, created_at, disabled_at FROM users WHERE username = ?1",
+            &format!("SELECT {USER_COLUMNS} FROM users WHERE username = ?1"),
             [username],
             user_from_row,
         )
@@ -2175,23 +2211,59 @@ impl Db {
             .map(|raw| Role::from_stored(&raw)))
     }
 
+    /// Crée un compte qui voit **tous les sites** — le comportement d'avant la
+    /// v31, conservé pour les appelants qui ne disent rien de la portée.
     pub fn create_user(&self, username: &str, password: &str, role: Role) -> DbResult<UserRecord> {
+        self.create_user_scoped(username, password, role, None)
+    }
+
+    /// Crée un compte avec sa portée : `None` = tous les sites, `Some(ids)` =
+    /// ces sites-là, **et rien si la liste est vide**.
+    ///
+    /// ⚠️ La portée est posée dans la MÊME transaction que le compte : un
+    /// compte restreint ne doit jamais exister, même un instant, en « tous les
+    /// sites » — c'est la fenêtre que l'audit relevait à la création.
+    pub fn create_user_scoped(
+        &self,
+        username: &str,
+        password: &str,
+        role: Role,
+        sites: Option<&[String]>,
+    ) -> DbResult<UserRecord> {
         let username = username.trim();
         if username.is_empty() {
             return Err(DbError::Conflict("le nom d'utilisateur est requis".into()));
         }
+        if role == Role::Admin && sites.is_some() {
+            return Err(DbError::Conflict(
+                "un administrateur voit tous les sites : il pourrait lever sa propre restriction"
+                    .into(),
+            ));
+        }
         check_password_length(password)?;
+        for id in sites.unwrap_or_default() {
+            self.get_site(id)?;
+        }
         let hash = lanprobe_core::passwords::hash_password(password)
             .map_err(|e| DbError::Internal(e.to_string()))?;
         {
             let conn = self.lock()?;
-            conn.execute(
-                "INSERT INTO users (username, password_hash, role, created_at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![username, hash, role.as_str(), now()],
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO users (username, password_hash, role, created_at, scope_all)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![username, hash, role.as_str(), now(), i64::from(sites.is_none())],
             )
             .map_err(|e| {
                 conflict_on_constraint(e, format!("le compte « {username} » existe déjà"))
             })?;
+            for id in sites.unwrap_or_default() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO user_sites (username, site_id) VALUES (?1, ?2)",
+                    rusqlite::params![username, id],
+                )?;
+            }
+            tx.commit()?;
         }
         self.get_user(username)
     }
@@ -2852,16 +2924,19 @@ impl Db {
     /// pourrait lever sa propre restriction en trois clics, et une limite
     /// qu'on retire soi-même n'est pas une limite. La règle est ici, en base,
     /// pas seulement dans l'interface qui masque le champ.
+    ///
+    /// 🔴 **Une liste vide ne vaut plus « tous ».** « Tous les sites » se lit
+    /// dans `users.scope_all` ; un compte restreint dont aucun site ne reste
+    /// ne voit RIEN (migration v31). Un compte inconnu est une erreur, jamais
+    /// une portée : l'appelant doit refuser, pas deviner.
     pub fn user_scope(&self, username: &str, role: Role) -> DbResult<Scope> {
         if role == Role::Admin {
             return Ok(Scope::All);
         }
-        let sites = self.list_user_sites(username)?;
-        Ok(if sites.is_empty() {
-            Scope::All
-        } else {
-            Scope::Sites(sites)
-        })
+        if self.get_user(username)?.all_sites {
+            return Ok(Scope::All);
+        }
+        Ok(Scope::Sites(self.list_user_sites(username)?))
     }
 
     pub fn list_user_sites(&self, username: &str) -> DbResult<Vec<String>> {
@@ -2873,7 +2948,9 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Remplace la portée d'un compte. Une liste vide rend l'accès à tout.
+    /// Restreint un compte à ces sites, et les remplace. 🔴 **Une liste vide
+    /// ne rend plus l'accès à tout : elle ne montre rien** (migration v31).
+    /// « Tous les sites » est [`Db::set_user_all_sites`].
     ///
     /// ⚠️ Les sites sont vérifiés un par un : sans ça, une faute de frappe
     /// dans un identifiant produirait une portée qui ne désigne rien — donc
@@ -2885,6 +2962,7 @@ impl Db {
         }
         let conn = self.lock()?;
         let tx = conn.unchecked_transaction()?;
+        tx.execute("UPDATE users SET scope_all = 0 WHERE username = ?1", [username])?;
         tx.execute("DELETE FROM user_sites WHERE username = ?1", [username])?;
         for id in site_ids {
             tx.execute(
@@ -2893,6 +2971,20 @@ impl Db {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Rend à un compte **tous les sites**.
+    ///
+    /// ⚠️ Les lignes `user_sites` restent : elles sont ignorées tant que
+    /// `scope_all` vaut 1, et revenir à une portée restreinte retrouve la liste
+    /// d'avant au lieu de repartir de zéro.
+    pub fn set_user_all_sites(&self, username: &str) -> DbResult<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute("UPDATE users SET scope_all = 1 WHERE username = ?1", [username])?;
+        if changed == 0 {
+            return Err(DbError::NotFound("compte inconnu".into()));
+        }
         Ok(())
     }
 
@@ -6615,6 +6707,114 @@ mod tests {
         db.apply_monitor_change(&probe, "9.9.9.9", true, 200).unwrap();
         db.apply_monitor_change(&probe, "9.9.9.9", false, 300).unwrap();
         assert_eq!(db.monitors(&probe).unwrap()[0].removed_at, None);
+    }
+
+    // ── Portée explicite (F1, audit RSSI du 16/11) ─────────────────────────
+
+    #[test]
+    fn rssi_la_portee_reste_fermee_apres_la_suppression_du_site() {
+        // 🔴 Le test de preuve du RSSI, retourné : il démontrait qu'un compte
+        // restreint à un seul site voyait TOUT le parc dès que ce site était
+        // supprimé — la cascade vidait `user_sites`, et une liste vide valait
+        // « tous les sites ».
+        let db = Db::open_in_memory().unwrap();
+        let demo = db.create_site("client demo").unwrap();
+        let reel = db.create_site("client reel").unwrap();
+        db.create_user("relecteur", "password123", Role::Viewer).unwrap();
+        db.set_user_sites("relecteur", &[demo.site_id.clone()]).unwrap();
+        let before = db.user_scope("relecteur", Role::Viewer).unwrap();
+        assert!(!before.allows(&reel.site_id));
+        db.delete_site(&demo.site_id).unwrap();
+        let after = db.user_scope("relecteur", Role::Viewer).unwrap();
+        assert!(
+            !after.allows(&reel.site_id),
+            "la suppression du dernier site ne doit pas ouvrir le parc"
+        );
+        assert_eq!(after, Scope::Sites(Vec::new()), "portée restreinte vide = rien");
+        assert!(db.list_sites_scoped(&after, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn une_portee_restreinte_vide_ne_montre_rien() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_site("Durand").unwrap();
+        db.create_user("claire", "password123", Role::Viewer).unwrap();
+        db.set_user_sites("claire", &[]).unwrap();
+        let scope = db.user_scope("claire", Role::Viewer).unwrap();
+        assert_eq!(scope, Scope::Sites(Vec::new()));
+        assert!(db.list_sites_scoped(&scope, true).unwrap().is_empty());
+        assert!(!db.get_user("claire").unwrap().all_sites);
+    }
+
+    #[test]
+    fn tous_les_sites_est_un_choix_explicite_qui_se_reprend() {
+        let db = Db::open_in_memory().unwrap();
+        let durand = db.create_site("Durand").unwrap();
+        db.create_user("claire", "password123", Role::Viewer).unwrap();
+        // Un compte créé sans portée garde le comportement d'avant : tout.
+        assert_eq!(db.user_scope("claire", Role::Viewer).unwrap(), Scope::All);
+        assert!(db.get_user("claire").unwrap().all_sites);
+
+        db.set_user_sites("claire", &[durand.site_id.clone()]).unwrap();
+        assert_eq!(
+            db.user_scope("claire", Role::Viewer).unwrap(),
+            Scope::Sites(vec![durand.site_id.clone()])
+        );
+
+        db.set_user_all_sites("claire").unwrap();
+        assert_eq!(db.user_scope("claire", Role::Viewer).unwrap(), Scope::All);
+        assert!(db.get_user("claire").unwrap().all_sites);
+    }
+
+    #[test]
+    fn un_compte_peut_naitre_restreint() {
+        // L'audit : « un viewer neuf voit tout tant que sa portée n'est pas
+        // posée ». Créé restreint, il ne passe jamais par « tout ».
+        let db = Db::open_in_memory().unwrap();
+        let durand = db.create_site("Durand").unwrap();
+        db.create_user_scoped(
+            "relecteur",
+            "password123",
+            Role::Viewer,
+            Some(&[durand.site_id.clone()]),
+        )
+        .unwrap();
+        assert_eq!(
+            db.user_scope("relecteur", Role::Viewer).unwrap(),
+            Scope::Sites(vec![durand.site_id])
+        );
+    }
+
+    #[test]
+    fn migration_v31_garde_tout_aux_comptes_sans_portee_et_restreint_les_autres() {
+        // 🔴 Le cas qui compte : un hub en service qu'on met à jour. Un compte
+        // sans ligne `user_sites` voyait tout — il doit continuer. Un compte
+        // restreint doit rester restreint.
+        let dir = tmp_dir("v30-to-v31");
+        let path = dir.join("hub.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..30] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 30").unwrap();
+            conn.execute_batch(
+                "INSERT INTO sites (site_id, name, created_at) VALUES ('s-1', 'Durand', 0);
+                 INSERT INTO users (username, password_hash, role, created_at)
+                   VALUES ('tous', 'h', 'operator', 0), ('restreint', 'h', 'viewer', 0);
+                 INSERT INTO user_sites (username, site_id) VALUES ('restreint', 's-1');",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(db.user_scope("tous", Role::Operator).unwrap(), Scope::All);
+        assert_eq!(
+            db.user_scope("restreint", Role::Viewer).unwrap(),
+            Scope::Sites(vec!["s-1".into()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {

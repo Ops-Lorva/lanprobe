@@ -6,6 +6,7 @@
   import Modal from '$lib/components/Modal.svelte';
   import RoleChoice from '$lib/components/RoleChoice.svelte';
   import { dateOnly } from '$lib/time';
+  import { initialScope, scopePatch, scopeSummary, type ScopeMode } from '$lib/account-scope';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
   const lang = $derived($locale ?? 'en');
@@ -68,24 +69,26 @@
 
   // ── Portée par site (contrat § 17) ───────────────────────────────────────
   //
-  // ⚠️ Aucune case cochée = accès à TOUS les sites, jamais « aucun ». Le
-  // dialogue le dit en toutes lettres : un sélecteur vide qui voudrait dire
-  // « ne voit rien » serait le contresens le plus coûteux de cet écran.
+  // 🔴 « Tous les sites » est un CHOIX, plus une absence de case (audit RSSI,
+  // F1) : une liste vide valait « tout », et supprimer le dernier site d'un
+  // compte restreint lui ouvrait le parc entier. Aucune case cochée veut
+  // désormais dire « rien », et le dialogue le dit en toutes lettres.
   let scopeTarget = $state<Account | null>(null);
+  let scopeMode = $state<ScopeMode>('all');
   let scopePicked = $state<string[]>([]);
   let scopeError = $state('');
   let scopeBusy = $state(false);
 
   function openScope(a: Account) {
     scopeTarget = a;
-    scopePicked = [...(a.sites ?? [])];
+    const initial = initialScope({ ...a, sites: a.sites ?? [] });
+    scopeMode = initial.mode;
+    scopePicked = initial.picked;
     scopeError = '';
   }
 
-  function toggleScope(siteId: string) {
-    scopePicked = scopePicked.includes(siteId)
-      ? scopePicked.filter((s) => s !== siteId)
-      : [...scopePicked, siteId];
+  function toggled(picked: string[], siteId: string): string[] {
+    return picked.includes(siteId) ? picked.filter((s) => s !== siteId) : [...picked, siteId];
   }
 
   async function submitScope() {
@@ -93,7 +96,7 @@
     scopeBusy = true;
     scopeError = '';
     try {
-      await api.patchUser(scopeTarget.username, { sites: scopePicked });
+      await api.patchUser(scopeTarget.username, scopePatch(scopeMode, scopePicked));
       scopeTarget = null;
       await load();
     } catch (e) {
@@ -105,10 +108,8 @@
 
   /** Ce que voit un compte, en une phrase, pour la colonne du tableau. */
   function scopeLabel(a: Account): string {
-    const n = a.sites?.length ?? 0;
-    if (a.role === 'admin') return $_('accounts.scope_admin');
-    if (n === 0) return $_('accounts.scope_all');
-    return $_('accounts.scope_n', { values: { n } });
+    const { key, values } = scopeSummary({ ...a, sites: a.sites ?? [] });
+    return $_(key, { values });
   }
 
   // ── Création ─────────────────────────────────────────────────────────────
@@ -116,6 +117,9 @@
   let newName = $state('');
   let newPassword = $state('');
   let newRole = $state<Role>('viewer');
+  /** Portée posée à la création : jamais un instant en « tous » par défaut. */
+  let newScopeMode = $state<ScopeMode>('all');
+  let newScopePicked = $state<string[]>([]);
   let createError = $state('');
   let busy = $state(false);
 
@@ -125,6 +129,8 @@
     // Le rôle le moins puissant par défaut : un oubli doit coûter un droit
     // manquant, jamais un droit accordé sans qu'on l'ait voulu.
     newRole = 'viewer';
+    newScopeMode = 'all';
+    newScopePicked = [];
     createError = '';
     createOpen = true;
   }
@@ -137,7 +143,13 @@
     }
     busy = true;
     try {
-      await api.createUser(newName.trim(), newPassword, newRole);
+      await api.createUser(
+        newName.trim(),
+        newPassword,
+        newRole,
+        // Un `admin` voit tout : le hub refuse de le restreindre.
+        newRole === 'admin' ? undefined : scopePatch(newScopeMode, newScopePicked),
+      );
       createOpen = false;
       await load();
     } catch (e) {
@@ -331,40 +343,76 @@
   </div>
 {/if}
 
+<!--
+  Le choix de portée, partagé par la création et la modification. Deux
+  boutons radio et non une case « tout » implicite : « aucune case = tous »
+  était le contresens que l'audit RSSI a transformé en faille (F1).
+-->
+{#snippet scopePicker(
+  group: string,
+  mode: ScopeMode,
+  picked: string[],
+  onmode: (m: ScopeMode) => void,
+  ontoggle: (id: string) => void,
+)}
+  <div class="scope-modes">
+    <label class="scope-row">
+      <input type="radio" name={group} checked={mode === 'all'} onchange={() => onmode('all')} />
+      <span class="scope-name">{$_('accounts.scope_mode_all')}</span>
+    </label>
+    <label class="scope-row">
+      <input
+        type="radio"
+        name={group}
+        checked={mode === 'sites'}
+        onchange={() => onmode('sites')}
+      />
+      <span class="scope-name">{$_('accounts.scope_mode_sites')}</span>
+    </label>
+  </div>
+  {#if mode === 'sites'}
+    {#if sites.length === 0}
+      <p class="dlg-lead">{$_('accounts.scope_no_site')}</p>
+    {:else}
+      <div class="scope-list">
+        {#each sites as s (s.site_id)}
+          <label class="scope-row">
+            <input
+              type="checkbox"
+              checked={picked.includes(s.site_id)}
+              onchange={() => ontoggle(s.site_id)}
+            />
+            <span class="scope-name">{s.name}</span>
+            <span class="scope-count">
+              {$_('accounts.scope_probe_count', { values: { n: s.probe_count } })}
+            </span>
+          </label>
+        {/each}
+      </div>
+    {/if}
+    <!-- ⚠️ La phrase qui compte : aucune case cochée veut dire « ne voit
+         RIEN ». Elle se voit quand c'est l'état courant. -->
+    <p class="dlg-note" class:accent={picked.length === 0}>
+      {picked.length === 0
+        ? $_('accounts.scope_empty_means_nothing')
+        : $_('accounts.scope_selected', { values: { n: picked.length } })}
+    </p>
+  {/if}
+{/snippet}
+
 <Modal
   open={scopeTarget !== null}
   title={$_('accounts.scope_title', { values: { name: scopeTarget?.username ?? '' } })}
   onclose={() => (scopeTarget = null)}
 >
   <p class="dlg-lead">{$_('accounts.scope_lead')}</p>
-
-  {#if sites.length === 0}
-    <p class="dlg-lead">{$_('accounts.scope_no_site')}</p>
-  {:else}
-    <div class="scope-list">
-      {#each sites as s (s.site_id)}
-        <label class="scope-row">
-          <input
-            type="checkbox"
-            checked={scopePicked.includes(s.site_id)}
-            onchange={() => toggleScope(s.site_id)}
-          />
-          <span class="scope-name">{s.name}</span>
-          <span class="scope-count">
-            {$_('accounts.scope_probe_count', { values: { n: s.probe_count } })}
-          </span>
-        </label>
-      {/each}
-    </div>
-  {/if}
-
-  <!-- ⚠️ La phrase qui compte : aucune case cochée ne veut pas dire « ne voit
-       rien ». Sans elle, on décocherait tout en croyant fermer un accès. -->
-  <p class="dlg-note" class:accent={scopePicked.length === 0}>
-    {scopePicked.length === 0
-      ? $_('accounts.scope_none_means_all')
-      : $_('accounts.scope_selected', { values: { n: scopePicked.length } })}
-  </p>
+  {@render scopePicker(
+    'edit-scope',
+    scopeMode,
+    scopePicked,
+    (m) => (scopeMode = m),
+    (id) => (scopePicked = toggled(scopePicked, id)),
+  )}
 
   {#if scopeError}<p class="dlg-err" role="alert">{scopeError}</p>{/if}
   {#snippet footer()}
@@ -395,6 +443,18 @@
     {$_('accounts.role')}
     <RoleChoice group="new-role" value={newRole} onchange={(r) => (newRole = r)} />
   </div>
+  {#if newRole !== 'admin'}
+    <div class="lp-field">
+      {$_('accounts.scope')}
+      {@render scopePicker(
+        'new-scope',
+        newScopeMode,
+        newScopePicked,
+        (m) => (newScopeMode = m),
+        (id) => (newScopePicked = toggled(newScopePicked, id)),
+      )}
+    </div>
+  {/if}
   {#if createError}<p class="err" role="alert">{createError}</p>{/if}
   {#snippet footer()}
     <button class="lp-btn" onclick={() => (createOpen = false)}>{$_('common.cancel')}</button>
@@ -559,8 +619,13 @@
     font-size: 11.5px;
     color: var(--ep-text-secondary);
   }
-  /* « Aucune case = tous les sites » est le contresens à éviter : quand c'est
-     l'état courant, la phrase se voit. */
+  /* « Aucune case = rien » doit se voir quand c'est l'état courant. */
+  .scope-modes {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 6px;
+  }
   .dlg-note.accent {
     color: var(--ep-accent, #b8860b);
     font-weight: 600;

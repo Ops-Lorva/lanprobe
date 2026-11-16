@@ -414,13 +414,16 @@ export interface Account {
   /** Epoch en secondes quand le compte est désactivé, `null` s'il est actif. */
   disabled_at: number | null;
   /**
-   * Sites que ce compte a le droit de voir (contrat § 17).
+   * Sites que ce compte a le droit de voir (contrat § 17), quand
+   * `all_sites` est faux.
    *
-   * ⚠️ **Liste vide = accès à TOUS les sites**, pas à aucun. C'est le cas
-   * courant et il ne coûte rien à configurer ; l'interpréter à l'envers
-   * afficherait « ne voit rien » pour la quasi-totalité des comptes.
+   * 🔴 **Depuis la v31 du hub, une liste vide ne vaut plus « tous »** : elle
+   * vaut « rien » (audit RSSI, F1). « Tous les sites » se lit dans
+   * `all_sites`. Voir `account-scope.ts`.
    */
   sites: string[];
+  /** « Tous les sites », explicitement. Absent sur un hub d'avant la v31. */
+  all_sites?: boolean;
 }
 
 // ── Journal d'audit (contrat § 11) ──────────────────────────────────────────
@@ -1457,22 +1460,31 @@ export const api = {
 
   users: () => request<Account[]>('/api/users'),
 
-  createUser: (username: string, password: string, role: Role) =>
+  /**
+   * ⚠️ La portée part AVEC la création : un compte restreint ne doit jamais
+   * exister, même un instant, en « tous les sites ».
+   */
+  createUser: (
+    username: string,
+    password: string,
+    role: Role,
+    scope?: { all_sites: true } | { all_sites: false; sites: string[] },
+  ) =>
     request<Account>('/api/users', {
       method: 'POST',
-      body: JSON.stringify({ username, password, role }),
+      body: JSON.stringify({ username, password, role, ...(scope ?? {}) }),
     }),
 
   /**
    * Rôle, activation, portée, ou tout à la fois. Le hub refuse (409) ce qui
    * couperait le dernier accès, et refuse de restreindre un `admin`.
    *
-   * ⚠️ `sites: []` est un ORDRE — « plus aucune restriction » — alors que
-   * l'absence du champ ne touche pas à la portée existante.
+   * 🔴 `sites: []` restreint à RIEN depuis la v31 ; « tous les sites » se dit
+   * `all_sites: true`. L'absence des deux champs ne touche pas à la portée.
    */
   patchUser: (
     username: string,
-    patch: { role?: Role; disabled?: boolean; sites?: string[] },
+    patch: { role?: Role; disabled?: boolean; sites?: string[]; all_sites?: boolean },
   ) =>
     request<Account>(`/api/users/${encodeURIComponent(username)}`, {
       method: 'PATCH',

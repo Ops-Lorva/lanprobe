@@ -1434,6 +1434,11 @@ pub struct Identity {
 /// Rend l'identité d'un compte actif. `None` si le compte a été désactivé
 /// pendant que sa session courait — la session ne vaut alors plus rien.
 ///
+/// 🔴 **`None` aussi quand la portée est illisible** (audit RSSI, F1). Elle
+/// retombait sur `Scope::All` : un mutex SQLite empoisonné ouvrait alors tout
+/// le parc à tous les comptes restreints au lieu de le leur fermer. Une
+/// portée qu'on ne sait pas lire n'autorise rien — l'appelant reçoit un 401.
+///
 /// ⚠️ **C'est le seul endroit qui construit une `Identity`.** Session,
 /// identifiants du compte, jeton d'appareil : trois chemins d'authentification,
 /// une seule fabrique. Deux fabriques, c'est une qui oubliera un jour de relire
@@ -1451,10 +1456,13 @@ pub(crate) fn identity_of(
     if user.disabled_at.is_some() {
         return None;
     }
-    let scope = state
-        .db
-        .user_scope(&user.username, user.role)
-        .unwrap_or(crate::db::Scope::All);
+    let scope = match state.db.user_scope(&user.username, user.role) {
+        Ok(scope) => scope,
+        Err(e) => {
+            tracing::error!("portée de « {} » illisible, accès refusé : {e}", user.username);
+            return None;
+        }
+    };
     Some(Identity {
         username: user.username,
         role: user.role,
@@ -1670,21 +1678,52 @@ async fn list_users(State(state): State<AppState>) -> Response {
         Err(e) => return error_response(e),
     };
     // La portée est jointe à chaque compte : sans elle, l'écran des comptes
-    // devrait interroger une route par ligne pour savoir ce que chacun voit,
-    // et afficherait « tous les sites » en attendant — c'est-à-dire l'inverse
-    // de la vérité pour un compte restreint.
-    let rows: Vec<serde_json::Value> = users
-        .into_iter()
-        .map(|u| {
-            let sites = state.db.list_user_sites(&u.username).unwrap_or_default();
-            let mut value = serde_json::to_value(&u).unwrap_or(serde_json::Value::Null);
-            if let Some(map) = value.as_object_mut() {
-                map.insert("sites".into(), serde_json::json!(sites));
-            }
-            value
-        })
-        .collect();
+    // devrait interroger une route par ligne pour savoir ce que chacun voit.
+    // « Tous les sites » se lit dans `all_sites`, jamais dans une liste vide
+    // (migration v31).
+    let rows: Vec<serde_json::Value> = users.iter().map(|u| user_json(&state, u)).collect();
     ok_json(serde_json::Value::Array(rows))
+}
+
+/// Un compte tel que l'écran des comptes le lit : la ligne, plus sa liste de
+/// sites. `all_sites` vrai rend la liste sans objet — elle est conservée en
+/// base pour qu'un retour à la restriction retrouve la liste d'avant.
+fn user_json(state: &AppState, user: &crate::db::UserRecord) -> serde_json::Value {
+    let sites = state.db.list_user_sites(&user.username).unwrap_or_default();
+    let mut value = serde_json::to_value(user).unwrap_or(serde_json::Value::Null);
+    if let Some(map) = value.as_object_mut() {
+        map.insert("sites".into(), serde_json::json!(sites));
+    }
+    value
+}
+
+/// La portée demandée par un corps de création ou de modification.
+///
+/// - `all_sites: true` → tous les sites ;
+/// - `sites: [...]` (avec ou sans `all_sites: false`) → ces sites-là, **et
+///   rien si la liste est vide** ;
+/// - `all_sites: false` seul → restreint à la liste déjà en base ;
+/// - rien → pas de changement.
+///
+/// 🔴 `all_sites: true` **et** une liste de sites se contredisent : refusé
+/// plutôt que de deviner lequel des deux l'appelant voulait dire.
+enum ScopeOrder {
+    Unchanged,
+    All,
+    Restrict(Option<Vec<String>>),
+}
+
+fn scope_order(all_sites: Option<bool>, sites: Option<Vec<String>>) -> Result<ScopeOrder, Response> {
+    match (all_sites, sites) {
+        (Some(true), Some(list)) if !list.is_empty() => Err(fail(
+            StatusCode::BAD_REQUEST,
+            "« tous les sites » et une liste de sites se contredisent : choisissez l'un des deux",
+        )),
+        (Some(true), _) => Ok(ScopeOrder::All),
+        (Some(false), list) => Ok(ScopeOrder::Restrict(list)),
+        (None, Some(list)) => Ok(ScopeOrder::Restrict(Some(list))),
+        (None, None) => Ok(ScopeOrder::Unchanged),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1692,6 +1731,12 @@ struct NewUserBody {
     username: String,
     password: String,
     role: String,
+    /// Portée du compte, posée À LA CRÉATION (voir [`scope_order`]). Absente :
+    /// tous les sites, comme avant la v31.
+    #[serde(default)]
+    all_sites: Option<bool>,
+    #[serde(default)]
+    sites: Option<Vec<String>>,
 }
 
 async fn create_user(
@@ -1715,19 +1760,22 @@ async fn create_user(
             "rôle attendu : admin, operator ou viewer",
         );
     };
+    let restricted = match scope_order(body.all_sites, body.sites) {
+        Ok(ScopeOrder::Restrict(list)) => Some(list.unwrap_or_default()),
+        Ok(ScopeOrder::All | ScopeOrder::Unchanged) => None,
+        Err(refus) => return refus,
+    };
     let created = audited(
         &state,
         Some(&actor.username),
         "user.create",
         Some(body.username.trim()),
-        state.db.create_user(body.username.trim(), &body.password, role),
+        state
+            .db
+            .create_user_scoped(body.username.trim(), &body.password, role, restricted.as_deref()),
     );
     match created {
-        Ok(user) => (
-            StatusCode::CREATED,
-            Json(serde_json::to_value(user).unwrap_or(serde_json::Value::Null)),
-        )
-            .into_response(),
+        Ok(user) => (StatusCode::CREATED, Json(user_json(&state, &user))).into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -1739,11 +1787,14 @@ struct UserPatch {
     /// `true` désactive, `false` réactive. Jamais de suppression.
     #[serde(default)]
     disabled: Option<bool>,
-    /// Portée par site (contrat § 17). Liste **vide** = accès à tous les
-    /// sites ; absente = on ne touche pas à la portée existante. La
-    /// distinction compte : `[]` est un ordre, `null` est un silence.
+    /// Portée par site (contrat § 17). 🔴 Depuis la v31, une liste **vide**
+    /// restreint à RIEN ; « tous les sites » se dit avec `all_sites: true`.
+    /// Absente = on ne touche pas à la portée existante.
     #[serde(default)]
     sites: Option<Vec<String>>,
+    /// « Tous les sites », explicitement. Voir [`scope_order`].
+    #[serde(default)]
+    all_sites: Option<bool>,
 }
 
 async fn update_user(
@@ -1783,7 +1834,11 @@ async fn update_user(
             return error_response(e);
         }
     }
-    if let Some(sites) = body.sites.as_deref() {
+    let order = match scope_order(body.all_sites, body.sites) {
+        Ok(order) => order,
+        Err(refus) => return refus,
+    };
+    if !matches!(order, ScopeOrder::Unchanged) {
         // ⚠️ Restreindre un `admin` ne veut rien dire : il gère les comptes,
         // donc il lèverait sa propre restriction en trois clics. Le refus est
         // ici, en plus du champ masqué dans l'interface — une limite qu'on
@@ -1793,19 +1848,34 @@ async fn update_user(
             Ok(u) => u.role,
             Err(e) => return error_response(e),
         };
-        if target_role == Role::Admin && !sites.is_empty() {
+        if target_role == Role::Admin && matches!(order, ScopeOrder::Restrict(_)) {
             return fail(
                 StatusCode::CONFLICT,
                 "un administrateur voit tous les sites : il pourrait lever sa propre \
                  restriction. Changez son rôle d'abord.",
             );
         }
-        let detail = if sites.is_empty() {
-            "tous les sites".to_string()
-        } else {
-            format!("{} site(s)", sites.len())
+        let (detail, written) = match order {
+            ScopeOrder::Restrict(list) => {
+                let list = match list {
+                    Some(list) => list,
+                    None => state.db.list_user_sites(&username).unwrap_or_default(),
+                };
+                (
+                    if list.is_empty() {
+                        "restreint à aucun site".to_string()
+                    } else {
+                        format!("{} site(s)", list.len())
+                    },
+                    state.db.set_user_sites(&username, &list),
+                )
+            }
+            // `Unchanged` n'arrive pas ici (filtré plus haut) : il rejoint
+            // `All`, dont l'écriture est idempotente.
+            ScopeOrder::All | ScopeOrder::Unchanged => {
+                ("tous les sites".to_string(), state.db.set_user_all_sites(&username))
+            }
         };
-        let written = state.db.set_user_sites(&username, sites);
         match &written {
             Ok(()) => audit(
                 &state,
@@ -1829,14 +1899,7 @@ async fn update_user(
         }
     }
     match state.db.get_user(&username) {
-        Ok(user) => {
-            let sites = state.db.list_user_sites(&username).unwrap_or_default();
-            let mut value = serde_json::to_value(&user).unwrap_or(serde_json::Value::Null);
-            if let Some(map) = value.as_object_mut() {
-                map.insert("sites".into(), serde_json::json!(sites));
-            }
-            ok_json(value)
-        }
+        Ok(user) => ok_json(user_json(&state, &user)),
         Err(e) => error_response(e),
     }
 }
@@ -13578,24 +13641,148 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_scope_set_then_cleared_gives_everything_back() {
+    async fn a_scope_set_then_lifted_gives_everything_back() {
         let (h, viewer, site_a, _b, _pa, _pb) = two_clients_and_a_restricted_viewer().await;
         let admin = h.login().await;
         let _ = site_a;
 
-        // `[]` est un ordre — « plus de restriction » — et non un silence.
-        let (status, _, _) = h
+        // « Tous les sites » est un ordre explicite depuis la v31.
+        let (status, body, _) = h
             .call(with_cookie(
-                json_request("PATCH", "/api/users/claire", serde_json::json!({ "sites": [] })),
+                json_request("PATCH", "/api/users/claire", serde_json::json!({ "all_sites": true })),
                 &admin,
             ))
             .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["all_sites"], true);
 
         let (_, probes, _) = h
             .call(with_cookie(empty_request("GET", "/api/probes"), &viewer))
             .await;
         assert_eq!(probes.as_array().unwrap().len(), 2, "la portée est levée");
+    }
+
+    #[tokio::test]
+    async fn an_empty_scope_shows_nothing_instead_of_everything() {
+        // 🔴 F1 de l'audit RSSI : `[]` valait « plus de restriction ». Un
+        // `PATCH {"sites": []}` ouvrait tout le parc au compte de démo.
+        let (h, viewer, _a, _b, _pa, _pb) = two_clients_and_a_restricted_viewer().await;
+        let admin = h.login().await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("PATCH", "/api/users/claire", serde_json::json!({ "sites": [] })),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["all_sites"], false);
+
+        let (_, probes, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &viewer))
+            .await;
+        assert!(probes.as_array().unwrap().is_empty(), "portée vide = rien : {probes}");
+        let (_, sites, _) = h
+            .call(with_cookie(empty_request("GET", "/api/sites"), &viewer))
+            .await;
+        assert!(sites.as_array().unwrap().is_empty(), "portée vide = rien : {sites}");
+    }
+
+    #[tokio::test]
+    async fn deleting_its_only_site_does_not_widen_a_restricted_operator() {
+        // 🔴 F1, scénario B : un opérateur restreint à un site encore vide le
+        // supprimait, la cascade vidait sa portée, et il devenait opérateur
+        // sur tout le hub.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.enroll(&admin, "Durand", "Paris").await;
+        let vide = h.state.db.create_site("Client pas encore équipé").unwrap();
+        h.user("olivier", Role::Operator).await;
+        h.state.db.set_user_sites("olivier", &[vide.site_id.clone()]).unwrap();
+        let op = h.login_as("olivier").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("DELETE", &format!("/api/sites/{}", vide.site_id)),
+                &op,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (_, probes, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &op))
+            .await;
+        assert!(probes.as_array().unwrap().is_empty(), "rien ne s'ouvre : {probes}");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_scope_closes_the_door() {
+        // 🔴 F1, scénario C : une portée illisible valait `Scope::All`.
+        let (h, viewer, _a, _b, _pa, _pb) = two_clients_and_a_restricted_viewer().await;
+        h.state
+            .db
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE user_sites RENAME TO user_sites_illisible")
+            .unwrap();
+
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &viewer))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_account_can_be_created_restricted_in_one_step() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.enroll(&admin, "Durand", "Paris").await;
+        h.enroll(&admin, "Martin", "Lyon").await;
+        let site_a = h.state.db.find_site_by_name("Durand").unwrap().unwrap().site_id;
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "POST",
+                    "/api/users",
+                    serde_json::json!({
+                        "username": "relecteur",
+                        "password": PASSWORD,
+                        "role": "viewer",
+                        "all_sites": false,
+                        "sites": [site_a],
+                    }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["all_sites"], false);
+        assert_eq!(body["sites"], serde_json::json!([site_a]));
+
+        let viewer = h.login_as("relecteur").await;
+        let (_, probes, _) = h
+            .call(with_cookie(empty_request("GET", "/api/probes"), &viewer))
+            .await;
+        assert_eq!(probes.as_array().unwrap().len(), 1, "{probes}");
+    }
+
+    #[tokio::test]
+    async fn all_sites_and_a_list_together_are_refused() {
+        let (h, _viewer, site_a, _b, _pa, _pb) = two_clients_and_a_restricted_viewer().await;
+        let admin = h.login().await;
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request(
+                    "PATCH",
+                    "/api/users/claire",
+                    serde_json::json!({ "all_sites": true, "sites": [site_a] }),
+                ),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
     #[tokio::test]

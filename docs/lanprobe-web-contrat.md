@@ -764,7 +764,8 @@ CREATE TABLE users (
   password_hash TEXT NOT NULL,          -- argon2id
   role          TEXT NOT NULL DEFAULT 'admin',
   created_at    INTEGER NOT NULL,
-  ui_locale     TEXT                    -- langue de l'INTERFACE. NULL = au navigateur de décider
+  ui_locale     TEXT,                   -- langue de l'INTERFACE. NULL = au navigateur de décider
+  scope_all     INTEGER NOT NULL DEFAULT 0  -- v31 : 1 = tous les sites (§ 17). 0 = user_sites, et RIEN s'il est vide
 );
 
 CREATE TABLE sites (
@@ -1257,18 +1258,25 @@ désactivation ni de rétrogradation du dernier administrateur actif.
 ```
 GET    /api/users
        → [ { "username": "admin", "role": "admin",
-             "created_at": 1787788800, "disabled_at": null } ]
+             "created_at": 1787788800, "disabled_at": null,
+             "all_sites": true, "sites": [] } ]
 
 POST   /api/users
-       { "username": "claire", "password": "…", "role": "viewer" }
+       { "username": "claire", "password": "…", "role": "viewer",
+         "all_sites": false, "sites": ["<site_id>"] }      ← portée facultative
        → 201 { "username": "claire", "role": "viewer",
-               "created_at": …, "disabled_at": null }
-       400 rôle inconnu · 409 nom déjà pris · 409 mot de passe < 8 caractères
+               "created_at": …, "disabled_at": null,
+               "all_sites": false, "sites": ["<site_id>"] }
+       400 rôle inconnu · 400 all_sites:true ET une liste · 404 site inconnu
+       409 nom déjà pris · 409 mot de passe < 8 caractères · 409 admin restreint
 
 PATCH  /api/users/{username}
        { "role": "operator" }   et/ou   { "disabled": true }
+       et/ou   { "all_sites": true }                 ← tous les sites
+       ou      { "all_sites": false, "sites": [...] } ← ces sites ; [] = RIEN
        → 200 <le compte, forme ci-dessus>
-       400 rôle inconnu · 404 compte inconnu · 409 dernier admin / soi-même
+       400 rôle inconnu · 400 all_sites:true ET une liste
+       404 compte inconnu · 409 dernier admin / soi-même · 409 admin restreint
 
 POST   /api/users/{username}/password
        { "password": "…" }  → 200 { "ok": true }
@@ -1278,6 +1286,11 @@ DELETE /api/users/{username} → 405, et il en sera toujours ainsi.
 ```
 
 Le hash du mot de passe n'apparaît dans aucune réponse.
+
+🔴 **`{"sites": []}` ne veut plus dire « tous les sites »** depuis la v31 : il
+restreint à RIEN. « Tous » se dit `{"all_sites": true}` (§ 17). `sites` sans
+`all_sites` vaut `all_sites: false` ; `all_sites: false` sans `sites` garde la
+liste déjà en base.
 
 ### Journal d'audit — `admin`, lecture seule
 
@@ -2132,9 +2145,34 @@ CREATE TABLE user_sites (
 );
 ```
 
-**Aucune ligne = accès à tous les sites.** C'est le cas courant (une équipe qui
-gère tout) et il ne doit rien coûter à configurer. Des lignes = restriction à
-ceux-là.
+🔴 **« Tous les sites » est un choix EXPLICITE depuis la v31 : `users.scope_all`.**
+Jusqu'à la v30, « aucune ligne » valait « tous les sites ». Or `user_sites` est
+en `ON DELETE CASCADE` : supprimer le dernier site d'un compte restreint vidait
+sa portée, et le compte voyait alors **tout le parc** — sans message, et pour
+toujours sur un téléphone appairé. Un opérateur restreint à un site encore vide
+pouvait s'élargir lui-même en supprimant ce site (audit RSSI du 16/11, F1).
+
+| `scope_all` | `user_sites` | Le compte voit |
+|---|---|---|
+| 1 | (ignorées) | tous les sites, y compris ceux créés plus tard |
+| 0 | des lignes | ces sites-là |
+| 0 | aucune ligne | **rien** |
+
+- La migration v31 pose `scope_all = 1` sur tout compte qui n'avait aucune
+  ligne : **rien ne change pour un hub en service**.
+- `create_user` sans portée crée un compte « tous les sites », comme avant. La
+  création peut porter la portée (`POST /api/users` avec `all_sites`/`sites`),
+  posée dans la même transaction : un compte restreint ne passe jamais, même un
+  instant, par « tous ».
+- **Choix retenu : « portée vide = rien », et la suppression du site reste
+  permise.** Refuser la suppression d'un site encore dans une portée ne
+  protégeait qu'un seul chemin — `PATCH {"sites": []}` en ouvrait un autre — et
+  aurait fait d'un compte oublié un verrou sur le parc. Fermer la portée à la
+  source couvre tous les chemins à la fois ; la cascade reste (migration
+  additive), elle n'ouvre plus rien.
+- 🔴 **Une portée illisible ferme la porte** : `identity_of` rend `None`, donc
+  `401`. Elle retombait sur « tous les sites » — un mutex SQLite empoisonné
+  ouvrait le parc à tous les comptes restreints.
 
 ⚠️ **Le filtrage se fait en SQL, dans chaque requête**, jamais en écartant des
 résultats après coup côté interface. `GET /api/probes`, `/api/sites`,
@@ -3600,3 +3638,16 @@ affirmerait une provenance fausse ; « inconnue » effacerait ce qu'on sait.
   usage.
 - **Aucune ligne d'audit de plus.** `probe.command` nomme déjà le geste et son
   auteur ; deux entrées pour un seul clic feraient lire deux gestes.
+
+## 27. Durcissement pour un hub exposé (audit RSSI du 16/11)
+
+Préparé pour l'exposition publique d'un hub de démonstration (review App Store
+de l'app iOS), et valable pour tous les hubs. Les findings sont ceux de
+`audits/lanprobe-ios-2026-11-16/rssi-hub-demo.md` (F1 à F7) et
+`audit-fable-securite-appstore.md` (A1 à A12).
+
+### F1 — la portée se ferme au lieu de s'ouvrir
+
+Voir § 17 : `users.scope_all` (v31), portée restreinte vide = rien, portée
+illisible = `401`.
+
