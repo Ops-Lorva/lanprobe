@@ -9,6 +9,26 @@ The hub has its own log: [CHANGELOG-hub.md](CHANGELOG-hub.md).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.9] - 2026-11-16
+
+### English
+
+- **Changed: new interface design** for the desktop app, in its three layouts (sidebar, single page, three tabs), with light and dark themes.
+- **Changed: hub connection** shows its four states clearly (not attached, code refused, attached, unreachable).
+- **Changed: deleting a profile asks for confirmation.**
+- **Fixed: the Geist font now loads.**
+- **Fixed: no English text left in the French interface.**
+- **Fixed: on a probe attached to a hub, the port scan profile pickers were empty.**
+
+### Français
+
+- **Modifié : nouvelle interface** pour l'application de bureau, dans ses trois dispositions (barre latérale, une page, trois onglets), en clair et en sombre.
+- **Modifié : la connexion au hub** affiche clairement ses quatre états (non rattachée, code refusé, rattachée, injoignable).
+- **Modifié : supprimer un profil demande une confirmation.**
+- **Corrigé : la police Geist se charge enfin.**
+- **Corrigé : plus de texte anglais dans l'interface française.**
+- **Corrigé : sur une sonde rattachée à un hub, les sélecteurs de profil de scan de ports étaient vides.**
+
 ## [2.4.8] - 2026-11-12
 
 ### English

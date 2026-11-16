@@ -10,6 +10,32 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. Les versions antérieures à 1.6.0
 sont décrites dans les [releases GitHub](https://github.com/Ops-Lorva/lanprobe/releases).
 
+## [1.6.14] - 2026-11-16
+
+### English
+
+- **Changed: new interface design** for the whole hub: fleet with a 24 h heartbeat strip, probe page, readable audit log, accounts with every account's paired devices, notifications and account pages.
+- **Added: "Add a probe" page** (enrolment code per site), replacing the packages screen.
+- **Added: SLA report page per site** with a preview (summary, outages, SLA per public IP) before downloading the workbook.
+- **Added: archive a probe** from its page, and restore it to the fleet; archived probes carry a badge.
+- **Fixed: a probe page left open could overload the hub.** Background refreshes no longer pile up, metrics queries are about 30× faster, and wide windows (7 and 30 days) refresh less often.
+- **Added: server-side limits on InfluxDB reads**: 2 at a time (503 with `Retry-After` beyond), 45 s maximum, and at most 400 MB of memory per query.
+- **Fixed: no more flickering** of the fleet and probe pages on refresh.
+- **Fixed: every audit log action is translated.**
+- **Security: a failed webhook test no longer shows the webhook URL.**
+
+### Français
+
+- **Modifié : nouvelle interface** pour tout le hub : parc avec une bande de battement sur 24 h, fiche sonde, journal lisible, comptes avec les appareils de tous les comptes, notifications et mon compte.
+- **Ajouté : page « Ajouter une sonde »** (code d'enrôlement par site), qui remplace l'écran des paquets.
+- **Ajouté : page Rapport SLA par site**, avec un aperçu (synthèse, coupures, SLA par IP publique) avant de télécharger le classeur.
+- **Ajouté : archiver une sonde** depuis sa fiche, et la remettre dans le parc ; une sonde archivée porte un badge.
+- **Corrigé : une fiche sonde laissée ouverte pouvait saturer le hub.** Les relectures de fond ne s'empilent plus, les requêtes de mesures sont environ 30 fois plus rapides, et les fenêtres larges (7 et 30 jours) se relisent moins souvent.
+- **Ajouté : limites côté serveur sur les lectures InfluxDB** : 2 à la fois (503 avec `Retry-After` au-delà), 45 s au plus, et 400 Mo de mémoire au plus par requête.
+- **Corrigé : plus de clignotement** du parc et de la fiche sonde à chaque relecture.
+- **Corrigé : toutes les actions du journal sont traduites.**
+- **Sécurité : l'échec d'un essai de webhook n'affiche plus l'URL du webhook.**
+
 ## [1.6.13] - 2026-11-16
 
 ### English
