@@ -3913,3 +3913,24 @@ compte a déjà un rapport `preparing` demandé il y a moins d'une heure, ou
 d'une heure — hub arrêté en pleine génération — ne bloque plus. Aucune colonne
 ajoutée : le décompte lit `reports.requested_by` et `requested_at`.
 
+
+## 28. Ce que l'interface web lit pour la bande de battement (DA « Relevé »)
+
+**Aucune route nouvelle.** La bande de battement 24 h du parc, la perte 24 h
+et la latence de passerelle de chaque ligne sont lues sur des routes déjà
+décrites :
+
+| Ce qu'affiche le parc | Route | Paramètres |
+|---|---|---|
+| Bande de 96 quarts d'heure | `GET /api/probes/{id}/metrics` | `measurement=internet_status`, `range=-24h`, `max_points=96` — champ texte `state` |
+| Perte 24 h de la passerelle | `GET /api/probes/{id}/uptime` | `range=-24h` — `100 − uptime_pct` de la cible passerelle |
+| Latence de la passerelle | `GET /api/probes` | `monitors[]` annoncés par la sonde |
+
+Le parc relit ces deux routes au plus toutes les 5 min par sonde, quatre
+sondes à la fois (`web-ui/src/lib/fleet-beats.ts`), à part de son
+rafraîchissement de 30 s.
+
+L'état **Dégradée** n'a pas de champ à lui : il se déduit d'une sonde fraîche
+(`last_seen` de moins de trois cadences) dont `internet_state` vaut `limited`
+ou `offline` (`web-ui/src/lib/probe-state.ts`). **Jamais vue** est une sonde
+dont `last_seen` est nul.

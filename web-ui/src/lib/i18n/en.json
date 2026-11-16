@@ -407,7 +407,8 @@
     "strip_aria_bad": "24 h heartbeat of {name}: {n} quarter hours in fault",
     "never": "never",
     "update_available": "update available",
-    "col_open": "Open"
+    "col_open": "Open",
+    "update_short": "Update"
   },
   "status": {
     "online": "Online",

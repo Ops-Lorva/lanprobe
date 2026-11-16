@@ -147,7 +147,7 @@
     {probe.version || ''}
     {#if behind}
       <span class="lp-tag upd" title={$_('fleet.version_behind', { values: { version: newest } })}>
-        {$_('fleet.update_available')}
+        <span class="long">{$_('fleet.update_available')}</span><span class="short">{$_('fleet.update_short')}</span>
       </span>
     {/if}
   </td>
@@ -194,9 +194,18 @@
   tr.degr td:first-child {
     box-shadow: inset 2px 0 0 var(--st-warn);
   }
+  .short {
+    display: none;
+  }
   @media (max-width: 90rem) {
     .opt-l {
       display: none;
+    }
+    .long {
+      display: none;
+    }
+    .short {
+      display: inline;
     }
   }
   @media (max-width: 48rem) {

@@ -407,7 +407,8 @@
     "strip_aria_bad": "Battement sur 24 h de {name} : {n} quarts d'heure en défaut",
     "never": "jamais",
     "update_available": "mise à jour disponible",
-    "col_open": "Ouvrir"
+    "col_open": "Ouvrir",
+    "update_short": "MAJ"
   },
   "status": {
     "online": "En ligne",

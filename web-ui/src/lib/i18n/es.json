@@ -407,7 +407,8 @@
     "strip_aria_bad": "Latido de 24 h de {name}: {n} cuartos de hora en fallo",
     "never": "nunca",
     "update_available": "actualización disponible",
-    "col_open": "Abrir"
+    "col_open": "Abrir",
+    "update_short": "Act."
   },
   "status": {
     "online": "En línea",
