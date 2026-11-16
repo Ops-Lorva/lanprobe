@@ -2837,12 +2837,23 @@ lanprobe://pair?hub=<url du hub>&code=<XXXX-XXXX>&fp=<empreinte SHA-256>
 `hub` est le réglage `hub_public_url` quand il est posé — c'est déjà l'adresse
 que reçoivent les sondes — sinon l'en-tête `Host` de la requête : celui qui
 affiche le QR est sur la page du hub, l'adresse de sa barre d'URL est donc celle
-qui marche depuis son réseau.
+qui marche depuis son réseau. 🔴 Dans ce second cas, le schéma suit
+`X-Forwarded-Proto` **quand la requête vient d'un proxy de `trusted_proxies`**
+(§ 27, A5) — sinon un hub en clair derrière un proxy TLS annonçait `http://`.
+La réponse de `POST /api/me/pair-codes` rend aussi `hub`, l'adresse annoncée.
 
 🔴 **`fp` est absent quand le hub sert en clair**, et son absence est une
 information : le téléphone n'a alors rien à épingler, parce que le certificat
 qu'il verra est celui du reverse proxy. Un champ vide le ferait comparer à du
 néant.
+
+🔴 **Et absent aussi quand le hub fait son TLS mais qu'un proxy le termine
+devant lui** (§ 27, C1) — dans le QR comme dans `cert_fingerprint` de la
+réponse de `POST /api/pair`. L'empreinte n'est annoncée que si la requête ne
+vient pas d'un proxy de confiance **et** que `hub_public_url` est absente ou
+désigne l'adresse même par laquelle on parle au hub (`Host`). L'app épinglait
+sinon le certificat interne et échouait ensuite en `certificateMismatch` sur
+chaque requête.
 
 ⚠️ **Ni mot de passe, ni jeton de longue durée dans le QR** — les deux premiers
 raccourcis refusés ci-dessus. L'image ne porte qu'un code de quinze minutes à
@@ -3767,4 +3778,15 @@ appareils n'ont personne pour les révoquer.
 
 Configuration recommandée du compte : `viewer`, portée restreinte au seul site
 de démonstration (`all_sites: false`), `lang = en`, `demo = true`.
+
+### A5 et C1 — l'adresse et l'empreinte annoncées à l'app
+
+Voir § 22, « Ce que le QR transporte ». `hub_url()` lit `X-Forwarded-Proto`
+d'un proxy de confiance (`client_ip::is_trusted`), comme `is_https` pour le
+cookie ; l'empreinte du certificat du hub n'est annoncée que si c'est bien lui
+que le téléphone verra.
+
+⚠️ **Cas que le hub ne voit pas** : un proxy NON déclaré dans `trusted_proxies`,
+devant un hub en TLS, joint sous l'adresse publique. Déclarer le proxy, ou
+couper le TLS du hub (recommandé derrière un proxy).
 

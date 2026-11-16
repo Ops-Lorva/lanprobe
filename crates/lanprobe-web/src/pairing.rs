@@ -143,7 +143,12 @@ pub(crate) struct PairCode {
     /// ⚠️ `None` quand le hub sert en clair derrière un reverse proxy : le
     /// certificat que le téléphone verra est celui du proxy, et annoncer une
     /// empreinte la ferait comparer à un certificat qui n'est pas le sien.
+    /// Et `None` aussi quand le hub fait son TLS mais qu'un proxy le termine
+    /// devant lui — voir [`pinnable_fingerprint`].
     pub cert_fingerprint: Option<String>,
+    /// L'adresse du hub que le QR annonce. Rendue pour que l'écran la montre
+    /// — c'est elle que le téléphone joindra.
+    pub hub: Option<String>,
 }
 
 /// Colonnes de `paired_devices`, dans l'ordre où [`device_from_row`] les lit.
@@ -217,6 +222,7 @@ impl Db {
             expires_at,
             qr_svg: None,
             cert_fingerprint: None,
+            hub: None,
         })
     }
 
@@ -749,6 +755,7 @@ async fn create_pair_code(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Response {
     if let Some(device_id) = actor.device_id.as_deref() {
         crate::web::audit(
@@ -785,8 +792,10 @@ async fn create_pair_code(
         Err(e) => return crate::web::error_response(e),
     };
 
-    let hub = hub_url(&state, &headers);
-    let uri = pairing_uri(&hub, &code.code, state.cert_fingerprint.as_deref());
+    let via_proxy = via_trusted_proxy(&state, &extensions);
+    let hub = hub_url(&state, &headers, via_proxy);
+    let fingerprint = pinnable_fingerprint(&state, &headers, via_proxy);
+    let uri = pairing_uri(&hub, &code.code, fingerprint.as_deref());
     // Un QR illisible ne fait pas échouer l'émission : le code en clair est le
     // chemin de secours obligatoire, et il est déjà là.
     let qr_svg = match qr_svg(&uri) {
@@ -798,7 +807,8 @@ async fn create_pair_code(
     };
     crate::web::ok_json(serde_json::json!(PairCode {
         qr_svg,
-        cert_fingerprint: state.cert_fingerprint.clone(),
+        cert_fingerprint: fingerprint,
+        hub: Some(hub),
         ..code
     }))
 }
@@ -809,7 +819,14 @@ async fn create_pair_code(
 /// que les sondes reçoivent. Sinon l'en-tête `Host` de la requête : celui qui
 /// affiche le QR est sur la page du hub, l'adresse de sa barre d'URL est donc
 /// celle qui marche depuis son réseau.
-fn hub_url(state: &AppState, headers: &HeaderMap) -> String {
+///
+/// 🔴 **Le schéma suit `X-Forwarded-Proto` quand la requête vient d'un proxy
+/// de confiance** (audit A5), comme `is_https` le fait pour le cookie. Sans
+/// ça, un hub en clair derrière un proxy TLS annonçait `http://` : le
+/// téléphone envoyait alors son secret d'appareil — qui n'expire pas — en
+/// clair. ⚠️ L'en-tête n'est lu QUE d'un proxy de `trusted_proxies` : écrit
+/// par un client qui parle au hub en direct, il ne vaut rien.
+fn hub_url(state: &AppState, headers: &HeaderMap, via_proxy: bool) -> String {
     if let Some(url) = state.settings.hub_public_url() {
         return url;
     }
@@ -817,8 +834,78 @@ fn hub_url(state: &AppState, headers: &HeaderMap) -> String {
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost");
-    let schema = if state.tls { "https" } else { "http" };
+    let https = state.tls || (via_proxy && forwarded_https(headers));
+    let schema = if https { "https" } else { "http" };
     format!("{schema}://{host}")
+}
+
+/// La requête arrive-t-elle d'un proxy de `trusted_proxies` ?
+fn via_trusted_proxy(state: &AppState, extensions: &axum::http::Extensions) -> bool {
+    let trusted = state.settings.trusted_proxies();
+    extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|axum::extract::ConnectInfo(addr)| {
+            crate::client_ip::is_trusted(addr.ip(), &trusted)
+        })
+}
+
+fn forwarded_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        // Un proxy peut chaîner les valeurs ; la première est celle du client.
+        .map(|v| v.split(',').next().unwrap_or("").trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+/// L'empreinte du certificat du hub, **si c'est bien lui que le téléphone
+/// verra** — sinon rien.
+///
+/// 🔴 **Audit C1.** TLS du hub actif derrière un proxy TLS : le QR et la
+/// réponse d'appairage portaient l'empreinte du certificat INTERNE, l'app
+/// l'épinglait, et chacune de ses requêtes échouait ensuite en
+/// `certificateMismatch` — sans issue, puisque réappairer reproduisait la
+/// panne. Une empreinte absente laisse l'app valider le certificat par le
+/// système ; une empreinte fausse la condamne.
+///
+/// Rien n'est annoncé quand :
+/// - le hub ne termine pas le TLS (`cert_fingerprint` est alors `None`) ;
+/// - la requête arrive d'un proxy de confiance — c'est lui que le téléphone
+///   joindra ;
+/// - une adresse publique est posée et n'est pas celle par laquelle on parle
+///   au hub : rien ne dit que c'est lui qui y termine le TLS.
+///
+/// ⚠️ Reste un cas que le hub ne voit pas : un proxy qui n'est PAS déclaré
+/// dans `trusted_proxies`, devant un hub en TLS, joint sous l'adresse publique.
+/// Le remède est de déclarer le proxy, ou de couper le TLS du hub.
+fn pinnable_fingerprint(state: &AppState, headers: &HeaderMap, via_proxy: bool) -> Option<String> {
+    let fingerprint = state.cert_fingerprint.clone()?;
+    if via_proxy {
+        return None;
+    }
+    if let Some(public) = state.settings.hub_public_url() {
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if authority(&public) != authority(host) {
+            return None;
+        }
+    }
+    Some(fingerprint)
+}
+
+/// `hôte[:port]` en minuscules, sans schéma ni chemin, sans `:443`.
+fn authority(url_or_host: &str) -> String {
+    let rest = url_or_host
+        .split_once("://")
+        .map_or(url_or_host, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority
+        .trim()
+        .to_ascii_lowercase()
+        .trim_end_matches(":443")
+        .to_string()
 }
 
 /// Ce que le QR transporte.
@@ -889,6 +976,7 @@ async fn pair(
     extensions: axum::http::Extensions,
     Json(body): Json<PairBody>,
 ) -> Response {
+    let via_proxy = via_trusted_proxy(&state, &extensions);
     // 🔴 Frein par adresse AVANT la vérification (audit RSSI, F4) : la route
     // est publique, et chaque essai coûte un argon2.
     let ip = crate::web::client_ip_key(&state, &extensions, &headers);
@@ -977,7 +1065,9 @@ async fn pair(
                 crate::db::Scope::All => serde_json::Value::Null,
                 crate::db::Scope::Sites(ids) => serde_json::json!(ids),
             },
-            "cert_fingerprint": state.cert_fingerprint,
+            // Même règle que le QR (audit C1) : l'empreinte d'un certificat
+            // que le téléphone ne verra pas le condamnerait.
+            "cert_fingerprint": pinnable_fingerprint(&state, &headers, via_proxy),
         })),
     )
         .into_response()
@@ -2642,6 +2732,125 @@ mod routes_tests {
         let (status, body) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body["code"].as_str().is_some());
+    }
+
+    // ── A5 et C1 : l'adresse annoncée et l'empreinte à épingler ───────────
+
+    fn harness_with(tls: bool, fingerprint: Option<&str>) -> Harness {
+        let mut state = state_with_admin();
+        state.tls = tls;
+        state.cert_fingerprint = fingerprint.map(str::to_string);
+        let router = crate::web::build_router(state.clone());
+        Harness { state, router }
+    }
+
+    /// `POST /api/me/pair-codes` depuis `peer`, avec ces en-têtes.
+    async fn issue_code_from(
+        h: &Harness,
+        peer: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/me/pair-codes")
+            .header(axum::http::header::COOKIE, h.session("admin"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let mut req = req.body(Body::from("{}")).unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            format!("{peer}:41000").parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        h.call(req).await
+    }
+
+    #[tokio::test]
+    async fn the_hub_url_follows_x_forwarded_proto_from_a_trusted_proxy_only() {
+        // A5 : derrière un proxy TLS sans `hub_public_url`, le QR disait
+        // `http://` — le secret d'appareil, qui n'expire pas, partait en clair.
+        let h = harness_with(false, None);
+        h.state
+            .settings
+            .put(crate::settings::keys::TRUSTED_PROXIES, "10.0.0.0/8", false)
+            .unwrap();
+        let entetes = [("host", "hub.example.org"), ("x-forwarded-proto", "https")];
+
+        let (status, body) = issue_code_from(&h, "10.0.0.2", &entetes).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["hub"], "https://hub.example.org", "{body}");
+
+        // Le même en-tête, écrit par un client qui parle au hub en direct, ne
+        // vaut rien.
+        let (_, body) = issue_code_from(&h, "203.0.113.7", &entetes).await;
+        assert_eq!(body["hub"], "http://hub.example.org", "{body}");
+    }
+
+    #[tokio::test]
+    async fn no_fingerprint_is_announced_when_a_proxy_terminates_the_tls() {
+        // C1 : TLS du hub actif derrière un proxy — le QR et la réponse
+        // d'appairage portaient l'empreinte du certificat INTERNE. L'app
+        // l'épinglait, et toutes ses requêtes échouaient ensuite en
+        // `certificateMismatch`, sans issue.
+        let h = harness_with(true, Some("AB:CD:EF"));
+        h.state
+            .settings
+            .put(crate::settings::keys::TRUSTED_PROXIES, "10.0.0.0/8", false)
+            .unwrap();
+
+        // En direct, sans adresse publique : c'est bien ce hub qui répond.
+        let (_, body) = issue_code_from(&h, "192.168.1.20", &[("host", "10.0.0.5:8443")]).await;
+        assert_eq!(body["cert_fingerprint"], "AB:CD:EF", "{body}");
+
+        // Par le proxy : le téléphone verra le certificat du proxy.
+        let (_, body) = issue_code_from(
+            &h,
+            "10.0.0.2",
+            &[("host", "hub.example.org"), ("x-forwarded-proto", "https")],
+        )
+        .await;
+        assert!(body["cert_fingerprint"].is_null(), "{body}");
+
+        // Adresse publique en https qui n'est pas celle par laquelle on parle
+        // au hub : rien ne dit que c'est lui qui y termine le TLS.
+        h.state
+            .settings
+            .put(crate::settings::keys::HUB_PUBLIC_URL, "https://hub.example.org", false)
+            .unwrap();
+        let (_, body) = issue_code_from(&h, "192.168.1.20", &[("host", "10.0.0.5:8443")]).await;
+        assert_eq!(body["hub"], "https://hub.example.org");
+        assert!(body["cert_fingerprint"].is_null(), "{body}");
+
+        // Joint en direct sous son adresse publique : c'est lui.
+        let (_, body) = issue_code_from(&h, "192.168.1.20", &[("host", "hub.example.org")]).await;
+        assert_eq!(body["cert_fingerprint"], "AB:CD:EF", "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_pairing_answer_drops_the_fingerprint_behind_a_proxy() {
+        let h = harness_with(true, Some("AB:CD:EF"));
+        h.state
+            .settings
+            .put(crate::settings::keys::TRUSTED_PROXIES, "10.0.0.0/8", false)
+            .unwrap();
+        let (_, code) = issue_code_from(&h, "192.168.1.20", &[("host", "10.0.0.5:8443")]).await;
+
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/pair")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header("host", "hub.example.org")
+            .header("x-forwarded-proto", "https")
+            .body(Body::from(
+                serde_json::json!({ "code": code["code"], "name": "iPhone" }).to_string(),
+            ))
+            .unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            "10.0.0.2:41000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let (status, body) = h.call(req).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert!(body["cert_fingerprint"].is_null(), "{body}");
     }
 }
 

@@ -87,6 +87,13 @@ pub fn parse_cidrs(value: &str) -> Vec<IpNet> {
         .collect()
 }
 
+/// Vrai si `peer` — l'adresse de la socket — est un proxy de confiance. C'est
+/// la condition pour lire quoi que ce soit de ce qu'il transmet, y compris
+/// `X-Forwarded-Proto`.
+pub fn is_trusted(peer: IpAddr, trusted: &[IpNet]) -> bool {
+    trusted.iter().any(|n| n.contains(peer))
+}
+
 /// Adresse du client. On part de la socket et on remonte `X-Forwarded-For` de
 /// droite à gauche tant que le saut examiné est un proxy de confiance.
 pub fn resolve(peer: IpAddr, forwarded: Option<&str>, trusted: &[IpNet]) -> IpAddr {
