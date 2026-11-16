@@ -322,7 +322,7 @@
     "totp_hint": "Los 6 dígitos que muestra su aplicación de autenticación.",
     "totp_bad": "Código rechazado. Compruebe la hora del dispositivo que lo genera y espere al siguiente código.",
     "or": "o",
-    "passkey_submit": "Iniciar sesión con una llave de acceso",
+    "passkey_submit": "Clave de acceso",
     "passkey_waiting": "Siga las indicaciones de su dispositivo…",
     "passkey_need_username": "Escriba primero su identificador.",
     "passkey_none": "Ninguna llave de acceso para esta cuenta en este hub."

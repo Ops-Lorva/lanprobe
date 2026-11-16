@@ -322,7 +322,7 @@
     "totp_hint": "The 6 digits shown by your authenticator app.",
     "totp_bad": "Code rejected. Check the clock of the device generating it, then wait for the next code.",
     "or": "or",
-    "passkey_submit": "Sign in with a passkey",
+    "passkey_submit": "Passkey",
     "passkey_waiting": "Follow your device…",
     "passkey_need_username": "Enter your username first.",
     "passkey_none": "No passkey for this account on this hub."

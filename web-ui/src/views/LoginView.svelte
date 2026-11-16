@@ -115,7 +115,7 @@
   }
 </script>
 
-<AuthFrame title={$_('auth.title')} lead={$_('auth.lead')}>
+<AuthFrame title={$_('auth.title')}>
   <form onsubmit={submit}>
     {#if notice}<p class="notice" role="status">{notice}</p>{/if}
 
@@ -131,6 +131,7 @@
         type="password"
         bind:value={password}
         autocomplete="current-password"
+        aria-invalid={!!error && !totpNeeded}
       />
     </label>
 
@@ -156,7 +157,7 @@
 
     {#if error}<p class="err" role="alert">{error}</p>{/if}
 
-    <button class="lp-btn primary" type="submit" disabled={busy}>
+    <button class="lp-btn primary wide" type="submit" disabled={busy}>
       {busy ? $_('auth.submitting') : $_('auth.submit')}
     </button>
 
@@ -166,7 +167,8 @@
            d'accès remplace le mot de passe ET le second facteur — elle est
            déjà liée à l'appareil et déverrouillée par lui. -->
       <div class="or" aria-hidden="true"><span>{$_('auth.or')}</span></div>
-      <button class="lp-btn" type="button" onclick={signInWithPasskey} disabled={pkBusy}>
+      <button class="lp-btn wide" type="button" onclick={signInWithPasskey} disabled={pkBusy}>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="5" cy="11" r="2.5" /><path d="M6.8 9.2 13 3M11 5l1.5 1.5M9.5 6.5 11 8" /></svg>
         {pkBusy ? $_('auth.passkey_waiting') : $_('auth.passkey_submit')}
       </button>
     {/if}
@@ -177,50 +179,52 @@
   form {
     display: flex;
     flex-direction: column;
-    gap: 13px;
+    gap: 16px;
   }
   .notice {
-    font-size: 12px;
-    color: var(--ep-warning);
+    font-size: 0.8125rem;
+    color: var(--st-warn);
     margin: 0;
-    border-left: 2px solid var(--ep-warning);
-    padding-left: 8px;
   }
   /* Le code se lit par groupes de chiffres : chasse fixe et lettres espacées,
      pour qu'on repère tout de suite une frappe de travers. */
   .code {
-    font-family: var(--ep-mono, ui-monospace, monospace);
+    font-family: var(--ep-font-mono);
     letter-spacing: 0.35em;
     text-align: center;
     font-size: 1.1rem;
   }
   .hint {
-    font-size: 11px;
-    color: var(--ep-text-secondary);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
   }
-  /* Séparateur « ou » : un simple filet coupé par le mot, pour que les deux
-     chemins se lisent comme des alternatives et non comme une suite d'étapes. */
+  .wide {
+    width: 100%;
+    height: 40px;
+    justify-content: center;
+  }
+  /* Séparateur « ou » : un filet coupé par le mot, pour que les deux chemins
+     se lisent comme des alternatives et non comme une suite d'étapes. */
   .or {
     display: flex;
     align-items: center;
-    gap: 10px;
-    font-size: 11px;
-    color: var(--ep-text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    gap: 12px;
+    font-size: 0.8125rem;
+    color: var(--color-muted);
   }
   .or::before,
   .or::after {
     content: '';
     flex: 1;
     height: 1px;
-    background: var(--ep-border);
+    background: var(--color-rule);
   }
   .err {
-    font-size: 12px;
-    color: var(--ep-danger);
-    margin: 0;
-    border-left: 2px solid var(--ep-danger);
-    padding-left: 8px;
+    font-size: 0.8125rem;
+    color: var(--st-bad);
+    margin: -8px 0 0;
+  }
+  :global(.lp-input[aria-invalid='true']) {
+    border-color: var(--st-bad);
   }
 </style>

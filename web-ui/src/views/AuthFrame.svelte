@@ -20,20 +20,17 @@
   reconnaissable par quelqu'un qui vient de l'application.
 -->
 <div class="page">
-  <div class="topline">
-    <div class="brand">
-      <LogoMark size={26} />
-      <span class="wordmark">{$_('common.app_name')}</span>
-      <span class="tag">{$_('common.hub')}</span>
-    </div>
-    <LangTheme compact />
-  </div>
-
   <main class="grid" class:with-aside={!!aside}>
-    <section class="panel lp-card">
+    <section class="panel">
+      <div class="brand">
+        <LogoMark size={32} />
+        <span class="wordmark">{$_('common.app_name')}</span>
+        <span class="host">{typeof location === 'undefined' ? '' : location.host}</span>
+      </div>
       <h1>{title}</h1>
       {#if lead}<p class="lead">{lead}</p>{/if}
       {@render children()}
+      <div class="foot"><LangTheme compact /></div>
     </section>
 
     {#if aside}
@@ -47,36 +44,24 @@
     min-height: 100dvh;
     display: flex;
     flex-direction: column;
-    background: var(--ep-bg-primary);
-    padding: 18px;
-    gap: 26px;
-  }
-  .topline {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
+    background: var(--color-paper);
+    padding: 24px;
   }
   .brand {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
+    margin-bottom: 16px;
   }
   .wordmark {
-    font-size: 14px;
-    font-weight: 800;
-    letter-spacing: 0.3px;
+    font-size: 1.125rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
   }
-  .tag {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--ep-accent-bright);
-    border: 1px solid var(--ep-accent-glow);
-    background: var(--ep-accent-dim);
-    border-radius: 999px;
-    padding: 2px 7px;
+  .host {
+    font-size: 0.8125rem;
+    color: var(--color-muted);
+    margin-top: 2px;
   }
 
   .grid {
@@ -84,37 +69,41 @@
     display: grid;
     justify-content: center;
     align-content: center;
-    gap: 22px;
+    gap: 48px;
     width: 100%;
     max-width: 1040px;
     margin: 0 auto;
     padding-bottom: 32px;
   }
   .grid.with-aside {
-    grid-template-columns: minmax(0, 400px) minmax(0, 460px);
+    grid-template-columns: minmax(0, 380px) minmax(0, 460px);
     align-items: start;
   }
   .panel {
-    padding: 26px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    width: min(400px, 100%);
+    gap: 16px;
+    width: min(380px, 100%);
   }
   .grid.with-aside .panel {
     width: auto;
   }
   h1 {
-    font-size: 19px;
-    font-weight: 800;
+    font-size: 1.375rem;
+    font-weight: 600;
     letter-spacing: -0.02em;
     margin: 0;
   }
   .lead {
-    font-size: 12.5px;
-    line-height: 1.65;
-    color: var(--ep-text-secondary);
-    margin: -4px 0 0;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--color-ink-2);
+    margin: -8px 0 0;
+  }
+  .foot {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
   }
   .aside {
     align-self: start;

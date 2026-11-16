@@ -310,7 +310,7 @@
   "auth": {
     "title": "Connexion",
     "lead": "Accès administrateur au hub.",
-    "username": "Nom d'utilisateur",
+    "username": "Identifiant",
     "password": "Mot de passe",
     "submit": "Se connecter",
     "submitting": "Connexion…",
@@ -322,7 +322,7 @@
     "totp_hint": "Les 6 chiffres affichés par votre application d'authentification.",
     "totp_bad": "Code refusé. Vérifiez l'heure de l'appareil qui le génère, puis attendez le code suivant.",
     "or": "ou",
-    "passkey_submit": "Se connecter avec une clé d'accès",
+    "passkey_submit": "Clé d'accès",
     "passkey_waiting": "Suivez votre appareil…",
     "passkey_need_username": "Entrez d'abord votre identifiant.",
     "passkey_none": "Aucune clé d'accès pour ce compte sur ce hub."
