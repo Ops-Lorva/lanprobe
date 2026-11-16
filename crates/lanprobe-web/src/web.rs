@@ -40,6 +40,7 @@ use webauthn_rs::prelude::*;
 use crate::db::{AuditFilter, Db, DbError, DbResult, Outcome, ProbeIdentity, Role};
 use crate::influx::Influx;
 use crate::probe::ProbeStatus;
+use crate::ratelimit::{account_key, Class, RetryAfter};
 use crate::settings::Settings;
 
 const SESSION_COOKIE: &str = "lanprobe_hub_session";
@@ -96,6 +97,9 @@ pub struct AppState {
     /// vivait que sur la carte de restauration — il disparaissait au premier
     /// rechargement, laissant un hub qui refuse d'écrire sans dire pourquoi.
     pub restart_required: Arc<std::sync::atomic::AtomicBool>,
+    /// Limitation de débit des routes publiques et regroupement des échecs
+    /// anonymes au journal (audit RSSI du 16/11, F3 et F4). En mémoire.
+    pub limits: Arc<crate::ratelimit::Limits>,
     /// Le volume du hub : base SQLite, `secret.key`, jeton opérateur,
     /// certificats. C'est ce que la sauvegarde emporte et ce que la
     /// restauration remplace.
@@ -620,14 +624,31 @@ struct StoredTotp {
 async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Json(body): Json<Credentials>,
 ) -> Response {
     let secure = is_https(&state, &headers);
 
+    // 🔴 Le frein passe AVANT toute vérification (audit RSSI, F3) : par
+    // adresse, et par compte visé — c'est le second qui borne les six
+    // chiffres d'un TOTP, qu'aucun budget par adresse ne protège d'un
+    // dictionnaire réparti. On compte les ÉCHECS : qui se connecte vingt fois
+    // dans la journée ne voit jamais de `429`.
+    let ip = client_ip_key(&state, &extensions, &headers);
+    let account = account_key(&body.username);
+    let keys = [(Class::AuthIp, ip.as_str()), (Class::AuthAccount, account.as_str())];
+    if let Err(wait) = state.limits.check(&keys) {
+        return too_many(&state, "/api/login", wait);
+    }
+
     // Le mot de passe d'abord, le second facteur ensuite : sans cet ordre, un
     // code valide renseignerait sur l'existence du compte avant même qu'un
     // mot de passe soit exigé.
-    let verified = state.db.verify_credentials(&body.username, &body.password);
+    let verified = {
+        let db = state.db.clone();
+        let (username, password) = (body.username.clone(), body.password.clone());
+        off_reactor(move || db.verify_credentials(&username, &password)).await
+    };
     if let Ok(username) = &verified {
         if state.db.totp_enabled(username).unwrap_or(false) {
             let Some(code) = body.code.as_deref().filter(|c| !c.trim().is_empty()) else {
@@ -671,6 +692,7 @@ async fn login(
                     let _ = state.db.set_totp_last_step(username, step);
                 }
                 None => {
+                    state.limits.fail(&keys);
                     audit(
                         &state,
                         Some(username.as_str()),
@@ -702,6 +724,7 @@ async fn login(
                 .into_response()
         }
         Err(e) => {
+            state.limits.fail(&keys);
             // Le champ « identifiant » reçoit ce que quelqu'un a tapé : un
             // jour, ce sera un mot de passe entré dans la mauvaise case. On ne
             // le recopie donc que si le compte existe — sinon la tentative est
@@ -833,11 +856,12 @@ async fn disable_own_totp(
     Extension(identity): Extension<Identity>,
     Json(body): Json<DisableTotpBody>,
 ) -> Response {
-    if state
-        .db
-        .verify_credentials(&identity.username, &body.password)
-        .is_err()
-    {
+    let checked = {
+        let (db, username, password) =
+            (state.db.clone(), identity.username.clone(), body.password.clone());
+        off_reactor(move || db.verify_credentials(&username, &password)).await
+    };
+    if checked.is_err() {
         audit(
             &state,
             Some(&identity.username),
@@ -1082,8 +1106,15 @@ struct PasskeyLoginStart {
 async fn passkey_login_start(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Json(body): Json<PasskeyLoginStart>,
 ) -> Response {
+    // Pas d'échec à compter ici — on compte les appels (F3). Chaque appel
+    // ouvre une cérémonie en mémoire et dit si le compte a des clés.
+    let ip = client_ip_key(&state, &extensions, &headers);
+    if let Err(wait) = state.limits.take(&[(Class::PasskeyStart, ip.as_str())]) {
+        return too_many(&state, "/api/login/passkey/start", wait);
+    }
     let host = host_header(&headers).unwrap_or_default();
     let https = is_https(&state, &headers);
     let webauthn = match crate::passkeys::context(&host, https) {
@@ -1124,8 +1155,15 @@ struct PasskeyLoginFinish {
 async fn passkey_login_finish(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Json(body): Json<PasskeyLoginFinish>,
 ) -> Response {
+    let ip = client_ip_key(&state, &extensions, &headers);
+    let account = account_key(&body.username);
+    let keys = [(Class::AuthIp, ip.as_str()), (Class::AuthAccount, account.as_str())];
+    if let Err(wait) = state.limits.check(&keys) {
+        return too_many(&state, "/api/login/passkey/finish", wait);
+    }
     let host = host_header(&headers).unwrap_or_default();
     let https = is_https(&state, &headers);
     let secure = is_https(&state, &headers);
@@ -1144,6 +1182,7 @@ async fn passkey_login_finish(
     let result = match webauthn.finish_passkey_authentication(&body.credential, &pending) {
         Ok(r) => r,
         Err(e) => {
+            state.limits.fail(&keys);
             audit(
                 &state,
                 Some(&username),
@@ -1293,11 +1332,12 @@ async fn change_own_password(
     Extension(identity): Extension<Identity>,
     Json(body): Json<OwnPasswordBody>,
 ) -> Response {
-    if state
-        .db
-        .verify_credentials(&identity.username, &body.current)
-        .is_err()
-    {
+    let checked = {
+        let (db, username, current) =
+            (state.db.clone(), identity.username.clone(), body.current.clone());
+        off_reactor(move || db.verify_credentials(&username, &current)).await
+    };
+    if checked.is_err() {
         audit(
             &state,
             Some(&identity.username),
@@ -1311,7 +1351,11 @@ async fn change_own_password(
     if body.next == body.current {
         return fail(StatusCode::BAD_REQUEST, "le nouveau mot de passe est identique à l'ancien");
     }
-    if let Err(e) = state.db.reset_user_password(&identity.username, &body.next) {
+    let written = {
+        let (db, username, next) = (state.db.clone(), identity.username.clone(), body.next.clone());
+        off_reactor(move || db.reset_user_password(&username, &next)).await
+    };
+    if let Err(e) = written {
         return error_response(e);
     }
     audit(
@@ -1593,7 +1637,33 @@ async fn role_guard(
 /// croire qu'il enregistre est pire que pas de journal du tout.
 ///
 /// **Aucun secret ne doit passer par `detail`.**
+///
+/// 🔴 **Les échecs ANONYMES sont regroupés** (audit RSSI, F4) : la première
+/// ligne d'une rafale s'écrit, les suivantes de la même minute ne font que
+/// compter, et une ligne de synthèse dit combien quand la fenêtre se ferme.
+/// Un flot de codes d'appairage faux remplissait sinon le disque d'un journal
+/// sans purge. Un échec qui nomme un compte reste une ligne à lui.
 pub(crate) fn audit(
+    state: &AppState,
+    actor: Option<&str>,
+    action: &str,
+    target: Option<&str>,
+    outcome: Outcome,
+    detail: Option<&str>,
+) {
+    if actor.is_none() && outcome == Outcome::Failure {
+        let (closed, write) = state.limits.digest.admit(action, crate::db::now());
+        if let Some(digest) = closed {
+            write_audit(state, None, &digest.action, None, Outcome::Failure, Some(&digest.detail()));
+        }
+        if !write {
+            return;
+        }
+    }
+    write_audit(state, actor, action, target, outcome, detail);
+}
+
+fn write_audit(
     state: &AppState,
     actor: Option<&str>,
     action: &str,
@@ -1604,6 +1674,89 @@ pub(crate) fn audit(
     if let Err(e) = state.db.record_audit(actor, action, target, outcome, detail) {
         tracing::error!("ligne d'audit « {action} » non écrite : {e}");
     }
+}
+
+/// Écrit les synthèses des rafales d'échecs anonymes dont la fenêtre est
+/// close. Appelée par une tâche de fond : une rafale qui s'arrête net ne doit
+/// pas rester sans sa ligne.
+pub fn flush_audit_digest(state: &AppState) {
+    for digest in state.limits.digest.due(crate::db::now()) {
+        write_audit(state, None, &digest.action, None, Outcome::Failure, Some(&digest.detail()));
+    }
+}
+
+/// La clé de limitation de débit de l'adresse du client (F3).
+///
+/// ⚠️ L'adresse passe par `client_ip::resolve`, qui ne lit `X-Forwarded-For`
+/// que depuis un proxy de confiance. Sans la couche `connect_info` — les tests
+/// de routes qui ne la posent pas —, tous les appels partagent une même clé :
+/// le frein s'applique quand même, il ne s'évapore pas.
+pub(crate) fn client_ip_key(
+    state: &AppState,
+    extensions: &axum::http::Extensions,
+    headers: &HeaderMap,
+) -> String {
+    extensions
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|ConnectInfo(addr)| {
+            crate::ratelimit::ip_key(crate::client_ip::resolve(
+                addr.ip(),
+                headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+                &state.settings.trusted_proxies(),
+            ))
+        })
+        .unwrap_or_else(|| "adresse-inconnue".into())
+}
+
+/// `429`, avec `Retry-After` et la même durée dans le corps. Le refus est
+/// journalisé SANS acteur : la ligne passe par le regroupement, sinon le frein
+/// lui-même remplirait le journal.
+pub(crate) fn too_many(state: &AppState, route: &str, wait: RetryAfter) -> Response {
+    audit(
+        state,
+        None,
+        "auth.throttled",
+        Some(route),
+        Outcome::Failure,
+        Some(&format!("réessayer dans {} s", wait.0)),
+    );
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, wait.0.to_string())],
+        Json(json!({
+            "error": format!("trop d'essais — réessayez dans {} s", wait.0),
+            "retry_after": wait.0,
+        })),
+    )
+        .into_response()
+}
+
+/// Exécute un calcul bloquant — argon2 avant tout — hors du réacteur.
+///
+/// 🔴 Argon2 coûte des dizaines de millisecondes par appel et tournait dans
+/// le fil async du handler : un flot de connexions saturait le runtime, et
+/// avec lui toutes les autres requêtes du hub (audit RSSI, F3).
+pub(crate) async fn off_reactor<T, F>(work: F) -> DbResult<T>
+where
+    F: FnOnce() -> DbResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| DbError::Internal(format!("calcul interrompu : {e}")))?
+}
+
+/// Ce compte a-t-il un second facteur — TOTP ou clé d'accès ?
+///
+/// ⚠️ Une lecture en échec répond OUI : c'est ce qui ferme le `Basic`, et un
+/// doute ne doit pas l'ouvrir.
+fn has_second_factor(state: &AppState, username: &str) -> bool {
+    state.db.totp_enabled(username).unwrap_or(true)
+        || state
+            .db
+            .list_passkeys(username)
+            .map(|keys| !keys.is_empty())
+            .unwrap_or(true)
 }
 
 /// Journalise le résultat d'une opération, quel qu'il soit, et rend la
@@ -1643,9 +1796,41 @@ async fn session_or_credentials(
         .and_then(|username| identity_of(&state, &username, None));
     if identity.is_none()
         && let Some((username, password)) = basic_credentials(&headers)
-        && state.db.verify_credentials(&username, &password).is_ok()
     {
-        identity = identity_of(&state, &username, None);
+        // 🔴 Même frein que `/api/login` (F3) : sans lui, le `Basic` était un
+        // oracle à mots de passe sans limite à côté d'une connexion bridée.
+        let ip = client_ip_key(&state, req.extensions(), &headers);
+        let account = account_key(&username);
+        let keys = [(Class::AuthIp, ip.as_str()), (Class::AuthAccount, account.as_str())];
+        if let Err(wait) = state.limits.check(&keys) {
+            return too_many(&state, "GET /api/sites (Basic)", wait);
+        }
+        let db = state.db.clone();
+        let candidate = username.clone();
+        match off_reactor(move || db.verify_credentials(&candidate, &password)).await {
+            // 🔴 **Refusé à un compte qui a un second facteur** (F3). Le
+            // `Basic` vérifiait le mot de passe SEUL : avec le mot de passe,
+            // un attaquant listait les sites d'un compte protégé par TOTP, et
+            // tenait un oracle qui ignorait le second facteur. Rien à saisir
+            // ici pour le présenter : le compte passe par une session.
+            Ok(canonical) if has_second_factor(&state, &canonical) => {
+                audit(
+                    &state,
+                    Some(&canonical),
+                    "auth.basic",
+                    None,
+                    Outcome::Failure,
+                    Some("second facteur actif : authentification Basic refusée"),
+                );
+                return fail(
+                    StatusCode::UNAUTHORIZED,
+                    "ce compte exige un second facteur : l'authentification Basic lui est \
+                     refusée — ouvrez une session",
+                );
+            }
+            Ok(canonical) => identity = identity_of(&state, &canonical, None),
+            Err(_) => state.limits.fail(&keys),
+        }
     }
     match identity {
         Some(identity) => {
@@ -1765,14 +1950,18 @@ async fn create_user(
         Ok(ScopeOrder::All | ScopeOrder::Unchanged) => None,
         Err(refus) => return refus,
     };
+    let creation = {
+        let db = state.db.clone();
+        let (username, password) = (body.username.trim().to_string(), body.password.clone());
+        off_reactor(move || db.create_user_scoped(&username, &password, role, restricted.as_deref()))
+            .await
+    };
     let created = audited(
         &state,
         Some(&actor.username),
         "user.create",
         Some(body.username.trim()),
-        state
-            .db
-            .create_user_scoped(body.username.trim(), &body.password, role, restricted.as_deref()),
+        creation,
     );
     match created {
         Ok(user) => (StatusCode::CREATED, Json(user_json(&state, &user))).into_response(),
@@ -1915,13 +2104,11 @@ async fn reset_password(
     Path(username): Path<String>,
     Json(body): Json<PasswordBody>,
 ) -> Response {
-    let done = audited(
-        &state,
-        Some(&actor.username),
-        "user.password",
-        Some(&username),
-        state.db.reset_user_password(&username, &body.password),
-    );
+    let written = {
+        let (db, target, password) = (state.db.clone(), username.clone(), body.password.clone());
+        off_reactor(move || db.reset_user_password(&target, &password)).await
+    };
+    let done = audited(&state, Some(&actor.username), "user.password", Some(&username), written);
     match done {
         Ok(()) => ok_json(json!({ "ok": true })),
         Err(e) => error_response(e),
@@ -2687,7 +2874,7 @@ async fn create_reenroll_code(
 
 // ── Enrôlement ─────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct EnrollBody {
     /// Facultatif. Un **ré-enrôlement l'ignore toujours** : il répare une sonde
     /// existante, son nom appartient au hub. L'accepter renommait la sonde dès
@@ -2712,6 +2899,7 @@ struct EnrollBody {
 async fn enroll(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Json(body): Json<EnrollBody>,
 ) -> Response {
     // L'acteur n'est connu que sur le chemin scripté ; par code d'enrôlement,
@@ -2719,10 +2907,30 @@ async fn enroll(
     // nommer un acteur qu'on aurait deviné.
     let actor = body.username.clone();
 
-    // 1. Qui a le droit d'enrôler, et dans quel site.
-    let (site, site_created, repairing) = match resolve_enrollment_target(&state, &body) {
+    // 🔴 Frein par adresse — et par compte sur le chemin scripté, qui vérifie
+    // un mot de passe comme `/api/login` (F3).
+    let ip = client_ip_key(&state, &extensions, &headers);
+    let account = body.username.as_deref().map(account_key);
+    let mut keys = vec![(Class::Enroll, ip.as_str())];
+    if let Some(account) = account.as_deref() {
+        keys.push((Class::AuthAccount, account));
+    }
+    if let Err(wait) = state.limits.check(&keys) {
+        return too_many(&state, "/api/probes/enroll", wait);
+    }
+
+    // 1. Qui a le droit d'enrôler, et dans quel site. Hors du réacteur : le
+    // code comme le mot de passe se vérifient en argon2.
+    let target = {
+        let (state, body) = (state.clone(), body.clone());
+        off_reactor(move || resolve_enrollment_target(&state, &body)).await
+    };
+    let (site, site_created, repairing) = match target {
         Ok(target) => target,
         Err(e) => {
+            if matches!(e, DbError::Unauthorized(_)) {
+                state.limits.fail(&keys);
+            }
             audit(
                 &state,
                 actor
@@ -6547,6 +6755,7 @@ mod tests {
                 // annoncer leur volet Influx manquant plutôt que de mentir.
                 influx_cli: "influx-absent-des-tests".into(),
                             restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                            limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
             };
             let router = build_router(state.clone());
             Self {
@@ -14106,4 +14315,165 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(body.to_string().contains("injoignable"), "l'admin garde le détail : {body}");
     }
+
+    // ── F3 : limitation de débit, Basic et second facteur ─────────────────
+
+    fn basic_request(user: &str, password: &str) -> Request<Body> {
+        let basic = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("{user}:{password}"),
+        );
+        let mut req = empty_request("GET", "/api/sites");
+        req.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("Basic {basic}").parse().unwrap(),
+        );
+        req
+    }
+
+    fn login_request(user: &str, password: &str) -> Request<Body> {
+        json_request(
+            "POST",
+            "/api/login",
+            serde_json::json!({ "username": user, "password": password }),
+        )
+    }
+
+    #[tokio::test]
+    async fn login_is_throttled_after_ten_failures_from_one_address() {
+        let h = Harness::with_admin().await;
+        for _ in 0..10 {
+            let (status, _, _) = h.call(login_request("admin", "mauvais-mot-de-passe")).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        // Même le bon mot de passe attend : c'est ce qui rend le dictionnaire
+        // inutile.
+        let (status, body, cookies) = h.call(login_request("admin", PASSWORD)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert!(cookies.is_empty(), "aucune session ne s'ouvre");
+        assert!(body["retry_after"].as_u64().is_some(), "{body}");
+
+        // Une autre adresse, un autre compte : pas concernés.
+        h.user("claire", Role::Viewer).await;
+        let (status, _, _) = h
+            .call(with_peer(login_request("claire", PASSWORD), "198.51.100.20"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_is_throttled_per_account_across_addresses() {
+        // Un dictionnaire réparti sur cent adresses bute quand même sur le
+        // compte — c'est ce qui borne le TOTP.
+        let h = Harness::with_admin().await;
+        for i in 0..10 {
+            let (status, _, _) = h
+                .call(with_peer(
+                    login_request("admin", "mauvais-mot-de-passe"),
+                    &format!("198.51.100.{i}"),
+                ))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, body, _) = h
+            .call(with_peer(login_request("ADMIN", PASSWORD), "203.0.113.99"))
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    }
+
+    #[tokio::test]
+    async fn basic_auth_is_throttled_like_the_login() {
+        let h = Harness::with_admin().await;
+        for _ in 0..10 {
+            let (status, _, _) = h.call(basic_request("admin", "mauvais")).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, _, _) = h.call(basic_request("admin", PASSWORD)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn basic_auth_is_refused_to_an_account_with_a_second_factor() {
+        // F3 : `GET /api/sites` en Basic vérifiait le mot de passe SANS le
+        // second facteur — un oracle qui ignorait le TOTP.
+        let h = Harness::with_admin().await;
+        h.state.db.set_totp_enabled("admin", true).unwrap();
+        let (status, body, _) = h.call(basic_request("admin", PASSWORD)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+        h.user("claire", Role::Viewer).await;
+        h.state
+            .db
+            .add_passkey("claire", "cle-1", "Yubikey", "{}")
+            .unwrap();
+        let (status, body, _) = h.call(basic_request("claire", PASSWORD)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+        h.user("olivier", Role::Viewer).await;
+        let (status, _, _) = h.call(basic_request("olivier", PASSWORD)).await;
+        assert_eq!(status, StatusCode::OK, "sans second facteur, le Basic reste ouvert");
+    }
+
+    #[tokio::test]
+    async fn passkey_login_start_is_throttled() {
+        let h = Harness::with_admin().await;
+        for _ in 0..30 {
+            let (status, _, _) = h
+                .call(json_request(
+                    "POST",
+                    "/api/login/passkey/start",
+                    serde_json::json!({ "username": "admin" }),
+                ))
+                .await;
+            assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+        let (status, _, _) = h
+            .call(json_request(
+                "POST",
+                "/api/login/passkey/start",
+                serde_json::json!({ "username": "admin" }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn enrollment_is_throttled_after_ten_wrong_codes() {
+        let h = Harness::with_admin().await;
+        for _ in 0..10 {
+            let (status, _, _) = h
+                .call(json_request(
+                    "POST",
+                    "/api/probes/enroll",
+                    serde_json::json!({ "code": "ZZZZ-ZZZZ", "name": "Paris" }),
+                ))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, _, _) = h
+            .call(json_request(
+                "POST",
+                "/api/probes/enroll",
+                serde_json::json!({ "code": "ZZZZ-ZZZZ", "name": "Paris" }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn anonymous_login_failures_are_grouped_in_the_journal() {
+        let h = Harness::with_admin().await;
+        for i in 0..6 {
+            h.call(with_peer(
+                login_request(&format!("inconnu{i}"), "x"),
+                &format!("198.51.100.{i}"),
+            ))
+            .await;
+        }
+        let admin = h.login().await;
+        let lines = h.audit(&admin, "auth.login").await;
+        let anonymes = lines.iter().filter(|l| l["actor"].is_null()).count();
+        assert_eq!(anonymes, 1, "{lines:?}");
+    }
 }
+

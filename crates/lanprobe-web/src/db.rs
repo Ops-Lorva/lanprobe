@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 31;
+pub const SCHEMA_VERSION: i64 = 32;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -930,6 +930,30 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE users ADD COLUMN scope_all INTEGER NOT NULL DEFAULT 0;
     UPDATE users SET scope_all = 1
      WHERE username NOT IN (SELECT DISTINCT username FROM user_sites);
+    "#,
+    // v31 → v32 : le code d'appairage se RETROUVE au lieu de se chercher
+    // (audit RSSI du 16/11, F4).
+    //
+    // 🔴 `consume_pair_code` vérifiait en argon2 CHAQUE code vivant, verrou
+    // de la base tenu : un compte qui émettait cent codes faisait payer cent
+    // argon2 à chaque `POST /api/pair` anonyme, et figeait tout le hub.
+    //
+    // - `code_lookup` : condensat SHA-256 du code, indexé. Il désigne LA ligne
+    //   candidate ; l'argon2 de `code_hash` reste la seule vérification, une
+    //   fois, hors du verrou. Pas de clé secrète : le clair du code vit déjà
+    //   dans `code_plain` pendant ses quinze minutes, et un condensat de code
+    //   consommé ou expiré n'ouvre plus rien.
+    // - `superseded_at` : un compte n'a qu'un code valide à la fois. Émettre
+    //   un code date les précédents encore ouverts — ils ne sont ni supprimés
+    //   ni marqués « consommés », ce qui mentirait sur leur histoire.
+    //
+    // ⚠️ Un code émis AVANT la mise à jour n'a pas de `code_lookup` : il ne
+    // s'utilise plus. Il expire de toute façon dans le quart d'heure.
+    r#"
+    ALTER TABLE pair_codes ADD COLUMN code_lookup   TEXT;
+    ALTER TABLE pair_codes ADD COLUMN superseded_at INTEGER;
+    CREATE INDEX idx_pair_codes_lookup ON pair_codes(code_lookup);
+    CREATE INDEX idx_pair_codes_user ON pair_codes(username);
     "#,
 ];
 
@@ -2363,8 +2387,18 @@ impl Db {
     /// Rend le nom d'utilisateur canonique si les identifiants sont bons.
     /// L'erreur ne distingue jamais « compte inconnu » de « mauvais mot de
     /// passe » : ce serait un oracle à noms de comptes.
+    ///
+    /// 🔴 **Ni par le message, ni par le temps** (audit RSSI, F3). Un compte
+    /// inconnu répondait sans argon2, un compte connu après quelques dizaines
+    /// de millisecondes : le chronomètre disait quels comptes existent. Un
+    /// compte inconnu paie donc un argon2 sur un condensat factice.
+    ///
+    /// ⚠️ **Argon2 coûte : l'appeler depuis un handler passe par
+    /// `spawn_blocking`** (`web::off_reactor`). Il ne tient jamais le verrou
+    /// SQLite — `password_hash_of` le rend avant la vérification.
     pub fn verify_credentials(&self, username: &str, password: &str) -> DbResult<String> {
         let Some(hash) = self.password_hash_of(username)? else {
+            let _ = lanprobe_core::passwords::verify_password(dummy_password_hash(), password);
             return Err(DbError::Unauthorized("identifiants invalides".into()));
         };
         lanprobe_core::passwords::verify_password(&hash, password)
@@ -4232,6 +4266,16 @@ pub(crate) fn generate_enroll_code() -> String {
         .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
         .collect();
     format!("{}-{}", &chars[..4], &chars[4..])
+}
+
+/// Un condensat argon2 qui ne correspond à aucun compte, calculé une fois.
+/// Mêmes paramètres que les vrais : c'est ce qui égalise le temps de réponse.
+fn dummy_password_hash() -> &'static str {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DUMMY.get_or_init(|| {
+        lanprobe_core::passwords::hash_password("lanprobe : aucun compte de ce nom")
+            .unwrap_or_default()
+    })
 }
 
 pub fn now() -> i64 {
@@ -6815,6 +6859,29 @@ mod tests {
             Scope::Sites(vec!["s-1".into()])
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_account_costs_an_argon2_like_a_known_one() {
+        // F3 : un compte inconnu répondait sans argon2, un compte connu après
+        // quelques dizaines de millisecondes — le temps de réponse disait
+        // quels comptes existent.
+        let db = Db::open_in_memory().unwrap();
+        db.create_user("benjamin", "password123", Role::Admin).unwrap();
+        let _ = db.verify_credentials("echauffement", "x");
+        let mesure = |nom: &str| {
+            let t = std::time::Instant::now();
+            for _ in 0..3 {
+                assert!(db.verify_credentials(nom, "mauvais").is_err());
+            }
+            t.elapsed()
+        };
+        let connu = mesure("benjamin");
+        let inconnu = mesure("personne");
+        assert!(
+            inconnu * 3 >= connu,
+            "compte inconnu {inconnu:?} contre compte connu {connu:?}"
+        );
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {

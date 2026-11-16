@@ -16,6 +16,7 @@ pub mod packages;
 pub mod pairing;
 pub mod portscan;
 pub mod probe;
+pub mod ratelimit;
 pub mod report_chart;
 pub mod report_i18n;
 pub mod report_xlsx;

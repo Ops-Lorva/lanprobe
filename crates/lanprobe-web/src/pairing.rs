@@ -45,7 +45,8 @@ use axum::{
 use rusqlite::OptionalExtension;
 
 use crate::db::{Db, DbError, DbResult, Outcome, Role};
-use crate::web::{guarded, AppState, Identity};
+use crate::ratelimit::Class;
+use crate::web::{guarded, off_reactor, AppState, Identity};
 
 /// Durée de vie d'un jeton d'accès. Quinze minutes : il vit en mémoire vive et
 /// se renouvelle en silence, son expiration n'a aucune conséquence visible.
@@ -170,6 +171,13 @@ fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairedDevice> {
 /// qu'aucune tâche parallèle ne peut se partager.
 impl Db {
     /// Émet un code court pour un compte. Usage unique, 15 minutes.
+    ///
+    /// 🔴 **Un seul code valide par compte** (audit RSSI, F4) : émettre un
+    /// code date les précédents encore ouverts (`superseded_at`), dans la même
+    /// transaction. Sans ça, un compte de démo émettait des centaines de codes
+    /// vivants, et chaque essai anonyme sur `/api/pair` les payait tous.
+    ///
+    /// ⚠️ L'argon2 du code est calculé AVANT de prendre le verrou.
     pub(crate) fn create_pair_code(&self, username: &str, ttl_secs: i64) -> DbResult<PairCode> {
         // Le même générateur que le code d'enrôlement, et pas une copie :
         // l'alphabet sans `0`/`O` ni `1`/`I` est ce qui rend le code dictable
@@ -181,11 +189,26 @@ impl Db {
         let expires_at = created_at + ttl_secs;
         {
             let conn = self.conn().lock().map_err(|_| poisoned())?;
-            conn.execute(
-                "INSERT INTO pair_codes (code_hash, username, created_at, expires_at, code_plain)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![code_hash, username, created_at, expires_at, code],
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE pair_codes SET superseded_at = ?2, code_plain = NULL
+                 WHERE username = ?1 AND consumed_at IS NULL AND superseded_at IS NULL",
+                rusqlite::params![username, created_at],
             )?;
+            tx.execute(
+                "INSERT INTO pair_codes
+                   (code_hash, username, created_at, expires_at, code_plain, code_lookup)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    code_hash,
+                    username,
+                    created_at,
+                    expires_at,
+                    code,
+                    pair_code_lookup(&code)
+                ],
+            )?;
+            tx.commit()?;
         }
         // Le QR et l'empreinte sont posés par la route : la base ne connaît
         // ni l'adresse du hub ni son certificat.
@@ -199,49 +222,52 @@ impl Db {
 
     /// Consomme un code et rend le compte auquel il appartient.
     ///
-    /// ⚠️ **Consommé au premier succès**, dans la même transaction que sa
-    /// lecture : deux téléphones qui présentent le même code au même instant
-    /// doivent laisser exactement un gagnant.
+    /// ⚠️ **Consommé au premier succès** : deux téléphones qui présentent le
+    /// même code au même instant doivent laisser exactement un gagnant. C'est
+    /// l'`UPDATE … WHERE consumed_at IS NULL` final qui tranche — un seul des
+    /// deux voit `changed == 1`.
+    ///
+    /// 🔴 **Une seule vérification argon2, et hors du verrou** (audit RSSI,
+    /// F4). La ligne candidate se retrouve par `code_lookup`, indexé ; elle
+    /// vérifiait jusqu'ici chaque code vivant en argon2, verrou de la base
+    /// tenu, ce qui figeait tout le hub sous un flot de `POST /api/pair`.
+    /// L'appelant HTTP passe par `spawn_blocking`.
     pub(crate) fn consume_pair_code(&self, code: &str, now: i64) -> DbResult<String> {
-        let mut conn = self.conn().lock().map_err(|_| poisoned())?;
-        // `IMMEDIATE` prend le verrou d'écriture dès l'ouverture : la lecture
-        // des candidats et la marque de consommation ne peuvent pas être
-        // entrelacées avec celles d'une autre transaction.
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-        // Le code est haché : on ne peut pas l'indexer, il faut vérifier les
-        // candidats vivants un par un. Ils se comptent sur les doigts d'une
-        // main — un code vit 15 minutes.
-        let candidates: Vec<(String, String)> = {
-            let mut stmt = tx.prepare(
-                "SELECT code_hash, username FROM pair_codes
-                 WHERE consumed_at IS NULL AND expires_at > ?1",
-            )?;
-            let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-
-        for (code_hash, username) in candidates {
-            if lanprobe_core::passwords::verify_password(&code_hash, code).is_err() {
-                continue;
-            }
-            let changed = tx.execute(
-                "UPDATE pair_codes SET code_plain = NULL, consumed_at = ?2
-                 WHERE code_hash = ?1 AND consumed_at IS NULL",
-                rusqlite::params![code_hash, now],
-            )?;
-            if changed == 0 {
-                break;
-            }
-            tx.commit()?;
-            return Ok(username);
-        }
         // ⚠️ Un seul message pour les trois cas — inconnu, expiré, déjà
         // utilisé. Distinguer « déjà utilisé » apprendrait à qui essaie au
         // hasard qu'il a touché un code réel.
-        Err(DbError::Unauthorized(
-            "code d'appairage inconnu, expiré ou déjà utilisé".into(),
-        ))
+        let refus = || {
+            DbError::Unauthorized("code d'appairage inconnu, expiré ou déjà utilisé".into())
+        };
+        let candidate: Option<(String, String)> = {
+            let conn = self.conn().lock().map_err(|_| poisoned())?;
+            conn.query_row(
+                "SELECT code_hash, username FROM pair_codes
+                 WHERE code_lookup = ?1 AND consumed_at IS NULL AND superseded_at IS NULL
+                   AND expires_at > ?2",
+                rusqlite::params![pair_code_lookup(code), now],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        };
+        let Some((code_hash, username)) = candidate else {
+            return Err(refus());
+        };
+        // Le condensat d'index désigne la ligne ; c'est argon2 qui fait foi.
+        if lanprobe_core::passwords::verify_password(&code_hash, code).is_err() {
+            return Err(refus());
+        }
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        let changed = conn.execute(
+            "UPDATE pair_codes SET code_plain = NULL, consumed_at = ?2
+             WHERE code_hash = ?1 AND consumed_at IS NULL AND superseded_at IS NULL
+               AND expires_at > ?2",
+            rusqlite::params![code_hash, now],
+        )?;
+        if changed == 0 {
+            return Err(refus());
+        }
+        Ok(username)
     }
 
     /// Les codes de ce compte encore ouverts, purge du clair expiré comprise.
@@ -253,7 +279,8 @@ impl Db {
         // surveiller, et c'est fait avant toute lecture.
         conn.execute(
             "UPDATE pair_codes SET code_plain = NULL
-             WHERE code_plain IS NOT NULL AND (expires_at <= ?1 OR consumed_at IS NOT NULL)",
+             WHERE code_plain IS NOT NULL
+               AND (expires_at <= ?1 OR consumed_at IS NOT NULL OR superseded_at IS NOT NULL)",
             [now],
         )?;
         Ok(())
@@ -493,6 +520,19 @@ fn poisoned() -> DbError {
     DbError::Internal("verrou de la base empoisonné".into())
 }
 
+/// Le condensat d'index d'un code d'appairage : SHA-256 hexadécimal, préfixé
+/// pour ne ressembler à aucun autre condensat du schéma.
+///
+/// ⚠️ Ce n'est PAS la vérification — argon2 l'est. Il ne sert qu'à retrouver
+/// la ligne sans parcourir tous les codes vivants (F4).
+fn pair_code_lookup(code: &str) -> String {
+    let digest = ring::digest::digest(
+        &ring::digest::SHA256,
+        format!("lanprobe-pair-code:v1:{code}").as_bytes(),
+    );
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Relit un jeton d'accès et rend l'identité de son propriétaire.
 ///
 /// 🔴 **C'est le crochet que `session_guard` appelle.** Il rend `None`
@@ -651,15 +691,17 @@ async fn create_pair_code(
         tracing::warn!("codes d'appairage périmés non purgés : {e}");
     }
     // ⚠️ Le code lui-même n'entre jamais au journal : c'est de quoi appairer
-    // un téléphone.
+    // un téléphone. Son argon2 se calcule hors du réacteur.
+    let issued = {
+        let (db, username) = (state.db.clone(), actor.username.clone());
+        off_reactor(move || db.create_pair_code(&username, PAIR_CODE_TTL_SECS)).await
+    };
     let code = match crate::web::audited(
         &state,
         Some(&actor.username),
         "device.pair_code",
         Some(&actor.username),
-        state
-            .db
-            .create_pair_code(&actor.username, PAIR_CODE_TTL_SECS),
+        issued,
     ) {
         Ok(code) => code,
         Err(e) => return crate::web::error_response(e),
@@ -763,10 +805,27 @@ struct PairBody {
 /// téléphone n'a rien d'autre à présenter, et lui demander un cookie
 /// reviendrait à lui demander de se connecter — c'est-à-dire à taper un mot de
 /// passe en haut d'une échelle.
-async fn pair(State(state): State<AppState>, Json(body): Json<PairBody>) -> Response {
-    let username = match state.db.consume_pair_code(body.code.trim(), crate::db::now()) {
+async fn pair(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+    Json(body): Json<PairBody>,
+) -> Response {
+    // 🔴 Frein par adresse AVANT la vérification (audit RSSI, F4) : la route
+    // est publique, et chaque essai coûte un argon2.
+    let ip = crate::web::client_ip_key(&state, &extensions, &headers);
+    let keys = [(Class::Pair, ip.as_str())];
+    if let Err(wait) = state.limits.check(&keys) {
+        return crate::web::too_many(&state, "/api/pair", wait);
+    }
+    let consumed = {
+        let (db, code) = (state.db.clone(), body.code.trim().to_string());
+        off_reactor(move || db.consume_pair_code(&code, crate::db::now())).await
+    };
+    let username = match consumed {
         Ok(username) => username,
         Err(e) => {
+            state.limits.fail(&keys);
             // 🔴 **Bruyamment.** Un code réessayé — parce qu'il a déjà servi,
             // ou parce que quelqu'un en essaie au hasard — est exactement ce
             // qu'un journal doit montrer. L'acteur est inconnu : personne ne
@@ -804,17 +863,21 @@ async fn pair(State(state): State<AppState>, Json(body): Json<PairBody>) -> Resp
         .map(str::trim)
         .filter(|n| !n.is_empty())
         .unwrap_or("Appareil");
+    let paired = {
+        let db = state.db.clone();
+        let (owner, device_name) = (username.clone(), name.to_string());
+        let (platform, app_version) = (body.platform.clone(), body.app_version.clone());
+        off_reactor(move || {
+            db.pair_device(&owner, &device_name, platform.as_deref(), app_version.as_deref())
+        })
+        .await
+    };
     let (device, secret) = match crate::web::audited(
         &state,
         Some(&username),
         "device.pair",
         Some(name),
-        state.db.pair_device(
-            &username,
-            name,
-            body.platform.as_deref(),
-            body.app_version.as_deref(),
-        ),
+        paired,
     ) {
         Ok(pair) => pair,
         Err(e) => return crate::web::error_response(e),
@@ -873,12 +936,24 @@ async fn issue_token(
     extensions: axum::http::Extensions,
     Json(body): Json<TokenBody>,
 ) -> Response {
+    // 🔴 Frein par adresse (audit RSSI, F3) : chaque refus coûte un argon2.
+    let ip = crate::web::client_ip_key(&state, &extensions, &headers);
+    let keys = [(Class::DeviceToken, ip.as_str())];
+    if let Err(wait) = state.limits.check(&keys) {
+        return crate::web::too_many(&state, "/api/devices/token", wait);
+    }
     let Some(secret) = bearer(&headers) else {
+        state.limits.fail(&keys);
         return refusal_response(Refusal::Unknown);
     };
-    let device = match state.db.authenticate_device(body.device_id.trim(), &secret) {
+    let checked = {
+        let (db, device_id) = (state.db.clone(), body.device_id.trim().to_string());
+        tokio::task::spawn_blocking(move || db.authenticate_device(&device_id, &secret)).await
+    };
+    let device = match checked.unwrap_or(Err(Refusal::Unknown)) {
         Ok(device) => device,
         Err(refusal) => {
+            state.limits.fail(&keys);
             crate::web::audit(
                 &state,
                 None,
@@ -1147,13 +1222,11 @@ async fn rotate_any_device(
     Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Response {
-    match crate::web::audited(
-        &state,
-        Some(&actor.username),
-        "device.rotate",
-        Some(&id),
-        state.db.rotate_paired_device_secret(&id),
-    ) {
+    let rotated = {
+        let (db, device_id) = (state.db.clone(), id.clone());
+        off_reactor(move || db.rotate_paired_device_secret(&device_id)).await
+    };
+    match crate::web::audited(&state, Some(&actor.username), "device.rotate", Some(&id), rotated) {
         // Rendu une seule fois, comme à l'appairage.
         Ok(secret) => crate::web::ok_json(serde_json::json!({ "device_secret": secret })),
         Err(e) => crate::web::error_response(e),
@@ -1197,6 +1270,7 @@ mod tests {
             tls: false,
             cert_fingerprint: None,
             restart_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
             config_dir: std::env::temp_dir().join("lanprobe-pairing-tests"),
             backup_dir: std::env::temp_dir().join("lanprobe-pairing-tests"),
             influx_cli: "influx-absent-des-tests".into(),
@@ -1487,6 +1561,70 @@ mod tests {
         assert_eq!(
             db.user_scope("dupont", Role::Operator).unwrap(),
             Scope::Sites(vec![site.site_id])
+        );
+    }
+
+    // ── F4 : un code vivant par compte, une seule vérification ─────────────
+
+    #[test]
+    fn a_new_pair_code_invalidates_the_previous_one() {
+        // F4 : un compte n'a qu'un code valide à la fois. Le relecteur d'un
+        // hub de démo pouvait en émettre des centaines, et chaque `POST
+        // /api/pair` faux déroulait alors autant d'argon2.
+        let db = db_with_admin();
+        let ancien = db.create_pair_code("admin", PAIR_CODE_TTL_SECS).unwrap();
+        let neuf = db.create_pair_code("admin", PAIR_CODE_TTL_SECS).unwrap();
+
+        assert!(db.consume_pair_code(&ancien.code, now()).is_err(), "l'ancien est mort");
+        assert_eq!(db.consume_pair_code(&neuf.code, now()).unwrap(), "admin");
+
+        // Et son clair est parti avec lui.
+        let clairs: i64 = db
+            .conn()
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM pair_codes WHERE code_plain IS NOT NULL", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(clairs, 0);
+    }
+
+    #[test]
+    fn the_codes_of_other_accounts_stay_valid() {
+        let db = db_with_admin();
+        db.create_user("dupont", "mot-de-passe-de-test", Role::Operator)
+            .unwrap();
+        let a = db.create_pair_code("admin", PAIR_CODE_TTL_SECS).unwrap();
+        let b = db.create_pair_code("dupont", PAIR_CODE_TTL_SECS).unwrap();
+        assert_eq!(db.consume_pair_code(&a.code, now()).unwrap(), "admin");
+        assert_eq!(db.consume_pair_code(&b.code, now()).unwrap(), "dupont");
+    }
+
+    #[test]
+    fn a_wrong_code_costs_no_argon2_whatever_the_live_codes() {
+        // F4 : `consume_pair_code` vérifiait en argon2 CHAQUE code vivant, le
+        // verrou de la base tenu. Trente comptes avec un code chacun = trente
+        // argon2 par essai anonyme. La recherche est désormais indexée.
+        let db = db_with_admin();
+        for i in 0..30 {
+            let nom = format!("compte{i}");
+            db.create_user(&nom, "mot-de-passe-de-test", Role::Viewer).unwrap();
+            db.create_pair_code(&nom, PAIR_CODE_TTL_SECS).unwrap();
+        }
+        let hash = lanprobe_core::passwords::hash_password("x").unwrap();
+        let un_argon2 = {
+            let t = std::time::Instant::now();
+            let _ = lanprobe_core::passwords::verify_password(&hash, "y");
+            t.elapsed()
+        };
+        let t = std::time::Instant::now();
+        assert!(db.consume_pair_code("ZZZZ-ZZZZ", now()).is_err());
+        assert!(
+            t.elapsed() < un_argon2 * 3,
+            "un code faux ne doit dérouler aucun argon2 : {:?} contre {:?} pour un seul",
+            t.elapsed(),
+            un_argon2
         );
     }
 }
@@ -2239,4 +2377,56 @@ mod routes_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body["access_token"].as_str().is_some());
     }
+
+    // ── F3/F4 : limitation de débit et journal ─────────────────────────────
+
+    #[tokio::test]
+    async fn pairing_is_throttled_after_ten_wrong_codes() {
+        let h = Harness::new();
+        for _ in 0..10 {
+            let (status, _) = h
+                .post("/api/pair", "", serde_json::json!({ "code": "ZZZZ-ZZZZ" }))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        // Même un bon code attend : le budget est celui de l'adresse.
+        let cookie = h.session("admin");
+        let (_, code) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
+        let (status, body) = h
+            .post("/api/pair", "", serde_json::json!({ "code": code["code"] }))
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert!(body["retry_after"].as_u64().is_some(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn device_token_refusals_are_throttled() {
+        let h = Harness::new();
+        for _ in 0..30 {
+            let (status, _) = h.refresh("appareil-invente", "secret-invente").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, body) = h.refresh("appareil-invente", "secret-invente").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    }
+
+    #[tokio::test]
+    async fn anonymous_pairing_failures_are_grouped_in_the_journal() {
+        // F4 : chaque code faux écrivait sa ligne, dans un journal sans purge.
+        let h = Harness::new();
+        for _ in 0..8 {
+            h.post("/api/pair", "", serde_json::json!({ "code": "ZZZZ-ZZZZ" }))
+                .await;
+        }
+        let refus = h
+            .audit_actions()
+            .into_iter()
+            .filter(|a| a == "device.refused")
+            .count();
+        assert_eq!(refus, 1, "une ligne pour la rafale, la synthèse viendra à sa fermeture");
+        let due = h.state.limits.digest.due(crate::db::now() + 3600);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].absorbed, 7);
+    }
 }
+

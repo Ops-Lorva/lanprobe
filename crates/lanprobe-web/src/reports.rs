@@ -1149,6 +1149,7 @@ mod routes_tests {
                 tls: false,
                 cert_fingerprint: None,
                 restart_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
                 config_dir: scratch(),
                 backup_dir: scratch(),
                 influx_cli: "influx-absent-des-tests".into(),

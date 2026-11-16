@@ -342,7 +342,22 @@ async fn main() -> Result<(), String> {
         backup_dir: args.backup_dir.clone(),
         influx_cli: args.influx_cli.clone(),
             restart_required: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            limits: Arc::new(lanprobe_web::ratelimit::Limits::new()),
     };
+    // Les synthèses des rafales d'échecs anonymes au journal d'audit (F4) :
+    // une rafale qui s'arrête net ne doit pas rester sans sa ligne.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+                lanprobe_web::ratelimit::DIGEST_WINDOW_SECS as u64,
+            ));
+            loop {
+                tick.tick().await;
+                web::flush_audit_digest(&state);
+            }
+        });
+    }
     let router = web::build_router(state);
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port)

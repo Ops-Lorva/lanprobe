@@ -138,6 +138,12 @@ Le `setup_token` est généré au démarrage tant qu'aucun compte n'existe, écr
 Non rejouable : consommé au premier succès.
 
 ### `POST /api/login` → cookie de session `HttpOnly`
+
+`429 { "error": "…", "retry_after": <s> }` (+ `Retry-After`) au-delà de 10
+échecs en 5 min depuis une adresse, ou de 10 échecs en 15 min sur un compte —
+voir § 27. Un compte inconnu paie un argon2 factice : le temps de réponse ne
+dit pas si le compte existe.
+
 ### `POST /api/logout`
 
 ### `GET /api/sites` — authentification : session **ou** identifiants du compte
@@ -146,6 +152,9 @@ qu'un champ libre — c'est ce qui évite qu'un « Durnad » se glisse dans le p
 ```json
 [{ "site_id": "…", "name": "Durand", "probe_count": 3 }]
 ```
+🔴 **`Basic` est refusé (`401`) à un compte qui a un second facteur** (TOTP ou
+clé d'accès) : il vérifiait le mot de passe seul, un oracle qui ignorait le
+TOTP. Même limitation de débit que `/api/login`.
 
 ### `POST /api/sites` — `{ "name": "Durand" }` → `201`. `409` si le nom existe déjà.
 ### `PATCH /api/sites/{id}` — les réglages du site : `{ "name": "…", "report_locale": "fr" | "en" | "es" | null }`
@@ -2767,6 +2776,13 @@ parfois ouvert sur le téléphone lui-même, auquel cas il n'y a aucun second é
 4. le faire durer **24 h** « pour être tranquille ». Le confort d'une fois par
    appareil ne paie pas une fenêtre d'attaque d'une journée.
 
+🔴 **Un seul code valide par compte** (audit RSSI, F4) : en émettre un date les
+précédents encore ouverts (`pair_codes.superseded_at`, v32), qui ne s'utilisent
+plus. Le code se retrouve par `code_lookup` (SHA-256, indexé) et ne coûte qu'une
+vérification argon2, hors du verrou de la base — il en coûtait une par code
+vivant, verrou tenu. `POST /api/pair` est limité à 10 échecs en 5 min par
+adresse (`429`).
+
 ⚠️ **Un code est émis depuis une session authentifiée, pour son propre compte.**
 Il ne crée aucun compte et n'élève aucun droit : l'appareil hérite du rôle et de
 la portée de site de celui qui l'a émis, **jamais plus**. Un code volé chez un
@@ -3671,4 +3687,47 @@ chaque fois, le refrapper après une restauration de sauvegarde ou un Influx
 réinitialisé, et retomber proprement quand il a été révoqué depuis Influx.
 Écarté de ce correctif : la liste blanche et l'échappement ferment l'injection
 à la source.
+
+### F3 et F4 — limitation de débit, argon2, journal
+
+**Limitation de débit, en mémoire** (`ratelimit.rs`). On compte les ÉCHECS, pas
+les requêtes : qui se connecte vingt fois par jour ne voit jamais de `429`.
+L'adresse est celle de `client_ip` — `X-Forwarded-For` n'est lu que depuis un
+proxy de `trusted_proxies` ; une IPv6 compte pour son /64. Un redémarrage remet
+les compteurs à zéro.
+
+| Route | Clé | Budget |
+|---|---|---|
+| `POST /api/login`, `/api/login/passkey/finish`, `GET /api/sites` en `Basic` | adresse | 10 échecs / 5 min |
+| les mêmes | compte visé (sans casse) | 10 échecs / 15 min |
+| `POST /api/login/passkey/start` | adresse | 30 appels / 5 min |
+| `POST /api/pair` | adresse | 10 échecs / 5 min |
+| `POST /api/devices/token` | adresse | 30 échecs / 5 min |
+| `POST /api/probes/enroll` | adresse (+ compte sur le chemin scripté) | 10 échecs / 5 min |
+
+Refus : `429 { "error", "retry_after" }` et `Retry-After`, journalisé
+`auth.throttled` sans acteur. Un TOTP faux compte comme un échec du compte :
+c'est le budget par compte qui borne les six chiffres.
+
+**Argon2 hors du réacteur et hors du verrou SQLite** : tout appel depuis un
+handler passe par `web::off_reactor` (`spawn_blocking`) — connexion, `Basic`,
+changement de mot de passe, création de compte, appairage, renouvellement de
+jeton, enrôlement. Un compte inconnu paie un argon2 factice.
+
+**`Basic` refusé à un compte qui a un second facteur** (TOTP ou clé d'accès).
+
+**Codes d'appairage** : un seul valide par compte, recherche indexée, une
+vérification (§ 22, migration v32).
+
+**Échecs anonymes regroupés au journal** : un échec SANS acteur (compte inconnu,
+code d'appairage faux, appareil inconnu, `429`) écrit la première ligne de sa
+minute ; les suivants de la même action ne font que compter, et une ligne de
+synthèse — « N échec(s) anonyme(s) de plus, regroupés » — s'écrit à la fermeture
+de la fenêtre (tâche de fond, toutes les 60 s). Rien n'est effacé ; un échec qui
+nomme un compte reste une ligne à lui.
+
+⚠️ **Reste en l'état** : `consume_enroll_code` vérifie encore chaque code
+d'enrôlement vivant en argon2, verrou tenu. Le risque est moindre — seul un
+`operator` émet des codes d'enrôlement, et la route est désormais limitée — mais
+le correctif de v32 s'y appliquerait tel quel.
 
