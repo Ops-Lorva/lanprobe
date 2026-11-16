@@ -332,7 +332,8 @@ table.t { width: 100%; border-collapse: collapse; font-size: var(--text-md); }
   .cell .t td, .cell .t th { padding-inline: var(--space-xs); }
   /* Une case de la grille est étroite : les boutons d'une rangée passent à
      la ligne au lieu de pousser le tableau sous un ascenseur horizontal. */
-  .cell .t td.act { white-space: normal; width: auto; }
+  .cell .t td.act, .cell .t td .nm { white-space: normal; overflow-wrap: break-word; }
+  .cell .t td.act { width: auto; }
   .cell .t td.act .btn { margin-block: 2px; }
   .cell .t th { white-space: normal; }
 }
