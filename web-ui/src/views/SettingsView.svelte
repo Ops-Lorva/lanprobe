@@ -1027,7 +1027,6 @@
         ontoggle={() => (openSections[s.id] = !openSections[s.id])}
       >
         {#if s.id === 'identity'}
-          <h3 class="subhead lp-title">{$_('account.identity')}</h3>
           <dl class="idlist">
             <div><dt>{$_('accounts.username')}</dt><dd class="lp-mono">{$identity?.username ?? '—'}</dd></div>
             <div>
@@ -2134,6 +2133,14 @@
 {/if}
 
 <style>
+  /* Mon compte à plat : sections séparées par un filet, champs à largeur de
+     lecture plutôt qu'étirés sur toute la colonne. */
+  #panel-account {
+    gap: 24px;
+  }
+  #panel-account :global(.lp-field) {
+    max-width: 420px;
+  }
   /* ── Mon compte ─────────────────────────────────────────────────────── */
 
   /* Sous-section : un cran sous le titre de l'accordéon, et nettement moins

@@ -6,134 +6,73 @@
     /** Identifiant de la section — sert à relier l'en-tête à son corps. */
     id: string;
     title: string;
-    /**
-     * Ce que la section dit FERMÉE. Un accordéon muet oblige à tout ouvrir,
-     * donc ne fait rien gagner sur la pile qu'il remplace.
-     */
+    /** L'état de la section, à droite du titre : on le lit avant le détail. */
     summary: string;
     /**
-     * 🔴 La section porte un signal : elle ne se replie pas, et n'a donc pas
-     * de bouton. Un bouton grisé se cliquerait trois fois avant qu'on
-     * comprenne.
+     * Gardés pour la compatibilité des appelants. Depuis la DA « Relevé »,
+     * Mon compte est à plat : AUCUNE section ne se replie, donc aucune ne peut
+     * cacher un signal (appareil inconnu, clé inattendue). `pinned` ne fait
+     * plus que souligner la section.
      */
-    pinned: boolean;
-    open: boolean;
-    ontoggle: () => void;
+    pinned?: boolean;
+    open?: boolean;
+    ontoggle?: () => void;
     children: Snippet;
   }
-  let { id, title, summary, pinned, open, ontoggle, children }: Props = $props();
+  let { id, title, summary, pinned = false, children }: Props = $props();
 
-  const bodyId = $derived(`account-body-${id}`);
+  const headId = $derived(`account-head-${id}`);
 </script>
 
 <!--
-  🔴 Ce qui alerte ne se replie pas. Un appareil appairé qu'on ne reconnaît
-  pas, une clé d'accès inattendue : ce sont des moyens d'accès permanents, et
-  personne ne déplie une section qu'il ne soupçonne pas déjà. Un accordéon qui
-  cache un signal est pire que la pile qu'il remplace.
+  🔴 Ce qui alerte ne se replie pas — et, à plat, plus rien ne se replie.
+  Un appareil appairé qu'on ne reconnaît pas, une clé d'accès inattendue :
+  ce sont des moyens d'accès permanents, ils doivent se voir sans geste.
 -->
-<section class="acc lp-card" class:pinned>
-  {#if pinned}
-    <div class="head">
-      <h2 class="lp-title nm">{title}</h2>
-      <span class="sum">{summary}</span>
-      <!-- Dire POURQUOI elle n'a pas de bouton : sans cette mention, une
-           section qui ne se replie pas se lit comme une panne de l'interface,
-           pas comme le signal qu'elle porte. -->
-      <span class="always">{$_('account.always_open')}</span>
-    </div>
-  {:else}
-    <button
-      class="head toggle"
-      onclick={ontoggle}
-      aria-expanded={open}
-      aria-controls={bodyId}
-      aria-label={open
-        ? $_('account.section_collapse', { values: { name: title } })
-        : $_('account.section_expand', { values: { name: title } })}
-    >
-      <span class="chev" class:open aria-hidden="true">
-        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="6,3 11,8 6,13" />
-        </svg>
-      </span>
-      <h2 class="lp-title nm">{title}</h2>
-      <span class="sum">{summary}</span>
-    </button>
-  {/if}
-
-  {#if pinned || open}
-    <div class="body" id={bodyId}>{@render children()}</div>
-  {/if}
+<section class="acc" class:pinned aria-labelledby={headId}>
+  <div class="head">
+    <h2 class="nm" id={headId}>{title}</h2>
+    <span class="sum">{summary}</span>
+  </div>
+  <div class="body">{@render children()}</div>
 </section>
 
 <style>
   .acc {
     display: flex;
     flex-direction: column;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--color-rule);
   }
-  /* La section épinglée se distingue au trait, pas à la couleur : elle n'est
-     pas en faute, elle porte simplement quelque chose qui doit se voir. */
-  .acc.pinned {
-    border-color: var(--ep-border-strong);
+  .acc:last-child {
+    border-bottom: 0;
   }
-
   .head {
     display: flex;
-    align-items: center;
-    gap: 10px;
+    align-items: baseline;
+    gap: 8px 16px;
     flex-wrap: wrap;
-    width: 100%;
-    padding: 14px 18px;
-    text-align: left;
+    margin-bottom: 12px;
   }
-  .toggle {
-    border: none;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-    border-radius: var(--ep-radius-lg);
-  }
-  .toggle:hover .nm {
-    color: var(--ep-accent);
-  }
-  .toggle:focus-visible {
-    outline: 2px solid var(--ep-accent);
-    outline-offset: -2px;
-  }
-
-  .chev {
-    display: inline-flex;
-    color: var(--ep-text-dim);
-    transition: transform 0.12s ease;
-  }
-  .chev.open {
-    transform: rotate(90deg);
-  }
-
   .nm {
     margin: 0;
+    font-size: 1.125rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
   }
-  /* L'état, à droite du titre et sur la même ligne : c'est lui qu'on lit pour
-     décider s'il vaut la peine de déplier. */
+  /* L'état, sur la ligne du titre. */
   .sum {
     margin-left: auto;
     font-size: 0.8125rem;
-    color: var(--ep-text-secondary);
+    color: var(--color-muted);
     font-variant-numeric: tabular-nums;
   }
-  .always {
-    font-size: 0.8125rem;
-    color: var(--color-muted);
+  .acc.pinned .sum {
+    color: var(--color-ink-2);
   }
-
   .body {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    padding: 0 18px 16px;
-    border-top: 1px solid var(--ep-border);
-    padding-top: 14px;
   }
 </style>
