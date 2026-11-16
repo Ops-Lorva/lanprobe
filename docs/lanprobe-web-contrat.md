@@ -2819,7 +2819,7 @@ manières de désigner le même compte dans le même schéma, et une jointure de
 
 | Route | Auth | Rôle | Note |
 |---|---|---|---|
-| `POST /api/me/pair-codes` | session | `viewer` | calque de `/api/enroll-codes`. Chacun agit sur **son** compte (§19) |
+| `POST /api/me/pair-codes` | session **web uniquement** | `viewer` | calque de `/api/enroll-codes`. Chacun agit sur **son** compte (§19). 🔴 `403` avec un jeton d'appareil (§ 27, A3). Un seul code valide par compte |
 | `POST /api/pair` — `{ code, name, platform, app_version }` | le **code** | — | → `201 { device_id, device_secret, user, role, scope }`. Le secret n'est rendu **qu'ici, une fois** |
 | `POST /api/devices/token` | `Bearer <device_secret>` | — | → `200 { access_token, expires_in: 900 }` |
 | `GET /api/me/devices[?archived=true]` · `PATCH /api/me/devices/{id}` · `POST /api/me/devices/{id}/revoke` · `POST /api/me/devices/{id}/archive` | session | `viewer` | **les siens**. Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir le révoquer seul |
@@ -3730,4 +3730,12 @@ nomme un compte reste une ligne à lui.
 d'enrôlement vivant en argon2, verrou tenu. Le risque est moindre — seul un
 `operator` émet des codes d'enrôlement, et la route est désormais limitée — mais
 le correctif de v32 s'y appliquerait tel quel.
+
+### A3 — un appareil n'émet pas de code d'appairage
+
+`POST /api/me/pair-codes` refuse (`403`, ligne d'audit `device.pair_code` en
+échec) un appel authentifié par un jeton d'appareil : une session web est
+exigée, pour tous les comptes. Un téléphone volé émettait sinon un code avec
+son jeton, appairait un second appareil, et ce second survivait à la révocation
+du premier.
 

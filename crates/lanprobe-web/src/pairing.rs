@@ -680,11 +680,30 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
 /// ⚠️ Il ne crée aucun compte et n'élève aucun droit : l'appareil héritera du
 /// rôle et de la portée de celui qui l'a émis, jamais plus. Un code volé chez
 /// un `viewer` ne donne qu'un `viewer`.
+///
+/// 🔴 **Une session web est exigée — jamais un jeton d'appareil** (audit
+/// A3). Un téléphone volé émettait un code avec son jeton, appairait un second
+/// appareil, et ce second survivait à la révocation du premier : la seule
+/// procédure de sécurité du modèle était contournée par l'objet même qu'elle
+/// vise. La règle vaut pour tous les comptes.
 async fn create_pair_code(
     State(state): State<AppState>,
     Extension(actor): Extension<Identity>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(device_id) = actor.device_id.as_deref() {
+        crate::web::audit(
+            &state,
+            Some(&actor.username),
+            "device.pair_code",
+            Some(&actor.username),
+            Outcome::Failure,
+            Some(&format!("demandé depuis l'appareil {device_id} : session web exigée")),
+        );
+        return crate::web::error_response(DbError::Forbidden(
+            "un code d'appairage s'émet depuis le hub web, pas depuis un appareil appairé".into(),
+        ));
+    }
     // Le clair des codes périmés s'en va avant qu'on en émette un de plus :
     // pas de minuterie à surveiller, et c'est fait avant toute lecture.
     if let Err(e) = state.db.purge_stale_pair_codes(crate::db::now()) {
@@ -2427,6 +2446,27 @@ mod routes_tests {
         let due = h.state.limits.digest.due(crate::db::now() + 3600);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].absorbed, 7);
+    }
+
+    // ── A3 : un appareil n'enfante pas d'autres appareils ─────────────────
+
+    #[tokio::test]
+    async fn a_device_token_cannot_issue_a_pair_code() {
+        // 🔴 A3 : un téléphone volé émettait un code avec son jeton, appairait
+        // un second appareil, et ce second survivait à la révocation du
+        // premier. Une session web est exigée.
+        let h = Harness::new();
+        let (_, _, token) = h.pair("admin").await;
+
+        let (status, body) = h
+            .bearer("POST", "/api/me/pair-codes", &token, serde_json::json!({}))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body["code"].is_null(), "aucun code ne sort : {body}");
+
+        let cookie = h.session("admin");
+        let (status, body) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "la session web le peut toujours : {body}");
     }
 }
 
