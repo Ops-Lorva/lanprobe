@@ -1,4 +1,4 @@
-<p align="center"><a href="README.md">English</a> · <b>Français</b></p>
+<p align="center"><a href="README.md">English</a> · <b>Français</b> · <a href="README.es.md">Español</a></p>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-fr-dark.png">
