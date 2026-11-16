@@ -266,6 +266,8 @@ table.t { width: 100%; border-collapse: collapse; font-size: var(--text-md); }
 @media (max-width: 48rem) { .setrow { grid-template-columns: minmax(0, 1fr); gap: var(--space-xs); } }
 .setgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-md); align-items: start; }
 .setgrid .panel > h2 { margin-bottom: 0; }
+/* Dans une demi-largeur, le libellé passe au-dessus du réglage. */
+.setgrid .setrow { grid-template-columns: minmax(0, 1fr); gap: var(--space-xs); }
 @media (max-width: 60rem) { .setgrid { grid-template-columns: minmax(0, 1fr); } }
 
 @media (prefers-reduced-motion: reduce) {
@@ -344,5 +346,5 @@ table.t { width: 100%; border-collapse: collapse; font-size: var(--text-md); }
 @media (max-width: 52rem) { .gmain { padding: var(--space-md); } .apptop .brand span { display: none; } }
 
 /* Les réglages en surimpression (une page) */
-.overlay-panel { max-width: 720px; padding: 0; gap: 0; overflow: hidden; display: flex; flex-direction: column; }
+.overlay-panel { width: min(960px, calc(100vw - 48px)); max-width: 960px; padding: 0; gap: 0; overflow: hidden; display: flex; flex-direction: column; }
 .overlay-panel .ov-body { overflow: auto; padding: var(--space-md); }
