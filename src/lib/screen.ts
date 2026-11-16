@@ -22,7 +22,7 @@ export function screenKind(): ScreenKind {
 
 const NAV = Symbol('lp-nav');
 
-/** Aller à un autre écran — fourni par la disposition « barre latérale » seulement. */
+/** Aller à un autre écran, dans la disposition courante (posé par la page). */
 export function setNavigate(fn: (page: string) => void) {
   setContext(NAV, fn);
 }

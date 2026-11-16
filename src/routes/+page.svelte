@@ -17,6 +17,8 @@
   import { settings } from '$lib/stores/settings';
   import { internetStatus } from '$lib/stores/internetStatus';
   import { _ } from 'svelte-i18n';
+  import { tick } from 'svelte';
+  import { setNavigate } from '$lib/screen';
 
   // Écran actif (barre latérale) et onglet actif (trois onglets).
   let currentPage = $state('dashboard');
@@ -45,6 +47,18 @@
     { id: 'config',  key: 'nav.groups.config',  sections: ['settings'] },
   ] as const;
   const group = $derived(groups.find((g) => g.id === currentGroup) ?? groups[0]);
+
+  // « Tout voir » et autres renvois : l'écran (barre latérale) ou l'onglet
+  // qui le contient, puis sa section (trois onglets). En « une page », tout
+  // est déjà à l'écran : le lien n'est pas proposé (cf. Dashboard).
+  setNavigate(async (p) => {
+    if ($settings.layout === 'sidebar') { currentPage = p; return; }
+    const g = groups.find((x) => (x.sections as readonly string[]).includes(p));
+    if (!g) return;
+    currentGroup = g.id;
+    await tick();
+    document.getElementById(`s-${p}`)?.scrollIntoView({ block: 'start' });
+  });
 </script>
 
 {#snippet screen(id: string)}
