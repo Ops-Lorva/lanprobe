@@ -49,6 +49,12 @@ struct Args {
     #[arg(long, env = "LANPROBE_INFLUX_CLI", default_value = "influx")]
     influx_cli: PathBuf,
 
+    /// Âge, en jours, au-delà duquel les appareils d'un compte de
+    /// DÉMONSTRATION sont révoqués (jamais supprimés). Sans effet sur les
+    /// comptes ordinaires, dont les appareils n'expirent jamais.
+    #[arg(long, env = "LANPROBE_WEB_DEMO_DEVICE_DAYS", default_value_t = 7)]
+    demo_device_days: i64,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -242,10 +248,24 @@ async fn main() -> Result<(), String> {
         let db = db.clone();
         let settings = settings.clone();
         let config_dir = args.config_dir.clone();
+        let demo_device_days = args.demo_device_days;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
             loop {
                 tick.tick().await;
+
+                // Appareils des comptes de démonstration : révoqués au bout de
+                // N jours. Un compte partagé entre inconnus n'a personne pour
+                // révoquer ses téléphones, et `paired_devices` grossirait sans
+                // fin. ⚠️ Avant le `continue` de l'inventaire, comme les rapports.
+                match lanprobe_web::pairing::revoke_stale_demo_devices(
+                    &db,
+                    demo_device_days,
+                    lanprobe_web::db::now(),
+                ) {
+                    0 => {}
+                    n => tracing::info!("démonstration : {n} appareil(s) révoqué(s)"),
+                }
 
                 // Historique des adresses publiques : il suit la rétention
                 // Influx, pas celle de l'inventaire. Les mesures que ces

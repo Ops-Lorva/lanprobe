@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// Version cible du schéma. Toute migration ajoutée doit incrémenter cette
 /// constante **et** être ajoutée à `MIGRATIONS` — jamais retoucher une
 /// migration déjà livrée : une base en production l'a déjà appliquée.
-pub const SCHEMA_VERSION: i64 = 32;
+pub const SCHEMA_VERSION: i64 = 33;
 
 /// Cadence du battement d'une sonde en mode temps réel. C'est aussi le
 /// plancher que la sonde applique de son côté (`hub.rs:876`) : descendre plus
@@ -955,6 +955,22 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_pair_codes_lookup ON pair_codes(code_lookup);
     CREATE INDEX idx_pair_codes_user ON pair_codes(username);
     "#,
+    // v32 → v33 : le compte de DÉMONSTRATION (audit App Store, 0.3).
+    //
+    // Un compte partagé entre inconnus — le relecteur d'Apple, puis le
+    // suivant — dont chacun connaît le mot de passe. Sans verrou, le premier
+    // venu change le mot de passe, active un TOTP qui ferme la connexion web à
+    // tous les autres, pose une clé d'accès, change la langue que tous les
+    // appareils suivent, et lit puis révoque les appareils des autres.
+    //
+    // `demo = 1` verrouille ses réglages personnels, borne `/api/me/devices*`
+    // à l'appareil appelant, et fait révoquer ses appareils au bout de N jours.
+    // **Seul un `admin` le pose**, et jamais sur un `admin`.
+    //
+    // ⚠️ `DEFAULT 0` : aucun compte existant ne change de comportement.
+    r#"
+    ALTER TABLE users ADD COLUMN demo INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Portée d'un compte : les sites qu'il a le droit de voir.
@@ -1434,6 +1450,10 @@ pub struct UserRecord {
     /// `user_sites`, **et rien si elle est vide**. Toujours vrai pour un
     /// `admin`, qui n'est jamais restreint.
     pub all_sites: bool,
+    /// Compte de démonstration (migration v33) : réglages personnels
+    /// verrouillés, appareils bornés à l'appelant et révoqués au bout de N
+    /// jours. Jamais vrai pour un `admin`.
+    pub demo: bool,
 }
 
 /// Une clé d'accès enregistrée, telle qu'elle sort de la base.
@@ -1710,7 +1730,7 @@ fn probe_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeRecord> {
 }
 
 /// Colonnes de `users`, dans l'ordre où [`user_from_row`] les lit.
-const USER_COLUMNS: &str = "username, role, created_at, disabled_at, scope_all";
+const USER_COLUMNS: &str = "username, role, created_at, disabled_at, scope_all, demo";
 
 fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
     let role = Role::from_stored(&r.get::<_, String>(1)?);
@@ -1720,6 +1740,7 @@ fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
         created_at: r.get(2)?,
         disabled_at: r.get(3)?,
         all_sites: role == Role::Admin || r.get::<_, i64>(4)? != 0,
+        demo: role != Role::Admin && r.get::<_, i64>(5)? != 0,
     })
 }
 
@@ -2300,6 +2321,15 @@ impl Db {
     /// - on ne rétrograde pas le dernier administrateur actif.
     pub fn set_user_role(&self, actor: &str, username: &str, role: Role) -> DbResult<UserRecord> {
         let target = self.get_user(username)?;
+        // Un compte de démonstration est partagé entre inconnus : lui donner
+        // les comptes, les réglages et le journal serait offrir le hub.
+        if target.demo && role == Role::Admin {
+            return Err(DbError::Conflict(
+                "un compte de démonstration ne peut pas être administrateur — retirez d'abord \
+                 le mode démo"
+                    .into(),
+            ));
+        }
         if target.role == Role::Admin && role != Role::Admin {
             if actor == target.username {
                 return Err(DbError::Conflict(
@@ -2313,6 +2343,25 @@ impl Db {
             conn.execute(
                 "UPDATE users SET role = ?2 WHERE username = ?1",
                 rusqlite::params![target.username, role.as_str()],
+            )?;
+        }
+        self.get_user(&target.username)
+    }
+
+    /// Pose ou retire le mode démo (migration v33). Refusé sur un `admin` :
+    /// un compte partagé entre inconnus ne gère pas les comptes.
+    pub fn set_user_demo(&self, username: &str, demo: bool) -> DbResult<UserRecord> {
+        let target = self.get_user(username)?;
+        if demo && target.role == Role::Admin {
+            return Err(DbError::Conflict(
+                "un administrateur ne peut pas être un compte de démonstration".into(),
+            ));
+        }
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "UPDATE users SET demo = ?2 WHERE username = ?1",
+                rusqlite::params![target.username, i64::from(demo)],
             )?;
         }
         self.get_user(&target.username)
@@ -6882,6 +6931,23 @@ mod tests {
             inconnu * 3 >= connu,
             "compte inconnu {inconnu:?} contre compte connu {connu:?}"
         );
+    }
+
+    #[test]
+    fn the_demo_flag_is_off_by_default_and_never_on_an_admin() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_initial_admin("admin", "password123").unwrap();
+        db.create_user("relecteur", "password123", Role::Viewer).unwrap();
+        assert!(!db.get_user("relecteur").unwrap().demo);
+        db.set_user_demo("relecteur", true).unwrap();
+        assert!(db.get_user("relecteur").unwrap().demo);
+        assert!(matches!(db.set_user_demo("admin", true), Err(DbError::Conflict(_))));
+        assert!(matches!(
+            db.set_user_role("admin", "relecteur", Role::Admin),
+            Err(DbError::Conflict(_))
+        ));
+        db.set_user_demo("relecteur", false).unwrap();
+        assert!(!db.get_user("relecteur").unwrap().demo);
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {

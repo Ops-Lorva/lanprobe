@@ -1031,6 +1031,11 @@
             </div>
           </dl>
           <p class="hint">{$_('account.role_hint')}</p>
+          <!-- Compte partagé : le hub refuse ces réglages, l'écran le dit
+               avant qu'on essaie (contrat § 27). -->
+          {#if $identity?.demo}
+            <p class="hint" role="note">{$_('account.demo_locked')}</p>
+          {/if}
 
           <!-- Le mot de passe sous l'identité, dans la même section : c'est la
                même question — « qui suis-je sur ce hub, et comment j'y

@@ -159,15 +159,8 @@ pub fn build_router(state: AppState) -> Router {
             // existe ne conduit rien. Ouvert au rôle le plus bas, comme le
             // reste de ce groupe.
             .route("/api/probe-release", get(probe_release))
-            .route("/api/me/password", post(change_own_password))
-            .route("/api/me/lang", post(set_own_lang))
-            .route("/api/me/totp", get(totp_status).delete(disable_own_totp))
-            .route("/api/me/totp/start", post(start_own_totp))
-            .route("/api/me/totp/confirm", post(confirm_own_totp))
+            .route("/api/me/totp", get(totp_status))
             .route("/api/me/passkeys", get(list_own_passkeys))
-            .route("/api/me/passkeys/start", post(start_passkey_registration))
-            .route("/api/me/passkeys/finish", post(finish_passkey_registration))
-            .route("/api/me/passkeys/{id}", axum::routing::delete(delete_own_passkey))
             .route("/api/probes", get(list_probes))
             .route("/api/settings", get(get_settings))
             .route("/api/settings/influx-advertise", get(get_advertise))
@@ -176,6 +169,26 @@ pub fn build_router(state: AppState) -> Router {
                 "/api/notifications/subscriptions",
                 get(list_subscriptions),
             ),
+    );
+
+    // Ses propres réglages : mot de passe, second facteur, clés d'accès,
+    // langue. Ouverts au rôle le plus bas — chacun gère son compte (§ 19) —
+    // et **verrouillés pour un compte de démonstration** (§ 27) : partagé
+    // entre inconnus, il serait saboté par le premier venu. La couche est
+    // posée à l'intérieur de `guarded`, donc après l'authentification.
+    let own_settings = guarded(
+        &state,
+        Role::Viewer,
+        Router::new()
+            .route("/api/me/password", post(change_own_password))
+            .route("/api/me/lang", post(set_own_lang))
+            .route("/api/me/totp", delete(disable_own_totp))
+            .route("/api/me/totp/start", post(start_own_totp))
+            .route("/api/me/totp/confirm", post(confirm_own_totp))
+            .route("/api/me/passkeys/start", post(start_passkey_registration))
+            .route("/api/me/passkeys/finish", post(finish_passkey_registration))
+            .route("/api/me/passkeys/{id}", axum::routing::delete(delete_own_passkey))
+            .layer(middleware::from_fn_with_state(state.clone(), demo_lock)),
     );
 
     // Conduite du parc. `GET /api/enroll-codes/pending` en fait partie et non
@@ -308,6 +321,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(public)
         .merge(sites_read)
         .merge(read_only)
+        .merge(own_settings)
         .merge(probe_read)
         .merge(parc)
         .merge(site_write)
@@ -1276,6 +1290,9 @@ async fn me(State(state): State<AppState>, Extension(identity): Extension<Identi
         "username": identity.username,
         "role": identity.role.as_str(),
         "lang": lang,
+        // Pour que l'écran « Mon compte » n'offre pas des gestes que le hub
+        // refusera. Le hub refuse quand même : l'écran n'est pas la garde.
+        "demo": identity.demo,
     }))
 }
 
@@ -1473,6 +1490,9 @@ pub struct Identity {
     /// rapport a été demandé (§ 23) — l'audit dirait « benjamin », ce qui est
     /// vrai et trompeur le jour où le téléphone est entre d'autres mains.
     pub device_id: Option<String>,
+    /// Compte de démonstration (§ 27) : réglages personnels verrouillés,
+    /// appareils bornés à l'appelant. Relu à chaque requête, comme le rôle.
+    pub demo: bool,
 }
 
 /// Rend l'identité d'un compte actif. `None` si le compte a été désactivé
@@ -1512,6 +1532,7 @@ pub(crate) fn identity_of(
         role: user.role,
         scope,
         device_id,
+        demo: user.demo,
     })
 }
 
@@ -1600,6 +1621,35 @@ async fn session_guard(
 /// Exige un rôle minimum, **après** authentification. Un refus est une ligne
 /// d'audit : une tentative sur une route interdite est exactement ce qu'un
 /// journal doit montrer.
+/// Refuse à un compte de démonstration les gestes qui modifient le compte
+/// lui-même (§ 27). `403`, et une ligne d'audit : c'est la trace d'un
+/// relecteur qui essaie.
+async fn demo_lock(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let Some(identity) = req.extensions().get::<Identity>().cloned() else {
+        return fail(StatusCode::UNAUTHORIZED, "authentification requise");
+    };
+    if !identity.demo {
+        return next.run(req).await;
+    }
+    let target = format!("{} {}", req.method(), req.uri().path());
+    audit(
+        &state,
+        Some(&identity.username),
+        "access.denied",
+        Some(&target),
+        Outcome::Failure,
+        Some("compte de démonstration : réglage verrouillé"),
+    );
+    fail(
+        StatusCode::FORBIDDEN,
+        "compte de démonstration : ce réglage est verrouillé",
+    )
+}
+
 async fn role_guard(
     State((state, minimum)): State<(AppState, Role)>,
     req: axum::extract::Request,
@@ -1984,6 +2034,9 @@ struct UserPatch {
     /// « Tous les sites », explicitement. Voir [`scope_order`].
     #[serde(default)]
     all_sites: Option<bool>,
+    /// Compte de démonstration (§ 27). Refusé sur un `admin`.
+    #[serde(default)]
+    demo: Option<bool>,
 }
 
 async fn update_user(
@@ -2018,6 +2071,18 @@ async fn update_user(
             action,
             Some(&username),
             state.db.set_user_disabled(&actor.username, &username, disabled),
+        );
+        if let Err(e) = changed {
+            return error_response(e);
+        }
+    }
+    if let Some(demo) = body.demo {
+        let changed = audited(
+            &state,
+            Some(&actor.username),
+            if demo { "user.demo" } else { "user.undemo" },
+            Some(&username),
+            state.db.set_user_demo(&username, demo),
         );
         if let Err(e) = changed {
             return error_response(e);
@@ -14474,6 +14539,88 @@ mod tests {
         let lines = h.audit(&admin, "auth.login").await;
         let anonymes = lines.iter().filter(|l| l["actor"].is_null()).count();
         assert_eq!(anonymes, 1, "{lines:?}");
+    }
+
+    // ── Mode démo ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn only_an_admin_marks_an_account_as_demo_and_never_an_admin() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        h.user("relecteur", Role::Viewer).await;
+        h.user("olivier", Role::Operator).await;
+        let op = h.login_as("olivier").await;
+
+        let (status, _, _) = h
+            .call(with_cookie(
+                json_request("PATCH", "/api/users/relecteur", serde_json::json!({ "demo": true })),
+                &op,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("PATCH", "/api/users/relecteur", serde_json::json!({ "demo": true })),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["demo"], true);
+
+        // Un compte démo ne devient pas administrateur, et inversement.
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("PATCH", "/api/users/relecteur", serde_json::json!({ "role": "admin" })),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        h.user("alice", Role::Admin).await;
+        let (status, body, _) = h
+            .call(with_cookie(
+                json_request("PATCH", "/api/users/alice", serde_json::json!({ "demo": true })),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_demo_account_cannot_change_its_own_settings() {
+        // 🔴 Audit 0.3 : avec le mot de passe partagé, n'importe quel relecteur
+        // changeait le mot de passe, activait un TOTP — fermant la connexion
+        // web à tous les autres —, posait une clé d'accès ou changeait la
+        // langue que tous les appareils suivent.
+        let h = Harness::with_admin().await;
+        h.user("relecteur", Role::Viewer).await;
+        h.state.db.set_user_demo("relecteur", true).unwrap();
+        let demo = h.login_as("relecteur").await;
+
+        for (method, path, corps) in [
+            ("POST", "/api/me/password", serde_json::json!({ "current": PASSWORD, "next": "autre-mot-de-passe" })),
+            ("POST", "/api/me/lang", serde_json::json!({ "lang": "fr" })),
+            ("POST", "/api/me/totp/start", serde_json::json!({})),
+            ("POST", "/api/me/totp/confirm", serde_json::json!({ "code": "123456" })),
+            ("DELETE", "/api/me/totp", serde_json::json!({ "password": PASSWORD })),
+            ("POST", "/api/me/passkeys/start", serde_json::json!({})),
+            ("POST", "/api/me/passkeys/finish", serde_json::json!({})),
+            ("DELETE", "/api/me/passkeys/cle-1", serde_json::json!({})),
+        ] {
+            let (status, body, _) = h
+                .call(with_cookie(json_request(method, path, corps), &demo))
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} : {body}");
+        }
+        // Le mot de passe n'a pas bougé.
+        assert!(h.state.db.verify_credentials("relecteur", PASSWORD).is_ok());
+
+        // Lire reste permis — l'écran « Mon compte » s'affiche.
+        let (status, body, _) = h.call(with_cookie(empty_request("GET", "/api/me"), &demo)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["demo"], true);
+        let (status, _, _) = h.call(with_cookie(empty_request("GET", "/api/me/totp"), &demo)).await;
+        assert_eq!(status, StatusCode::OK);
     }
 }
 

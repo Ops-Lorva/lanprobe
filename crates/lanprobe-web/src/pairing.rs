@@ -495,6 +495,41 @@ impl Db {
         Ok(secret)
     }
 
+    /// Révoque les appareils des comptes de DÉMONSTRATION appairés depuis plus
+    /// de `days` jours, et rend leurs identifiants.
+    ///
+    /// ⚠️ **Révoqués, jamais supprimés**, comme toute révocation : la ligne
+    /// porte le lien `device_id ↔ nom` que le journal ne garde pas.
+    ///
+    /// ⚠️ C'est une **exception assumée** à « aucune révocation par
+    /// inactivité » (§ 22) : elle ne vise que les comptes `demo`, partagés
+    /// entre inconnus, dont les appareils n'ont personne pour les révoquer. Un
+    /// compte ordinaire n'expire jamais. Le critère est l'âge de l'appairage,
+    /// pas l'inactivité : un relecteur actif n'a pas vocation à rester.
+    pub(crate) fn revoke_stale_demo_devices(&self, days: i64, now: i64) -> DbResult<Vec<String>> {
+        let cutoff = now - days.max(1) * 86_400;
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        let tx = conn.unchecked_transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT device_id FROM paired_devices
+                 WHERE revoked_at IS NULL AND created_at <= ?1
+                   AND username IN (SELECT username FROM users WHERE demo = 1)
+                 ORDER BY created_at, device_id",
+            )?;
+            let rows = stmt.query_map([cutoff], |r| r.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for id in &ids {
+            tx.execute(
+                "UPDATE paired_devices SET revoked_at = ?2 WHERE device_id = ?1 AND revoked_at IS NULL",
+                rusqlite::params![id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
     /// Note la dernière vue et la dernière adresse.
     ///
     /// ⚠️ Écrite au renouvellement du jeton, qui ne laisse **aucune** ligne
@@ -513,6 +548,30 @@ impl Db {
             rusqlite::params![device_id, now, ip],
         )?;
         Ok(())
+    }
+}
+
+/// Révoque les appareils de démonstration trop anciens, et l'écrit au journal
+/// — une ligne système par appareil. Appelée par la tâche d'entretien du hub.
+pub fn revoke_stale_demo_devices(db: &Db, days: i64, now: i64) -> usize {
+    match db.revoke_stale_demo_devices(days, now) {
+        Ok(ids) => {
+            for id in &ids {
+                if let Err(e) = db.record_system_audit(
+                    "device.revoke",
+                    Some(id),
+                    Outcome::Success,
+                    Some(&format!("appareil de démonstration appairé depuis plus de {days} jour(s)")),
+                ) {
+                    tracing::error!("ligne d'audit de révocation de {id} non écrite : {e}");
+                }
+            }
+            ids.len()
+        }
+        Err(e) => {
+            tracing::warn!("révocation des appareils de démonstration : {e}");
+            0
+        }
     }
 }
 
@@ -1070,6 +1129,16 @@ async fn list_my_devices(
         .db
         .list_paired_devices(Some(&actor.username), filter.archived)
     {
+        // 🔴 Un compte de démonstration est partagé entre inconnus : chacun ne
+        // voit QUE l'appareil d'où il appelle — ni le nom ni la dernière
+        // adresse des téléphones des autres (audit 0.3). Depuis une session
+        // web, il n'y en a aucun.
+        Ok(devices) if actor.demo => devices_json(
+            devices
+                .into_iter()
+                .filter(|d| Some(&d.device_id) == actor.device_id.as_ref())
+                .collect(),
+        ),
         Ok(devices) => devices_json(devices),
         Err(e) => crate::web::error_response(e),
     }
@@ -1103,8 +1172,17 @@ async fn list_all_devices(
 /// ⚠️ **404 et non 403** quand l'appareil est celui d'un autre : « ça existe
 /// mais pas pour vous » apprendrait déjà l'existence du téléphone de quelqu'un
 /// d'autre. C'est la règle que le § 17 applique aux sites et aux sondes.
+///
+/// 🔴 Pour un compte de démonstration, « le sien » veut dire **l'appareil
+/// appelant**, pas tous ceux du compte : sinon un relecteur révoquait ou
+/// renommait le téléphone du suivant (audit 0.3).
 fn mine(state: &AppState, actor: &Identity, device_id: &str) -> Result<PairedDevice, Response> {
     match state.db.get_paired_device(device_id) {
+        Ok(d) if actor.demo && actor.device_id.as_deref() != Some(d.device_id.as_str()) => {
+            Err(crate::web::error_response(crate::db::DbError::NotFound(
+                "appareil inconnu".into(),
+            )))
+        }
         Ok(d) if d.username == actor.username => Ok(d),
         _ => Err(crate::web::error_response(crate::db::DbError::NotFound(
             "appareil inconnu".into(),
@@ -1581,6 +1659,40 @@ mod tests {
             db.user_scope("dupont", Role::Operator).unwrap(),
             Scope::Sites(vec![site.site_id])
         );
+    }
+
+    // ── Mode démo : révocation automatique ────────────────────────────────
+
+    #[test]
+    fn demo_devices_are_revoked_after_n_days_and_only_them() {
+        let db = db_with_admin();
+        db.create_user("relecteur", "mot-de-passe-de-test", Role::Viewer).unwrap();
+        db.set_user_demo("relecteur", true).unwrap();
+        let (vieux, _) = db.pair_device("relecteur", "iPad", None, None).unwrap();
+        let (recent, _) = db.pair_device("relecteur", "iPhone", None, None).unwrap();
+        let (a_moi, _) = db.pair_device("admin", "iPhone", None, None).unwrap();
+        let t0 = now();
+        {
+            let conn = db.conn().lock().unwrap();
+            conn.execute(
+                "UPDATE paired_devices SET created_at = ?2 WHERE device_id IN (?1, ?3)",
+                rusqlite::params![vieux.device_id, t0 - 8 * 86_400, a_moi.device_id],
+            )
+            .unwrap();
+        }
+
+        let revoked = db.revoke_stale_demo_devices(7, t0).unwrap();
+
+        assert_eq!(revoked, vec![vieux.device_id.clone()]);
+        assert!(db.get_paired_device(&vieux.device_id).unwrap().revoked_at.is_some());
+        assert!(db.get_paired_device(&recent.device_id).unwrap().revoked_at.is_none());
+        assert!(
+            db.get_paired_device(&a_moi.device_id).unwrap().revoked_at.is_none(),
+            "un compte ordinaire n'expire jamais (§ 22)"
+        );
+        // Révoqué, pas supprimé — et pas deux fois.
+        assert!(db.revoke_stale_demo_devices(7, t0).unwrap().is_empty());
+        assert_eq!(db.list_paired_devices(Some("relecteur"), true).unwrap().len(), 2);
     }
 
     // ── F4 : un code vivant par compte, une seule vérification ─────────────
@@ -2467,6 +2579,69 @@ mod routes_tests {
         let cookie = h.session("admin");
         let (status, body) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "la session web le peut toujours : {body}");
+    }
+
+    // ── Mode démo : l'appareil appelant, et lui seul ───────────────────────
+
+    #[tokio::test]
+    async fn a_demo_device_only_sees_and_touches_itself() {
+        // 🔴 Audit 0.3 : avec un compte partagé, chaque relecteur listait les
+        // appareils des autres — nom et dernière IP — et pouvait les révoquer.
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user("relecteur", MOT_DE_PASSE, Role::Viewer)
+            .unwrap();
+        h.state.db.set_user_demo("relecteur", true).unwrap();
+        let (a, _, token_a) = h.pair("relecteur").await;
+        let (b, _, _) = h.pair("relecteur").await;
+
+        let (status, body) = h.bearer("GET", "/api/me/devices", &token_a, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let ids: Vec<&str> = body["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["device_id"].as_str())
+            .collect();
+        assert_eq!(ids, vec![a.as_str()], "{body}");
+
+        for (method, path, corps) in [
+            ("POST", format!("/api/me/devices/{b}/revoke"), serde_json::json!({})),
+            ("PATCH", format!("/api/me/devices/{b}"), serde_json::json!({ "name": "x" })),
+            ("POST", format!("/api/me/devices/{b}/archive"), serde_json::json!({ "archived": true })),
+        ] {
+            let (status, body) = h.bearer(method, &path, &token_a, corps).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path} : {body}");
+        }
+        assert!(h.state.db.get_paired_device(&b).unwrap().revoked_at.is_none());
+
+        // Une session web du compte démo ne voit aucun appareil.
+        let cookie = h.session("relecteur");
+        let (_, body) = h.get("/api/me/devices", &cookie).await;
+        assert!(body["devices"].as_array().unwrap().is_empty(), "{body}");
+
+        // Mais l'appareil se révoque lui-même.
+        let (status, body) = h
+            .bearer("POST", &format!("/api/me/devices/{a}/revoke"), &token_a, serde_json::json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_demo_account_issues_pair_codes_from_a_web_session() {
+        // Le relecteur se connecte au hub web avec le compte démo, émet un
+        // code depuis « Mon compte », et le saisit dans l'app.
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user("relecteur", MOT_DE_PASSE, Role::Viewer)
+            .unwrap();
+        h.state.db.set_user_demo("relecteur", true).unwrap();
+        let cookie = h.session("relecteur");
+        let (status, body) = h.post("/api/me/pair-codes", &cookie, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["code"].as_str().is_some());
     }
 }
 

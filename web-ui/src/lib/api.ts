@@ -396,6 +396,11 @@ export interface Identity {
    * dans `localStorage`, et changer de poste ramenait l'anglais.
    */
   lang?: Lang | null;
+  /**
+   * Compte de démonstration (contrat § 27) : le hub refuse mot de passe,
+   * second facteur, clés d'accès et langue. Absent sur un hub plus ancien.
+   */
+  demo?: boolean;
 }
 
 /** Du plus puissant au moins puissant : c'est l'ordre dans lequel on choisit. */
@@ -424,6 +429,8 @@ export interface Account {
   sites: string[];
   /** « Tous les sites », explicitement. Absent sur un hub d'avant la v31. */
   all_sites?: boolean;
+  /** Compte de démonstration (contrat § 27). Absent sur un hub plus ancien. */
+  demo?: boolean;
 }
 
 // ── Journal d'audit (contrat § 11) ──────────────────────────────────────────
@@ -1484,7 +1491,13 @@ export const api = {
    */
   patchUser: (
     username: string,
-    patch: { role?: Role; disabled?: boolean; sites?: string[]; all_sites?: boolean },
+    patch: {
+      role?: Role;
+      disabled?: boolean;
+      sites?: string[];
+      all_sites?: boolean;
+      demo?: boolean;
+    },
   ) =>
     request<Account>(`/api/users/${encodeURIComponent(username)}`, {
       method: 'PATCH',

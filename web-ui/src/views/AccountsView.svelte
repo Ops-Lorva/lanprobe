@@ -236,6 +236,19 @@
   }
 
   /** Réactiver ne coupe l'accès de personne : pas de dialogue à franchir. */
+  async function toggleDemo(a: Account) {
+    rowError = '';
+    busy = true;
+    try {
+      await api.patchUser(a.username, { demo: !a.demo });
+      await load();
+    } catch (e) {
+      rowError = handle(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function enable(a: Account) {
     rowError = '';
     busy = true;
@@ -294,6 +307,9 @@
       <div class="row" class:off={a.disabled_at != null}>
         <span class="who">
           <span class="nm">{a.username}</span>
+          {#if a.demo}
+            <span class="pill">{$_('accounts.demo_pill')}</span>
+          {/if}
           {#if a.disabled_at != null}
             <span class="pill off-pill">
               {$_('accounts.disabled_on', { values: { date: dateOnly(a.disabled_at, lang) } })}
@@ -323,6 +339,13 @@
           {#if a.role !== 'admin'}
             <button class="lp-btn sm" onclick={() => openScope(a)}>
               {$_('accounts.change_scope')}
+            </button>
+          {/if}
+          <!-- Mode démo : un compte partagé entre inconnus, verrouillé par le
+               hub (contrat § 27). Jamais sur un `admin`, que le hub refuse. -->
+          {#if a.role !== 'admin'}
+            <button class="lp-btn sm" disabled={busy} onclick={() => toggleDemo(a)}>
+              {a.demo ? $_('accounts.demo_off') : $_('accounts.demo_on')}
             </button>
           {/if}
           <button class="lp-btn sm" onclick={() => openPassword(a)}>

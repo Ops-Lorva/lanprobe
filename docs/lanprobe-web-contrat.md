@@ -782,7 +782,8 @@ CREATE TABLE users (
   role          TEXT NOT NULL DEFAULT 'admin',
   created_at    INTEGER NOT NULL,
   ui_locale     TEXT,                   -- langue de l'INTERFACE. NULL = au navigateur de décider
-  scope_all     INTEGER NOT NULL DEFAULT 0  -- v31 : 1 = tous les sites (§ 17). 0 = user_sites, et RIEN s'il est vide
+  scope_all     INTEGER NOT NULL DEFAULT 0, -- v31 : 1 = tous les sites (§ 17). 0 = user_sites, et RIEN s'il est vide
+  demo          INTEGER NOT NULL DEFAULT 0  -- v33 : compte de démonstration (§ 27). Jamais sur un admin
 );
 
 CREATE TABLE sites (
@@ -1291,9 +1292,11 @@ PATCH  /api/users/{username}
        { "role": "operator" }   et/ou   { "disabled": true }
        et/ou   { "all_sites": true }                 ← tous les sites
        ou      { "all_sites": false, "sites": [...] } ← ces sites ; [] = RIEN
+       et/ou   { "demo": true | false }              ← compte de démonstration (§ 27)
        → 200 <le compte, forme ci-dessus>
        400 rôle inconnu · 400 all_sites:true ET une liste
        404 compte inconnu · 409 dernier admin / soi-même · 409 admin restreint
+       409 demo sur un admin · 409 rôle admin pour un compte démo
 
 POST   /api/users/{username}/password
        { "password": "…" }  → 200 { "ok": true }
@@ -2822,7 +2825,7 @@ manières de désigner le même compte dans le même schéma, et une jointure de
 | `POST /api/me/pair-codes` | session **web uniquement** | `viewer` | calque de `/api/enroll-codes`. Chacun agit sur **son** compte (§19). 🔴 `403` avec un jeton d'appareil (§ 27, A3). Un seul code valide par compte |
 | `POST /api/pair` — `{ code, name, platform, app_version }` | le **code** | — | → `201 { device_id, device_secret, user, role, scope }`. Le secret n'est rendu **qu'ici, une fois** |
 | `POST /api/devices/token` | `Bearer <device_secret>` | — | → `200 { access_token, expires_in: 900 }` |
-| `GET /api/me/devices[?archived=true]` · `PATCH /api/me/devices/{id}` · `POST /api/me/devices/{id}/revoke` · `POST /api/me/devices/{id}/archive` | session | `viewer` | **les siens**. Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir le révoquer seul |
+| `GET /api/me/devices[?archived=true]` · `PATCH /api/me/devices/{id}` · `POST /api/me/devices/{id}/revoke` · `POST /api/me/devices/{id}/archive` | session | `viewer` | **les siens**. Ouvert à `viewer` : celui qui perd son téléphone à 22 h doit pouvoir le révoquer seul. 🔴 Compte démo : **l'appareil appelant seul** (§ 27) |
 | `GET /api/devices[?user=][&archived=true]` · `POST /api/devices/{id}/revoke` · `POST /api/devices/{id}/rotate` · `POST /api/devices/{id}/archive` | session | `admin` | ceux de **tous** les comptes : un opérateur parti de l'entreprise ne se révoque pas lui-même |
 
 ### Ce que le QR transporte
@@ -3738,4 +3741,30 @@ le correctif de v32 s'y appliquerait tel quel.
 exigée, pour tous les comptes. Un téléphone volé émettait sinon un code avec
 son jeton, appairait un second appareil, et ce second survivait à la révocation
 du premier.
+
+### Mode démo — un compte partagé entre inconnus
+
+Pour la review App Store : le relecteur se connecte au hub web avec le compte
+démo, émet un code depuis « Mon compte → Appairer un téléphone » (session web,
+§ 22), et le saisit dans l'app. **Aucune route publique ne distribue de code** :
+écartée à la demande du propriétaire (pas de bouton « Try the demo hub »).
+
+`users.demo` (v33), posé par un `admin` seul (`PATCH /api/users/{u}
+{"demo": true}`), refusé sur un `admin`, et un compte démo ne devient pas
+`admin`. `GET /api/me` rend `demo`.
+
+| Pour un compte démo | Comportement |
+|---|---|
+| `POST /api/me/password`, `POST /api/me/lang`, `POST /api/me/totp/start`, `/confirm`, `DELETE /api/me/totp`, `POST /api/me/passkeys/start`, `/finish`, `DELETE /api/me/passkeys/{id}` | `403`, ligne `access.denied` |
+| `POST /api/me/pair-codes` | permis depuis une **session web** ; `403` depuis un appareil (A3, comme tout compte) ; un seul code valide |
+| `GET /api/me/devices` | l'appareil appelant seul ; aucun depuis une session web |
+| `PATCH`/`revoke`/`archive` sur `/api/me/devices/{id}` | `404` pour tout autre appareil que l'appelant |
+| appareils appairés | **révoqués** (jamais supprimés) après `LANPROBE_WEB_DEMO_DEVICE_DAYS` jours d'âge, 7 par défaut, par la tâche d'entretien (toutes les 6 h). Une ligne d'audit système `device.revoke` par appareil |
+
+⚠️ La révocation par âge est une exception assumée au § 22 (« aucune
+révocation par inactivité ») : elle ne vise que les comptes démo, dont les
+appareils n'ont personne pour les révoquer.
+
+Configuration recommandée du compte : `viewer`, portée restreinte au seul site
+de démonstration (`all_sites: false`), `lang = en`, `demo = true`.
 
