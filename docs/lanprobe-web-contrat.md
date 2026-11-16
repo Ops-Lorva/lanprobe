@@ -3751,6 +3751,29 @@ d'enrôlement vivant en argon2, verrou tenu. Le risque est moindre — seul un
 `operator` émet des codes d'enrôlement, et la route est désormais limitée — mais
 le correctif de v32 s'y appliquerait tel quel.
 
+⚠️ **Risque connu, non corrigé : le verrouillage d'un compte à la demande**
+(revue RSSI, N3). Le budget par compte (10 échecs / 15 min) est contrôlé
+**avant** toute vérification, et il couvre `/api/login`,
+`/api/login/passkey/finish`, le `Basic` et l'enrôlement scripté. Quiconque
+connaît un nom de compte peut donc, depuis n'importe quelle adresse, envoyer
+dix mauvais mots de passe par quart d'heure : tant qu'il continue, toute
+connexion web à ce compte répond `429` — le bon mot de passe **et** la clé
+d'accès compris. Les appareils déjà appairés (`/api/devices/token`, autre
+budget) ne sont pas touchés. Le nom se devine (`admin`, un prénom) ou se
+confirme : `POST /api/login/passkey/start` répond `404` à un compte sans clé
+d'accès.
+
+Le mécanisme reste en l'état. **Consigne d'exploitation** :
+
+- le nom du **compte démo** (review App Store) n'est **pas devinable** —
+  aléatoire, pas `demo`, `review` ni `apple` — et ne figure dans aucune capture
+  ni aucun texte public ; il ne circule que dans les notes de review ;
+- un compte administrateur exposé sur Internet porte, de même, un nom qui ne
+  se devine pas ;
+- en cas de verrouillage observé (échecs `auth.login` répétés sur un même
+  compte, puis des `auth.throttled`), un redémarrage du hub remet les
+  compteurs à zéro.
+
 ### A3 — un appareil n'émet pas de code d'appairage
 
 `POST /api/me/pair-codes` refuse (`403`, ligne d'audit `device.pair_code` en
