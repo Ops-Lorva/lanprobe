@@ -330,6 +330,11 @@ table.t { width: 100%; border-collapse: collapse; font-size: var(--text-md); }
   .split, .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); }
   .t .opt { display: none; }
   .cell .t td, .cell .t th { padding-inline: var(--space-xs); }
+  /* Une case de la grille est étroite : les boutons d'une rangée passent à
+     la ligne au lieu de pousser le tableau sous un ascenseur horizontal. */
+  .cell .t td.act { white-space: normal; width: auto; }
+  .cell .t td.act .btn { margin-block: 2px; }
+  .cell .t th { white-space: normal; }
 }
 @media (max-width: 68.75rem) {
   .app-top > .dash-grid { overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; grid-auto-rows: minmax(300px, 60vh); }
