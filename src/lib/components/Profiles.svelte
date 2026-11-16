@@ -8,6 +8,33 @@
   import ProfileForm from './ProfileForm.svelte';
   import { api } from '../tauri';
   import { invoke } from '@tauri-apps/api/core';
+  import ScreenHead from './ScreenHead.svelte';
+  import { maskToPrefix } from '../format';
+  import { screenKind } from '../screen';
+  import type { InterfaceDetails } from '../tauri';
+
+  const isCell = screenKind() === 'cell';
+
+  // Le profil dont la configuration est celle de l'interface en ce moment :
+  // même comparaison que le tableau de bord (IP, masque, passerelle, DNS).
+  let ifaceNow = $state<InterfaceDetails | null>(null);
+  async function loadIface() {
+    const name = $selectedInterface;
+    if (!name) { ifaceNow = null; return; }
+    try { ifaceNow = await api.getInterfaceDetails(name); } catch { ifaceNow = null; }
+  }
+  $effect(() => { void $selectedInterface; loadIface(); });
+  const appliedId = $derived.by(() => {
+    const i = ifaceNow;
+    if (!i || i.dhcp_enabled) return null;
+    return $profiles.find(p => p.ip === (i.ip ?? '') && p.subnet === (i.subnet ?? '')
+      && p.gateway === (i.gateway ?? '') && p.dns_primary === (i.dns[0] ?? ''))?.id ?? null;
+  });
+  const addr = (p: Profile) => {
+    const n = maskToPrefix(p.subnet);
+    return n != null ? `${p.ip}/${n}` : `${p.ip} / ${p.subnet}`;
+  };
+  let confirmRemove = $state<Profile | null>(null);
 
   let showForm = $state(false);
   let editing = $state<Partial<Profile> | undefined>();
@@ -55,6 +82,7 @@
         try { await invoke('cmd_start_ping', { ip }); }
         catch (e) { console.error('[Profiles] cmd_start_ping failed for', ip, e); }
       }
+      await loadIface();
     } catch (e) { flashStatus(`${tr('common.error')}: ${e}`); }
   }
 
@@ -66,64 +94,81 @@
   }
 </script>
 
-<div class="page">
-  <div class="header">
-    <h1>{$_('profiles.title')}</h1>
-    <button class="primary" onclick={openNew}>{$_('profiles.new')}</button>
+<div class="screen">
+  <ScreenHead title={$_('profiles.title')}>
+    {#snippet acts()}
+      <button class="btn" class:sm={isCell} type="button" onclick={openNew}>{isCell ? $_('profiles.new_short') : $_('profiles.new')}</button>
+    {/snippet}
+  </ScreenHead>
+
+  <div class="screen-body">
+    <p class="hint" style="margin-bottom:12px">
+      {#if $selectedInterface}
+        {$_('profiles.target', { values: { iface: $selectedInterface } })}
+      {:else}
+        <span class="err-text">{$_('profiles.target_missing')}</span>
+      {/if}
+    </p>
+    {#if status}<div class="banner info" role="status"><span class="grow">{status}</span></div>{/if}
+
+    <div class="tbl-wrap">
+      {#if $profiles.length === 0}
+        <div class="state"><p>{$_('profiles.empty')}</p></div>
+      {:else}
+        <table class="t">
+          <thead>
+            <tr>
+              <th>{$_('profiles.col_profile')}</th>
+              <th>{$_('profiles.col_address')}</th>
+              <th class="opt">{$_('profiles.col_gateway')}</th>
+              <th class="opt">{$_('profiles.col_dns')}</th>
+              <th class="num opt">{$_('profiles.col_targets')}</th>
+              <th><span class="visually-hidden">{$_('profiles.col_actions')}</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each $profiles as p (p.id)}
+              <tr class:sel={appliedId === p.id}>
+                <td>
+                  <span class="nm">{p.name}</span>
+                  {#if appliedId === p.id}<span class="sub2">{$_('profiles.applied_on', { values: { iface: $selectedInterface } })}</span>{/if}
+                </td>
+                <td class="m">{addr(p)}</td>
+                <td class="m opt">{p.gateway || '—'}</td>
+                <td class="m opt">{[p.dns_primary, p.dns_secondary].filter(Boolean).join(', ') || '—'}</td>
+                <td class="num opt" title={(p.monitor_ips ?? []).join('\n') || undefined}>{p.monitor_ips?.length ?? 0}</td>
+                <td class="act">
+                  {#if appliedId === p.id}
+                    <button class="btn sm quiet" type="button" disabled>{$_('profiles.applied_short')}</button>
+                  {:else}
+                    <button class="btn sm" type="button" onclick={() => applyProfile(p)} disabled={!$selectedInterface}>{$_('profiles.apply')}</button>
+                  {/if}
+                  <button class="btn sm quiet" type="button" onclick={() => openEdit(p)}>{$_('profiles.edit')}</button>
+                  <button class="btn sm quiet" type="button" onclick={() => (confirmRemove = p)}>{$_('profiles.remove')}</button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
   </div>
-  <div class="target-hint">
-    {$_('profiles.target_label')}
-    {#if $selectedInterface}
-      <span class="iface-name">{$selectedInterface}</span>
-      <span class="muted">{$_('profiles.target_selected_suffix')}</span>
-    {:else}
-      <span class="warn">{$_('profiles.target_missing')}</span>
-    {/if}
-  </div>
-  {#if status}<div class="status">{status}</div>{/if}
-  <div class="list">
-    {#each $profiles as p (p.id)}
-      <div class="card">
-        <div class="info">
-          <div class="name">{p.name}</div>
-          <div class="meta">{p.ip} / {p.subnet}</div>
-          <div class="meta">GW: {p.gateway} · DNS: {p.dns_primary}</div>
-          {#if p.monitor_ips && p.monitor_ips.length > 0}
-            <div class="meta monitor" title={p.monitor_ips.join('\n')}>📡 {$_('profiles.monitor_count', { values: { n: p.monitor_ips.length } })}</div>
-          {/if}
-        </div>
-        <div class="actions">
-          <button class="primary" onclick={() => applyProfile(p)}>{$_('profiles.apply')}</button>
-          <button onclick={() => openEdit(p)}>{$_('profiles.edit')}</button>
-          <button class="danger" onclick={() => profiles.remove(p.id)}>{$_('profiles.remove')}</button>
-        </div>
-      </div>
-    {:else}
-      <p class="empty">{$_('profiles.empty')}</p>
-    {/each}
-  </div>
-  {#if showForm}
-    <ProfileForm profile={editing} onSave={handleSave} onCancel={() => showForm = false} />
-  {/if}
 </div>
 
-<style>
-  .page { padding: 24px; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  h1 { font-size: 20px; font-weight: 700; }
-  .target-hint { font-size: 12px; padding: 8px 12px; background: var(--ep-bg-secondary); border: 1px solid var(--ep-border); border-radius: 6px; margin-bottom: 12px; }
-  .target-hint .iface-name { font-family: var(--ep-font-mono); font-weight: 700; color: var(--ep-accent); }
-  .target-hint .muted { color: var(--ep-text-muted); }
-  .target-hint .warn { color: var(--ep-danger); font-weight: 600; }
-  .status { padding: 8px 12px; background: var(--ep-bg-tertiary); border-radius: 6px; font-size: 13px; color: var(--ep-success); margin-bottom: 16px; }
-  .list { display: flex; flex-direction: column; gap: 10px; }
-  .card { background: var(--ep-bg-secondary); border: 1px solid var(--ep-border); border-radius: 10px; padding: 16px; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-  .name { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
-  .meta { font-size: 12px; color: var(--ep-text-secondary); font-family: var(--ep-font-mono); }
-  .meta.monitor { color: var(--ep-accent); margin-top: 2px; }
-  .actions { display: flex; gap: 6px; flex-shrink: 0; }
-  button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); cursor: pointer; font-size: 12px; font-weight: 600; }
-  button.primary { background: var(--ep-accent); border-color: var(--ep-accent); color: #fff; }
-  button.danger { background: transparent; border-color: var(--ep-danger); color: var(--ep-danger); }
-  .empty { color: var(--ep-text-muted); font-size: 14px; margin-top: 20px; }
-</style>
+{#if showForm}
+  <ProfileForm profile={editing} onSave={handleSave} onCancel={() => showForm = false} />
+{/if}
+
+{#if confirmRemove}
+  <div class="overlay" role="presentation" onclick={() => (confirmRemove = null)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="h-prm" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+      <h2 id="h-prm">{$_('profiles.remove_title', { values: { name: confirmRemove.name } })}</h2>
+      <p class="muted">{$_('profiles.remove_body')}</p>
+      <div class="row">
+        <button class="btn" type="button" onclick={() => (confirmRemove = null)}>{$_('common.cancel')}</button>
+        <button class="btn danger" type="button" onclick={() => { profiles.remove(confirmRemove!.id); confirmRemove = null; }}>{$_('profiles.remove')}</button>
+      </div>
+    </div>
+  </div>
+{/if}

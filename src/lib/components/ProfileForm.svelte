@@ -46,51 +46,41 @@
   }
 </script>
 
-<div class="overlay">
-  <div class="card">
-    <h2>{profile?.id ? $_('profiles.form.edit_title') : $_('profiles.form.new_title')}</h2>
-    <div class="hint">
-      {$_('profiles.form.applied_to')}
-      {#if $selectedInterface}<span class="iface-name">({$selectedInterface})</span>{/if}
+<div class="overlay" role="presentation">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="h-pf">
+    <h2 id="h-pf">{profile?.id ? $_('profiles.form.edit_title') : $_('profiles.form.new_title')}</h2>
+    <p class="hint">
+      {$_('profiles.form.applied_to')}{#if $selectedInterface} <span class="m">{$selectedInterface}</span>{/if}
+    </p>
+    <div class="field"><label for="pf-name">{$_('profiles.form.name')}</label><input id="pf-name" class="input" bind:value={form.name} placeholder={$_('profiles.form.name_placeholder')} /></div>
+    <div class="grid2">
+      <div class="field"><label for="pf-ip">{$_('profiles.form.ip')}</label><input id="pf-ip" class="input m" bind:value={form.ip} placeholder={$_('profiles.form.ip_placeholder')} /></div>
+      <div class="field"><label for="pf-mask">{$_('profiles.form.mask')}</label><input id="pf-mask" class="input m" bind:value={form.subnet} placeholder={$_('profiles.form.mask_placeholder')} /></div>
     </div>
-    <label>{$_('profiles.form.name')}<input bind:value={form.name} placeholder={$_('profiles.form.name_placeholder')} /></label>
-    <label>{$_('profiles.form.ip')}<input bind:value={form.ip} placeholder={$_('profiles.form.ip_placeholder')} /></label>
-    <label>{$_('profiles.form.mask')}<input bind:value={form.subnet} placeholder={$_('profiles.form.mask_placeholder')} /></label>
-    <label>{$_('profiles.form.gateway')} <span class="opt">{$_('profiles.form.gateway_optional')}</span><input bind:value={form.gateway} placeholder={$_('profiles.form.gateway_placeholder')} /></label>
-    <label>{$_('profiles.form.dns_primary')} <span class="opt">{$_('profiles.form.dns_optional')}</span><input bind:value={form.dns_primary} placeholder={$_('profiles.form.dns_primary_placeholder')} /></label>
-    <label>{$_('profiles.form.dns_secondary')} <span class="opt">{$_('profiles.form.dns_optional')}</span><input bind:value={form.dns_secondary} placeholder={$_('profiles.form.dns_secondary_placeholder')} /></label>
-    <label>
-      {$_('profiles.form.monitor_ips')}
-      <span class="opt">{$_('profiles.form.monitor_ips_hint')}</span>
-      <textarea
-        bind:value={monitorIpsText}
-        placeholder={$_('profiles.form.monitor_ips_placeholder')}
-        rows="3"
-      ></textarea>
-    </label>
-    <div class="actions">
-      <button type="button" class="detect-btn" onclick={autoDetect} title={$_('profiles.form.detect_title')}>{$_('profiles.form.detect')}</button>
-      <span class="spacer"></span>
-      <button onclick={onCancel}>{$_('profiles.form.cancel')}</button>
-      <button class="primary" onclick={save}>{$_('profiles.form.save')}</button>
+    <div class="field">
+      <label for="pf-gw">{$_('profiles.form.gateway')} <span class="muted">{$_('profiles.form.gateway_optional')}</span></label>
+      <input id="pf-gw" class="input m" bind:value={form.gateway} placeholder={$_('profiles.form.gateway_placeholder')} />
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label for="pf-dns1">{$_('profiles.form.dns_primary')} <span class="muted">{$_('profiles.form.dns_optional')}</span></label>
+        <input id="pf-dns1" class="input m" bind:value={form.dns_primary} placeholder={$_('profiles.form.dns_primary_placeholder')} />
+      </div>
+      <div class="field">
+        <label for="pf-dns2">{$_('profiles.form.dns_secondary')} <span class="muted">{$_('profiles.form.dns_optional')}</span></label>
+        <input id="pf-dns2" class="input m" bind:value={form.dns_secondary} placeholder={$_('profiles.form.dns_secondary_placeholder')} />
+      </div>
+    </div>
+    <div class="field">
+      <label for="pf-mon">{$_('profiles.form.monitor_ips')}</label>
+      <textarea id="pf-mon" class="textarea m" bind:value={monitorIpsText} placeholder={$_('profiles.form.monitor_ips_placeholder')} rows="3"></textarea>
+      <span class="hint">{$_('profiles.form.monitor_ips_hint')}</span>
+    </div>
+    <div class="row">
+      <button type="button" class="btn quiet" onclick={autoDetect} title={$_('profiles.form.detect_title')}>{$_('profiles.form.detect')}</button>
+      <span class="grow"></span>
+      <button type="button" class="btn" onclick={onCancel}>{$_('profiles.form.cancel')}</button>
+      <button type="button" class="btn primary" onclick={save} disabled={!form.name.trim()}>{$_('profiles.form.save')}</button>
     </div>
   </div>
 </div>
-
-<style>
-  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
-  .card { background: var(--ep-bg-secondary); border: 1px solid var(--ep-border); border-radius: 12px; padding: 24px; width: 380px; display: flex; flex-direction: column; gap: 12px; }
-  h2 { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
-  .hint { font-size: 12px; color: var(--ep-text-muted); padding: 8px 10px; background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border); border-radius: 6px; }
-  .iface-name { font-family: var(--ep-font-mono); color: var(--ep-accent); font-weight: 600; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ep-text-secondary); }
-  .opt { color: var(--ep-text-muted); font-weight: 400; font-size: 11px; }
-  input, textarea { background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border); border-radius: 6px; padding: 7px 10px; color: var(--ep-text-primary); font-family: var(--ep-font-mono); font-size: 13px; }
-  textarea { resize: vertical; min-height: 52px; }
-  .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
-  .spacer { flex: 1; }
-  .detect-btn { padding: 7px 12px; border-radius: 6px; border: 1px solid var(--ep-accent); background: transparent; color: var(--ep-accent); cursor: pointer; font-size: 12px; font-weight: 600; }
-  .detect-btn:hover { background: var(--ep-accent); color: #fff; }
-  button { padding: 7px 16px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); cursor: pointer; font-size: 13px; font-weight: 600; }
-  button.primary { background: var(--ep-accent); border-color: var(--ep-accent); color: #fff; }
-</style>
