@@ -104,7 +104,3 @@ jobs:
               lanprobe-web:
                 image: ${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/lanprobe-web:${{ steps.version.outputs.version }}
             ```
-
-            ⚠️ Épinglez la version. Un tag mouvant fait sauter une majeure sans
-            qu'on le voie venir, et une migration de schéma ne se rejoue pas
-            à l'envers.
