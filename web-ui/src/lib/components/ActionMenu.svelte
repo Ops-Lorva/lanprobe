@@ -7,8 +7,10 @@
     label: string;
     /** Reçoit la fonction de fermeture : un item qui agit referme le menu. */
     children: Snippet<[() => void]>;
+    /** `more` : « ⋯ » discret, pour le menu d'une ligne de tableau. */
+    icon?: 'gear' | 'more';
   }
-  let { label, children }: Props = $props();
+  let { label, children, icon = 'gear' }: Props = $props();
 
   let open = $state(false);
   let root = $state<HTMLDivElement | null>(null);
@@ -78,6 +80,8 @@
 <div class="menu-root" bind:this={root}>
   <button
     class="lp-btn sm gear"
+    class:ghost={icon === 'more'}
+    class:icon={icon === 'more'}
     bind:this={trigger}
     onclick={toggle}
     aria-haspopup="menu"
@@ -85,6 +89,13 @@
     aria-label={label}
     title={label}
   >
+    {#if icon === 'more'}
+      <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+        <circle cx="3.5" cy="8" r="1.3" fill="currentColor" />
+        <circle cx="8" cy="8" r="1.3" fill="currentColor" />
+        <circle cx="12.5" cy="8" r="1.3" fill="currentColor" />
+      </svg>
+    {:else}
     <Icons name="gear" size={15} />
     <svg
       class="caret"
@@ -100,6 +111,7 @@
     >
       <polyline points="3,6 8,11 13,6" />
     </svg>
+    {/if}
   </button>
 
   {#if open}
@@ -148,6 +160,6 @@
     background: var(--ep-bg-secondary);
     border: 1px solid var(--ep-border-strong);
     border-radius: var(--ep-radius-lg);
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-pop);
   }
 </style>

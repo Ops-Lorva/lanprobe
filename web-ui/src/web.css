@@ -837,3 +837,84 @@ table.lp-t {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* La bande de battement — signature de la DA. 96 quarts d'heure, la santé en
+   vert sourd, le défaut en couleur franche, le « sans relevé » hachuré. */
+.lp-strip {
+  display: grid;
+  grid-template-columns: repeat(96, minmax(0, 1fr));
+  height: 18px;
+  width: 100%;
+  min-width: 192px;
+  max-width: 320px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.lp-strip i {
+  display: block;
+  background: var(--strip-ok);
+}
+.lp-strip i.w {
+  background: var(--st-warn);
+}
+.lp-strip i.b {
+  background: var(--st-bad);
+}
+.lp-strip i.n {
+  background: repeating-linear-gradient(135deg, transparent 0 2px, var(--st-none) 2px 3px);
+}
+.lp-strip i.a {
+  background: var(--lp-armed);
+}
+.lp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  font-size: 0.8125rem;
+  color: var(--color-ink-2);
+}
+.lp-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.lp-sw {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  flex: none;
+  display: inline-block;
+}
+.lp-sw.ok {
+  background: var(--strip-ok);
+}
+.lp-sw.w {
+  background: var(--st-warn);
+}
+.lp-sw.b {
+  background: var(--st-bad);
+}
+.lp-sw.n {
+  background: repeating-linear-gradient(135deg, transparent 0 2px, var(--st-none) 2px 3px);
+  border: 1px solid var(--color-rule-2);
+}
+.lp-sw.a {
+  background: var(--lp-armed);
+}
+.lp-sw.l0 {
+  background: var(--loss-0);
+  border: 1px solid var(--color-rule-2);
+}
+.lp-sw.l1 {
+  background: var(--loss-1);
+}
+.lp-sw.l2 {
+  background: var(--loss-2);
+}
+.lp-sw.l3 {
+  background: var(--loss-3);
+}
+.lp-sw.l4 {
+  background: var(--loss-4);
+}

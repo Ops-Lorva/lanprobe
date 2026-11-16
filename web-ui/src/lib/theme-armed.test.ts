@@ -63,7 +63,9 @@ function fonds(): { sombres: string[]; clairs: string[] } {
 /** Le corps de la règle CSS d'un sélecteur, dans un composant Svelte. */
 function regle(fichier: string, selecteur: string): string {
   const css = lire(fichier);
-  const i = css.indexOf(`\n  ${selecteur} {`);
+  // Indenté dans un `<style>` de composant, en tête de ligne dans `web.css`.
+  const j = css.indexOf(`\n  ${selecteur} {`);
+  const i = j > -1 ? j : css.indexOf(`\n${selecteur} {`);
   expect(i, `sélecteur « ${selecteur} » introuvable dans ${fichier}`).toBeGreaterThan(-1);
   return css.slice(i, css.indexOf('}', i));
 }
@@ -122,7 +124,9 @@ describe('la couleur de l’armé', () => {
  */
 describe('les repères du temps réel', () => {
   const REPERES: [string, string][] = [
-    ['./components/ProbeRow.svelte', '.rtflag'],
+    // DA « Relevé » : le fanion du parc est la pilule partagée `.lp-armed`,
+    // que la ligne du parc emploie (vérifié plus bas).
+    ['../web.css', '.lp-armed'],
     ['../views/ProbeView.svelte', '.rt.on'],
     ['../views/ProbeView.svelte', '.rt-note'],
   ];
@@ -141,6 +145,7 @@ describe('les repères du temps réel', () => {
   // demandait à perdre.
   it('gardent le temps restant, que l’app mobile n’affiche pas', () => {
     expect(lire('./components/ProbeRow.svelte')).toContain('fleet.realtime_flag');
+    expect(lire('./components/ProbeRow.svelte')).toContain('class="lp-armed"');
     expect(lire('../views/ProbeView.svelte')).toContain('probe.realtime_active');
   });
 });

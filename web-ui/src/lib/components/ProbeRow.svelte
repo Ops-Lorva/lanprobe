@@ -3,27 +3,31 @@
   import { platformLabel } from '$lib/format';
   import StatusMark from './StatusMark.svelte';
   import BufferBadge from './BufferBadge.svelte';
-  import { relativeTime, absoluteTime, secondsLeft, countdown } from '$lib/time';
-  import { probeLiveness } from '$lib/probe-liveness';
+  import HeartbeatStrip from './HeartbeatStrip.svelte';
+  import { relativeTime, absoluteTime, secondsLeft, countdown, elapsed, contactTime } from '$lib/time';
+  import { probeDisplay } from '$lib/probe-state';
   import { isBehind } from '$lib/probe-version';
+  import { go } from '$lib/router';
+  import type { Beat } from '$lib/heartbeat';
   import type { Probe } from '$lib/api';
 
   interface Props {
     probe: Probe;
     /** Horloge partagée : le délai relatif doit vieillir sans rechargement. */
     now: number;
-    /** Affiche le site sous le nom — utile hors du regroupement par site. */
-    showSite?: boolean;
     /**
-     * La version la plus récente du parc, pour signaler celles qui traînent.
-     *
-     * ⚠️ La plus récente DU PARC, pas celle publiée sur GitHub : un hub
-     * auto-hébergé tourne souvent sans accès sortant, et une couleur qui
-     * dépendrait d'un appel externe serait fausse là où on en a besoin.
+     * La version de référence : la dernière publiée quand le hub sait la lire,
+     * la plus récente du parc sinon (voir `FleetView`).
      */
     newest?: string | null;
+    /** Les 96 quarts d'heure de la bande de battement. */
+    cells: Beat[];
+    /** Latence passerelle en ms, `null` quand on ne sait pas. */
+    latency: number | null;
+    /** Perte 24 h de la passerelle en %, `null` quand on ne sait pas. */
+    loss: number | null;
   }
-  let { probe, now, showSite = false, newest = null }: Props = $props();
+  let { probe, now, newest = null, cells, latency, loss }: Props = $props();
 
   /** 🔴 Ni une version illisible ni une sonde EN AVANCE ne sont « en retard » :
       colorer sur un doute enverrait mettre à jour une machine qui n'en a pas
@@ -31,284 +35,173 @@
   const behind = $derived(isBehind(probe.version, newest));
 
   const lang = $derived($locale ?? 'en');
-  const seen = $derived(relativeTime(probe.last_seen, lang, now));
 
   /**
-   * Fraîcheur recalculée ici, à chaque battement de l'horloge partagée.
+   * L'état affiché, recalculé à chaque battement de l'horloge partagée.
    *
    * ⚠️ On n'affiche PAS `probe.status` : il est daté du dernier chargement, et
-   * son « en ligne » couvre trois battements manqués. Une sonde qui a battu
-   * une fois au démarrage puis s'est tue restait verte — le parc affirmait
-   * une disponibilité que personne n'avait vérifiée.
+   * son « en ligne » couvre trois battements manqués.
    */
-  const live = $derived(probeLiveness(probe.last_seen, now));
+  const shown = $derived(probeDisplay(probe, now));
+  const since = $derived(
+    shown.since != null ? elapsed(Math.max(0, now / 1000 - shown.since), lang) : '',
+  );
 
   /**
    * Temps restant de mode temps réel, `0` quand il ne tourne pas.
    *
-   * ⚠️ C'est le garde-fou contre l'oubli, pas une décoration : on redescend de
-   * l'échelle, la caméra marche, on passe à la suivante — on ne revient pas
-   * éteindre le mode. Ce qui tourne doit se voir depuis le parc, avec sa fin.
+   * ⚠️ C'est le garde-fou contre l'oubli : ce qui tourne doit se voir depuis le
+   * parc, avec sa fin.
    */
   const realtimeLeft = $derived(secondsLeft(probe.realtime_until, now));
 
-  /**
-   * `linux` → `Linux`, `macos` → `macOS`. Une simple capitalisation donnerait
-   * « Macos », qui est faux : les noms de plateformes ont une graphie, autant
-   * la respecter.
-   */
+  /** Une sonde muette n'a plus de mesure fraîche : sa dernière latence est figée. */
+  const fresh = $derived(shown.state === 'online' || shown.state === 'degraded');
+
+  const href = $derived(`#/probes/${encodeURIComponent(probe.probe_id)}`);
+  const one = $derived(
+    new Intl.NumberFormat(lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
+  );
+
+  /** Ce que dit la bande, en mots. */
+  const stripLabel = $derived.by(() => {
+    const bad = cells.filter((c) => c === 'b' || c === 'w').length;
+    return bad
+      ? $_('fleet.strip_aria_bad', { values: { name: probe.name, n: bad } })
+      : $_('fleet.strip_aria_ok', { values: { name: probe.name } });
+  });
+
+  /** La ligne entière s'ouvre, sauf quand on vise un contrôle qu'elle porte. */
+  function open(e: MouseEvent) {
+    if ((e.target as HTMLElement).closest('a, button')) return;
+    if (e.ctrlKey || e.metaKey) window.open(href, '_blank');
+    else go(href);
+  }
 </script>
 
-<!--
-  La ligne entière est un lien : cible large, ouverture en nouvel onglet, et
-  navigation clavier sans piège. Les métadonnées restent en chasse fixe pour
-  que versions et plateformes s'alignent verticalement — c'est ce qui permet
-  de repérer la sonde restée en 1.1.5 sans lire les autres.
--->
-<a
-  class="row {live.state}"
-  class:buffering={probe.buffered_points > 0}
-  href="#/probes/{encodeURIComponent(probe.probe_id)}"
-  aria-label={$_('fleet.open', { values: { name: probe.name } })}
+<tr
+  class:trouble={shown.state === 'offline'}
+  class:degr={shown.state === 'degraded' || shown.state === 'silent'}
+  onclick={open}
 >
-  <span class="name">
-    <span class="nm">{probe.name}</span>
-    {#if showSite}<span class="site">{probe.site}</span>{/if}
-  </span>
+  <td>
+    <a class="nm" {href}>{probe.name}</a>
+    <span class="sub2">{platformLabel(probe.platform, $_('common.none'))}</span>
+  </td>
 
-  <!-- ⚠️ Le repère vit DANS la cellule de statut, il n'ajoute pas de colonne :
-       une cellule conditionnelle décalerait toute la grille quand elle
-       apparaît, et l'en-tête ne correspondrait plus aux lignes.
-
-       Une sonde peut battre parfaitement alors que son lien mesuré est mort —
-       battement et mesures ne passent pas par la même requête. Un voyant vert
-       seul cacherait exactement ce cas. Le repère ne s'affiche que sur une
-       sonde EN LIGNE : sur une sonde muette, l'état internet est une valeur
-       figée qui n'apprend rien de plus que le statut. -->
-  <span class="status">
-    <StatusMark status={live.state} />
-    {#if live.state === 'online' && probe.internet_state && probe.internet_state !== 'online'}
-      <span
-        class="netflag"
-        class:limited={probe.internet_state === 'limited'}
-        title={$_('fleet.net_help')}
-      >{$_(`charts.internet_${probe.internet_state}`)}</span>
+  <td class="status">
+    <StatusMark status={shown.state} />
+    {#if shown.state === 'degraded' && shown.internet}
+      <span class="since">
+        {since
+          ? $_('status.degraded_since', {
+              values: { net: $_(`status.net_${shown.internet}`), when: since },
+            })
+          : $_(`status.net_${shown.internet}`)}
+      </span>
+    {:else if shown.state === 'never'}
+      <span class="since">
+        {$_('status.enrolled_at', { values: { when: contactTime(shown.since, lang, now) } })}
+      </span>
+    {:else if since}
+      <span class="since" title={absoluteTime(probe.last_seen, lang)}>
+        {$_('status.since', { values: { when: since } })}
+      </span>
     {/if}
-    <!-- ⚠️ Le repère s'affiche quel que soit le statut, contrairement à celui
-         d'internet : une sonde muette peut très bien avoir été armée juste
-         avant de se taire, et c'est précisément le cas qu'on doit voir. -->
     {#if realtimeLeft > 0}
       <span
-        class="rtflag"
+        class="lp-armed"
         title={$_('fleet.realtime_help', { values: { left: countdown(realtimeLeft, lang) } })}
-      >{$_('fleet.realtime_flag', { values: { left: countdown(realtimeLeft, lang) } })}</span>
+      >
+        <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M6.8 1 2.5 7h3l-.6 4L9.5 5h-3z" fill="currentColor" /></svg>
+        {$_('fleet.realtime_flag', { values: { left: countdown(realtimeLeft, lang) } })}
+      </span>
     {/if}
-  </span>
+    {#if probe.buffered_points > 0}
+      <BufferBadge points={probe.buffered_points} live={shown.state === 'online' || shown.state === 'degraded'} />
+    {/if}
+  </td>
 
-  <span
-    class="seen lp-mono"
-    title={probe.last_seen ? absoluteTime(probe.last_seen, lang) : $_('status.never_seen')}
-  >
-    {probe.last_seen ? seen : $_('common.none')}
-  </span>
+  <td class="opt-s"><HeartbeatStrip {cells} label={stripLabel} /></td>
 
-  <span class="pubip lp-mono" title={probe.public_ip ?? ''}>{probe.public_ip || '—'}</span>
-  <span class="platform lp-mono">{platformLabel(probe.platform, $_('common.none'))}</span>
-  <span
-    class="version lp-mono"
-    class:behind
-    title={behind ? $_('fleet.version_behind', { values: { version: newest } }) : undefined}
-  >{probe.version || $_('common.none')}</span>
-  <span class="buffer"><BufferBadge points={probe.buffered_points} live={live.state === 'online'} /></span>
+  <td class="num opt">
+    {#if fresh && latency != null}{one.format(latency)}<span class="lp-u">ms</span>{/if}
+  </td>
+  <td class="num opt">
+    {#if fresh && loss != null}{loss === 0 ? '0' : one.format(loss)}<span class="lp-u">%</span>{/if}
+  </td>
 
-  <span class="chev" aria-hidden="true">
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="6,3 11,8 6,13" />
-    </svg>
-  </span>
-</a>
+  <td class="num" title={probe.last_seen ? absoluteTime(probe.last_seen, lang) : $_('status.never_seen')}>
+    {#if probe.last_seen == null}
+      {$_('fleet.never')}
+    {:else if shown.state === 'online' || shown.state === 'degraded'}
+      {relativeTime(probe.last_seen, lang, now)}
+    {:else}
+      {contactTime(probe.last_seen, lang, now)}
+    {/if}
+  </td>
+
+  <td class="opt-l"><span class="lp-mono ip">{probe.public_ip || ''}</span></td>
+
+  <td class="num">
+    {probe.version || ''}
+    {#if behind}
+      <span class="lp-tag upd" title={$_('fleet.version_behind', { values: { version: newest } })}>
+        {$_('fleet.update_available')}
+      </span>
+    {/if}
+  </td>
+
+  <td class="act" aria-hidden="true">
+    <svg class="go" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="6,3 11,8 6,13" /></svg>
+  </td>
+</tr>
 
 <style>
-  .row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 118px 120px 118px 92px 84px 78px 18px;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 12px 9px 9px;
-    border-left: 3px solid transparent;
-    border-bottom: 1px solid var(--ep-border);
-    color: var(--ep-text-primary);
-    text-decoration: none;
-    font-size: 12px;
-    transition: background 0.12s;
+  tr {
+    cursor: pointer;
   }
-  .row:last-child {
-    border-bottom: none;
-  }
-  .row:hover {
-    background: var(--ep-bg-hover);
-  }
-
-  /* Rail de statut : la couleur touche le bord de la ligne, donc toutes les
-     lignes s'alignent sur la même colonne d'un pixel. Sur trente lignes, les
-     hors ligne dessinent une trame verticale repérable sans rien lire. */
-  .row.online {
-    border-left-color: color-mix(in srgb, var(--ep-success) 55%, transparent);
-  }
-  /* Silencieuse : le rail reste gris. Une teinte d'alerte ferait sortir la
-     ligne de la trame au même titre qu'un hors ligne, alors qu'on n'a
-     justement rien à annoncer — seulement une date à donner. */
-  .row.silent {
-    border-left-color: var(--ep-text-muted);
-  }
-  .row.offline {
-    border-left-color: var(--ep-danger);
-    /* La teinte de fond est le second canal : elle porte le bloc entier, pas
-       un point de 6 px, et survit à un écran mal calibré. */
-    background: color-mix(in srgb, var(--ep-danger) 6%, transparent);
-  }
-  .row.offline:hover {
-    background: color-mix(in srgb, var(--ep-danger) 11%, transparent);
-  }
-
-  .name {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    gap: 1px;
-  }
-  .nm {
-    font-weight: 600;
-    font-size: 12.5px;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  td:first-child {
     white-space: nowrap;
   }
-  .site {
-    font-size: 10px;
-    color: var(--ep-text-muted);
-  }
-
-  .seen,
   .status {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    min-width: 0;
-  }
-  /* La cellule de statut peut porter deux repères ; elle passe à la ligne
-     plutôt que de déborder sur la colonne voisine. */
-  .status {
-    flex-wrap: wrap;
-    row-gap: 2px;
-  }
-  .netflag {
-    padding: 1px 5px;
-    border-radius: 3px;
-    font-size: 9.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
-    color: var(--ep-danger);
-    border: 1px solid var(--ep-danger);
-  }
-  .netflag.limited {
-    color: var(--ep-warning, #f59e0b);
-    border-color: var(--ep-warning, #f59e0b);
-  }
-  /* Le temps restant est DANS le repère, pas seulement en infobulle : sur
-     tactile il n'y a pas de survol, et « ça tourne encore longtemps ? » est
-     exactement la question qui empêche l'oubli. */
-  /* ⚠️ Le bleu de l'armé, FIXE — voir `--lp-armed` dans `web.css`. Il portait
-     l'accent, donc la couleur que l'utilisateur choisit : en palette
-     « emerald » ce fanion prenait le vert de « en ligne », juste à côté du
-     statut. Un état ne se peint pas avec la teinte des liens. */
-  .rtflag {
-    padding: 1px 5px;
-    border-radius: 3px;
-    font-size: 9.5px;
-    white-space: nowrap;
-    color: var(--lp-armed);
-    border: 1px solid var(--lp-armed-line);
-    background: var(--lp-armed-dim);
-    cursor: help;
-  }
-  .pubip,
-  .platform,
-  .version {
-    color: var(--ep-text-secondary);
-    font-size: 11px;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .platform,
-  .version {
-    color: var(--ep-text-muted);
+  .status > :global(*) {
+    vertical-align: middle;
   }
-  /* ⚠️ Même ambre que le reste des avertissements de cette ligne. Ce n'est pas
-     une panne — la sonde mesure — donc surtout pas le rouge, qui enverrait
-     quelqu'un sur site. */
-  .version.behind {
-    color: var(--ep-warning, #f59e0b);
-    cursor: help;
+  .status > :global(* + *) {
+    margin-left: 8px;
   }
-  .offline .seen {
-    color: var(--ep-danger);
+  .since {
+    color: var(--color-muted);
+    font-size: 0.8125rem;
   }
-
-  .chev {
-    color: var(--ep-text-dim);
-    display: flex;
-    justify-content: flex-end;
+  .ip {
+    font-size: 0.8125rem;
+    color: var(--color-ink-2);
   }
-  .row:hover .chev {
-    color: var(--ep-accent-bright);
+  .lp-tag.upd {
+    margin-left: 4px;
   }
-
-  /* Les colonnes de contexte tombent avant les colonnes de décision : on perd
-     la plateforme et la version bien avant le statut et le tampon. */
-  @media (max-width: 1080px) {
-    .row {
-      grid-template-columns: minmax(0, 1fr) 118px 120px 118px 84px 78px 18px;
-    }
-    .platform {
+  .go {
+    color: var(--color-muted);
+    vertical-align: middle;
+  }
+  tr.trouble td:first-child {
+    box-shadow: inset 2px 0 0 var(--st-bad);
+  }
+  tr.degr td:first-child {
+    box-shadow: inset 2px 0 0 var(--st-warn);
+  }
+  @media (max-width: 90rem) {
+    .opt-l {
       display: none;
     }
   }
-  @media (max-width: 900px) {
-    .row {
-      grid-template-columns: minmax(0, 1fr) 118px 110px 78px 18px;
-    .pubip { display: none; }
-    }
-    .version {
-      display: none;
-    }
-  }
-  @media (max-width: 640px) {
-    .row {
-      grid-template-columns: minmax(0, 1fr) auto;
-      grid-template-areas:
-        'name status'
-        'meta buffer';
-      row-gap: 4px;
-      padding: 11px 12px 11px 9px;
-    }
-    .name {
-      grid-area: name;
-    }
-    .status {
-      grid-area: status;
-      justify-self: end;
-    }
-    .seen {
-      grid-area: meta;
-    }
-    .buffer {
-      grid-area: buffer;
-      justify-self: end;
-    }
-    .chev {
+  @media (max-width: 48rem) {
+    .opt,
+    .opt-s {
       display: none;
     }
   }

@@ -132,3 +132,37 @@ export function countdown(seconds: number, locale: string): string {
     seconds < 60 ? [Math.round(seconds), 'second'] : [Math.round(seconds / 60), 'minute'];
   return new Intl.NumberFormat(locale, { style: 'unit', unit, unitDisplay: 'short' }).format(value);
 }
+
+/**
+ * Une durée écrite comme la maquette : « 9 s », « 41 min », « 3 h 12 »,
+ * « 2 j 3 h ». Deux unités au plus — la seconde d'une panne de trois heures
+ * n'apprend rien.
+ */
+export function elapsed(seconds: number, locale: string): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const day = locale.startsWith('fr') ? 'j' : 'd';
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  if (s < 86400) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return m ? `${h} h ${String(m).padStart(2, '0')}` : `${h} h`;
+  }
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  return h ? `${d} ${day} ${h} h` : `${d} ${day}`;
+}
+
+/**
+ * Le dernier contact d'une sonde qui ne bat plus : l'heure seule le jour même
+ * (« 11:18 »), la date et l'heure au-delà (« 15/11 18:22 »). C'est ce qu'on
+ * recoupe avec un appel du client, pas un délai qui vieillit.
+ */
+export function contactTime(seconds: number | null | undefined, locale: string, at: number): string {
+  if (seconds == null) return '—';
+  const d = new Date(seconds * 1000);
+  const time = new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit', hour12: false }).format(d);
+  if (new Date(at).toDateString() === d.toDateString()) return time;
+  const day = new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit' }).format(d);
+  return `${day} ${time}`;
+}

@@ -28,8 +28,6 @@
   // « Silencieuse » sur sa ligne se retrouvait comptée « En ligne » dans le
   // bandeau et retenue par le filtre « En ligne ».
   import {
-    LIVENESS_ORDER,
-    fleetTotals,
     livenessOf,
     matchesFleetFilter,
     needsAttention,
@@ -37,14 +35,14 @@
     sortKey,
     type FleetFilter,
   } from '$lib/fleet-filter';
-  import { enrollments, pendingRows, pendingKey, type PendingRow } from '$lib/enroll';
   import FleetRail from '$lib/components/FleetRail.svelte';
   import SiteSection from '$lib/components/SiteSection.svelte';
   import StateBlock from '$lib/components/StateBlock.svelte';
-  import StatusMark from '$lib/components/StatusMark.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import SiteAlerts from '$lib/components/SiteAlerts.svelte';
-  import PackagesModal from '$lib/components/PackagesModal.svelte';
+  import { fleetBeats } from '$lib/fleet-beats';
+  import { displayTotals, probeDisplay } from '$lib/probe-state';
+  import { contactTime } from '$lib/time';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
 
@@ -122,7 +120,12 @@
   // toutes les 15 s, et c'est elle qui fait glisser une sonde d'« en ligne »
   // vers « silencieuse » entre deux chargements du parc. Sans elle, le bandeau
   // resterait figé sur le verdict du dernier rafraîchissement.
-  const totals = $derived(fleetTotals($fleet.probes, $now));
+  const totals = $derived(displayTotals($fleet.probes, $now));
+
+  /** Les sondes qui ne battent plus, pour le bandeau : c'est elles qu'on vient voir. */
+  const down = $derived(
+    $fleet.probes.filter((p) => probeDisplay(p, $now).state === 'offline'),
+  );
   /**
    * La référence de « pas à jour » : la dernière version PUBLIÉE quand le hub
    * arrive à la lire, la plus récente du parc sinon.
@@ -147,25 +150,11 @@
   const bufferingCount = $derived($fleet.probes.filter((p) => p.buffered_points > 0).length);
   const hasFilter = $derived(search.trim() !== '' || statusFilter !== 'all');
 
-  /** Attentes rangées par site : elles s'affichent dans la liste de leur site. */
-  const pendingBySite = $derived.by(() => {
-    const m = new Map<string, PendingRow[]>();
-    for (const r of $pendingRows) {
-      const list = m.get(r.site_id) ?? [];
-      list.push(r);
-      m.set(r.site_id, list);
-    }
-    return m;
-  });
-
   // ── Dépliage ─────────────────────────────────────────────────────────────
   let manual = $state<Record<string, boolean>>({});
 
   function isExpanded(siteId: string, probes: Probe[], siteCount: number) {
     if (siteId in manual) return manual[siteId];
-    // Une attente en cours ouvre toujours son site : un code qu'il faut
-    // déplier pour lire est un code qu'on croit perdu.
-    if ((pendingBySite.get(siteId)?.length ?? 0) > 0) return true;
     // Peu de sites : tout ouvert, on voit le parc d'un bloc.
     // Beaucoup de sites : seuls ceux qui demandent une action s'ouvrent, les
     // autres restent pliés — mais leur en-tête dit déjà comment ils vont.
@@ -173,91 +162,10 @@
     return needsAttention(probes, $now);
   }
 
-  // ── Enrôlement : le « + » du site crée le code, sur place ────────────────
-  // Aucune fenêtre, aucun formulaire : le site est déterminé par l'endroit du
-  // clic, et le code n'a rien d'autre à recevoir. Ce qui apparaît est une ligne
-  // dans la liste de ce site — un emplacement réservé, lisible au téléphone.
-  let addBusySite = $state<string | null>(null);
-  let addErrors = $state<Record<string, string>>({});
-  let pendingBusyKey = $state<string | null>(null);
-
-  /**
-   * La liste des paquets de la sonde, ouverte depuis la ligne d'enrôlement.
-   *
-   * 🔴 **Montée seulement quand on l'ouvre.** C'est elle qui fait l'appel
-   * sortant ; l'écran d'enrôlement, lui, n'en dépend pas — un hub sans Internet
-   * affiche son code comme d'habitude.
-   */
-  let packagesOpen = $state(false);
-
-  async function addProbe(siteId: string, siteName: string) {
-    if (addBusySite) return;
-    addBusySite = siteId;
-    addErrors = { ...addErrors, [siteId]: '' };
-    try {
-      const created = await api.createEnrollCode(siteId);
-      enrollments.remember(
-        {
-          site_id: created.site_id ?? siteId,
-          site: created.site ?? siteName,
-          probe_id: null,
-          probe: null,
-          created_at: Math.floor(Date.now() / 1000),
-          expires_at: created.expires_at,
-        },
-        created.code,
-      );
-      // Le site s'ouvre, sinon le code atterrit dans une section repliée.
-      manual = { ...manual, [siteId]: true };
-      void enrollments.refresh(onExpired);
-    } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      addErrors = {
-        ...addErrors,
-        [siteId]: e instanceof ApiError ? e.message : String(e),
-      };
-    } finally {
-      addBusySite = null;
-    }
-  }
-
-  /**
-   * Remplacer un code : nouvelle sonde → nouveau code de site ; réparation →
-   * code rattaché à la sonde, pour qu'elle revienne avec son historique.
-   */
-  async function regenerate(row: PendingRow) {
-    if (pendingBusyKey) return;
-    pendingBusyKey = row.key;
-    addErrors = { ...addErrors, [row.site_id]: '' };
-    try {
-      const created = row.probe_id
-        ? await api.reenrollCode(row.probe_id)
-        : await api.createEnrollCode(row.site_id);
-      const next = {
-        site_id: created.site_id ?? row.site_id,
-        site: created.site ?? row.site,
-        probe_id: row.probe_id,
-        probe: row.probe,
-        created_at: Math.floor(Date.now() / 1000),
-        expires_at: created.expires_at,
-      };
-      enrollments.remember(next, created.code);
-      // L'ancienne ligne sort de l'écran : on vient de demander à la remplacer,
-      // et deux emplacements réservés pour une seule machine se lisent comme
-      // deux sondes à installer. Son code n'est pas révoqué pour autant — il
-      // expire tout seul, personne ne l'a plus sous les yeux.
-      if (pendingKey(next) !== row.key) enrollments.hide(row.key);
-      void enrollments.refresh(onExpired);
-    } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      addErrors = {
-        ...addErrors,
-        [row.site_id]: e instanceof ApiError ? e.message : String(e),
-      };
-    } finally {
-      pendingBusyKey = null;
-    }
-  }
+  // ── Enrôlement ────────────────────────────────────────────────────────────
+  // « Ajouter une sonde » et le « + » de chaque site mènent à `#/add` : le
+  // code, l'adresse du hub et l'installeur tiennent sur un seul écran. Les
+  // codes en attente y sont listés (ils étaient ici, dans la liste du site).
 
   // ── Sites : création / renommage ─────────────────────────────────────────
   let createOpen = $state(false);
@@ -569,19 +477,26 @@
     }
   }
 
+  // ── Bande de battement ───────────────────────────────────────────────────
+  // Lue à part et lentement (`fleet-beats`) : elle compte des quarts d'heure.
+  // Le store ne relit que ce qui a plus de 5 min ; on le relance donc à chaque
+  // relecture du parc sans craindre l'avalanche.
+  $effect(() => {
+    const ids = $fleet.probes.map((p) => p.probe_id);
+    if (ids.length) void fleetBeats.refresh(ids, onExpired);
+  });
+
   // ── Cycle de vie ─────────────────────────────────────────────────────────
   let timer: ReturnType<typeof setInterval> | null = null;
 
   onMount(() => {
     void fleet.load(onExpired);
-    void enrollments.refresh(onExpired);
     // Le statut est dérivé du dernier battement : sans rafraîchissement, un
     // parc laissé ouvert affiche un « en ligne » qui a vieilli d'une heure.
     // Le même tour recharge les attentes : c'est ainsi qu'une place réservée
     // disparaît d'elle-même quand la machine a consommé son code.
     timer = setInterval(() => {
       void fleet.load(onExpired, { quiet: true });
-      void enrollments.refresh(onExpired);
     }, 30_000);
   });
   onDestroy(() => {
@@ -592,37 +507,24 @@
 {#if $flash}
   <!-- Confirmation rapportée depuis le détail : elle redit que les mesures
        sont conservées, au moment où l'utilisateur constate la ligne en moins. -->
-  <div class="flash" role="status">
-    <span>{$flash}</span>
+  <div class="lp-banner info" role="status">
+    <span class="grow">{$flash}</span>
     <button class="lp-btn ghost sm" onclick={() => flash.set('')}>{$_('common.close')}</button>
   </div>
 {/if}
 
-<header class="page-head">
-  <div>
-    <h1>{$_('fleet.title')}</h1>
-    <p class="sub">
-      {$_('fleet.site_count', { values: { n: $fleet.sites.length } })}
-      · {$_('fleet.count', { values: { n: $fleet.probes.length } })}
-      {#if $fleet.loadedAt}
-        <span class="upd">
-          · {$_('fleet.updated', {
-            values: { when: relativeTime(Math.floor($fleet.loadedAt / 1000), lang, $now) },
-          })}
-        </span>
-      {/if}
-    </p>
-  </div>
-  <div class="head-acts">
+<header class="lp-head">
+  <h1>{$_('fleet.title')}</h1>
+  <div class="lp-acts">
+    <!-- Un seul bouton plein : l'action de l'écran. Les autres restent sobres. -->
     {#if $canOperate}
-      <button class="lp-btn sm" onclick={() => (createOpen = true)}>{$_('fleet.new_site')}</button>
+      <button class="lp-btn ghost" onclick={() => (createOpen = true)}>{$_('fleet.new_site')}</button>
     {/if}
     <!-- ⚠️ Le chemin vers les archives ne disparaît jamais, même à zéro
          archive : sans lui, on archive un site puis on cherche comment le
-         faire revenir. Le compte s'affiche quand il y en a. -->
+         faire revenir. -->
     <button
-      class="lp-btn sm"
-      class:on={$fleet.showArchived}
+      class="lp-btn ghost"
       onclick={() => fleet.toggleArchived(onExpired)}
       aria-pressed={$fleet.showArchived}
     >
@@ -632,43 +534,78 @@
           ? $_('fleet.show_archived_n', { values: { n: archivedCount } })
           : $_('fleet.show_archived')}
     </button>
-    <button
-      class="lp-btn sm"
-      onclick={() => void fleet.load(onExpired, { quiet: true })}
-      disabled={$fleet.refreshing}
-    >
-      {$fleet.refreshing ? $_('fleet.refreshing') : $_('fleet.refresh')}
-    </button>
+    {#if $canOperate}
+      <a class="lp-btn primary" href="#/add">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
+        {$_('fleet.add_probe')}
+      </a>
+    {/if}
   </div>
 </header>
 
-<div class="rail-wrap">
-  <FleetRail
-    sites={$fleet.sites.length}
-    total={$fleet.probes.length}
-    online={totals.online}
-    silent={totals.silent}
-    offline={totals.offline}
-    buffered={totals.buffered}
-  />
-</div>
+<FleetRail
+  sites={$fleet.sites.length}
+  total={$fleet.probes.length}
+  {totals}
+  filter={statusFilter}
+  onpick={(f) => (statusFilter = statusFilter === f ? 'all' : f)}
+/>
+
+{#if down.length === 1}
+  <div class="lp-banner bad" role="status">
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1" y="1" width="8" height="8" rx="1" fill="var(--st-bad)" /></svg>
+    <span class="grow">
+      {$_('fleet.down_one', {
+        values: {
+          name: down[0].name,
+          site: down[0].site,
+          when: contactTime(down[0].last_seen, lang, $now),
+        },
+      })}
+    </span>
+    <a class="lp-btn sm" href="#/probes/{encodeURIComponent(down[0].probe_id)}">{$_('fleet.down_open')}</a>
+  </div>
+{:else if down.length > 1}
+  <div class="lp-banner bad" role="status">
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1" y="1" width="8" height="8" rx="1" fill="var(--st-bad)" /></svg>
+    <span class="grow">{$_('fleet.down_many', { values: { n: down.length } })}</span>
+    <button class="lp-btn sm" onclick={() => (statusFilter = 'offline')}>{$_('fleet.down_show')}</button>
+  </div>
+{/if}
 
 {#if bufferingCount > 0}
   <!-- Le tampon mérite un bandeau, pas une colonne de plus : il annonce un
        trou dans les données que les courbes ne montreront que plus tard. -->
-  <div class="buffer-alert" role="status">
-    <div>
+  <div class="lp-banner" role="status">
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="3.7" fill="none" stroke="var(--st-warn)" stroke-width="1.7" /></svg>
+    <span class="grow">
       <strong>{$_('buffer.warn_title', { values: { n: bufferingCount } })}</strong>
-      <p>{$_('buffer.warn_body')}</p>
-    </div>
+      · {$_('buffer.warn_body')}
+    </span>
     <button class="lp-btn sm" onclick={() => (statusFilter = 'buffering')}>
       {$_('buffer.warn_cta')}
     </button>
   </div>
 {/if}
 
-<div class="toolbar">
-  <label class="ctl">
+<div class="filters">
+  <input
+    class="lp-input search"
+    type="search"
+    bind:value={search}
+    placeholder={$_('fleet.search_placeholder')}
+    aria-label={$_('common.search')}
+  />
+
+  <div class="lp-seg" role="group" aria-label={$_('fleet.col_status')}>
+    {#each ['all', 'problems', 'buffering', 'realtime'] as const as f (f)}
+      <button aria-pressed={statusFilter === f} onclick={() => (statusFilter = f)}>
+        {$_(`fleet.filter_${f}`)}
+      </button>
+    {/each}
+  </div>
+
+  <label>
     <span class="lp-sr">{$_('fleet.site_label')}</span>
     <select
       value={$fleet.siteId ?? ''}
@@ -681,38 +618,9 @@
     </select>
   </label>
 
-  <div class="chips" role="group" aria-label={$_('fleet.col_status')}>
-    <button class="chip" class:on={statusFilter === 'all'} onclick={() => (statusFilter = 'all')}>
-      {$_('fleet.filter_all')}
-    </button>
-    {#each LIVENESS_ORDER as s (s)}
-      <button
-        class="chip {s}"
-        class:on={statusFilter === s}
-        onclick={() => (statusFilter = s as LivenessState)}
-      >
-        <StatusMark status={s} size={9} withLabel={false} />
-        {$_(`status.${s}`)}
-      </button>
-    {/each}
-    <button
-      class="chip buffering"
-      class:on={statusFilter === 'buffering'}
-      onclick={() => (statusFilter = 'buffering')}
-    >
-      {$_('fleet.filter_buffering')}
-    </button>
-  </div>
+  <span class="grow"></span>
 
-  <input
-    class="lp-input search"
-    type="search"
-    bind:value={search}
-    placeholder={$_('fleet.search_placeholder')}
-    aria-label={$_('common.search')}
-  />
-
-  <label class="ctl">
+  <label>
     <span class="lp-sr">{$_('fleet.sort')}</span>
     <select bind:value={sort}>
       <option value="status">{$_('fleet.sort_status')}</option>
@@ -735,8 +643,8 @@
     </button>
   </StateBlock>
 {:else if $fleet.sites.length === 0 && $fleet.probes.length === 0}
-  <!-- Premier vide : rien du tout. Il n'y a pas encore de site où réserver une
-       place, donc la seule action possible est d'en créer un. -->
+  <!-- Premier vide : il n'y a pas encore de site où rattacher un code, la
+       seule action possible est d'en créer un. -->
   <StateBlock title={$_('fleet.empty_sites_title')} body={$_('fleet.empty_sites_body')}>
     {#if $canOperate}
       <button class="lp-btn primary" onclick={() => (createOpen = true)}>
@@ -744,7 +652,7 @@
       </button>
     {/if}
   </StateBlock>
-{:else if filtered.length === 0 && hasFilter && $pendingRows.length === 0}
+{:else if filtered.length === 0 && hasFilter}
   <StateBlock
     title={$_('fleet.no_match_title')}
     body={$_('fleet.no_match_body', { values: { n: $fleet.probes.length } })}
@@ -760,51 +668,76 @@
     </button>
   </StateBlock>
 {:else}
-  <div class="sections" class:dim={$fleet.refreshing}>
-    {#each groups as g (g.site.site_id)}
-      <SiteSection
-        siteId={g.site.site_id}
-        siteName={g.site.name}
-        probes={g.probes}
-        newest={newestVersionSeen}
-        pending={pendingBySite.get(g.site.site_id) ?? []}
-        now={$now}
-        expanded={isExpanded(g.site.site_id, g.probes, groups.length)}
-        ontoggle={() =>
-          (manual = {
-            ...manual,
-            [g.site.site_id]: !isExpanded(g.site.site_id, g.probes, groups.length),
-          })}
-        onrename={() => openRename(g.site)}
-        onalerts={() => openAlerts(g.site.site_id, g.site.name)}
-        archived={!!g.site.archived_at}
-        onarchive={() =>
-          (archiveTarget = {
-            id: g.site.site_id,
-            name: g.site.name,
-            archived: !g.site.archived_at,
-          })}
-        onexportSla={() => openSlaExport(g.site.site_id, g.site.name)}
-        onfocusSite={() => fleet.selectSite(g.site.site_id, onExpired)}
-        onadd={() => void addProbe(g.site.site_id, g.site.name)}
-        addBusy={addBusySite === g.site.site_id}
-        addError={addErrors[g.site.site_id] ?? ''}
-        onregenerate={(row) => void regenerate(row)}
-        onhidePending={(row) => enrollments.hide(row.key)}
-        onpackages={() => (packagesOpen = true)}
-        {pendingBusyKey}
-        filtered={hasFilter}
-      />
-    {/each}
+  <div class="lp-tbl-wrap" class:dim={$fleet.refreshing}>
+    <table class="lp-t">
+      <thead>
+        <tr>
+          <th>{$_('fleet.col_probe')}</th>
+          <th>{$_('fleet.col_status')}</th>
+          <th class="opt-s">{$_('fleet.col_strip')}</th>
+          <th class="num opt">{$_('fleet.col_latency')}</th>
+          <th class="num opt">{$_('fleet.col_loss')}</th>
+          <th class="num">{$_('fleet.col_last_seen')}</th>
+          <th class="opt-l">{$_('fleet.col_public_ip')}</th>
+          <th class="num">{$_('fleet.col_version')}</th>
+          <th class="act"><span class="lp-sr">{$_('fleet.col_open')}</span></th>
+        </tr>
+      </thead>
+      {#each groups as g (g.site.site_id)}
+        <SiteSection
+          siteId={g.site.site_id}
+          siteName={g.site.name}
+          probes={g.probes}
+          newest={newestVersionSeen}
+          now={$now}
+          beats={$fleetBeats}
+          cols={9}
+          expanded={isExpanded(g.site.site_id, g.probes, groups.length)}
+          ontoggle={() =>
+            (manual = {
+              ...manual,
+              [g.site.site_id]: !isExpanded(g.site.site_id, g.probes, groups.length),
+            })}
+          onrename={() => openRename(g.site)}
+          onalerts={() => openAlerts(g.site.site_id, g.site.name)}
+          archived={!!g.site.archived_at}
+          onarchive={() =>
+            (archiveTarget = {
+              id: g.site.site_id,
+              name: g.site.name,
+              archived: !g.site.archived_at,
+            })}
+          onexportSla={() => openSlaExport(g.site.site_id, g.site.name)}
+          onfocusSite={() => fleet.selectSite(g.site.site_id, onExpired)}
+          filtered={hasFilter}
+        />
+      {/each}
+    </table>
   </div>
-{/if}
 
-{#if packagesOpen}
-  <PackagesModal
-    open={packagesOpen}
-    onclose={() => (packagesOpen = false)}
-    onexpired={onExpired}
-  />
+  <div class="foot">
+    <div class="lp-legend">
+      <span><i class="lp-sw ok"></i>{$_('fleet.legend_ok')}</span>
+      <span><i class="lp-sw w"></i>{$_('fleet.legend_warn')}</span>
+      <span><i class="lp-sw b"></i>{$_('fleet.legend_bad')}</span>
+      <span><i class="lp-sw n"></i>{$_('fleet.legend_none')}</span>
+      <span><i class="lp-sw a"></i>{$_('fleet.legend_realtime')}</span>
+    </div>
+    {#if $fleet.loadedAt}
+      <span class="upd">
+        {$_('fleet.updated', {
+          values: { when: relativeTime(Math.floor($fleet.loadedAt / 1000), lang, $now) },
+        })}
+      </span>
+    {/if}
+    <button
+      class="lp-btn ghost sm"
+      onclick={() => void fleet.load(onExpired, { quiet: true })}
+      disabled={$fleet.refreshing}
+    >
+      {$fleet.refreshing ? $_('fleet.refreshing') : $_('fleet.refresh')}
+    </button>
+  </div>
 {/if}
 
 <Modal
@@ -1186,159 +1119,47 @@
     max-width: 260px;
   }
 
-  .flash {
+  .filters {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 10px 12px;
-    margin-bottom: 12px;
-    border: 1px solid color-mix(in srgb, var(--ep-success) 45%, var(--ep-border));
-    border-left-width: 3px;
-    border-radius: var(--ep-radius-md);
-    background: color-mix(in srgb, var(--ep-success) 8%, transparent);
-    font-size: 12.5px;
-    color: var(--ep-text-primary);
-  }
-
-  .page-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
     flex-wrap: wrap;
-    margin-bottom: 14px;
-  }
-  /*
-    Le bloc de titre doit pouvoir rétrécir. Sans ça il réclame sa largeur de
-    contenu, et « Actualisé il y a 1 min. » — qui s'allonge tout seul avec le
-    temps — pousse les deux boutons sur une deuxième ligne : 40 px de haut de
-    page qui apparaissent et disparaissent selon l'âge du rafraîchissement.
-    On préfère que la ligne de comptage passe à la ligne, elle, c'est stable.
-
-    Base explicite et non `auto` : avec `flex-wrap`, le navigateur passe à la
-    ligne AVANT de rétrécir un élément dont la base vaut son contenu. Une base
-    de 180 px laisse les deux boutons tenir sur la même ligne, et c'est la
-    ligne de comptage qui se replie.
-  */
-  .page-head > div:first-child {
-    flex: 1 1 180px;
-    min-width: 0;
-  }
-  h1 {
-    font-size: 20px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    margin: 0;
-  }
-  .sub {
-    font-size: 11.5px;
-    color: var(--ep-text-muted);
-    margin: 3px 0 0;
-  }
-  .upd {
-    color: var(--ep-text-dim);
-  }
-  .head-acts {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-
-  .rail-wrap {
-    margin-bottom: 12px;
-  }
-
-  .buffer-alert {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 14px;
-    flex-wrap: wrap;
-    padding: 12px 14px;
-    margin-bottom: 12px;
-    border: 1px solid color-mix(in srgb, var(--ep-warning) 50%, var(--ep-border));
-    border-left-width: 3px;
-    border-radius: var(--ep-radius-md);
-    background: color-mix(in srgb, var(--ep-warning) 8%, transparent);
-  }
-  .buffer-alert strong {
-    font-size: 12.5px;
-    color: var(--ep-text-primary);
-  }
-  .buffer-alert p {
-    font-size: 11.5px;
-    color: var(--ep-text-secondary);
-    margin: 4px 0 0;
-    max-width: 78ch;
-    line-height: 1.55;
-  }
-
-  .toolbar {
-    display: flex;
-    align-items: center;
     gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
+    align-items: center;
+    margin-bottom: 16px;
   }
   .search {
-    flex: 1 1 190px;
-    min-width: 0;
-    max-width: 280px;
-    font-family: var(--ep-font-sans);
-    font-size: 12px;
-    min-height: 30px;
-    padding: 5px 9px;
+    flex: 1 1 240px;
+    max-width: 360px;
   }
-  .ctl select {
-    font-size: 12px;
+  .grow {
+    flex: 1;
   }
-
-  .chips {
-    display: flex;
-    gap: 4px;
-    flex-wrap: wrap;
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 5px 9px;
-    border-radius: 999px;
-    border: 1px solid var(--ep-border);
-    background: var(--ep-bg-secondary);
-    color: var(--ep-text-secondary);
-    font-family: var(--ep-font-sans);
-    font-size: 11.5px;
-    cursor: pointer;
-  }
-  .chip:hover {
-    border-color: var(--ep-border-strong);
-    color: var(--ep-text-primary);
-  }
-  .chip.on {
-    border-color: var(--ep-accent);
-    background: var(--ep-accent-dim);
-    color: var(--ep-accent-bright);
-    font-weight: 600;
-  }
-  .chip.buffering.on {
-    border-color: var(--ep-warning);
-    background: color-mix(in srgb, var(--ep-warning) 14%, transparent);
-    color: var(--ep-warning);
-  }
-
-  /* Doit rester aligné sur la grille de ProbeRow.svelte — les styles Svelte
-     sont scopés, la définition ne peut pas être partagée. */
-
-  .sections {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+  .lp-tbl-wrap {
     transition: opacity 0.15s;
   }
-  .sections.dim {
+  .lp-tbl-wrap.dim {
     opacity: 0.6;
+  }
+  .foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 24px;
+    margin-top: 12px;
+  }
+  .upd {
+    font-size: 0.8125rem;
+    color: var(--color-muted);
+  }
+  @media (max-width: 90rem) {
+    .opt-l {
+      display: none;
+    }
+  }
+  @media (max-width: 48rem) {
+    .opt,
+    .opt-s {
+      display: none;
+    }
   }
 
   .warn {
@@ -1362,16 +1183,4 @@
     padding-left: 8px;
   }
 
-  @media (max-width: 1080px) {
-    .c-platform {
-      display: none;
-    }
-  }
-  @media (max-width: 900px) {
-    .c-version {
-      display: none;
-    }
-  }
-  @media (max-width: 640px) {
-  }
 </style>

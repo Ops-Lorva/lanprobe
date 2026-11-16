@@ -1,103 +1,133 @@
 <script lang="ts">
-  import { _, locale } from 'svelte-i18n';
-  import { compactNumber } from '$lib/time';
+  import { _ } from 'svelte-i18n';
+  import type { FleetFilter } from '$lib/fleet-filter';
+  import type { DisplayTotals } from '$lib/probe-state';
 
   interface Props {
     sites: number;
     total: number;
-    online: number;
-    /**
-     * ⚠️ `silent`, pas `stale` : ce compteur vient de `probeLiveness`, calculé
-     * dans le navigateur, et non du statut du hub. Deux mots pour le même
-     * ensemble de sondes laissaient le bandeau et les lignes se contredire.
-     */
-    silent: number;
-    offline: number;
-    buffered: number;
+    totals: DisplayTotals;
+    /** Le filtre en cours : la case qui le porte est marquée. */
+    filter: FleetFilter;
+    /** Une case se clique : elle filtre le parc sur ce qu'elle compte. */
+    onpick: (f: FleetFilter) => void;
   }
-  let { sites, total, online, silent, offline, buffered }: Props = $props();
+  let { sites, total, totals, filter, onpick }: Props = $props();
 
-  const lang = $derived($locale ?? 'en');
+  const attention = $derived(totals.degraded + totals.silent);
 </script>
 
 <!--
-  Reprise littérale du gabarit de tuile de l'app desktop (`StatRail.svelte`) :
-  même hauteur, même étiquette 9 px capitalisée, même valeur 18 px. Seules les
-  grandeurs changent. Un utilisateur du desktop retrouve le même bandeau.
-
-  Les compteurs à zéro restent en gris : un « 0 hors ligne » en rouge apprend à
-  l'œil à ignorer le rouge.
+  Le relevé chiffré du parc. Les compteurs à zéro restent sans couleur : un
+  « 0 hors ligne » en rouge apprend à l'œil à ignorer le rouge.
 -->
-<div class="rail">
-  <div class="tile">
-    <div class="lp-label">{$_('fleet.rail_sites')}</div>
-    <div class="val">{sites}</div>
+<dl class="rail">
+  <div><dt>{$_('fleet.rail_sites')}</dt><dd>{sites}</dd></div>
+  <div>
+    <dt>{$_('fleet.rail_total')}</dt>
+    <dd><button onclick={() => onpick('all')}>{total}</button></dd>
   </div>
-  <div class="tile">
-    <div class="lp-label">{$_('fleet.rail_total')}</div>
-    <div class="val">{total}</div>
+  <div class:ok={totals.online > 0}>
+    <dt>{$_('fleet.rail_online')}</dt>
+    <dd>
+      <button class:on={filter === 'online'} onclick={() => onpick('online')}>
+        {#if totals.online > 0}<svg viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4.2" fill="currentColor" /></svg>{/if}
+        {totals.online}
+      </button>
+    </dd>
   </div>
-  <div class="tile">
-    <div class="lp-label">{$_('fleet.rail_online')}</div>
-    <div class="val" class:ok={online > 0}>{online}</div>
+  <div class:warn={attention > 0}>
+    <dt>{$_('fleet.rail_attention')}</dt>
+    <dd>
+      <button class:on={filter === 'attention'} onclick={() => onpick('attention')}>
+        {#if attention > 0}<svg viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="3.9" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M5 1.1A3.9 3.9 0 0 1 5 8.9Z" fill="currentColor" /></svg>{/if}
+        {attention}
+      </button>
+    </dd>
   </div>
-  <div class="tile">
-    <div class="lp-label">{$_('fleet.rail_silent')}</div>
-    <!-- Neutre et non orange : le silence n'affirme aucune panne, et un
-         compteur orange se lit comme une alerte de plus à traiter. -->
-    <div class="val">{silent}</div>
+  <div class:bad={totals.offline > 0}>
+    <dt>{$_('fleet.rail_offline')}</dt>
+    <dd>
+      <button class:on={filter === 'offline'} onclick={() => onpick('offline')}>
+        {#if totals.offline > 0}<svg viewBox="0 0 10 10" aria-hidden="true"><rect x="1" y="1" width="8" height="8" rx="1" fill="currentColor" /></svg>{/if}
+        {totals.offline}
+      </button>
+    </dd>
   </div>
-  <div class="tile" class:alert={offline > 0}>
-    <div class="lp-label">{$_('fleet.rail_offline')}</div>
-    <div class="val" class:err={offline > 0}>{offline}</div>
+  <div>
+    <dt>{$_('fleet.rail_never')}</dt>
+    <dd>
+      <button class:on={filter === 'never'} onclick={() => onpick('never')}>{totals.never}</button>
+    </dd>
   </div>
-  <div class="tile" class:alert={buffered > 0}>
-    <div class="lp-label">{$_('fleet.rail_buffered')}</div>
-    <div class="val" class:warn={buffered > 0}>{compactNumber(buffered, lang)}</div>
-  </div>
-</div>
+</dl>
 
 <style>
   .rail {
+    display: flex;
+    flex-wrap: wrap;
+    border-block: 1px solid var(--color-rule);
+    margin: 0 0 24px;
+  }
+  .rail > div {
+    padding: 12px 24px 12px 0;
+    margin-right: 24px;
+    border-right: 1px solid var(--color-rule);
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 6px;
+    gap: 1px;
+    min-width: 0;
   }
-  .tile {
-    background: var(--ep-bg-secondary);
-    border: 1px solid var(--ep-border);
-    border-radius: var(--ep-radius-md);
-    padding: 10px 12px;
+  .rail > div:last-child {
+    border-right: 0;
   }
-  /* Une tuile qui compte quelque chose d'anormal se démarque par son cadre,
-     pas seulement par la couleur du chiffre. */
-  .tile.alert {
-    border-color: color-mix(in srgb, var(--ep-danger) 45%, var(--ep-border));
+  dt {
+    font-size: 0.8125rem;
+    color: var(--color-muted);
   }
-  .val {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--ep-text-primary);
-    line-height: 1.25;
+  dd {
+    margin: 0;
+    font-size: 1.375rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
   }
-  .val.ok {
-    color: var(--ep-success);
+  dd button {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    border-radius: 3px;
   }
-  .val.warn {
-    color: var(--ep-warning);
+  dd button:hover {
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.2em;
   }
-  .val.err {
-    color: var(--ep-danger);
+  dd button.on {
+    text-decoration: underline;
+    text-decoration-color: var(--color-accent);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 0.25em;
   }
-
-  @media (max-width: 860px) {
-    .rail {
-      grid-template-columns: repeat(3, 1fr);
-    }
+  dd button:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
-  @media (max-width: 460px) {
-    .rail {
-      grid-template-columns: repeat(2, 1fr);
-    }
+  dd svg {
+    width: 10px;
+    height: 10px;
+  }
+  .ok svg {
+    color: var(--st-ok);
+  }
+  .warn svg {
+    color: var(--st-warn);
+  }
+  .bad svg {
+    color: var(--st-bad);
+  }
+  .bad dd {
+    color: var(--st-bad);
   }
 </style>
