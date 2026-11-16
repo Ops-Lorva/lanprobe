@@ -10,6 +10,32 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. Les versions antérieures à 1.6.0
 sont décrites dans les [releases GitHub](https://github.com/Ops-Lorva/lanprobe/releases).
 
+## [1.6.13] - 2026-11-16
+
+### English
+
+- **Security: an account restricted to some sites no longer sees the others** when it has none assigned; access to every site is now an explicit setting.
+- **Security: closed a query injection in probe metrics**, and InfluxDB errors are no longer relayed to non-admins.
+- **Security: rate limiting on login, pairing and enrolment**, counted before the password check, with at most 4 password checks at once.
+- **Security: a paired phone can no longer change the account's password, passkeys or TOTP, nor administer the hub** (accounts, backups, settings, devices); these require a web session.
+- **Security: a restricted account can no longer create a site, enrol a probe outside its sites, or change the hub settings.**
+- **Added: report requests are limited per account** (one at a time, 20 per hour).
+- **Added: demo accounts**, read-only, whose paired devices are revoked after 7 days.
+- **Fixed: behind a reverse proxy, the app receives the hub's public HTTPS address** and no certificate fingerprint to pin.
+- **Changed: the sample compose file publishes the hub on 127.0.0.1 only.**
+
+### Français
+
+- **Sécurité : un compte restreint à des sites ne voit plus les autres** quand aucun ne lui est attribué ; l'accès à tous les sites devient un réglage explicite.
+- **Sécurité : fermeture d'une injection de requête dans les mesures des sondes**, et les erreurs d'InfluxDB ne sont plus relayées aux non-admins.
+- **Sécurité : limitation des tentatives de connexion, d'appairage et d'enrôlement**, décomptées avant la vérification du mot de passe, avec 4 vérifications simultanées au plus.
+- **Sécurité : un téléphone appairé ne peut plus changer le mot de passe, les clés d'accès ou le TOTP du compte, ni administrer le hub** (comptes, sauvegardes, réglages, appareils) : il faut une session web.
+- **Sécurité : un compte restreint ne peut plus créer de site, enrôler une sonde hors de ses sites, ni modifier les réglages du hub.**
+- **Ajouté : les demandes de rapport sont limitées par compte** (une à la fois, 20 par heure).
+- **Ajouté : comptes de démonstration**, en lecture seule, dont les appareils appairés sont révoqués au bout de 7 jours.
+- **Corrigé : derrière un reverse proxy, l'app reçoit l'adresse publique HTTPS du hub** et aucune empreinte de certificat à épingler.
+- **Modifié : le compose d'exemple publie le hub sur 127.0.0.1 seulement.**
+
 ## [1.6.12] - 2026-10-02
 
 ### English
