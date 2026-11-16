@@ -65,6 +65,15 @@ else
 fi
 
 # ── 2. Démarrage d'InfluxDB ──────────────────────────────────────────────────
+# Requêtes Flux bornées (tests de charge du 16/11/2026) : sans plafond, une
+# seule lecture 30 j montait à 3 Go et faisait tuer le conteneur. 400 Mo par
+# requête, 800 Mo au total, 2 à la fois. Chaque valeur reste surchargeable par
+# l'environnement du conteneur.
+export INFLUXD_QUERY_CONCURRENCY="${INFLUXD_QUERY_CONCURRENCY:-2}"
+export INFLUXD_QUERY_QUEUE_SIZE="${INFLUXD_QUERY_QUEUE_SIZE:-10}"
+export INFLUXD_QUERY_INITIAL_MEMORY_BYTES="${INFLUXD_QUERY_INITIAL_MEMORY_BYTES:-10485760}"
+export INFLUXD_QUERY_MAX_MEMORY_BYTES="${INFLUXD_QUERY_MAX_MEMORY_BYTES:-419430400}"
+export INFLUXD_QUERY_MEMORY_BYTES="${INFLUXD_QUERY_MEMORY_BYTES:-838860800}"
 influxd \
     --bolt-path "${INFLUX_DATA}/influxd.bolt" \
     --engine-path "${INFLUX_DATA}/engine" \
