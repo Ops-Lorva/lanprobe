@@ -3,13 +3,24 @@
   import { invoke } from '@tauri-apps/api/core';
   import { _ } from 'svelte-i18n';
   import { get } from 'svelte/store';
-  import { monitoring, type HostMonitor, type PingEntry } from '../stores/monitoring';
+  import { monitoring, type HostMonitor } from '../stores/monitoring';
   import { internetStatus } from '../stores/internetStatus';
-  import { settings } from '../stores/settings';
   import { selectedInterface } from '../stores/selectedInterface';
   import ExcelJS from 'exceljs';
+  import { locale } from 'svelte-i18n';
+  import ScreenHead from './ScreenHead.svelte';
+  import StateMark from './StateMark.svelte';
+  import LatencySpark from './LatencySpark.svelte';
+  import LatencyChart from './LatencyChart.svelte';
+  import { internetMark, targetMark } from '../status';
+  import { fmtNum } from '../format';
+  import { screenKind } from '../screen';
 
-  const isSingle = $derived($settings.layout === 'single');
+  // Dans une case de la grille (une page) : tableau resserré, sans courbe.
+  const isCell = screenKind() === 'cell';
+  const lang = $derived($locale ?? 'en');
+  /** La cible dont la courbe s'affiche sous le tableau. */
+  let selectedIp = $state<string | null>(null);
 
   let newIp = $state('');
   let adding = $state(false);
@@ -94,7 +105,7 @@
       ctx.fillStyle = '#6b7280';
       ctx.font = '14px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('Aucune donnée', W / 2, H / 2);
+      ctx.fillText(get(_)('monitoring.xlsx_no_data') as string, W / 2, H / 2);
       return canvas.toDataURL('image/png').split(',')[1];
     }
 
@@ -160,7 +171,7 @@
 
     // titre
     ctx.fillStyle = '#111827'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('Latence (ms) — ' + localDt(minTs) + ' → ' + localDt(maxTs), W / 2, 22);
+    ctx.fillText(get(_)('monitoring.xlsx_col_latency') + ' — ' + localDt(minTs) + ' → ' + localDt(maxTs), W / 2, 22);
 
     // légende
     let lx = PAD.left;
@@ -174,7 +185,7 @@
     // légende zone rouge
     ctx.fillStyle = 'rgba(239,68,68,0.35)'; ctx.fillRect(lx, H - 20, 14, 10);
     ctx.fillStyle = '#374151'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
-    ctx.fillText('Coupure', lx + 18, H - 11);
+    ctx.fillText(get(_)('monitoring.xlsx_outage') as string, lx + 18, H - 11);
 
     return canvas.toDataURL('image/png').split(',')[1];
   }
@@ -402,6 +413,7 @@
   async function removeHost(ip: string) {
     await invoke('cmd_stop_ping', { ip });
     monitoring.removeHost(ip);
+    if (selectedIp === ip) selectedIp = null;
   }
 
   interface SlaView {
@@ -471,306 +483,155 @@
       p95: lats[Math.min(lats.length - 1, Math.ceil(lats.length * 0.95) - 1)],
     };
   });
-  function fmtMs(v: number | null, digits = 1): string {
-    return v != null ? `${v.toFixed(digits)}ms` : '—';
-  }
-
-  function sparkline(history: PingEntry[], color: string): string {
-    if (history.length < 2) return '';
-    const W = 220, H = 32;
-    const vals = history.map(p => p.latency_ms ?? 0);
-    const max = Math.max(...vals, 1);
-    const denom = Math.max(1, history.length - 1);
-    // Trace seulement les segments entre samples "alive" consécutifs — un gap
-    // où le host était down ne doit pas être relié par une ligne droite qui
-    // masquerait la panne visuellement.
-    let path = '';
-    let drawing = false;
-    history.forEach((p, i) => {
-      const x = (i / denom) * W;
-      if (p.alive && p.latency_ms != null) {
-        const y = H - (p.latency_ms / max) * H;
-        path += (drawing ? ' L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1);
-        drawing = true;
-      } else {
-        drawing = false;
-      }
-    });
-    const failDots = history
-      .map((p, i) => !p.alive ? `<circle cx="${((i / denom) * W).toFixed(1)}" cy="${H - 2}" r="2" fill="var(--ep-danger)"/>` : '')
-      .join('');
-    return `<svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><path d="${path}" fill="none" stroke="${color}" stroke-width="1.5"/>${failDots}</svg>`;
-  }
-
-  function uptimeColor(pct: number) {
-    if (pct >= 99) return 'var(--ep-success)';
-    if (pct >= 95) return '#f59e0b';
-    return 'var(--ep-danger)';
-  }
-
-  function internetSpark(): string {
-    const t = $internetStatus;
-    if (!t || t.icmp_ms == null) return '';
-    return `<svg width="100%" height="32" viewBox="0 0 220 32" preserveAspectRatio="none"><line x1="0" y1="16" x2="220" y2="16" stroke="var(--ep-success)" stroke-width="1.5"/></svg>`;
-  }
+  // La série internet, mise en forme comme celle d'une cible pour la courbe.
+  const internetSeries = $derived(internetHistory.slice(-60).map((ms, i) => ({ timestamp: i, alive: true, latency_ms: ms })));
+  const selected = $derived(selectedIp ? $monitoring.get(selectedIp) ?? null : null);
+  const selectedSeries = $derived(selectedIp ? Math.max(0, hostSlas.findIndex((h) => h.ip === selectedIp)) % 3 + 1 : 1);
 </script>
 
-<div class="page" class:compact={isSingle}>
-  <div class="header">
-    <h1>{$_('monitoring.title')}</h1>
-    <div class="add-row">
-      <input bind:value={newIp} placeholder={$_('monitoring.placeholder')} aria-label={$_('monitoring.placeholder')} onkeydown={(e) => e.key === 'Enter' && addHost()} />
-      <button class="primary" onclick={addHost} disabled={adding}>{$_('monitoring.add')}</button>
-      <button onclick={openExport}>{$_('monitoring.export')}</button>
-    </div>
-  </div>
+<div class="screen">
+  <ScreenHead title={$_('monitoring.title')}>
+    {#snippet acts()}
+      {#if !isCell}
+        <input class="input m" style="width:220px" bind:value={newIp} placeholder={$_('monitoring.placeholder')}
+               aria-label={$_('monitoring.placeholder')} onkeydown={(e) => e.key === 'Enter' && addHost()} />
+        <button class="btn primary" type="button" onclick={addHost} disabled={adding}>{$_('monitoring.add')}</button>
+      {/if}
+      <button class="btn" class:sm={isCell} type="button" onclick={openExport}>{$_('monitoring.export')}</button>
+    {/snippet}
+  </ScreenHead>
 
-  {#if showExport}
-    <div class="modal-backdrop" role="presentation" onclick={() => showExport = false}>
-      <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
-        <h2>{$_('monitoring.export_modal_title')}</h2>
-        <div class="export-actions">
-          <button class="sm" onclick={exportSelectAll}>{$_('monitoring.export_select_all')}</button>
-          <button class="sm" onclick={exportDeselectAll}>{$_('monitoring.export_deselect_all')}</button>
-        </div>
-        <div class="export-list">
-          <label class="export-item">
-            <input type="checkbox" checked={exportIncludeInternet} onchange={() => exportIncludeInternet = !exportIncludeInternet} />
-            <span class="export-ip">🌐 Internet</span>
-            <span class="export-hint">{$_('monitoring.pinned')}</span>
-          </label>
-          {#each [...$monitoring.keys()] as ip}
-            <label class="export-item">
-              <input type="checkbox" checked={exportSelected.has(ip)} onchange={() => toggleExportIp(ip)} />
-              <span class="export-ip">🖥 {ip}</span>
-            </label>
+  <div class="screen-body">
+    {#if isCell}
+      <div class="input-row" style="margin-bottom:8px">
+        <input class="input m" style="flex:1;min-width:120px" bind:value={newIp} placeholder={$_('monitoring.placeholder')}
+               aria-label={$_('monitoring.placeholder')} onkeydown={(e) => e.key === 'Enter' && addHost()} />
+        <button class="btn" type="button" onclick={addHost} disabled={adding}>{$_('monitoring.add')}</button>
+      </div>
+    {/if}
+
+    <div class="tbl-wrap">
+      <table class="t" class:compact={isCell}>
+        <thead>
+          <tr>
+            <th>{$_('monitoring.col_target')}</th>
+            <th>{$_('monitoring.col_state')}</th>
+            <th>{$_('monitoring.col_recent')}</th>
+            <th class="num opt">{$_('monitoring.col_min')}</th>
+            <th class="num">{$_('monitoring.col_avg')}</th>
+            <th class="num opt">{$_('monitoring.col_p95')}</th>
+            <th class="num opt">{$_('monitoring.col_max')}</th>
+            <th class="num">{$_('monitoring.col_loss')}</th>
+            <th class="num">{$_('monitoring.col_uptime')}</th>
+            <th><span class="visually-hidden">{$_('monitoring.col_actions')}</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- Internet : épinglé, toujours en tête. -->
+          <tr class:trouble={$internetStatus?.state === 'offline'} class:degr={$internetStatus?.state === 'limited'}>
+            <td><span class="nm">{$_('monitoring.internet')}</span><span class="sub2" class:visually-hidden={isCell}>{$_('monitoring.pinned')}</span></td>
+            <td><StateMark mark={internetMark($internetStatus?.state)} /></td>
+            <td><LatencySpark history={internetSeries} series={2} /></td>
+            <td class="num opt">{fmtNum(internetStats.min, lang)}</td>
+            <td class="num">{fmtNum(internetStats.avg, lang)}</td>
+            <td class="num opt">{fmtNum(internetStats.p95, lang)}</td>
+            <td class="num opt">{fmtNum(internetStats.max, lang)}</td>
+            <td class="num">{$internetStatus ? fmtNum(100 - $internetStatus.uptime_pct, lang, 1) : '—'}</td>
+            <td class="num" title={$_('monitoring.uptime_samples', { values: { n: $internetStatus?.samples ?? 0 } })}>{$internetStatus ? fmtNum($internetStatus.uptime_pct, lang, 2) : '—'}</td>
+            <td class="act"></td>
+          </tr>
+          {#each hostSlas as s, i (s.ip)}
+            <tr class="click" class:sel={selectedIp === s.ip} class:trouble={s.alive === false}
+                onclick={() => (selectedIp = selectedIp === s.ip ? null : s.ip)}>
+              <td>
+                <button class="nm m rowbtn" type="button" aria-pressed={selectedIp === s.ip}
+                        onclick={(e) => { e.stopPropagation(); selectedIp = selectedIp === s.ip ? null : s.ip; }}>{s.ip}</button>
+                <span class="sub2" class:visually-hidden={isCell}>{s.failed > 0
+                  ? $_('monitoring.uptime_samples_failed', { values: { n: s.total, f: s.failed } })
+                  : $_('monitoring.uptime_samples', { values: { n: s.total } })}</span>
+              </td>
+              <td><StateMark mark={targetMark(s.alive)} /></td>
+              <td><LatencySpark history={$monitoring.get(s.ip)?.history ?? []} series={(i % 3) + 1} /></td>
+              <td class="num opt">{fmtNum(s.min, lang)}</td>
+              <td class="num">{fmtNum(s.avg, lang)}</td>
+              <td class="num opt">{fmtNum(s.p95, lang)}</td>
+              <td class="num opt">{fmtNum(s.max, lang)}</td>
+              <td class="num">{fmtNum(100 - s.uptime_pct, lang, 1)}</td>
+              <td class="num">{fmtNum(s.uptime_pct, lang, 2)}</td>
+              <td class="act">
+                <button class="btn sm quiet" type="button" onclick={(e) => { e.stopPropagation(); removeHost(s.ip); }}>{$_('monitoring.remove')}</button>
+              </td>
+            </tr>
           {/each}
-          {#if $monitoring.size === 0}
-            <p class="export-empty">{$_('monitoring.empty')}</p>
-          {/if}
-        </div>
-        {#if !exportIncludeInternet && exportSelected.size === 0}
-          <p class="export-warn">{$_('monitoring.export_empty')}</p>
-        {/if}
-        <div class="modal-footer">
-          <button onclick={() => showExport = false}>{$_('monitoring.export_cancel')}</button>
-          <button class="primary"
-            disabled={exporting || (!exportIncludeInternet && exportSelected.size === 0)}
-            onclick={doExportXlsx}>
-            {exporting ? $_('monitoring.export_exporting') : $_('monitoring.export_xlsx')}
-          </button>
-        </div>
-      </div>
+        </tbody>
+      </table>
+      {#if hostSlas.length === 0}
+        <div class="state"><p>{$_('monitoring.empty')}</p></div>
+      {/if}
     </div>
-  {/if}
 
-  <div class="host-card pinned state-{$internetStatus?.state ?? 'offline'}">
-    <div class="head">
-      <span class="icon">🌐</span>
-      <span class="name">{$_('monitoring.internet')}</span>
-      <span class="pin-badge">{$_('monitoring.pinned')}</span>
-    </div>
-    <div class="state-pill">
-      <span class="dot"></span>
-      {$_(`monitoring.${$internetStatus?.state ?? 'offline'}`)}
-    </div>
-    <div class="uptime-block">
-      <div class="uptime" style="color: {uptimeColor($internetStatus?.uptime_pct ?? 0)}">
-        {($internetStatus?.uptime_pct ?? 0).toFixed(2)}%
-      </div>
-      <div class="uptime-sub">
-        {$_('monitoring.uptime_samples', { values: { n: $internetStatus?.samples ?? 0 } })}
-      </div>
-    </div>
-    <div class="actions"></div>
-    <div class="row3">
-      <span class="spark">{@html internetSpark()}</span>
-      <div class="latency-live" style="color: var(--ep-success)">
-        {$internetStatus?.icmp_ms != null ? `${$internetStatus.icmp_ms}ms` : '—'}
-      </div>
-      <div class="stats">
-        <span title={$_('monitoring.stats.avg')}><span class="k">{$_('monitoring.stats.avg')}</span><span class="v">{fmtMs(internetStats.avg)}</span></span>
-        <span title={$_('monitoring.stats.p95')}><span class="k">{$_('monitoring.stats.p95')}</span><span class="v">{fmtMs(internetStats.p95, 0)}</span></span>
-        <span title={$_('monitoring.stats.min')}><span class="k">{$_('monitoring.stats.min')}</span><span class="v">{fmtMs(internetStats.min, 0)}</span></span>
-        <span title={$_('monitoring.stats.max')}><span class="k">{$_('monitoring.stats.max')}</span><span class="v">{fmtMs(internetStats.max, 0)}</span></span>
-      </div>
-    </div>
+    {#if selected && !isCell}
+      <section class="panel" style="margin-top:16px" aria-labelledby="h-mc">
+        <div class="chart-head">
+          <h2 id="h-mc" class="m">{selected.ip}</h2>
+          <span class="muted">{$_('monitoring.chart_sub')}</span>
+          <span class="acts"><button class="btn sm quiet" type="button" onclick={() => (selectedIp = null)}>{$_('common.close')}</button></span>
+        </div>
+        <LatencyChart history={selected.history} series={selectedSeries} />
+        <div class="legend" style="margin-top:8px">
+          <span><span class="sw s{selectedSeries}"></span>{$_('monitoring.col_latency')}</span>
+          <span><span class="sw b" style="width:3px"></span>{$_('monitoring.legend_lost')}</span>
+        </div>
+      </section>
+    {:else if !isCell && hostSlas.length > 0}
+      <p class="hint" style="margin-top:8px">{$_('monitoring.select_hint')}</p>
+    {/if}
   </div>
-
-  {#each hostSlas as s (s.ip)}
-    <div class="host-card state-{s.alive === null ? 'pending' : s.alive ? 'alive' : 'down'}">
-      <div class="head">
-        <span class="icon">🖥</span>
-        <span class="name">{s.ip}</span>
-      </div>
-      <div class="state-pill">
-        <span class="dot"></span>
-        {s.alive === null ? '…' : s.alive ? $_('monitoring.alive') : $_('monitoring.down')}
-      </div>
-      <div class="uptime-block">
-        <div class="uptime" style="color: {uptimeColor(s.uptime_pct)}">
-          {s.uptime_pct.toFixed(2)}%
-        </div>
-        <div class="uptime-sub">
-          {s.failed > 0
-            ? $_('monitoring.uptime_samples_failed', { values: { n: s.total, f: s.failed } })
-            : $_('monitoring.uptime_samples', { values: { n: s.total } })}
-        </div>
-      </div>
-      <div class="actions">
-        <button class="icon-btn" title={$_('monitoring.remove')} aria-label={$_('monitoring.remove')} onclick={() => removeHost(s.ip)}>✕</button>
-      </div>
-      <div class="row3">
-        <span class="spark">{@html sparkline($monitoring.get(s.ip)?.history ?? [],
-          s.alive === false ? 'var(--ep-danger)' : 'var(--ep-success)')}</span>
-        <div class="latency-live" style="color: {s.alive === false ? 'var(--ep-danger)' : 'var(--ep-success)'}">
-          {s.alive === false ? '—' : (s.current_ms != null ? `${s.current_ms}ms` : '…')}
-        </div>
-        <div class="stats">
-          <span title={$_('monitoring.stats.avg')}><span class="k">{$_('monitoring.stats.avg')}</span><span class="v">{s.avg != null ? s.avg.toFixed(1) + 'ms' : '—'}</span></span>
-          <span title={$_('monitoring.stats.p95')}><span class="k">{$_('monitoring.stats.p95')}</span><span class="v">{s.p95 != null ? s.p95 + 'ms' : '—'}</span></span>
-          <span title={$_('monitoring.stats.min')}><span class="k">{$_('monitoring.stats.min')}</span><span class="v">{s.min != null ? s.min + 'ms' : '—'}</span></span>
-          <span title={$_('monitoring.stats.max')}><span class="k">{$_('monitoring.stats.max')}</span><span class="v">{s.max != null ? s.max + 'ms' : '—'}</span></span>
-        </div>
-      </div>
-    </div>
-  {:else}
-    <p class="empty">{$_('monitoring.empty')}</p>
-  {/each}
-
 </div>
 
+{#if showExport}
+  <div class="overlay" role="presentation" onclick={() => showExport = false}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="h-exp" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+      <h2 id="h-exp">{$_('monitoring.export_modal_title')}</h2>
+      <div class="input-row">
+        <button class="btn sm" type="button" onclick={exportSelectAll}>{$_('monitoring.export_select_all')}</button>
+        <button class="btn sm" type="button" onclick={exportDeselectAll}>{$_('monitoring.export_deselect_all')}</button>
+      </div>
+      <div class="export-list">
+        <label class="check">
+          <input type="checkbox" checked={exportIncludeInternet} onchange={() => exportIncludeInternet = !exportIncludeInternet} />
+          <span>{$_('monitoring.internet')}</span>
+          <span class="muted">{$_('monitoring.pinned')}</span>
+        </label>
+        {#each [...$monitoring.keys()] as ip}
+          <label class="check">
+            <input type="checkbox" checked={exportSelected.has(ip)} onchange={() => toggleExportIp(ip)} />
+            <span class="m">{ip}</span>
+          </label>
+        {/each}
+        {#if $monitoring.size === 0}
+          <p class="muted">{$_('monitoring.empty')}</p>
+        {/if}
+      </div>
+      {#if !exportIncludeInternet && exportSelected.size === 0}
+        <p class="err-text">{$_('monitoring.export_empty')}</p>
+      {/if}
+      <div class="row">
+        <button class="btn" type="button" onclick={() => showExport = false}>{$_('monitoring.export_cancel')}</button>
+        <button class="btn primary" type="button"
+          disabled={exporting || (!exportIncludeInternet && exportSelected.size === 0)}
+          aria-busy={exporting}
+          onclick={doExportXlsx}>
+          {exporting ? $_('monitoring.export_exporting') : $_('monitoring.export_xlsx')}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
-  .page { padding: 24px; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
-  h1 { font-size: 20px; font-weight: 700; }
-  .add-row { display: flex; gap: 8px; }
-  input { background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border); border-radius: 6px; padding: 7px 12px; color: var(--ep-text-primary); font-family: var(--ep-font-mono); font-size: 13px; width: 200px; }
-  button { padding: 7px 14px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); cursor: pointer; font-size: 13px; font-weight: 600; }
-  button.primary { background: var(--ep-accent); border-color: var(--ep-accent); color: #fff; }
-  .icon-btn { background: transparent; border: 1px solid var(--ep-border); color: var(--ep-text-muted); padding: 4px 8px; border-radius: 5px; font-size: 11px; }
-
-  .host-card {
-    background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border);
-    border-left: 3px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-lg);
-    padding: 18px 20px;
-    margin-bottom: 10px;
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 12px 24px;
-    transition: border-color 0.15s;
-  }
-  .host-card:hover { border-color: var(--ep-glass-border-strong); }
-  .host-card.pinned { border-left-color: #06b6d4; background: color-mix(in srgb, #06b6d4 5%, var(--ep-glass-bg)); }
-  .host-card.state-alive   { border-left-color: var(--ep-success); }
-  .host-card.state-down    { border-left-color: var(--ep-danger); }
-  .host-card.state-online  { border-left-color: var(--ep-success); }
-  .host-card.state-limited { border-left-color: #f59e0b; }
-  .host-card.state-offline { border-left-color: var(--ep-danger); }
-
-  .head { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 700; grid-column: 1; }
-  .head .icon { font-size: 16px; }
-  .pin-badge { font-size: 9px; text-transform: uppercase; letter-spacing: .5px; background: color-mix(in srgb, #06b6d4 20%, transparent); color: #06b6d4; padding: 2px 6px; border-radius: 4px; font-weight: 700; }
-
-  .state-pill { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; grid-column: 2; justify-self: end; }
-  .state-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ep-text-muted); }
-  .host-card.state-alive .state-pill,
-  .host-card.state-online .state-pill { color: var(--ep-success); }
-  .host-card.state-alive .state-pill .dot,
-  .host-card.state-online .state-pill .dot { background: var(--ep-success); box-shadow: 0 0 8px var(--ep-success); }
-  .host-card.state-down .state-pill,
-  .host-card.state-offline .state-pill { color: var(--ep-danger); }
-  .host-card.state-down .state-pill .dot,
-  .host-card.state-offline .state-pill .dot { background: var(--ep-danger); box-shadow: 0 0 8px var(--ep-danger); }
-  .host-card.state-limited .state-pill { color: #f59e0b; }
-  .host-card.state-limited .state-pill .dot { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
-
-  .uptime-block { grid-column: 1; }
-  .uptime { font-size: 32px; font-weight: 800; line-height: 1; }
-  .uptime-sub { font-size: 10px; color: var(--ep-text-muted); margin-top: 4px; text-transform: uppercase; letter-spacing: .5px; }
-  .actions { grid-column: 2; display: flex; gap: 6px; justify-self: end; }
-
-  .row3 { grid-column: 1 / span 2; display: flex; align-items: center; gap: 16px; padding-top: 10px; border-top: 1px solid var(--ep-glass-border); }
-  .spark { flex: 1; min-width: 0; }
-  .latency-live { font-size: 16px; font-weight: 700; min-width: 60px; text-align: right; font-family: var(--ep-font-mono); }
-  .stats { display: flex; gap: 14px; font-size: 11px; color: var(--ep-text-secondary); }
-  .stats .k { color: var(--ep-text-muted); margin-right: 3px; text-transform: uppercase; font-size: 9px; letter-spacing: .5px; }
-  .stats .v { color: var(--ep-text-primary); font-weight: 600; font-family: var(--ep-font-mono); }
-
-  .empty { color: var(--ep-text-muted); font-size: 14px; text-align: center; padding: 30px; }
-
-  /* ── Export modal ─────────────────────────────────────────────────── */
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,.5);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 100;
-  }
-  .modal {
-    background: var(--ep-bg-secondary); border: 1px solid var(--ep-glass-border-strong);
-    border-radius: var(--ep-radius-lg); padding: 24px; min-width: 320px; max-width: 420px; width: 90%;
-  }
-  .modal h2 { font-size: 16px; font-weight: 700; margin-bottom: 14px; }
-  .export-actions { display: flex; gap: 8px; margin-bottom: 12px; }
-  .export-list { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; margin-bottom: 12px; }
-  .export-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 10px; border-radius: 7px; cursor: pointer;
-    background: var(--ep-glass-bg); border: 1px solid var(--ep-glass-border);
-    font-size: 13px;
-    transition: border-color 0.12s;
-  }
-  .export-item:hover { border-color: var(--ep-accent); }
-  .export-item input[type="checkbox"] { accent-color: var(--ep-accent); width: 15px; height: 15px; flex-shrink: 0; }
-  .export-ip { flex: 1; font-family: var(--ep-font-mono); font-size: 13px; }
-  .export-hint { font-size: 10px; color: var(--ep-text-muted); text-transform: uppercase; letter-spacing: .5px; }
-  .export-empty { color: var(--ep-text-muted); font-size: 12px; padding: 10px 0; text-align: center; }
-  .export-warn { font-size: 12px; color: #f59e0b; margin-bottom: 10px; }
-  .modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
-  button.sm { font-size: 11px; padding: 4px 10px; }
-
-  /* En single-page on aplatit complètement chaque card en une ligne :
-     icône + nom + état + uptime + latence + sparkline + stats, sans
-     padding vertical ni border-top, pour faire tenir 5-6 hosts sans scroll.*/
-  .page.compact { padding: 12px; }
-  .page.compact h1 { font-size: 14px; }
-  .page.compact .header { margin-bottom: 10px; }
-  .page.compact .add-row input { padding: 4px 8px; font-size: 11px; width: 150px; }
-  .page.compact .add-row button { padding: 4px 10px; font-size: 11px; }
-
-  .page.compact .host-card {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 10px;
-    margin-bottom: 4px;
-    border-radius: 6px;
-  }
-  .page.compact .head { font-size: 11px; gap: 5px; flex: 0 0 auto; min-width: 0; }
-  .page.compact .head .icon { font-size: 12px; }
-  .page.compact .head .name { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
-  .page.compact .pin-badge { display: none; }
-  .page.compact .state-pill { font-size: 10px; flex: 0 0 auto; order: 2; justify-self: start; }
-  .page.compact .state-pill .dot { width: 6px; height: 6px; }
-
-  .page.compact .uptime-block { display: flex; align-items: baseline; gap: 4px; flex: 0 0 auto; order: 3; }
-  .page.compact .uptime { font-size: 13px; font-weight: 700; }
-  .page.compact .uptime-sub { display: none; }
-
-  .page.compact .row3 {
-    flex: 1 1 auto;
-    padding-top: 0;
-    border-top: none;
-    min-width: 0;
-    gap: 8px;
-    order: 4;
-  }
-  .page.compact .spark { max-width: 120px; }
-  .page.compact .latency-live { font-size: 11px; min-width: 38px; }
-  .page.compact .stats { gap: 8px; font-size: 10px; }
-  .page.compact .stats .k { display: none; }
-
-  .page.compact .actions { order: 5; flex: 0 0 auto; }
-  .page.compact .icon-btn { padding: 2px 6px; font-size: 10px; }
+  .rowbtn { border: 0; background: none; padding: 0; cursor: pointer; text-align: left; }
+  .rowbtn:hover { text-decoration: underline; }
+  .export-list { display: grid; gap: var(--space-xs); max-height: 260px; overflow-y: auto; }
 </style>
