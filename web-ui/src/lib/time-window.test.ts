@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  backgroundRefreshMs,
   MAX_RANGE_DAYS,
   applyRealtime,
   clipToWindow,
@@ -199,5 +200,17 @@ describe('applyRealtime', () => {
   it('ne touche à rien quand le mode est éteint et l’a toujours été', () => {
     const idle = { choice: before, restore: null };
     expect(applyRealtime(idle, { on: false, windowMin: 10 })).toEqual(idle);
+  });
+});
+
+describe('cadence de relecture de fond', () => {
+  const now = Date.UTC(2026, 10, 16, 12);
+  const H = 3_600_000;
+  const abs = (h: number): WindowChoice => ({ kind: 'absolute', startMs: now - h * H, stopMs: now });
+  it('une fenêtre courte se relit toutes les 3 s, une large bien moins', () => {
+    expect(backgroundRefreshMs(abs(6), now)).toBe(3_000);
+    expect(backgroundRefreshMs(abs(24), now)).toBe(15_000);
+    expect(backgroundRefreshMs(abs(7 * 24), now)).toBe(60_000);
+    expect(backgroundRefreshMs(abs(30 * 24), now)).toBe(300_000);
   });
 });

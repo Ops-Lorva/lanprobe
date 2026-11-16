@@ -54,6 +54,7 @@
   // avant, elle n'existait que sur le tableau de bord et les quatre autres
   // onglets affichaient son choix sans le dire.
   import {
+    backgroundRefreshMs,
     clipToWindow,
     timeWindow,
     toMetricsWindow,
@@ -153,12 +154,17 @@
   // retardait.
   const REFRESH_MS = 3_000;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let lastBackground = 0;
 
   onMount(() => {
     // Accès direct par URL : le parc n'est peut-être pas encore chargé.
     if ($fleet.probes.length === 0) void fleet.load(onExpired);
     timer = setInterval(() => {
       void fleet.load(onExpired, { quiet: true });
+      // Fenêtre large : relue moins souvent (cf. `backgroundRefreshMs`).
+      const now = Date.now();
+      if (now - lastBackground < backgroundRefreshMs(win, now) - 100) return;
+      lastBackground = now;
       void loadMetrics({ background: true });
     }, REFRESH_MS);
   });

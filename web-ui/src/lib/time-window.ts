@@ -225,3 +225,20 @@ function createWindowStore() {
 }
 
 export const timeWindow = createWindowStore();
+
+/**
+ * Cadence de la relecture de fond d'une fiche, selon la largeur de la fenêtre.
+ * Une fenêtre courte se relit toutes les 3 s (une caméra qu'on branche doit
+ * apparaître aussitôt) ; une fenêtre de 7 ou 30 jours ne bouge pas à la
+ * seconde, et la relire toutes les 3 s coûtait jusqu'à 20 s d'InfluxDB par
+ * tour (`/uptime` 30 j, tests de charge du 16/11/2026).
+ */
+export function backgroundRefreshMs(choice: WindowChoice, nowMs: number): number {
+  const { from, to } = windowDomain(choice, nowMs);
+  const width = to - from;
+  const H = 3_600_000;
+  if (width <= 6 * H) return 3_000;
+  if (width <= 24 * H) return 15_000;
+  if (width <= 7 * 24 * H) return 60_000;
+  return 300_000;
+}
