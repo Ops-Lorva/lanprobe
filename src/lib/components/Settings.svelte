@@ -9,6 +9,26 @@
   import { get } from 'svelte/store';
   import { selectedInterface } from '../stores/selectedInterface';
   import { scheduler } from '../stores/scheduler';
+  import ScreenHead from './ScreenHead.svelte';
+  import StateMark from './StateMark.svelte';
+  import SchedulerControl from './SchedulerControl.svelte';
+  import { hubStatus } from '../stores/hub';
+  import { hubMark } from '../status';
+  import { screenKind } from '../screen';
+  import { locale } from 'svelte-i18n';
+
+  // Barre latérale : les réglages en onglets. Ailleurs (onglet Config,
+  // surimpression de la page unique), en panneaux côte à côte.
+  const kind = screenKind();
+  const tabbed = kind === 'page';
+  let tab = $state<'general' | 'hub' | 'scan' | 'about'>('general');
+  const lang = $derived($locale ?? 'en');
+  let codeInput = $state<HTMLInputElement | null>(null);
+  function retype() {
+    hubError = '';
+    hubCode = '';
+    codeInput?.focus();
+  }
 
   // Les profils de scan tels que l'écran les montre : une sonde rattachée à un
   // hub n'affiche plus ses profils de base (contrat § 25).
@@ -91,7 +111,14 @@
       // Le rattachement est optionnel : son indisponibilité ne doit pas
       // empêcher le reste des réglages de s'afficher.
     }
+    // La barre latérale et le tableau de bord lisent le même état.
+    void hubStatus.refresh();
   }
+  onMount(() => hubStatus.watch());
+  const live = $derived($hubStatus);
+  const liveMark = $derived(hubMark(live));
+  const sinceMin = $derived(live.last_beat_at ? Math.max(1, Math.round((Date.now() / 1000 - live.last_beat_at) / 60)) : null);
+  const beatAt = $derived(live.last_beat_at ? new Date(live.last_beat_at * 1000).toLocaleTimeString(lang) : null);
 
   async function connectHub(pin: string = '') {
     hubError = '';
@@ -284,530 +311,306 @@
   ];
 </script>
 
-<div class="page">
-  <h1>{$_('settings.title')}</h1>
-  <p class="page-sub">{readOnly ? $_('settings.web_readonly_hint') : 'LanProbe · v' + appVersion}</p>
+{#snippet general()}
+  <div class="setrow">
+    <div><div class="k">{$_('settings.layout.title')}</div></div>
+    <div class="seg" role="group" aria-label={$_('settings.layout.title')}>
+      {#each layouts as l}
+        <button type="button" aria-pressed={$settings.layout === l.value} disabled={readOnly}
+                title={$_(l.descKey)} onclick={() => settings.setLayout(l.value)}>{$_(l.labelKey)}</button>
+      {/each}
+    </div>
+  </div>
+  <div class="setrow">
+    <div><div class="k">{$_('settings.theme.title')}</div></div>
+    <div class="seg" role="group" aria-label={$_('settings.theme.title')}>
+      {#each themes as t}
+        <button type="button" aria-pressed={$settings.theme === t.value} disabled={readOnly}
+                title={$_(t.descKey)} onclick={() => settings.setTheme(t.value)}>{$_(t.labelKey)}</button>
+      {/each}
+    </div>
+  </div>
+  <div class="setrow">
+    <div><div class="k">{$_('settings.palette.title')}</div><div class="d">{$_('settings.palette.hint')}</div></div>
+    <div class="swatches" role="group" aria-label={$_('settings.palette.title')}>
+      {#each palettes as p}
+        <button type="button" class="swatch" aria-pressed={$settings.palette === p.value} disabled={readOnly}
+                style="--swatch-dark: {p.dark}; --swatch-light: {p.light}" title={$_(`settings.palette.${p.value}`)}
+                onclick={() => settings.setPalette(p.value)}>
+          <span class="dot" aria-hidden="true"></span><span class="visually-hidden">{$_(`settings.palette.${p.value}`)}</span>
+        </button>
+      {/each}
+    </div>
+  </div>
+  <div class="setrow">
+    <div><label class="k" for="set-lang">{$_('settings.language.title')}</label></div>
+    <select id="set-lang" class="select" value={$settings.lang} disabled={readOnly}
+            onchange={(e) => settings.setLanguage((e.currentTarget as HTMLSelectElement).value as Lang)}>
+      {#each langs as l}<option value={l.value}>{$_(l.labelKey)}</option>{/each}
+    </select>
+  </div>
+  <div class="setrow">
+    <div><label class="k" for="set-refresh">{$_('settings.dashboard_refresh.label')}</label><div class="d">{$_('settings.dashboard_refresh.hint')}</div></div>
+    <select id="set-refresh" class="select" value={$settings.dashboardRefreshSec} disabled={readOnly}
+            onchange={(e) => settings.setDashboardRefresh(Number((e.target as HTMLSelectElement).value))}>
+      {#each refreshOptions as opt}<option value={opt.value}>{$_(opt.labelKey)}</option>{/each}
+    </select>
+  </div>
+{/snippet}
 
+{#snippet schedulerRows()}
+  <div class="setrow">
+    <div><div class="k">{$_('nav.discovery')}</div></div>
+    <SchedulerControl field="discovery_interval_min" />
+  </div>
+  <div class="setrow">
+    <div><div class="k">{$_('nav.speedtest')}</div></div>
+    <SchedulerControl field="speedtest_interval_min" />
+  </div>
+  <div class="setrow">
+    <div><div class="k">{$_('settings.scheduler.portscan')}</div></div>
+    <SchedulerControl field="portscan_interval_min" />
+  </div>
+  <div class="setrow">
+    <div><label class="k" for="set-autops">{$_('settings.auto_port_scan.label')}</label><div class="d">{$_('settings.auto_port_scan.hint')}</div></div>
+    <select id="set-autops" class="select" value={$settings.autoPortScanProfileId ?? ''} disabled={readOnly}
+      onchange={(e) => {
+        const v = (e.target as HTMLSelectElement).value;
+        settings.setAutoPortScanProfile(v === '' ? null : v);
+      }}>
+      <option value="">{$_('settings.auto_port_scan.disabled')}</option>
+      <!-- ⚠️ Les profils AFFICHÉS, pas tous : une sonde rattachée à un hub
+           n'affiche plus ses profils de base (§ 25). Proposer ici un
+           profil invisible ailleurs ferait tourner un scan automatique
+           avec une liste de ports introuvable à l'écran. -->
+      {#each $visiblePortscanProfiles as p (p.id)}
+        <option value={p.id}>{p.from_hub ? `★ ${p.name}` : p.name} ({p.tcp_ports.length} TCP, {p.udp_ports.length} UDP)</option>
+      {/each}
+    </select>
+  </div>
+{/snippet}
+
+{#snippet speedtest()}
+  <div class="setrow">
+    <div><div class="k">{$_('settings.speedtest.engine')}</div>
+      <div class="d">{$settings.speedtestEngine === 'iperf3' ? $_('settings.speedtest.iperf3_desc') : $_('settings.speedtest.ookla_desc')}</div></div>
+    <div class="seg" role="group" aria-label={$_('settings.speedtest.engine')}>
+      <button type="button" aria-pressed={$settings.speedtestEngine === 'ookla'} onclick={() => settings.setSpeedtestEngine('ookla')}>{$_('settings.speedtest.ookla')}</button>
+      <button type="button" aria-pressed={$settings.speedtestEngine === 'iperf3'} onclick={() => settings.setSpeedtestEngine('iperf3')}>{$_('settings.speedtest.iperf3')}</button>
+    </div>
+  </div>
+  {#if $settings.speedtestEngine === 'iperf3'}
+    <div class="setrow">
+      <div><label class="k" for="set-iperf">{$_('settings.speedtest.server_label')}</label><div class="d">{$_('settings.speedtest.iperf_hint')}</div></div>
+      <input id="set-iperf" class="input m" type="text" placeholder="iperf.example.com" value={$settings.iperfServer}
+             oninput={(e) => settings.setIperfServer((e.target as HTMLInputElement).value)} />
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet hubForm()}
   <!-- Rattachement à un hub : entièrement optionnel. Sans lui, LanProbe
        fonctionne exactement comme avant, sans compte ni serveur. -->
-  <div class="group">
-    <section class="section">
-      <div class="section-head">{$_('settings.hub.title')}</div>
-      {#if hub.enrolled}
-        <p class="hub-state">
-          {$_('settings.hub.connected')} <strong>{hub.url}</strong>
-          — <strong>{hub.name}</strong>{#if hub.site} · {$_('settings.hub.site')} {hub.site}{/if}
-        </p>
-        <button class="hub-btn ghost" onclick={forgetHub} disabled={readOnly}>
-          {$_('settings.hub.forget')}
-        </button>
-        {#if hubRestored > 0}
-          <!-- Le dire : quelqu'un qui vient de réinstaller une machine ne
-               s'attend pas à retrouver ses profils, et les découvrirait par
-               hasard. -->
-          <p class="hub-hint hub-restored">
-            {$_('settings.hub.restored', { values: { n: hubRestored } })}
-          </p>
-        {/if}
-        <p class="hub-hint">{$_('settings.hub.forget_hint')}</p>
+  {#if hub.enrolled}
+    <div class="hubstate">
+      <StateMark mark={liveMark}
+        label={live.state === 'ok' && hub.site ? $_('settings.hub.attached_to', { values: { site: hub.site } }) : undefined} />
+      {#if live.state === 'ok' && beatAt}<span class="muted">{$_('settings.hub.last_beat', { values: { at: beatAt } })}</span>{/if}
+      {#if live.state === 'degraded' && sinceMin}<span class="muted">{$_('settings.hub.since_min', { values: { n: sinceMin } })}</span>{/if}
+      {#if live.buffered_points > 0}<span class="muted">{$_('dashboard.hub_buffered', { values: { n: live.buffered_points } })}</span>{/if}
+    </div>
+    {#if live.last_error && live.state !== 'ok'}<p class="hint m">{live.last_error}</p>{/if}
+    <dl class="kv" style="margin-top:12px">
+      <dt>{$_('settings.hub.url')}</dt><dd class="m">{hub.url}</dd>
+      <dt>{$_('settings.hub.name')}</dt><dd>{hub.name || '—'}</dd>
+      {#if hub.site}<dt>{$_('settings.hub.site')}</dt><dd>{hub.site}</dd>{/if}
+    </dl>
+    {#if hubRestored > 0}
+      <!-- Le dire : quelqu'un qui vient de réinstaller une machine ne
+           s'attend pas à retrouver ses profils, et les découvrirait par
+           hasard. -->
+      <div class="banner ok" style="margin-top:12px"><span class="grow">{$_('settings.hub.restored', { values: { n: hubRestored } })}</span></div>
+    {/if}
+    <div class="setrow" style="border:0">
+      <div class="d">{$_('settings.hub.forget_hint')}</div>
+      <div><button class="btn danger" type="button" onclick={forgetHub} disabled={readOnly}>{$_('settings.hub.forget')}</button></div>
+    </div>
+  {:else}
+    <p class="hint" style="margin-bottom:12px">{$_('settings.hub.lead')}</p>
+    <form class="hubform" onsubmit={(e) => { e.preventDefault(); if (!pendingPin) connectHub(); }}>
+      <div class="field">
+        <label for="hub-host">{$_('settings.hub.url')}</label>
+        <div class="input-row" style="flex-wrap:nowrap">
+          <!-- Le schéma est un bouton, pas un caractère à taper : c'est la
+               partie de l'adresse qui ne varie qu'entre deux valeurs, et
+               c'est celle qu'on tape le plus mal. -->
+          <button type="button" class="btn m scheme" onclick={toggleScheme} disabled={readOnly}
+                  title={$_('settings.hub.scheme_hint')}>{scheme}</button>
+          <input id="hub-host" class="input m" type="text" bind:value={hubHost} placeholder="hub.exemple.fr"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" disabled={readOnly} />
+        </div>
+      </div>
+      <div class="field">
+        <label for="hub-code">{$_('settings.hub.code')}</label>
+        <input id="hub-code" bind:this={codeInput} class="input m code" type="text" value={hubCode}
+               oninput={(e) => (hubCode = formatCode(e.currentTarget.value))}
+               placeholder="K7M2-4PQX" spellcheck="false" autocapitalize="characters" autocomplete="off"
+               aria-invalid={hubError ? 'true' : undefined} disabled={readOnly} />
+        <span class="hint">{$_('settings.hub.code_hint')}</span>
+      </div>
+      <div class="field">
+        <label for="hub-name">{$_('settings.hub.name')}</label>
+        <input id="hub-name" class="input" type="text" bind:value={hubName} placeholder={$_('settings.hub.name_ph')} disabled={readOnly} />
+        <span class="hint">{$_('settings.hub.name_hint')}</span>
+      </div>
+      {#if pendingPin}
+        <!--
+          L'empreinte se compare à l'œil, donc elle s'affiche en entier et en
+          chasse fixe. La tronquer ferait comparer les premiers caractères,
+          ce qui ne prouve rien.
+        -->
+        <div class="banner">
+          <span class="grow"><b>{$_('settings.hub.pin_title', { values: { host: pendingPin.host } })}</b></span>
+          <code class="fp">{pendingPin.fingerprint}</code>
+          <span class="hint">{$_('settings.hub.pin_hint')}</span>
+          <span class="input-row">
+            <button class="btn" type="button" onclick={() => (pendingPin = null)} disabled={hubBusy}>{$_('common.cancel')}</button>
+            <button class="btn primary" type="button" onclick={() => connectHub(pendingPin?.fingerprint ?? '')} disabled={hubBusy}>{$_('settings.hub.pin_confirm')}</button>
+          </span>
+        </div>
       {:else}
-        <p class="hub-hint">{$_('settings.hub.lead')}</p>
-        <label class="hub-field">
-          {$_('settings.hub.url')}
-          <div class="url-row">
-            <!-- Le schéma est un bouton, pas un caractère à taper : c'est la
-                 partie de l'adresse qui ne varie qu'entre deux valeurs, et
-                 c'est celle qu'on tape le plus mal. -->
-            <button
-              type="button"
-              class="scheme"
-              class:secure={scheme === 'https://'}
-              onclick={toggleScheme}
-              disabled={readOnly}
-              title={$_('settings.hub.scheme_hint')}
-            >{scheme}</button>
-            <input
-              type="text"
-              bind:value={hubHost}
-              placeholder="lanprobe.exemple.fr"
-              autocapitalize="off"
-              autocorrect="off"
-              spellcheck="false"
-              disabled={readOnly}
-            />
-          </div>
-        </label>
-        <label class="hub-field">
-          {$_('settings.hub.name')}
-          <input type="text" bind:value={hubName} placeholder={$_('settings.hub.name_ph')} disabled={readOnly} />
-          <span class="hub-hint">{$_('settings.hub.name_hint')}</span>
-        </label>
-        <label class="hub-field">
-          {$_('settings.hub.code')}
-          <input
-            type="text"
-            value={hubCode}
-            oninput={(e) => (hubCode = formatCode(e.currentTarget.value))}
-            placeholder="K7M2-4PQX"
-            spellcheck="false"
-            autocapitalize="characters"
-            autocomplete="off"
-            disabled={readOnly}
-          />
-        </label>
-        <p class="hub-hint">{$_('settings.hub.code_hint')}</p>
-        {#if pendingPin}
-          <!--
-            L'empreinte se compare à l'œil, donc elle s'affiche en entier et en
-            chasse fixe. La tronquer ferait comparer les premiers caractères,
-            ce qui ne prouve rien.
-          -->
-          <div class="pin-box">
-            <p class="pin-title">{$_('settings.hub.pin_title', { values: { host: pendingPin.host } })}</p>
-            <p class="pin-fp">{pendingPin.fingerprint}</p>
-            <p class="hub-hint">{$_('settings.hub.pin_hint')}</p>
-            <div class="pin-acts">
-              <button class="hub-btn ghost" onclick={() => (pendingPin = null)} disabled={hubBusy}>
-                {$_('common.cancel')}
-              </button>
-              <button
-                class="hub-btn"
-                onclick={() => connectHub(pendingPin?.fingerprint ?? '')}
-                disabled={hubBusy}
-              >
-                {$_('settings.hub.pin_confirm')}
-              </button>
-            </div>
-          </div>
-        {:else}
-          <button class="hub-btn" onclick={() => connectHub()} disabled={readOnly || hubBusy || !hubUrl || !hubCode}>
+        <div>
+          <button class="btn primary" type="submit" disabled={readOnly || hubBusy || !hubUrl || !hubCode} aria-busy={hubBusy}>
             {hubBusy ? $_('settings.hub.connecting') : $_('settings.hub.connect')}
           </button>
-        {/if}
-        {#if hubError}
-          <p class="hub-error" role="alert">{$_('settings.hub.error')} — {hubError}</p>
-        {/if}
+        </div>
       {/if}
-    </section>
-  </div>
+    </form>
+  {/if}
+{/snippet}
 
-  <!-- Apparence : Thème + Layout groupés dans une carte -->
-  <div class="group">
-    <section class="section">
-      <div class="section-head">{$_('settings.theme.title')}</div>
-      <div class="option-grid">
-        {#each themes as t}
-          <label class="option-card" class:selected={$settings.theme === t.value} class:readonly={readOnly}>
-            <input type="radio" name="theme" value={t.value}
-              checked={$settings.theme === t.value}
-              disabled={readOnly}
-              onchange={() => settings.setTheme(t.value)} />
-            <div class="option-body">
-              <span class="option-label">{$_(t.labelKey)}</span>
-              <span class="option-desc">{$_(t.descKey)}</span>
-            </div>
-            {#if $settings.theme === t.value}<span class="check">✓</span>{/if}
-          </label>
-        {/each}
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">{$_('settings.palette.title')}</div>
-      <div class="palette-row">
-        {#each palettes as p}
-          <button
-            class="palette-swatch"
-            class:palette-selected={$settings.palette === p.value}
-            style="--swatch-color: {$settings.theme === 'light' || ($settings.theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: light)').matches) ? p.light : p.dark}"
-            title={p.label}
-            disabled={readOnly}
-            onclick={() => settings.setPalette(p.value)}
-          >
-            <span class="swatch-dot"></span>
-            <span class="swatch-label">{p.label}</span>
-          </button>
-        {/each}
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">{$_('settings.layout.title')}</div>
-      <div class="option-grid">
-        {#each layouts as l}
-          <label class="option-card" class:selected={$settings.layout === l.value} class:readonly={readOnly}>
-            <input type="radio" name="layout" value={l.value}
-              checked={$settings.layout === l.value}
-              disabled={readOnly}
-              onchange={() => settings.setLayout(l.value)} />
-            <div class="option-body">
-              <span class="option-label">{$_(l.labelKey)}</span>
-              <span class="option-desc">{$_(l.descKey)}</span>
-            </div>
-            {#if $settings.layout === l.value}<span class="check">✓</span>{/if}
-          </label>
-        {/each}
-      </div>
-    </section>
-  </div>
-
-  <!-- Comportement : Refresh + Auto Port Scan groupés -->
-  <div class="group">
-    <section class="section">
-      <div class="section-head">{$_('settings.dashboard_refresh.title')}</div>
-      <label class="row-control">
-        <span class="row-label">{$_('settings.dashboard_refresh.label')}</span>
-        <select
-          value={$settings.dashboardRefreshSec}
-          disabled={readOnly}
-          onchange={(e) => settings.setDashboardRefresh(Number((e.target as HTMLSelectElement).value))}
-        >
-          {#each refreshOptions as opt}
-            <option value={opt.value}>{$_(opt.labelKey)}</option>
-          {/each}
-        </select>
-      </label>
-      <p class="hint">{$_('settings.dashboard_refresh.hint')}</p>
-    </section>
-
-    <section class="section">
-      <div class="section-head">{$_('settings.auto_port_scan.title')}</div>
-      <label class="row-control">
-        <span class="row-label">{$_('settings.auto_port_scan.label')}</span>
-        <select
-          value={$settings.autoPortScanProfileId ?? ''}
-          disabled={readOnly}
-          onchange={(e) => {
-            const v = (e.target as HTMLSelectElement).value;
-            settings.setAutoPortScanProfile(v === '' ? null : v);
-          }}
-        >
-          <option value="">{$_('settings.auto_port_scan.disabled')}</option>
-          <!-- ⚠️ Les profils AFFICHÉS, pas tous : une sonde rattachée à un hub
-               n'affiche plus ses profils de base (§ 25). Proposer ici un
-               profil invisible ailleurs ferait tourner un scan automatique
-               avec une liste de ports introuvable à l'écran. -->
-          {#each $visiblePortscanProfiles as p (p.id)}
-            <option value={p.id}>{p.from_hub ? `★ ${p.name}` : p.name} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
-          {/each}
-        </select>
-      </label>
-      <p class="hint">{$_('settings.auto_port_scan.hint')}</p>
-    </section>
-  </div>
-
-  <!-- Speedtest : moteur + config iperf dans une carte -->
-  <div class="group">
-    <section class="section">
-      <div class="section-head">{$_('settings.speedtest.title')}</div>
-      <div class="option-grid">
-        <label class="option-card" class:selected={$settings.speedtestEngine === 'ookla'}>
-          <input type="radio" name="speedtest-engine" value="ookla"
-            checked={$settings.speedtestEngine === 'ookla'}
-            onchange={() => settings.setSpeedtestEngine('ookla')} />
-          <div class="option-body">
-            <span class="option-label">{$_('settings.speedtest.ookla')}</span>
-            <span class="option-desc">{$_('settings.speedtest.ookla_desc')}</span>
-          </div>
-          {#if $settings.speedtestEngine === 'ookla'}<span class="check">✓</span>{/if}
-        </label>
-        <label class="option-card" class:selected={$settings.speedtestEngine === 'iperf3'}>
-          <input type="radio" name="speedtest-engine" value="iperf3"
-            checked={$settings.speedtestEngine === 'iperf3'}
-            onchange={() => settings.setSpeedtestEngine('iperf3')} />
-          <div class="option-body">
-            <span class="option-label">{$_('settings.speedtest.iperf3')}</span>
-            <span class="option-desc">{$_('settings.speedtest.iperf3_desc')}</span>
-          </div>
-          {#if $settings.speedtestEngine === 'iperf3'}<span class="check">✓</span>{/if}
-        </label>
-      </div>
-    </section>
-    {#if $settings.speedtestEngine === 'iperf3'}
-    <section class="section">
-      <div class="section-head">{$_('settings.speedtest.server_label')}</div>
-      <label class="row-control">
-        <span class="row-label">{$_('settings.speedtest.server_label')}</span>
-        <input
-          type="text"
-          placeholder="iperf.example.com"
-          value={$settings.iperfServer}
-          oninput={(e) => settings.setIperfServer((e.target as HTMLInputElement).value)}
-        />
-      </label>
-      <p class="hint">{$_('settings.speedtest.iperf_hint')}</p>
-    </section>
-    {/if}
-  </div>
-
-  <!-- Langue + Données dans une carte -->
-  <div class="group">
-    <section class="section">
-      <div class="section-head">{$_('settings.language.title')}</div>
-      <div class="option-grid">
-        {#each langs as l}
-          <label class="option-card" class:selected={$settings.lang === l.value}>
-            <input type="radio" name="lang" value={l.value}
-              checked={$settings.lang === l.value}
-              disabled={readOnly}
-              onchange={() => settings.setLanguage(l.value)} />
-            <div class="option-body">
-              <span class="option-label">{$_(l.labelKey)}</span>
-            </div>
-            {#if $settings.lang === l.value}<span class="check">✓</span>{/if}
-          </label>
-        {/each}
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">{$_('settings.export_import.title')}</div>
-      <div class="btn-row">
-        <button class="action-btn" onclick={exportConfig} disabled={readOnly}>{$_('settings.export_import.export')}</button>
-        <button class="action-btn" onclick={() => importInput?.click()} disabled={readOnly}>{$_('settings.export_import.import')}</button>
-        <input
-          bind:this={importInput}
-          type="file"
-          accept=".json,application/json"
-          onchange={onImportFile}
-          style="display: none;"
-        />
-      </div>
-      <p class="hint">{$_('settings.export_import.hint')}</p>
-      {#if importStatus}
-        <p class="hint" style="color: var(--ep-accent);">{importStatus}</p>
-      {/if}
-    </section>
-  </div>
-
-
-  <!-- À propos -->
-  <div class="group">
-  <section class="section" style="margin-bottom:0;">
-    <div class="section-head">{$_('settings.about.title')}</div>
-    <div class="about-rows">
-      <div class="about-row"><span class="key">{$_('settings.about.application')}</span><span class="mono">LanProbe</span></div>
-      <div class="about-row"><span class="key">{$_('settings.about.version')}</span><span class="mono">v{appVersion}</span></div>
-      <div class="about-row" class:no-border={installType === 'unknown' || installType === 'headless-server' || (!isHeadless && !navigator.userAgent.includes('Mac'))}>
-        <span class="key">{$_('settings.about.platform')}</span><span class="mono">
-          {#if isHeadless && serverPlatform}
-            {serverPlatform === 'windows' ? 'Windows' : serverPlatform === 'macos' ? 'macOS' : 'Linux'}
-            <span style="font-size:11px;color:var(--ep-text-muted);margin-left:4px;">(server)</span>
-          {:else if navigator.userAgent.includes('Win')}Windows
-          {:else if navigator.userAgent.includes('Mac')}macOS
-          {:else}Linux{/if}
-        </span>
-      </div>
-      {#if isHeadless}
-      <div class="about-row" style="border-bottom:none;">
-        <span class="key">{$_('settings.about.install_type')}</span>
-        <span class="mono install-badge" style="background:var(--ep-glass-bg);color:var(--ep-text);">Headless</span>
-      </div>
-      {:else if navigator.userAgent.includes('Mac') && installType !== 'unknown'}
-      <div class="about-row" style="border-bottom:none;">
-        <span class="key">{$_('settings.about.install_type')}</span>
-        <span class="mono install-badge install-{installType}">
-          {installType === 'pkg' ? 'PKG' : 'DMG'}
-          <span class="install-hint">{$_('settings.about.install_hint_' + installType)}</span>
-        </span>
-      </div>
-      {/if}
+{#snippet hubState()}
+  <!-- Les quatre états de l'enrôlement, dans l'ordre où on les rencontre. -->
+  {#if hubError}
+    <div class="hubstate" role="alert">
+      <StateMark mark={{ tone: 'bad', shape: 'square', key: 'settings.hub.error' }} />
+      <button class="btn sm" type="button" onclick={retype}>{$_('settings.hub.retype')}</button>
     </div>
-  </section>
+    <p class="hint m">{hubError}</p>
+  {:else if hub.enrolled}
+    <div class="hubstate"><StateMark mark={liveMark} /></div>
+  {:else if hubBusy}
+    <div class="hubstate"><StateMark mark={{ tone: 'none', shape: 'ring', key: 'settings.hub.connecting' }} /></div>
+  {:else}
+    <div class="hubstate"><StateMark mark={liveMark} /></div>
+  {/if}
+{/snippet}
+
+{#snippet config()}
+  <div class="setrow">
+    <div>
+      <div class="k">{$_('settings.export_import.summary', { values: { profiles: $profiles.length, portscan: $portscanProfiles.filter(p => !p.builtin && !p.id.startsWith('builtin:')).length } })}</div>
+      <div class="d">{$_('settings.export_import.hint')}</div>
+    </div>
+    <div class="input-row">
+      <button class="btn" type="button" onclick={exportConfig} disabled={readOnly}>{$_('settings.export_import.export')}</button>
+      <button class="btn" type="button" onclick={() => importInput?.click()} disabled={readOnly}>{$_('settings.export_import.import')}</button>
+      <input bind:this={importInput} type="file" accept=".json,application/json" onchange={onImportFile} hidden />
+    </div>
+  </div>
+  {#if importStatus}<div class="banner info" role="status"><span class="grow">{importStatus}</span></div>{/if}
+  <div class="setrow">
+    <div><div class="k">{$_('settings.about.version')}</div></div>
+    <div class="num">
+      LanProbe {appVersion},
+      {#if isHeadless && serverPlatform}
+        {serverPlatform === 'windows' ? 'Windows' : serverPlatform === 'macos' ? 'macOS' : 'Linux'} <span class="muted">({$_('settings.about.server')})</span>
+      {:else if navigator.userAgent.includes('Win')}Windows
+      {:else if navigator.userAgent.includes('Mac')}macOS
+      {:else}Linux{/if}
+    </div>
+  </div>
+  {#if isHeadless}
+    <div class="setrow">
+      <div><div class="k">{$_('settings.about.install_type')}</div></div>
+      <div><span class="tag">{$_('settings.about.headless')}</span></div>
+    </div>
+  {:else if navigator.userAgent.includes('Mac') && (installType === 'pkg' || installType === 'dmg')}
+    <div class="setrow">
+      <div><div class="k">{$_('settings.about.install_type')}</div></div>
+      <div><span class="tag">{installType === 'pkg' ? 'PKG' : 'DMG'}</span> <span class="muted">{$_(installType === 'pkg' ? 'settings.about.install_hint_pkg' : 'settings.about.install_hint_dmg')}</span></div>
+    </div>
+  {/if}
+{/snippet}
+
+<div class="screen">
+  <ScreenHead title={$_('settings.title')} />
+  <div class="screen-body">
+    {#if readOnly}<div class="banner info"><span class="grow">{$_('settings.web_readonly_hint')}</span></div>{/if}
+
+    {#if tabbed}
+      <div class="tabs" role="tablist" aria-label={$_('settings.title')}>
+        {#each [['general', 'settings.tabs.general'], ['hub', 'settings.tabs.hub'], ['scan', 'settings.tabs.scan'], ['about', 'settings.tabs.about']] as [id, key]}
+          <button type="button" role="tab" aria-selected={tab === id} aria-current={tab === id ? 'page' : undefined}
+                  onclick={() => (tab = id as typeof tab)}>{$_(key)}</button>
+        {/each}
+      </div>
+      {#if tab === 'general'}
+        <section class="panel">{@render general()}</section>
+      {:else if tab === 'hub'}
+        {#if hub.enrolled}
+          <section class="panel" aria-labelledby="h-he" style="max-width:720px">
+            <h2 id="h-he">{$_('settings.hub.title')}</h2>
+            {@render hubForm()}
+          </section>
+        {:else}
+          <div class="grid2">
+            <section class="panel" aria-labelledby="h-he">
+              <h2 id="h-he">{$_('settings.hub.enrol_title')}</h2>
+              {@render hubForm()}
+            </section>
+            <section class="panel" aria-labelledby="h-hs">
+              <h2 id="h-hs">{$_('settings.hub.state')}</h2>
+              {@render hubState()}
+            </section>
+          </div>
+        {/if}
+      {:else if tab === 'scan'}
+        <div class="grid2">
+          <section class="panel" aria-labelledby="h-sc"><h2 id="h-sc">{$_('settings.scheduler.title')}</h2>{@render schedulerRows()}</section>
+          <section class="panel" aria-labelledby="h-st"><h2 id="h-st">{$_('settings.speedtest.title')}</h2>{@render speedtest()}</section>
+        </div>
+      {:else}
+        <section class="panel">{@render config()}</section>
+      {/if}
+    {:else}
+      <div class="setgrid">
+        <section class="panel" aria-labelledby="h-g"><h2 id="h-g">{$_('settings.tabs.general')}</h2>{@render general()}</section>
+        <section class="panel" aria-labelledby="h-sc"><h2 id="h-sc">{$_('settings.scheduler.title')}</h2>{@render schedulerRows()}</section>
+        <section class="panel" aria-labelledby="h-st"><h2 id="h-st">{$_('settings.speedtest.title')}</h2>{@render speedtest()}</section>
+        <section class="panel" aria-labelledby="h-h">
+          <h2 id="h-h">{hub.enrolled ? $_('settings.hub.title') : $_('settings.hub.enrol_title')}</h2>
+          {#if !hub.enrolled}{@render hubState()}{/if}
+          {@render hubForm()}
+        </section>
+        <section class="panel" aria-labelledby="h-c"><h2 id="h-c">{$_('settings.tabs.about')}</h2>{@render config()}</section>
+      </div>
+    {/if}
   </div>
 </div>
 
 <style>
-  .hub-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 13px; }
-  .hub-field input { padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border, #333);
-    background: var(--input-bg, #1a1a1a); color: inherit; font-size: 13px; }
-  /* Le schéma et l'hôte forment un seul champ à l'œil : bordure commune,
-     coins arrondis aux extrémités seulement. Deux boîtes séparées se
-     liraient comme deux réglages sans rapport. */
-  .url-row { display: flex; }
-  .url-row input { flex: 1; min-width: 0; border-radius: 0 6px 6px 0; border-left: none; }
-  .scheme {
-    padding: 7px 9px; border: 1px solid var(--border, #333); border-radius: 6px 0 0 6px;
-    background: var(--input-bg, #1a1a1a); color: inherit;
-    font-family: var(--ep-font-mono, monospace); font-size: 13px;
-    cursor: pointer; white-space: nowrap;
-  }
-  .scheme:hover:not(:disabled) { border-color: var(--accent, #6366f1); }
-  /* `https` porte une marque : le passage en clair doit se voir, pas se
-     deviner à la lecture de huit caractères. */
-  .scheme.secure { color: var(--ep-success, #22c55e); }
-  .scheme:disabled { opacity: .5; cursor: default; }
-  .hub-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 4px 0; }
-  .hub-hint { font-size: 12px; opacity: .65; margin: 2px 0 10px; }
-  .hub-restored { color: var(--ep-success, #22c55e); opacity: 1; }
-  .hub-state { font-size: 13px; margin-bottom: 10px; }
-  /* L'empreinte se compare à l'œil : chasse fixe, entière, et coupable de
-     prendre de la place. La tronquer ferait comparer les premiers caractères,
-     ce qui ne prouve rien. */
-  .pin-box {
-    margin: 8px 0;
-    padding: 10px 12px;
-    border: 1px solid var(--lp-warn, #b8860b);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--lp-warn, #b8860b) 8%, transparent);
-  }
-  .pin-title {
-    margin: 0 0 6px;
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .pin-fp {
-    margin: 0 0 6px;
-    font-family: ui-monospace, monospace;
-    font-size: 11.5px;
-    line-height: 1.6;
-    word-break: break-all;
-    user-select: all;
-  }
-  .pin-acts {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
-  }
-  .hub-btn.ghost {
-    background: none;
-    border: 1px solid var(--lp-border, #4444);
-  }
-  .hub-error { font-size: 12px; color: var(--danger, #f87171); margin-top: 8px; }
-  .hub-btn { padding: 7px 14px; border-radius: 6px; border: 1px solid transparent;
-    background: var(--accent, #6366f1); color: #fff; font-size: 13px; cursor: pointer; }
-  .hub-btn.ghost { background: transparent; border-color: var(--border, #333); color: inherit; }
-  .hub-btn:disabled { opacity: .5; cursor: default; }
-
-  .page { padding: 24px 28px; max-width: 680px; }
-  h1 { font-size: 18px; font-weight: 800; margin-bottom: 6px; letter-spacing: -.2px; }
-  .page-sub { font-size: 12px; color: var(--ep-text-muted); margin-bottom: 24px; }
-
-  /* Group card: plusieurs sections dans une carte vitrée */
-  .group {
-    background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-lg);
-    margin-bottom: 16px;
-    overflow: hidden;
-  }
-  .group .section {
-    padding: 14px 18px;
-    margin-bottom: 0;
-    border-bottom: 1px solid var(--ep-glass-border);
-  }
-  .group .section:last-child { border-bottom: none; }
-
-  .section { margin-bottom: 16px; }
-  .section-head {
-    font-size: 10px; font-weight: 700;
-    color: var(--ep-text-muted);
-    text-transform: uppercase; letter-spacing: .8px;
-    margin-bottom: 10px;
-  }
-
-  /* Option cards (theme, layout, speedtest engine, language) */
-  .option-grid { display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; }
-  .option-card {
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 14px;
-    flex: 1; min-width: 150px;
-    background: var(--ep-bg-tertiary);
-    border: 1px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-md);
-    cursor: pointer;
-    transition: border-color 0.12s, background 0.12s;
-  }
-  .option-card:hover { border-color: var(--ep-glass-border-strong); background: var(--ep-glass-bg-md); }
-  .option-card.selected { border-color: var(--ep-accent); background: var(--ep-accent-dim); }
-  .option-card.readonly { cursor: not-allowed; opacity: 0.6; }
-  .option-card input { display: none; }
-  .option-body { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-  .option-label { font-size: 13px; font-weight: 600; }
-  .option-desc { font-size: 11.5px; color: var(--ep-text-secondary); }
-  .check { color: var(--ep-accent-bright); font-size: 14px; }
-
-  /* Row controls (select, input) */
-  .row-control {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 16px;
-    background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-lg);
-    gap: 16px;
-  }
-  .row-label { font-size: 13px; font-weight: 600; }
-  .row-control select,
-  .row-control input[type="text"],
-  .row-control select:focus,
-  .row-control input:focus { outline: none; border-color: var(--ep-accent); }
-  .row-control select:disabled,
-  .row-control input:disabled { opacity: 0.55; cursor: not-allowed; }
-
-  .hint { font-size: 11.5px; color: var(--ep-text-muted); margin-top: 7px; line-height: 1.5; }
-  .hint-success { color: var(--ep-success); }
-  .addr-link { background: none; border: none; padding: 0; color: var(--ep-success); font-size: inherit; font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-  .hint-danger  { color: var(--ep-danger); }
-
-  /* Export/import row */
-  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
-  .action-btn {
-    background: var(--ep-glass-bg-md);
-    border: 1px solid var(--ep-glass-border-strong);
-    color: var(--ep-text-primary);
-    padding: 9px 16px;
-    border-radius: var(--ep-radius-md);
-    font-size: 12.5px; font-weight: 600;
-    cursor: pointer;
-    transition: border-color 0.12s, background 0.12s;
-  }
-  .action-btn:hover { border-color: var(--ep-accent); background: var(--ep-accent-dim); color: var(--ep-accent-bright); }
-  .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  /* Server mode start/stop */
-  .server-start { background: var(--ep-accent-dim); border-color: var(--ep-accent); color: var(--ep-accent-bright); }
-  .server-stop  { background: rgba(239,68,68,0.12); border-color: var(--ep-danger); color: var(--ep-danger); }
-
-  /* Account feedback */
-  .account-feedback { font-size: 12px; color: var(--ep-success); font-weight: 600; }
-
-  /* About rows (dans la group card) */
-  .about-rows { display: flex; flex-direction: column; }
-  .about-row {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 9px 0;
-    border-bottom: 1px solid var(--ep-glass-border);
-    font-size: 12.5px;
-  }
-  .about-row .key { color: var(--ep-text-secondary); }
-  .about-row.no-border { border-bottom: none; }
-  .mono { font-family: var(--ep-font-mono); color: var(--ep-accent-bright); font-size: 12px; }
-  .install-badge { display: flex; align-items: center; gap: 8px; }
-  .install-pkg  { color: #10b981; }
-  .install-dmg  { color: #f59e0b; }
-  .install-hint { font-family: var(--ep-font-sans, sans-serif); font-size: 11px;
-                  color: var(--ep-text-muted); font-weight: 400; }
-
-  /* Palette picker */
-  .palette-row { display: flex; flex-wrap: wrap; gap: 8px; }
-  .palette-swatch {
-    display: flex; flex-direction: column; align-items: center; gap: 5px;
-    padding: 8px 10px;
-    background: var(--ep-bg-tertiary);
-    border: 2px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-md);
-    cursor: pointer;
-    transition: border-color 0.12s, transform 0.1s;
-    min-width: 62px;
-  }
-  .palette-swatch:hover { border-color: var(--swatch-color); transform: translateY(-1px); }
-  .palette-swatch.palette-selected { border-color: var(--swatch-color); background: var(--ep-accent-dim); }
-  .palette-swatch:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-  .swatch-dot {
-    width: 22px; height: 22px; border-radius: 50%;
-    background: var(--swatch-color);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--swatch-color) 20%, transparent);
-  }
-  .swatch-label { font-size: 10px; font-weight: 600; color: var(--ep-text-secondary); }
-  .palette-swatch.palette-selected .swatch-label { color: var(--ep-text-primary); }
+  .swatches { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
+  .swatch { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--color-rule-2); border-radius: 50%; background: var(--color-paper-2); cursor: pointer; padding: 0; }
+  .swatch .dot { width: 16px; height: 16px; border-radius: 50%; background: var(--swatch-dark); }
+  :global([data-theme='light']) .swatch .dot { background: var(--swatch-light); }
+  @media (prefers-color-scheme: light) { :global(:root:not([data-theme])) .swatch .dot { background: var(--swatch-light); } }
+  .swatch[aria-pressed='true'] { border-color: var(--color-ink); box-shadow: 0 0 0 1px var(--color-ink); }
+  .swatch[disabled] { cursor: not-allowed; opacity: 0.6; }
+  .hubform { display: grid; gap: var(--space-md); }
+  .code { font-size: 1.25rem; letter-spacing: 0.12em; height: 44px; max-width: 220px; }
+  .scheme { flex: none; min-width: 84px; padding: 0 var(--space-sm); }
+  .hubstate { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs) var(--space-md); margin: var(--space-2xs) 0 var(--space-xs); }
+  .fp { flex-basis: 100%; overflow-wrap: anywhere; font-size: var(--text-sm); }
+  .panel > h2 { margin-bottom: var(--space-xs); }
 </style>
