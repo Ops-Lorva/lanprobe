@@ -488,7 +488,7 @@
     "meta_site": "Site",
     "meta_platform": "Plateforme",
     "meta_version": "Version",
-    "meta_created": "Enrôlée",
+    "meta_created": "Enrôlée le",
     "meta_last_seen": "Dernier battement",
     "move": "Déplacer",
     "move_title": "Déplacer « {name} »",
@@ -641,8 +641,8 @@
   "charts": {
     "aggregated": "Moyenné par {every} — le maximum de chaque intervalle est tracé en fond, pour qu'un pic ne disparaisse pas dans sa moyenne.",
     "peak_label": "{label} (max)",
-    "latency_title": "Latence des hôtes suivis",
-    "latency_sub": "Temps de réponse ICMP, en millisecondes.",
+    "latency_title": "Latence et perte, par cible",
+    "latency_sub": "Échelle propre à chaque cible",
     "internet_title": "Accès internet",
     "internet_sub": "État vu depuis la sonde.",
     "speed_title": "Débits mesurés",
@@ -678,7 +678,17 @@
     "stat_max": "max",
     "stat_runs": "{n, plural, one {# test} other {# tests}}",
     "speed_server": "Serveur :",
-    "toggle_hint": "Cliquer pour masquer ou réafficher cette courbe"
+    "toggle_hint": "Cliquer pour masquer ou réafficher cette courbe",
+    "gateway": "Passerelle",
+    "row_stats": "moy {avg} {unit}, P95 {p95} {unit}, max {max} {unit}",
+    "row_loss": "perte {loss} %",
+    "loss_short": "perte",
+    "loss_aria": "Perte vers {target}, en niveaux de gris",
+    "loss_legend": "Perte :",
+    "loss_l1": "moins de 1 %",
+    "loss_l2": "1 à 5 %",
+    "loss_l3": "5 à 20 %",
+    "loss_l4": "plus de 20 %"
   },
   "revoke": {
     "action": "Retirer la sonde",

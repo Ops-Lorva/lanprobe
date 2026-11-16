@@ -15,8 +15,11 @@
     logTime,
     secondsLeft,
     countdown,
+    elapsed,
+    contactTime,
   } from '$lib/time';
   import { probeLiveness } from '$lib/probe-liveness';
+  import { probeDisplay } from '$lib/probe-state';
   import {
     api,
     ApiError,
@@ -98,6 +101,7 @@
   import BufferBadge from '$lib/components/BufferBadge.svelte';
   import ChartCard from '$lib/components/ChartCard.svelte';
   import TimeSeriesChart from '$lib/components/TimeSeriesChart.svelte';
+  import TargetRows from '$lib/components/TargetRows.svelte';
   import StatusBand from '$lib/components/StatusBand.svelte';
   import SeriesLegend from '$lib/components/SeriesLegend.svelte';
   import CommandButton from '$lib/components/CommandButton.svelte';
@@ -226,6 +230,8 @@
    * du temps.
    */
   const live = $derived(probeLiveness(probe?.last_seen, $now));
+  /** L'état affiché, forme et mot : Dégradée et Jamais vue en plus de la fraîcheur. */
+  const shown = $derived(probe ? probeDisplay(probe, $now) : null);
 
   async function toggleRealtime() {
     if (!probe) return;
@@ -798,6 +804,21 @@
   });
   const pingPoints = $derived(pingCurves.flatMap((c) => c.points));
 
+  /**
+   * Disponibilité `alive` par adresse, lue dans la même réponse que la
+   * latence : c'est elle qui donne la perte en niveaux de gris sous chaque
+   * cible. Rien de plus n'est demandé au hub.
+   */
+  const aliveByTarget = $derived.by(() => {
+    const out: Record<string, { t: number; v: number }[]> = {};
+    for (const c of ping.curves) {
+      if (c.field !== 'alive') continue;
+      const ip = curveTarget(c);
+      if (ip) out[ip] = numeric(c.points);
+    }
+    return out;
+  });
+
   /** Cibles ICMP surveillées, telles que les mesures les nomment. */
   const monitoredTargets = $derived(
     [...new Set(pingCurves.map((c) => c.target).filter(Boolean))].sort(),
@@ -1360,13 +1381,6 @@
 
 </script>
 
-<a class="back" href="#/">
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-    <polyline points="10,3 5,8 10,13" />
-  </svg>
-  {$_('probe.back')}
-</a>
-
 {#if !probe}
   {#if $fleet.loading}
     <StateBlock tone="loading" title={$_('fleet.loading')} />
@@ -1380,6 +1394,11 @@
     </StateBlock>
   {/if}
 {:else}
+  <nav class="lp-crumbs" aria-label={$_('nav.fleet')}>
+    <a href="#/">{$_('nav.fleet')}</a><span class="sep">/</span>
+    <span>{probe.site}</span><span class="sep">/</span>
+    <span>{probe.name}</span>
+  </nav>
   <header class="head">
     <div class="ident">
       {#if editing}
@@ -1402,6 +1421,35 @@
       {:else}
         <div class="title-row">
           <h1>{probe.name}</h1>
+          {#if shown}
+            <span class="state">
+              <StatusMark status={shown.state} />
+              <span
+                class="since"
+                class:silent={live.state === 'silent'}
+                title={probe.last_seen ? absoluteTime(probe.last_seen, lang) : $_('status.never_seen')}
+              >
+                {#if shown.state === 'degraded' && shown.internet}
+                  {shown.since != null
+                    ? $_('status.degraded_since', {
+                        values: {
+                          net: $_(`status.net_${shown.internet}`),
+                          when: elapsed($now / 1000 - shown.since, lang),
+                        },
+                      })
+                    : $_(`status.net_${shown.internet}`)}
+                {:else if shown.state === 'silent'}
+                  {$_('status.silent_for', {
+                    values: { ago: countdown(live.silentFor ?? 0, lang) },
+                  })}
+                {:else if shown.state === 'offline' && shown.since != null}
+                  {$_('status.since', { values: { when: elapsed($now / 1000 - shown.since, lang) } })}
+                {:else if shown.state === 'never'}
+                  {$_('status.enrolled_at', { values: { when: contactTime(shown.since, lang, $now) } })}
+                {/if}
+              </span>
+            </span>
+          {/if}
           {#if $canOperate}
             <button class="lp-btn ghost sm" onclick={startEdit}>{$_('probe.rename')}</button>
             <!-- Le seul geste de cette fiche qui change le comportement de la
@@ -1414,6 +1462,7 @@
               disabled={realtimeBusy}
               title={$_('probe.realtime_hint')}
             >
+              <svg width="14" height="14" viewBox="0 0 12 12" aria-hidden="true"><path d="M6.8 1 2.5 7h3l-.6 4L9.5 5h-3z" fill="currentColor" /></svg>
               {realtimeOn ? $_('probe.realtime_stop') : $_('probe.realtime')}
             </button>
           {/if}
@@ -1426,28 +1475,6 @@
            et « il y a 12 min » posé à côté d'un statut ne dit pas de quoi il
            est l'âge. La place ne manque pas ici, contrairement à la ligne de
            parc. -->
-      <div class="badges">
-        <StatusMark status={live.state} />
-        <span class="dot" aria-hidden="true">·</span>
-        <span class="site">{probe.site}</span>
-        <span class="dot" aria-hidden="true">·</span>
-        <span
-          class="seen lp-mono"
-          class:silent={live.state === 'silent'}
-          title={probe.last_seen ? absoluteTime(probe.last_seen, lang) : $_('status.never_seen')}
-        >
-          {#if live.state === 'silent'}
-            {$_('status.silent_for', {
-              values: { ago: countdown(live.silentFor ?? 0, lang) },
-            })}
-          {:else if probe.last_seen}
-            {relativeTime(probe.last_seen, lang, $now)}
-          {:else}
-            {$_('status.never_seen')}
-          {/if}
-        </span>
-      </div>
-
       <!--
         ⚠️ La minute d'attente est écrite noir sur blanc, active ou non. Le hub
         ne joint jamais la sonde : l'ordre voyage dans la réponse au battement.
@@ -1458,8 +1485,6 @@
         <p class="rt-note" role="status">
           {$_('probe.realtime_active', { values: { left: countdown(realtimeLeft, lang) } })}
         </p>
-      {:else if $canOperate}
-        <p class="rt-hint">{$_('probe.realtime_hint')}</p>
       {/if}
       {#if realtimeError}<p class="err" role="alert">{realtimeError}</p>{/if}
     </div>
@@ -1572,24 +1597,32 @@
   {/if}
 
   <dl class="meta">
-    <div><dt>{$_('probe.meta_id')}</dt><dd class="lp-mono id">{probe.probe_id}</dd></div>
     <div><dt>{$_('probe.meta_site')}</dt><dd>{probe.site}</dd></div>
-    <div><dt>{$_('probe.meta_platform')}</dt><dd class="lp-mono">{platformLabel(probe.platform, '—')}</dd></div>
-    <div><dt>{$_('probe.meta_version')}</dt><dd class="lp-mono">{probe.version || '—'}</dd></div>
+    <div><dt>{$_('probe.meta_platform')}</dt><dd>{platformLabel(probe.platform, '—')}</dd></div>
+    <div><dt>{$_('probe.meta_version')}</dt><dd>{probe.version || '—'}</dd></div>
+    {#if probe.public_ip}
+      <div><dt>{$_('fleet.col_public_ip')}</dt><dd class="lp-mono">{probe.public_ip}</dd></div>
+    {/if}
     <div>
-      <dt>{$_('probe.meta_created')}</dt>
-      <dd class="lp-mono">{dateOnly(probe.created_at, lang)}</dd>
+      <dt>{$_('probe.meta_last_seen')}</dt>
+      <dd title={probe.last_seen ? absoluteTime(probe.last_seen, lang) : ''}>
+        {probe.last_seen ? contactTime(probe.last_seen, lang, $now) : $_('fleet.never')}
+      </dd>
     </div>
     <div>
       <dt>{$_('buffer.label')}</dt>
       <dd><BufferBadge points={probe.buffered_points} /></dd>
     </div>
+    <div><dt>{$_('probe.meta_created')}</dt><dd>{dateOnly(probe.created_at, lang)}</dd></div>
+    <div><dt>{$_('probe.meta_id')}</dt><dd class="lp-mono id">{probe.probe_id}</dd></div>
   </dl>
 
   {#if probe.buffered_points > 0}
-    <div class="buffer-alert" role="status">
-      <strong>{$_('buffer.pending', { values: { n: probe.buffered_points } })}</strong>
-      <p>{$_('buffer.warn_body')}</p>
+    <div class="lp-banner" role="status">
+      <span class="grow">
+        <strong>{$_('buffer.pending', { values: { n: probe.buffered_points } })}</strong>
+        · {$_('buffer.warn_body')}
+      </span>
     </div>
   {/if}
 
@@ -1655,6 +1688,8 @@
   {#if tab === 'dashboard'}
 
   <div class="charts">
+    <!-- « Une cible = une rangée » : chaque cible à son échelle, sa perte en
+         gris juste dessous, sur le même temps. -->
     <ChartCard
       title={$_('charts.latency_title')}
       sub={$_('charts.latency_sub')}
@@ -1662,17 +1697,12 @@
       errorText={ping.error}
       {refreshing}
     >
-      <TimeSeriesChart
-        series={shownPing}
+      <TargetRows
+        rows={pingCurves}
+        alive={aliveByTarget}
         {domain}
         unit={$_('charts.unit_ms')}
-      />
-      <SeriesLegend
-        rows={pingCurves}
-        unit={$_('charts.unit_ms')}
-        decimals={0}
-        {hidden}
-        ontoggle={toggle}
+        gateway={probe.gateway}
       />
       {#snippet table()}
         <ValueTable
@@ -2868,26 +2898,13 @@
 {/if}
 
 <style>
-  .back {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 12px;
-    color: var(--ep-text-secondary);
-    text-decoration: none;
-    margin-bottom: 12px;
-  }
-  .back:hover {
-    color: var(--ep-accent-bright);
-  }
-
   .head {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 14px;
+    gap: 12px 24px;
     flex-wrap: wrap;
-    margin-bottom: 14px;
+    margin-bottom: 24px;
   }
   .ident {
     min-width: 0;
@@ -2896,59 +2913,46 @@
   .title-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 8px 16px;
     flex-wrap: wrap;
   }
   h1 {
-    font-size: 21px;
-    font-weight: 800;
+    font-size: 1.75rem;
+    font-weight: 600;
     letter-spacing: -0.02em;
+    line-height: 1.05;
     margin: 0;
     overflow-wrap: anywhere;
   }
+  .state {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .since {
+    color: var(--color-muted);
+    font-size: 0.8125rem;
+  }
+  /* Silencieuse : le délai devient l'information principale. */
+  .since.silent {
+    color: var(--color-ink-2);
+  }
   .edit {
     display: flex;
-    gap: 6px;
+    gap: 8px;
     flex-wrap: wrap;
   }
   .edit input {
     flex: 1 1 200px;
-    font-family: var(--ep-font-sans);
-    font-size: 15px;
-    font-weight: 700;
-  }
-  .badges {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-top: 7px;
-    font-size: 11.5px;
-  }
-  .site {
-    color: var(--ep-text-secondary);
+    font-size: 1rem;
     font-weight: 600;
-  }
-  .seen {
-    color: var(--ep-text-muted);
-    font-size: 11px;
-  }
-  /* Silencieuse : le délai devient l'information principale de la ligne,
-     puisque le statut, lui, ne conclut rien. */
-  .seen.silent {
-    color: var(--ep-text-secondary);
-  }
-  .dot {
-    color: var(--ep-text-dim);
   }
   .acts {
     display: flex;
-    gap: 6px;
+    gap: 8px;
     flex-wrap: wrap;
   }
 
-  /* Le bouton allumé prend la couleur d'accent : ce qui tourne doit se voir
-     sans lire, y compris du coin de l'œil en revenant sur l'onglet. */
   /* ⚠️ ARMÉ, donc le bleu fixe de l'état (`--lp-armed`) — pas l'accent. Le
      bouton au repos reste un bouton ordinaire : c'est l'état qui prend la
      couleur, pas le contrôle. */
@@ -2958,73 +2962,41 @@
     color: var(--lp-armed);
     font-weight: 600;
   }
-  .rt-note,
-  .rt-hint {
-    margin: 6px 0 0;
-    font-size: 11.5px;
-    line-height: 1.55;
-    max-width: 82ch;
-  }
-  /* ⚠️ Le temps restant RESTE écrit ici. « Juste la couleur » est la règle de
-     l'app mobile, qui est sèche ; le hub a droit à un peu plus de texte, et
-     cette phrase porte la minute d'attente avant que la sonde change de
-     cadence. */
+  /* ⚠️ Le temps restant RESTE écrit ici : cette phrase porte la minute
+     d'attente avant que la sonde change de cadence. */
   .rt-note {
+    margin: 8px 0 0;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    max-width: 82ch;
     color: var(--lp-armed);
   }
-  .rt-hint {
-    color: var(--ep-text-dim);
-  }
 
+  /* Méta d'une fiche : des paires, pas des boîtes. */
   .meta {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 6px;
-    margin: 0 0 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 40px;
+    margin: -8px 0 24px;
   }
   .meta div {
-    background: var(--ep-bg-secondary);
-    border: 1px solid var(--ep-border);
-    border-radius: var(--ep-radius-md);
-    padding: 9px 11px;
+    display: grid;
     min-width: 0;
   }
   dt {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--ep-text-dim);
-    margin-bottom: 3px;
+    font-size: 0.75rem;
+    color: var(--color-muted);
   }
   dd {
     margin: 0;
-    font-size: 12px;
-    color: var(--ep-text-primary);
+    font-size: 0.875rem;
+    color: var(--color-ink);
   }
   /* Un UUID ne doit jamais élargir la page : il se coupe, il ne pousse pas. */
   dd.id {
-    font-size: 10.5px;
-    color: var(--ep-text-secondary);
+    font-size: 0.75rem;
+    color: var(--color-ink-2);
     overflow-wrap: anywhere;
-  }
-
-  .buffer-alert {
-    padding: 11px 13px;
-    margin-bottom: 14px;
-    border: 1px solid color-mix(in srgb, var(--ep-warning) 50%, var(--ep-border));
-    border-left-width: 3px;
-    border-radius: var(--ep-radius-md);
-    background: color-mix(in srgb, var(--ep-warning) 8%, transparent);
-  }
-  .buffer-alert strong {
-    font-size: 12.5px;
-  }
-  .buffer-alert p {
-    font-size: 11.5px;
-    color: var(--ep-text-secondary);
-    margin: 4px 0 0;
-    line-height: 1.55;
-    max-width: 82ch;
   }
 
   /* `.rangebar` et `.slabox` ont suivi la barre de fenêtre dans
@@ -3194,31 +3166,37 @@
   .tabs {
     display: flex;
     gap: 2px;
-    margin: 18px 0 14px;
-    border-bottom: 1px solid var(--ep-border);
+    margin: 0 0 16px;
+    border-bottom: 1px solid var(--color-rule);
     overflow-x: auto;
+    scrollbar-width: none;
   }
   .tab {
-    padding: 8px 14px;
+    position: relative;
+    padding: 12px;
     border: none;
-    border-bottom: 2px solid transparent;
     background: none;
-    color: var(--ep-text-secondary);
-    font: inherit;
-    font-size: 13px;
+    color: var(--color-ink-2);
+    font: 500 0.875rem/1.2 var(--ep-font-sans);
     white-space: nowrap;
     cursor: pointer;
   }
-  .tab:hover {
-    color: var(--ep-text-primary);
-  }
+  .tab:hover,
   .tab.on {
-    color: var(--ep-text-primary);
-    border-bottom-color: var(--ep-accent);
+    color: var(--color-ink);
+  }
+  .tab.on::after {
+    content: '';
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: -1px;
+    height: 2px;
+    background: var(--color-accent);
   }
   .tab:focus-visible {
-    outline: 2px solid var(--ep-accent);
-    outline-offset: -2px;
+    outline: 2px solid var(--color-focus);
+    outline-offset: -4px;
   }
 
   .panel {
@@ -3344,22 +3322,20 @@
   .grid {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12.5px;
+    font-size: 0.875rem;
   }
   .grid th {
     text-align: left;
-    padding: 6px 10px 6px 0;
-    border-bottom: 1px solid var(--ep-border);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--ep-text-dim);
+    padding: 8px 12px 8px 0;
+    border-bottom: 1px solid var(--color-rule-2);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
     font-weight: 500;
     white-space: nowrap;
   }
   .grid td {
-    padding: 6px 10px 6px 0;
-    border-bottom: 1px solid var(--ep-border);
+    padding: 10px 12px 10px 0;
+    border-bottom: 1px solid var(--color-rule);
     vertical-align: top;
   }
   .grid .num {

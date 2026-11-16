@@ -19,13 +19,15 @@
      * quand elle est presque vide.
      */
     domain?: { from: number; to: number };
+    /** `false` : sans l'axe des temps, pour les rangées empilées d'une même fiche. */
+    axis?: boolean;
   }
-  let { series, unit, height = 168, decimals = 0, domain }: Props = $props();
+  let { series, unit, height = 168, decimals = 0, domain, axis = true }: Props = $props();
 
   const lang = $derived($locale ?? 'en');
 
   // ── Géométrie ────────────────────────────────────────────────────────────
-  const PAD = { top: 10, right: 14, bottom: 22, left: 46 };
+  const PAD = $derived({ top: 10, right: 14, bottom: axis ? 22 : 6, left: 46 });
   let wrap = $state<HTMLDivElement | null>(null);
   let width = $state(720);
 
@@ -278,7 +280,7 @@
       <text x={PAD.left - 8} y={y(tick) + 3.5} class="ytick">{tickFmt(tick)}</text>
     {/each}
 
-    {#each xTicks as t, i (i)}
+    {#each axis ? xTicks : [] as t, i (i)}
       <text
         x={x(t)}
         y={height - 6}
@@ -406,9 +408,9 @@
   }
   .ytick,
   .xtick {
-    font-family: var(--ep-font-mono);
-    font-size: 9px;
-    fill: var(--ep-text-muted);
+    font-family: var(--ep-font-sans);
+    font-size: 11px;
+    fill: var(--color-muted);
     font-variant-numeric: tabular-nums;
   }
   .ytick {
@@ -419,18 +421,18 @@
     position: absolute;
     top: 4px;
     transform: translateX(-50%);
-    background: var(--ep-bg-tertiary);
-    border: 1px solid var(--ep-border-strong);
-    border-radius: var(--ep-radius-md);
-    padding: 6px 8px;
-    font-size: 11px;
+    background: var(--color-paper-4);
+    border: 1px solid var(--color-rule-2);
+    border-radius: 5px;
+    padding: 8px 12px;
+    font-size: 0.8125rem;
     pointer-events: none;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-pop);
     white-space: nowrap;
     z-index: 2;
   }
   .tip-t {
-    font-size: 9.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     margin-bottom: 3px;
   }

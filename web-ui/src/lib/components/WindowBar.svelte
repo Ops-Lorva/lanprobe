@@ -107,12 +107,9 @@
   conséquence de la fenêtre.
 -->
 <div class="rangebar">
-  <span class="lp-label">{$_('probe.range')}</span>
-  <div class="chips" role="group" aria-label={$_('probe.range')}>
+  <div class="lp-seg" role="group" aria-label={$_('probe.range')}>
     {#each RANGES as r (r)}
       <button
-        class="chip"
-        class:on={activeRange === r}
         aria-pressed={activeRange === r}
         onclick={() => onpick({ kind: 'relative', range: r })}
       >
@@ -120,11 +117,9 @@
       </button>
     {/each}
     {#if extraRange}
-      <button class="chip on" aria-pressed="true">{rangeLabel(extraRange)}</button>
+      <button aria-pressed="true">{rangeLabel(extraRange)}</button>
     {/if}
     <button
-      class="chip custom"
-      class:on={choice.kind === 'absolute'}
       aria-pressed={choice.kind === 'absolute'}
       aria-expanded={customOpen}
       onclick={() => (customOpen = !customOpen)}
@@ -176,31 +171,6 @@
     flex-wrap: wrap;
     margin-bottom: 10px;
   }
-  .chips {
-    display: flex;
-    gap: 4px;
-    flex-wrap: wrap;
-  }
-  .chip {
-    padding: 5px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--ep-border);
-    background: var(--ep-bg-secondary);
-    color: var(--ep-text-secondary);
-    font-family: var(--ep-font-sans);
-    font-size: 11.5px;
-    cursor: pointer;
-  }
-  .chip:hover {
-    border-color: var(--ep-border-strong);
-    color: var(--ep-text-primary);
-  }
-  .chip.on {
-    border-color: var(--ep-accent);
-    background: var(--ep-accent-dim);
-    color: var(--ep-accent-bright);
-    font-weight: 600;
-  }
   .acts {
     margin-left: auto;
     display: flex;
@@ -215,9 +185,9 @@
     flex-wrap: wrap;
     padding: 10px 12px;
     margin-bottom: 10px;
-    border: 1px solid var(--ep-border);
-    border-radius: var(--ep-radius-md);
-    background: var(--ep-bg-secondary);
+    border: 1px solid var(--color-rule);
+    border-radius: 6px;
+    background: var(--color-paper-2);
   }
   .werr {
     margin: 0;

@@ -71,7 +71,7 @@
           <span class="dot" style:background={l.color}></span>
           <span class="label">{l.label}</span>
         </span>
-        <span class="vals lp-mono">
+        <span class="vals lp-num">
           <span>{$_('charts.stat_min')} {l.min.toFixed(decimals)}</span>
           <span>{$_('charts.stat_avg')} {l.avg.toFixed(decimals)}</span>
           <span>{$_('charts.stat_max')} {l.max.toFixed(decimals)}</span>
@@ -106,7 +106,7 @@
     background: none;
     color: inherit;
     font: inherit;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     text-align: left;
     cursor: pointer;
   }

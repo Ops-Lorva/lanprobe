@@ -105,7 +105,7 @@
 
 <style>
   .card {
-    padding: 14px 14px 12px;
+    padding: 16px;
     /* La carte grandit avec son contenu : une hauteur figée finirait par
        rogner la bande d'axe et créer un mini-défilement interne. */
   }
@@ -118,9 +118,9 @@
     margin-bottom: 10px;
   }
   .sub {
-    font-size: 11.5px;
-    color: var(--ep-text-muted);
-    margin: 3px 0 0;
+    font-size: 0.8125rem;
+    color: var(--color-muted);
+    margin: 2px 0 0;
     max-width: 60ch;
     line-height: 1.5;
   }
@@ -138,9 +138,9 @@
   .key {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    font-size: 11.5px;
-    color: var(--ep-text-secondary);
+    gap: 8px;
+    font-size: 0.8125rem;
+    color: var(--color-ink-2);
   }
   .key.toggle {
     background: none;
@@ -186,8 +186,8 @@
     gap: 8px;
     flex-wrap: wrap;
     min-height: 96px;
-    font-size: 12.5px;
-    color: var(--ep-text-secondary);
+    font-size: 0.875rem;
+    color: var(--color-ink-2);
     margin: 0;
   }
   .msg.err {

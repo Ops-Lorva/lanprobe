@@ -488,7 +488,7 @@
     "meta_site": "Site",
     "meta_platform": "Platform",
     "meta_version": "Version",
-    "meta_created": "Enrolled",
+    "meta_created": "Enrolled on",
     "meta_last_seen": "Last heartbeat",
     "move": "Move",
     "move_title": "Move “{name}”",
@@ -641,8 +641,8 @@
   "charts": {
     "aggregated": "Averaged over {every} — each interval's maximum is drawn behind, so a spike does not vanish into its own average.",
     "peak_label": "{label} (max)",
-    "latency_title": "Latency of monitored hosts",
-    "latency_sub": "ICMP round-trip time, in milliseconds.",
+    "latency_title": "Latency and loss, per target",
+    "latency_sub": "Each target on its own scale",
     "internet_title": "Internet access",
     "internet_sub": "State as seen from the probe.",
     "speed_title": "Measured throughput",
@@ -678,7 +678,17 @@
     "stat_max": "max",
     "stat_runs": "{n, plural, one {# run} other {# runs}}",
     "speed_server": "Server:",
-    "toggle_hint": "Click to hide or show this curve"
+    "toggle_hint": "Click to hide or show this curve",
+    "gateway": "Gateway",
+    "row_stats": "avg {avg} {unit}, P95 {p95} {unit}, max {max} {unit}",
+    "row_loss": "loss {loss} %",
+    "loss_short": "loss",
+    "loss_aria": "Loss to {target}, in grey levels",
+    "loss_legend": "Loss:",
+    "loss_l1": "under 1 %",
+    "loss_l2": "1 to 5 %",
+    "loss_l3": "5 to 20 %",
+    "loss_l4": "over 20 %"
   },
   "revoke": {
     "action": "Remove probe",

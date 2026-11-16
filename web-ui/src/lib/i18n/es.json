@@ -488,7 +488,7 @@
     "meta_site": "Sitio",
     "meta_platform": "Plataforma",
     "meta_version": "Versión",
-    "meta_created": "Dada de alta",
+    "meta_created": "Inscrita el",
     "meta_last_seen": "Último latido",
     "move": "Mover",
     "move_title": "Mover «{name}»",
@@ -641,8 +641,8 @@
   "charts": {
     "aggregated": "Promediado cada {every} — el máximo de cada intervalo se dibuja de fondo, para que un pico no desaparezca en su media.",
     "peak_label": "{label} (máx)",
-    "latency_title": "Latencia de los hosts vigilados",
-    "latency_sub": "Tiempo de respuesta ICMP, en milisegundos.",
+    "latency_title": "Latencia y pérdida, por destino",
+    "latency_sub": "Escala propia de cada destino",
     "internet_title": "Acceso a internet",
     "internet_sub": "Estado visto desde la sonda.",
     "speed_title": "Caudales medidos",
@@ -678,7 +678,17 @@
     "stat_max": "máx",
     "stat_runs": "{n, plural, one {# prueba} other {# pruebas}}",
     "speed_server": "Servidor:",
-    "toggle_hint": "Haga clic para ocultar o mostrar esta curva"
+    "toggle_hint": "Haga clic para ocultar o mostrar esta curva",
+    "gateway": "Pasarela",
+    "row_stats": "media {avg} {unit}, P95 {p95} {unit}, máx {max} {unit}",
+    "row_loss": "pérdida {loss} %",
+    "loss_short": "pérdida",
+    "loss_aria": "Pérdida hacia {target}, en niveles de gris",
+    "loss_legend": "Pérdida:",
+    "loss_l1": "menos de 1 %",
+    "loss_l2": "1 a 5 %",
+    "loss_l3": "5 a 20 %",
+    "loss_l4": "más de 20 %"
   },
   "revoke": {
     "action": "Quitar la sonda",

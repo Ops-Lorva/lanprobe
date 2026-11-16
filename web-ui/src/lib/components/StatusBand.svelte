@@ -236,8 +236,10 @@
     stroke: var(--lp-grid);
     stroke-width: 1;
   }
+  /* La santé se tait : « en ligne » prend le vert sourd de la bande de
+     battement, seul le défaut prend une couleur franche. */
   .seg.online {
-    fill: var(--ep-success);
+    fill: var(--strip-ok);
   }
   .seg.limited {
     fill: var(--ep-warning);
@@ -263,9 +265,10 @@
     opacity: 1;
   }
   .xtick {
-    font-family: var(--ep-font-mono);
-    font-size: 9px;
-    fill: var(--ep-text-muted);
+    font-family: var(--ep-font-sans);
+    font-size: 11px;
+    fill: var(--color-muted);
+    font-variant-numeric: tabular-nums;
   }
 
   .foot {
@@ -293,7 +296,7 @@
     display: block;
   }
   .chip.online {
-    background: var(--ep-success);
+    background: var(--strip-ok);
   }
   .chip.limited {
     background: var(--ep-warning);
