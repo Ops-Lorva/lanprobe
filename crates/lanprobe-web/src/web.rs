@@ -913,12 +913,26 @@ struct DisableTotpBody {
 async fn disable_own_totp(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Json(body): Json<DisableTotpBody>,
 ) -> Response {
     let checked = {
         let (db, username, password) =
             (state.db.clone(), identity.username.clone(), body.password.clone());
-        off_reactor(move || db.verify_credentials(&username, &password)).await
+        match check_current_password(
+            &state,
+            &identity,
+            &headers,
+            &extensions,
+            "DELETE /api/me/totp",
+            move || db.verify_credentials(&username, &password),
+        )
+        .await
+        {
+            Ok(checked) => checked,
+            Err(refused) => return refused,
+        }
     };
     if checked.is_err() {
         audit(
@@ -1395,12 +1409,26 @@ struct OwnPasswordBody {
 async fn change_own_password(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Json(body): Json<OwnPasswordBody>,
 ) -> Response {
     let checked = {
         let (db, username, current) =
             (state.db.clone(), identity.username.clone(), body.current.clone());
-        off_reactor(move || db.verify_credentials(&username, &current)).await
+        match check_current_password(
+            &state,
+            &identity,
+            &headers,
+            &extensions,
+            "POST /api/me/password",
+            move || db.verify_credentials(&username, &current),
+        )
+        .await
+        {
+            Ok(checked) => checked,
+            Err(refused) => return refused,
+        }
     };
     if checked.is_err() {
         audit(
@@ -1900,6 +1928,44 @@ where
         work()
     })
     .await)
+}
+
+/// Vérifie le mot de passe courant d'une session, sous le même frein que
+/// `/api/login` : budget réservé par adresse et par compte, portail argon2
+/// (revue RSSI, suite de N1). Sans lui, une session volée devenait un oracle
+/// à mots de passe sans limite, et chaque essai un argon2 hors plafond.
+///
+/// `Err` : la réponse `429` à rendre telle quelle. Le jeton est rendu sur
+/// un mot de passe juste.
+async fn check_current_password<F>(
+    state: &AppState,
+    identity: &Identity,
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    route: &str,
+    verify: F,
+) -> Result<DbResult<String>, Response>
+where
+    F: FnOnce() -> DbResult<String> + Send + 'static,
+{
+    let ip = client_ip_key(state, extensions, headers);
+    let account = account_key(&identity.username);
+    let keys = [(Class::AuthIp, ip.as_str()), (Class::AuthAccount, account.as_str())];
+    if let Err(wait) = state.limits.take(&keys) {
+        return Err(too_many(state, route, wait));
+    }
+    match off_reactor_argon2(state, verify).await {
+        Ok(checked) => {
+            if checked.is_ok() {
+                state.limits.refund(&keys);
+            }
+            Ok(checked)
+        }
+        Err(wait) => {
+            state.limits.refund(&keys);
+            Err(too_many(state, route, wait))
+        }
+    }
 }
 
 /// Ce compte a-t-il un second facteur — TOTP ou clé d'accès ?
@@ -14894,6 +14960,57 @@ mod tests {
         for _ in 0..10 {
             let (status, _, _) = h.call(login_request("admin", "mauvais-mot-de-passe")).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_current_password_check_is_throttled_like_the_login() {
+        // Une session volée devenait un oracle à mots de passe sans limite :
+        // `POST /api/me/password` et `DELETE /api/me/totp` vérifient le mot de
+        // passe courant en argon2, hors budget et hors portail.
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        for i in 0..10 {
+            let (method, path, corps) = if i % 2 == 0 {
+                ("POST", "/api/me/password", serde_json::json!({ "current": "faux", "next": "nouveau-mot-de-passe" }))
+            } else {
+                ("DELETE", "/api/me/totp", serde_json::json!({ "password": "faux" }))
+            };
+            let (status, body, _) = h.call(with_cookie(json_request(method, path, corps), &session)).await;
+            assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "essai {i} : {body}");
+        }
+        for (method, path, corps) in [
+            ("POST", "/api/me/password", serde_json::json!({ "current": PASSWORD, "next": "nouveau-mot-de-passe" })),
+            ("DELETE", "/api/me/totp", serde_json::json!({ "password": PASSWORD })),
+        ] {
+            let (status, body, _) = h.call(with_cookie(json_request(method, path, corps), &session)).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path} : {body}");
+        }
+        assert!(h.state.db.verify_credentials("admin", PASSWORD).is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_current_password_check_goes_through_the_argon2_gate() {
+        let h = Harness::with_admin().await;
+        let session = h.login().await;
+        let tenus = saturate_argon2(&h);
+        for (method, path, corps) in [
+            ("POST", "/api/me/password", serde_json::json!({ "current": PASSWORD, "next": "nouveau-mot-de-passe" })),
+            ("DELETE", "/api/me/totp", serde_json::json!({ "password": PASSWORD })),
+        ] {
+            let (status, body, _) = h.call(with_cookie(json_request(method, path, corps), &session)).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path} : {body}");
+        }
+        drop(tenus);
+        // Un bon mot de passe ne coûte pas le budget.
+        for _ in 0..12 {
+            let (status, body, _) = h
+                .call(with_cookie(
+                    json_request("DELETE", "/api/me/totp", serde_json::json!({ "password": PASSWORD })),
+                    &session,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
         }
     }
 
