@@ -803,13 +803,18 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
     // ⚠️ `operator`, comme tout ce qui touche une sonde : un profil décide de
     // ce qui sera frappé sur le réseau d'un client, ce n'est pas une
     // consultation.
+    //
+    // 🔴 **Et « tous les sites »** (audit F7) : un profil vaut pour le hub
+    // entier et voyage vers toutes les sondes. Un opérateur restreint à un
+    // client changeait ce que frappent les sondes de tous les autres.
     let ecriture = guarded(
         state,
         Role::Operator,
         Router::new()
             .route("/api/portscan-profiles", post(create_profile))
             .route("/api/portscan-profiles/{id}", patch(update_profile))
-            .route("/api/portscan-profiles/{id}", delete(delete_profile)),
+            .route("/api/portscan-profiles/{id}", delete(delete_profile))
+            .layer(axum::middleware::from_fn(all_sites_writer)),
     );
 
     lecture.merge(ecriture)
@@ -819,14 +824,49 @@ fn fail(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
-async fn list_profiles(State(state): State<AppState>) -> Response {
+/// Refuse l'écriture d'un profil à un compte restreint à des sites (F7).
+/// Posée à l'intérieur de `guarded`, donc après l'authentification.
+async fn all_sites_writer(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    match req.extensions().get::<Identity>() {
+        Some(actor) if matches!(actor.scope, crate::db::Scope::All) => next.run(req).await,
+        Some(_) => fail(
+            StatusCode::FORBIDDEN,
+            "un profil de scan vaut pour tout le hub : réservé aux comptes qui voient tous les sites",
+        ),
+        None => fail(StatusCode::UNAUTHORIZED, "authentification requise"),
+    }
+}
+
+async fn list_profiles(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
     match (state.db.list_portscan_profiles(), state.db.portscan_rev()) {
         // La révision accompagne la liste : l'app mobile et le hub web peuvent
         // ainsi savoir qu'ils regardent la même version, sans la deviner.
-        (Ok(profiles), Ok(rev)) => ok_json(serde_json::json!({
-            "profiles": profiles,
-            "rev": rev,
-        })),
+        (Ok(mut profiles), Ok(rev)) => {
+            // 🔴 F7 : la liste reste lisible — l'app iOS la lit —, mais la
+            // sonde d'origine d'un profil n'est nommée qu'à qui voit cette
+            // sonde. Un identifiant de sonde hors portée désigne un client
+            // qui n'est pas le sien.
+            if !matches!(actor.scope, crate::db::Scope::All) {
+                for p in &mut profiles {
+                    let visible = p.origin_probe.as_deref().is_some_and(|id| {
+                        state
+                            .db
+                            .get_probe(id)
+                            .is_ok_and(|probe| actor.scope.allows(&probe.site_id))
+                    });
+                    if !visible {
+                        p.origin_probe = None;
+                    }
+                }
+            }
+            ok_json(serde_json::json!({
+                "profiles": profiles,
+                "rev": rev,
+            }))
+        }
         (Err(e), _) | (_, Err(e)) => error_response(e),
     }
 }
@@ -1808,4 +1848,67 @@ mod routes_tests {
             "toute le parc l'a apprise : elle n'a plus rien à dire"
         );
     }
+
+    // ── F7 : un compte restreint lit les profils, n'en écrit aucun ─────────
+
+    #[tokio::test]
+    async fn un_compte_restreint_lit_les_profils_mais_ne_les_ecrit_pas() {
+        // 🔴 F7 : un profil de scan vaut pour le hub ENTIER. Un opérateur
+        // restreint à un client changeait ce que les sondes de TOUS les
+        // clients frappent.
+        let h = Harness::new();
+        h.state
+            .db
+            .create_user_scoped("rene", MOT_DE_PASSE, crate::db::Role::Operator, Some(&[]))
+            .unwrap();
+        let token = h.state.auth.start_session("rene".to_string()).unwrap();
+        let restreint = format!("lanprobe_hub_session={token}");
+        let (sonde, _) = h.probe();
+        h.state
+            .db
+            .create_portscan_profile("Venu d'ailleurs", &[2222, 8022], &[], Some(&sonde))
+            .unwrap();
+
+        // L'app iOS lit la liste : elle reste lisible…
+        let (status, body) = h
+            .send("GET", "/api/portscan-profiles", &restreint, json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let venu = body["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "Venu d'ailleurs")
+            .expect("le profil est listé");
+        // … sans dire de quelle sonde, hors de sa portée, il vient.
+        assert!(venu["origin_probe"].is_null(), "{venu}");
+
+        let (status, _) = h
+            .send(
+                "POST",
+                "/api/portscan-profiles",
+                &restreint,
+                json!({ "name": "Caméras", "ports": [554] }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = h
+            .send("PATCH", "/api/portscan-profiles/db", &restreint, json!({ "ports": [1] }))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = h
+            .send("DELETE", "/api/portscan-profiles/db", &restreint, json!({}))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Un opérateur « tous les sites » les écrit toujours.
+        let operateur = h.session("olivier", crate::db::Role::Operator);
+        let (status, body) = h
+            .send("POST", "/api/portscan-profiles", &operateur, json!({ "name": "Caméras", "ports": [554] }))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (_, body) = h.send("GET", "/api/portscan-profiles", &operateur, json!({})).await;
+        assert!(body.to_string().contains(&sonde), "{body}");
+    }
 }
+

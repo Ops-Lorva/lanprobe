@@ -6340,8 +6340,60 @@ fn is_plain_file_name(name: &str) -> bool {
 
 // ── Réglages ───────────────────────────────────────────────────────────────
 
-async fn get_settings(State(state): State<AppState>) -> Response {
-    ok_json(state.settings.all())
+/// Les réglages du hub.
+///
+/// 🔴 **Réponse réduite pour un compte restreint à des sites** (audit A12).
+/// Il lisait l'URL interne d'InfluxDB, l'org, le bucket, les proxys de
+/// confiance, l'adresse publique, la politique de sauvegarde : la carte de
+/// l'infrastructure de l'exploitant, servie au relecteur d'un hub de démo. Ne
+/// restent que les réglages dont l'interface a besoin pour afficher son parc :
+/// cadence de battement, temps réel, événements notifiables, durée des
+/// rapports.
+async fn get_settings(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+) -> Response {
+    let all = state.settings.all();
+    if matches!(actor.scope, crate::db::Scope::All) {
+        return ok_json(all);
+    }
+    let mut reduced = serde_json::Map::new();
+    for key in RESTRICTED_SETTINGS {
+        if let Some(v) = all.get(*key) {
+            reduced.insert((*key).to_string(), v.clone());
+        }
+    }
+    ok_json(serde_json::Value::Object(reduced))
+}
+
+/// Ce qu'un compte restreint lit de `GET /api/settings`. Rien de ce qui décrit
+/// l'infrastructure — adresses, proxys, InfluxDB, sauvegardes, TLS.
+const RESTRICTED_SETTINGS: &[&str] = &[
+    crate::settings::keys::HEARTBEAT_INTERVAL_SECS,
+    crate::settings::keys::NOTIFY_EVENTS,
+    crate::settings::keys::REALTIME_DURATION_MIN,
+    crate::settings::keys::REALTIME_WINDOW_MIN,
+    crate::settings::keys::REALTIME_HEARTBEAT_SECS,
+    crate::settings::keys::REPORT_DAYS,
+];
+
+/// Refuse au compte restreint à des sites ce qui décrit le hub entier.
+fn all_sites_only(state: &AppState, actor: &Identity, what: &str) -> Option<Response> {
+    if matches!(actor.scope, crate::db::Scope::All) {
+        return None;
+    }
+    audit(
+        state,
+        Some(&actor.username),
+        "access.denied",
+        Some(what),
+        Outcome::Failure,
+        Some("réservé aux comptes « tous les sites »"),
+    );
+    Some(fail(
+        StatusCode::FORBIDDEN,
+        "réservé aux comptes qui voient tous les sites",
+    ))
 }
 
 async fn put_settings(
@@ -6427,7 +6479,15 @@ async fn put_settings(
     ok_json(state.settings.all())
 }
 
-async fn get_advertise(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn get_advertise(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    headers: HeaderMap,
+) -> Response {
+    // Une adresse d'InfluxDB : l'infrastructure, pas un site (A12).
+    if let Some(refus) = all_sites_only(&state, &actor, "GET /api/settings/influx-advertise") {
+        return refus;
+    }
     let (url, source) = state
         .influx
         .resolve_advertise_url(host_header(&headers).as_deref());
@@ -6475,7 +6535,16 @@ async fn test_advertise(State(state): State<AppState>, headers: HeaderMap) -> Re
 
 // ── Influx vu depuis les réglages ──────────────────────────────────────────
 
-async fn influx_overview(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn influx_overview(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
+    headers: HeaderMap,
+) -> Response {
+    // L'état d'InfluxDB, son org, son bucket : l'infrastructure, pas un site
+    // (A12).
+    if let Some(refus) = all_sites_only(&state, &actor, "GET /api/influx") {
+        return refus;
+    }
     // L'utilisateur ne doit jamais avoir à administrer Influx, mais il doit
     // pouvoir aller voir ses données. Aucun jeton dans cette réponse.
     let health = state.influx.health().await;
@@ -14620,6 +14689,53 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["demo"], true);
         let (status, _, _) = h.call(with_cookie(empty_request("GET", "/api/me/totp"), &demo)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // ── A12 et F7 : ce que la configuration du hub montre à un compte restreint
+
+    #[tokio::test]
+    async fn a_restricted_account_reads_a_reduced_settings_and_no_influx() {
+        // 🔴 A12 : un viewer restreint au site de démo lisait l'URL interne
+        // d'InfluxDB, l'org, le bucket, les proxys de confiance, la politique
+        // de sauvegarde — la carte de l'infrastructure de l'exploitant.
+        let h = Harness::with_admin().await;
+        h.state
+            .db
+            .create_user_scoped("relecteur", PASSWORD, Role::Viewer, Some(&[]))
+            .unwrap();
+        h.user("claire", Role::Viewer).await;
+        let restreint = h.login_as("relecteur").await;
+        let partout = h.login_as("claire").await;
+
+        let (status, body, _) = h
+            .call(with_cookie(empty_request("GET", "/api/settings"), &restreint))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for cle in ["heartbeat_interval_secs", "notify_events", "realtime_window_min", "report_days"] {
+            assert!(!body[cle].is_null(), "{cle} reste lisible : {body}");
+        }
+        for cle in [
+            "influx_url",
+            "influx_org",
+            "influx_bucket",
+            "influx_advertise_url",
+            "hub_public_url",
+            "trusted_proxies",
+            "backup_enabled",
+        ] {
+            assert!(body.get(cle).is_none(), "{cle} ne sort pas : {body}");
+        }
+
+        for path in ["/api/influx", "/api/settings/influx-advertise"] {
+            let (status, body, _) = h.call(with_cookie(empty_request("GET", path), &restreint)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path} : {body}");
+        }
+
+        // « Tous les sites » : rien ne change.
+        let (_, body, _) = h.call(with_cookie(empty_request("GET", "/api/settings"), &partout)).await;
+        assert!(body.get("influx_url").is_some(), "{body}");
+        let (status, _, _) = h.call(with_cookie(empty_request("GET", "/api/influx"), &partout)).await;
         assert_eq!(status, StatusCode::OK);
     }
 }

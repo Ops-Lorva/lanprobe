@@ -1229,7 +1229,7 @@ d'objet, parce que le paramètre porte le même nom et ne désigne pas la même 
 | `GET /api/sites` | `viewer` | accepte aussi les identifiants du compte (Basic) |
 | `GET /api/me`, et les routes `/api/me/*` — mot de passe, TOTP, clés d'accès, **codes d'appairage et appareils** | `viewer` | chacun agit sur **son** compte, quel que soit son rôle (§19, §22) |
 | `GET /api/probes` | `viewer` | |
-| `GET /api/settings`, `GET /api/settings/influx-advertise`, `GET /api/influx` | `viewer` | aucune de ces réponses ne porte de secret |
+| `GET /api/settings`, `GET /api/settings/influx-advertise`, `GET /api/influx` | `viewer` | aucune de ces réponses ne porte de secret. 🔴 Compte restreint à des sites : `GET /api/settings` **réduite** (`heartbeat_interval_secs`, `notify_events`, `realtime_*`, `report_days`), les deux autres en `403` (§ 27, A12) |
 | `GET /api/notifications/subscriptions` | `viewer` | |
 | `GET /api/probes/{id}/metrics`, `/uptime`, `/inventory`, `/sla`, `/sla.csv`, `/public-ips` | `viewer` | **portée** |
 | `GET /api/packages`, `POST /api/packages/{p}/fetch`, `GET /api/packages/{p}/file` | `operator` | distribuer un installeur prolonge l'enrôlement (§24) |
@@ -3338,10 +3338,10 @@ profil n'a aucune autorité dessus.
 
 | Route | Rôle | Effet |
 |---|---|---|
-| `GET /api/portscan-profiles` | `viewer` | la liste, supprimés exclus |
-| `POST /api/portscan-profiles` | `operator` | crée — `409` si le nom existe |
-| `PATCH /api/portscan-profiles/{id}` | `operator` | renomme / change les ports |
-| `DELETE /api/portscan-profiles/{id}` | `operator` | pose `deleted_at`, **ne supprime aucune ligne** |
+| `GET /api/portscan-profiles` | `viewer` | la liste, supprimés exclus. Compte restreint : `origin_probe` à `null` hors de sa portée (§ 27, F7) |
+| `POST /api/portscan-profiles` | `operator` **et tous les sites** (`403` sinon, § 27 F7) | crée — `409` si le nom existe |
+| `PATCH /api/portscan-profiles/{id}` | `operator` **et tous les sites** (`403` sinon, § 27 F7) | renomme / change les ports |
+| `DELETE /api/portscan-profiles/{id}` | `operator` **et tous les sites** (`403` sinon, § 27 F7) | pose `deleted_at`, **ne supprime aucune ligne** |
 
 Portée : **le hub entier** (décision 4). Un profil de scan n'est pas privé,
 contrairement au profil RÉSEAU, qui décrit un site et reste sur la sonde — ces
@@ -3789,4 +3789,18 @@ que le téléphone verra.
 ⚠️ **Cas que le hub ne voit pas** : un proxy NON déclaré dans `trusted_proxies`,
 devant un hub en TLS, joint sous l'adresse publique. Déclarer le proxy, ou
 couper le TLS du hub (recommandé derrière un proxy).
+
+### A12 et F7 — la configuration du hub n'est pas celle d'un site
+
+Un compte **restreint à des sites** (§ 17) :
+
+| Route | Comportement |
+|---|---|
+| `GET /api/settings` | réponse réduite à `heartbeat_interval_secs`, `notify_events`, `realtime_duration_min`, `realtime_window_min`, `realtime_heartbeat_secs`, `report_days` |
+| `GET /api/influx`, `GET /api/settings/influx-advertise` | `403`, ligne `access.denied` |
+| `GET /api/portscan-profiles` | lisible (l'app iOS la lit) ; `origin_probe` à `null` si la sonde est hors de sa portée |
+| `POST`/`PATCH`/`DELETE /api/portscan-profiles*` | `403` même pour un `operator` : un profil vaut pour toutes les sondes du hub |
+
+Un `admin` et tout compte « tous les sites » ne voient aucun changement.
+L'interface tolère la réponse réduite (champs absents laissés vides).
 

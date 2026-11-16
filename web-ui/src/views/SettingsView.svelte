@@ -85,9 +85,11 @@
 
   function fill(s: HubSettings) {
     saved = s;
-    influxUrl = s.influx_url;
-    org = s.influx_org;
-    bucket = s.influx_bucket;
+    // ⚠️ `?? ''` : un compte restreint à des sites reçoit une réponse
+    // réduite (contrat § 27, A12) — ces clés n'y sont pas.
+    influxUrl = s.influx_url ?? '';
+    org = s.influx_org ?? '';
+    bucket = s.influx_bucket ?? '';
     hubPublicUrl = s.hub_public_url ?? '';
     api
       .status()
@@ -96,7 +98,7 @@
         restartPending = st.restart_required === true;
       })
       .catch(() => {});
-    retention = String(s.retention_days);
+    retention = String(s.retention_days ?? '');
     heartbeat = String(s.heartbeat_interval_secs);
     // `?? 30` : un hub antérieur à ce réglage ne le renvoie pas, et `undefined`
     // dans un `<input>` laisserait un champ non contrôlé qui se croit modifié
@@ -107,16 +109,16 @@
     // un champ non contrôlé qui se croit modifié dès l'ouverture.
     realtimeWindow = String(s.realtime_window_min ?? 10);
     realtimeHeartbeat = String(s.realtime_heartbeat_secs ?? 5);
-    backupEnabled = s.backup_enabled;
-    backupInterval = String(s.backup_interval_hours);
-    backupKeep = String(s.backup_keep_last);
-    inventoryDays = String(s.inventory_days);
+    backupEnabled = s.backup_enabled ?? false;
+    backupInterval = String(s.backup_interval_hours ?? '');
+    backupKeep = String(s.backup_keep_last ?? '');
+    inventoryDays = String(s.inventory_days ?? '');
     // ⚠️ `?? 7` : le hub qui ne connaît pas encore ce réglage ne le renvoie
     // pas, et un champ non contrôlé se croirait modifié dès l'ouverture — le
     // formulaire partirait alors enregistrer une clé que le hub refuse.
     reportDays = String(s.report_days ?? REPORT_DAYS_DEFAULT);
     packageKeep = String(s.package_keep_versions ?? PACKAGE_KEEP_DEFAULT);
-    tlsEnabled = s.tls_enabled;
+    tlsEnabled = s.tls_enabled ?? false;
     // ⚠️ `?? ''` et non `s.trusted_proxies` : un hub plus ancien que ce
     // réglage ne le renvoie pas, et `undefined` dans un `<input>` laisserait
     // un champ non contrôlé qui se croit modifié dès l'ouverture.
