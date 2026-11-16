@@ -198,6 +198,8 @@ docker compose up -d
 docker compose logs lanprobe-web | grep -i token
 ```
 
+Le fichier compose publie le hub sur **`127.0.0.1:8080` seulement** : ouvrez `http://localhost:8080` sur cette machine, ou placez votre reverse proxy devant. Pour le joindre depuis le LAN sans proxy, remplacez la ligne par `"8080:8080"` — en sachant que les mots de passe circuleront alors en clair.
+
 Ouvrez le hub, collez le jeton, créez le compte administrateur — le jeton est consommé au premier usage. Puis **Enrôler une sonde** : le hub donne un code court, valable 15 minutes. Dans LanProbe, **Réglages → Connexion au serveur**, saisissez l'adresse du hub et ce code. Aucun mot de passe n'atteint la machine surveillée.
 
 Les comptes portent un rôle (`admin` / `operator` / `viewer`), chaque action est écrite au journal d'audit, et les bascules hors ligne / en ligne peuvent partir par e-mail ou par webhook (Slack, Discord, ntfy…). L'[API complète est décrite dans le contrat](docs/lanprobe-web-contrat.md).
@@ -207,6 +209,8 @@ Les comptes portent un rôle (`admin` / `operator` / `viewer`), chaque action es
 - si cette machine a déjà été jointe en HTTPS, le navigateur garde un cookie `Secure` qui bloque silencieusement la connexion en HTTP ensuite : la connexion semble aboutir puis revient à l'écran de login, **sans erreur**. Fenêtre privée, ou vider les cookies du site.
 
 Le hub sert **en clair par défaut**, pour vivre derrière votre propre reverse proxy. Un interrupteur dans **Réglages → Général** — ou `--tls` — lui fait terminer le TLS lui-même avec un certificat auto-signé, ce qui suffit sur un LAN. L'effet est **au redémarrage**, l'adresse change, et les sondes déjà enrôlées sur l'ancienne devront voir la leur corrigée. Les clés d'accès l'exigent (ou un proxy) : les navigateurs refusent WebAuthn hors contexte sécurisé. Le port d'InfluxDB (`8086`) est fermé par défaut : ne l'ouvrez que pour y brancher Grafana — les sondes n'en ont jamais besoin.
+
+**Exposer un hub sur Internet** (un hub de démo par exemple) : TLS sur le reverse proxy, le réseau du proxy dans **Proxies de confiance**, **URL publique du hub** renseignée. Le hub limite les tentatives de connexion, d'appairage, d'enrôlement et de jeton d'appareil par adresse et par compte (HTTP 429), et refuse l'authentification Basic aux comptes qui ont un second facteur. Un compte partagé peut passer en **mode démo** (*Réglages → Comptes*) : mot de passe, second facteur, clés d'accès et langue verrouillés, il ne voit que l'appareil d'où il appelle, et ses appareils appairés sont révoqués après `LANPROBE_WEB_DEMO_DEVICE_DAYS` jours (7 par défaut). Donnez-lui le rôle `viewer` et restreignez-le au site de démo : un compte restreint ne lit plus les réglages d'infrastructure du hub. Détails dans le [contrat, § 27](docs/lanprobe-web-contrat.md).
 
 Le hub a **sa propre version**, indépendante de l'application.
 
@@ -289,7 +293,7 @@ Derrière un reverse proxy le hub ne termine pas le TLS lui-même, et il **ne fa
 
 **1. Le téléphone refuse l'appairage : « App Transport Security policy requires the use of a secure connection ».**
 Le QR d'appairage portait `hub=http://…`. Tant que le hub ne connaît pas son adresse publique, il compose l'invitation depuis l'en-tête `Host` et son propre schéma — `http` en clair derrière un proxy. iOS le refuse.
-→ Renseignez **URL publique du hub** (`hub_public_url`) avec l'adresse tapée dans le navigateur, par exemple `https://lanprobe.exemple.fr`, puis générez un **nouveau** code d'appairage : une invitation déjà affichée garde l'ancien schéma.
+→ Renseignez **URL publique du hub** (`hub_public_url`) avec l'adresse tapée dans le navigateur, par exemple `https://lanprobe.exemple.fr`, puis générez un **nouveau** code d'appairage : une invitation déjà affichée garde l'ancien schéma. Sans ce réglage, le hub suit `X-Forwarded-Proto`, mais seulement venant d'un proxy listé dans **Proxies de confiance** (point 2).
 Ce réglage décide aussi de l'adresse où les sondes écrivent leurs mesures (même hôte, port d'InfluxDB), sauf si `LANPROBE_WEB_INFLUX_ADVERTISE_URL` est posé — derrière un seul proxy sur le même hôte, c'est ce qu'on veut.
 
 **2. Tous les appareils appairés (et toutes les sondes) affichent l'adresse du proxy, par exemple `172.32.0.3`, au lieu de leur IP publique.**

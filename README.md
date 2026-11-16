@@ -197,6 +197,8 @@ docker compose up -d
 docker compose logs lanprobe-web | grep -i token
 ```
 
+The compose file publishes the hub on **`127.0.0.1:8080` only**: open `http://localhost:8080` on that machine, or put your reverse proxy in front of it. To reach it from the LAN without a proxy, change the line to `"8080:8080"` — knowing that passwords then travel in clear text.
+
 Open the hub, paste the token, create the administrator account — the token is consumed on first use. Then **Enrol a probe**: the hub gives you a short code, valid 15 minutes. In LanProbe, **Settings → Server connection**, enter the hub address and that code. No password ever reaches the monitored machine.
 
 Accounts carry a role (`admin` / `operator` / `viewer`), every action is written to the audit log, and offline / online transitions can go out by e-mail or webhook (Slack, Discord, ntfy…). The [full API lives in the contract](docs/lanprobe-web-contrat.md).
@@ -206,6 +208,8 @@ Accounts carry a role (`admin` / `operator` / `viewer`), every action is written
 - if that machine was ever reached over HTTPS, the browser keeps a `Secure` cookie that silently blocks the later HTTP session: sign-in appears to succeed, then bounces back to the login screen, **with no error**. Private window, or clear the site's cookies.
 
 The hub serves **in plain HTTP by default**, meant to live behind your own reverse proxy. A switch under **Settings → General** — or `--tls` — makes it terminate TLS itself with a self-signed certificate, fine on a LAN. It takes effect **on restart**, the address changes, and probes already enrolled on the old one will need theirs corrected. Passkeys require it (or a proxy): browsers refuse WebAuthn outside a secure context. The InfluxDB port (`8086`) is closed by default: only open it to point Grafana at it — probes never need it.
+
+**Exposing a hub to the Internet** (e.g. a demo hub): TLS on the reverse proxy, the proxy's network in **Trusted proxies**, **Public hub URL** set. The hub throttles sign-in, pairing, enrolment and device-token attempts per address and per account (HTTP 429), and refuses Basic authentication to accounts that have a second factor. A shared account can be put in **demo mode** (*Settings → Accounts*): its password, second factor, passkeys and language are locked, it only sees the device it calls from, and its paired devices are revoked after `LANPROBE_WEB_DEMO_DEVICE_DAYS` days (7 by default). Give it the `viewer` role and restrict it to the demo site: a restricted account no longer reads the hub's infrastructure settings. Details in the [contract, § 27](docs/lanprobe-web-contrat.md).
 
 The hub carries **its own version**, independent of the app.
 
@@ -287,7 +291,7 @@ The hub does not terminate TLS itself when it sits behind a reverse proxy, and i
 
 **1. The phone refuses to pair: "App Transport Security policy requires the use of a secure connection".**
 The pairing QR carried `hub=http://…`. When the hub is not told its public address, it builds the pairing invite from the `Host` header and its own scheme — plain `http` behind a proxy. iOS rejects that.
-→ Set **Public hub URL** (`hub_public_url`) to the address users type in their browser, e.g. `https://lanprobe.example.com`, then generate a **new** pairing code: an invite already displayed keeps the old scheme.
+→ Set **Public hub URL** (`hub_public_url`) to the address users type in their browser, e.g. `https://lanprobe.example.com`, then generate a **new** pairing code: an invite already displayed keeps the old scheme. Without that setting, the hub follows `X-Forwarded-Proto`, but only from a proxy listed in **Trusted proxies** (point 2).
 The setting also decides where probes write their measurements (same host, InfluxDB port), unless `LANPROBE_WEB_INFLUX_ADVERTISE_URL` is set — behind a single proxy on the same host, that is what you want.
 
 **2. Every paired device (and every probe) shows the proxy's address, e.g. `172.32.0.3`, instead of its public IP.**

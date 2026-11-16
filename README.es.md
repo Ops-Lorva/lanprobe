@@ -197,6 +197,8 @@ docker compose up -d
 docker compose logs lanprobe-web | grep -i token
 ```
 
+El archivo compose publica el hub **solo en `127.0.0.1:8080`**: abra `http://localhost:8080` en esa máquina, o ponga su reverse proxy delante. Para acceder desde la LAN sin proxy, cambie la línea por `"8080:8080"`, sabiendo que las contraseñas viajarán entonces en claro.
+
 Abra el hub, pegue el token y cree la cuenta de administrador; el token se consume en el primer uso. Después, **Dar de alta una sonda**: el hub le da un código corto, válido 15 minutos. En LanProbe, **Ajustes → Conexión al servidor**, escriba la dirección del hub y ese código. Ninguna contraseña llega nunca a la máquina vigilada.
 
 Las cuentas llevan un rol (`admin` / `operator` / `viewer`), cada acción queda en el registro de auditoría, y los cambios a fuera de línea / en línea pueden enviarse por correo o webhook (Slack, Discord, ntfy…). La [API completa está en el contrato](docs/lanprobe-web-contrat.md).
@@ -206,6 +208,8 @@ Las cuentas llevan un rol (`admin` / `operator` / `viewer`), cada acción queda 
 - si esa máquina se abrió alguna vez en HTTPS, el navegador conserva una cookie `Secure` que bloquea en silencio la sesión HTTP posterior: el inicio de sesión parece funcionar y luego vuelve a la pantalla de acceso, **sin ningún error**. Ventana privada, o borre las cookies del sitio.
 
 El hub sirve **en HTTP sin cifrar por defecto**, pensado para vivir detrás de su propio proxy inverso. Un interruptor en **Ajustes → General** (o `--tls`) hace que termine él mismo el TLS con un certificado autofirmado, suficiente en una LAN. Surte efecto **al reiniciar**, la dirección cambia, y habrá que corregir la suya en las sondas ya dadas de alta con la anterior. Las llaves de acceso lo exigen (o un proxy): los navegadores rechazan WebAuthn fuera de un contexto seguro. El puerto de InfluxDB (`8086`) está cerrado por defecto: ábralo solo para conectar Grafana; las sondas nunca lo necesitan.
+
+**Exponer un hub en Internet** (por ejemplo un hub de demostración): TLS en el reverse proxy, la red del proxy en **Proxies de confianza**, **URL pública del hub** configurada. El hub limita los intentos de inicio de sesión, emparejamiento, alta de sondas y token de dispositivo por dirección y por cuenta (HTTP 429), y rechaza la autenticación Basic a las cuentas con segundo factor. Una cuenta compartida puede pasar a **modo demo** (*Ajustes → Cuentas*): contraseña, segundo factor, llaves de acceso e idioma bloqueados, solo ve el dispositivo desde el que llama, y sus dispositivos vinculados se revocan tras `LANPROBE_WEB_DEMO_DEVICE_DAYS` días (7 por defecto). Asígnele el rol `viewer` y restrínjala al sitio de demostración: una cuenta restringida ya no lee los ajustes de infraestructura del hub. Detalles en el [contrato, § 27](docs/lanprobe-web-contrat.md).
 
 El hub tiene **su propia versión**, independiente de la aplicación.
 
@@ -288,7 +292,7 @@ Detrás de un proxy inverso el hub no termina el TLS él mismo, y **nunca confí
 
 **1. El teléfono rechaza el emparejamiento: «App Transport Security policy requires the use of a secure connection».**
 El QR de emparejamiento llevaba `hub=http://…`. Mientras el hub no conoce su dirección pública, compone la invitación a partir de la cabecera `Host` y de su propio esquema: `http` sin cifrar detrás de un proxy. iOS lo rechaza.
-→ Rellene **URL pública del hub** (`hub_public_url`) con la dirección que se escribe en el navegador, por ejemplo `https://lanprobe.ejemplo.com`, y luego genere un **nuevo** código de emparejamiento: una invitación ya mostrada conserva el esquema anterior.
+→ Rellene **URL pública del hub** (`hub_public_url`) con la dirección que se escribe en el navegador, por ejemplo `https://lanprobe.ejemplo.com`, y luego genere un **nuevo** código de emparejamiento: una invitación ya mostrada conserva el esquema anterior. Sin ese ajuste, el hub sigue `X-Forwarded-Proto`, pero solo si viene de un proxy listado en **Proxies de confianza** (punto 2).
 Este ajuste también decide la dirección donde las sondas escriben sus mediciones (mismo host, puerto de InfluxDB), salvo si se define `LANPROBE_WEB_INFLUX_ADVERTISE_URL`; detrás de un solo proxy en el mismo host, es lo que se quiere.
 
 **2. Todos los dispositivos emparejados (y todas las sondas) muestran la dirección del proxy, por ejemplo `172.32.0.3`, en lugar de su IP pública.**

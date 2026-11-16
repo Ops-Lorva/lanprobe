@@ -21,11 +21,19 @@ services:
     # bucket, rétention, cadence des sauvegardes...) — voir le README.
 
     ports:
-      # Interface web du hub — HTTPS auto-signé par défaut (voir le README,
-      # section "Sécurité"). C'est ici que vous créez le compte admin, que
-      # vous enrôlez vos sondes, et c'est par ici qu'elles envoient leurs
-      # mesures : une seule porte, une seule authentification.
-      - "8080:8080"
+      # Interface web du hub — en HTTP CLAIR par défaut, faite pour vivre
+      # derrière votre reverse proxy TLS (`--tls` / LANPROBE_WEB_TLS, ou
+      # Réglages → Général, pour un certificat auto-signé). C'est ici que vous
+      # créez le compte admin, que vous enrôlez vos sondes, et c'est par ici
+      # qu'elles envoient leurs mesures : une seule porte, une seule
+      # authentification.
+      #
+      # ⚠️ Liée à 127.0.0.1 : seul un proxy sur cette machine la joint. Un
+      # port publié sans adresse s'ouvre sur toutes les interfaces — et Docker
+      # passe devant le pare-feu de l'hôte. Pour joindre le hub depuis le LAN
+      # sans proxy, remplacez par "8080:8080" en connaissance de cause : les
+      # mots de passe y circuleront en clair.
+      - "127.0.0.1:8080:8080"
       # InfluxDB. **Optionnel, et fermé par défaut** : les sondes n'en ont
       # pas besoin, elles passent par le hub qui relaie. Ne l'ouvrez que pour
       # brancher un Grafana sur les séries, avec un jeton de lecture émis
