@@ -223,13 +223,13 @@
 
 <style>
   .hint {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     line-height: 1.55;
     max-width: 74ch;
   }
   .err {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-danger, #f87171);
   }
   .rows {
@@ -256,11 +256,11 @@
     grid-template-columns: minmax(110px, 1fr) minmax(140px, 1.4fr) minmax(140px, 1.4fr) auto;
   }
   .name {
-    font-size: 13px;
+    font-size: 0.875rem;
     font-weight: 600;
   }
   .ports {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
@@ -269,10 +269,8 @@
     color: var(--ep-text-muted);
   }
   .tag {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--ep-text-dim);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
   }
   .acts {
     display: flex;

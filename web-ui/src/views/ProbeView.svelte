@@ -3014,7 +3014,7 @@
     background: var(--ep-bg-secondary);
     color: var(--ep-text-secondary);
     font-family: var(--ep-font-sans);
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     cursor: pointer;
   }
   .chip.on {
@@ -3036,7 +3036,7 @@
      familles ne se ressemblent pas — neutre, accent, rouge — pour qu'un clic
      mal visé ne coupe pas une sonde. */
   .mgroup {
-    font-size: 9px;
+    font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.8px;
     color: var(--ep-text-dim);
@@ -3046,7 +3046,7 @@
     margin-top: 4px;
   }
   .mintro {
-    font-size: 11px;
+    font-size: 0.8125rem;
     line-height: 1.55;
     color: var(--ep-text-muted);
     margin: 0 8px 6px;
@@ -3076,12 +3076,12 @@
     cursor: not-allowed;
   }
   .mi-label {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     font-weight: 600;
     color: var(--ep-text-primary);
   }
   .mi-hint {
-    font-size: 11px;
+    font-size: 0.8125rem;
     line-height: 1.5;
     color: var(--ep-text-muted);
   }
@@ -3111,7 +3111,7 @@
     padding: 11px 13px;
   }
   .triage h3 {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     font-weight: 700;
     margin: 0 0 6px;
     color: var(--ep-danger);
@@ -3119,7 +3119,7 @@
   .triage ul {
     margin: 0;
     padding-left: 18px;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     line-height: 1.6;
     color: var(--ep-text-secondary);
   }
@@ -3136,24 +3136,24 @@
     padding: 11px 13px;
   }
   .pending strong {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-text-primary);
   }
   .pending p {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     margin: 4px 0 0;
     line-height: 1.6;
     max-width: 82ch;
   }
   .done {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-success);
     margin: 0 0 14px;
   }
 
   .err {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     margin: 6px 0 0;
     border-left: 2px solid var(--ep-danger);
@@ -3217,7 +3217,7 @@
   }
   .bsub {
     margin: 3px 0 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
   }
   /* En-tête d'un onglet qui n'a pas de carte enveloppante : la grille en
@@ -3275,7 +3275,7 @@
     align-items: center;
     min-height: 96px;
     margin: 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     line-height: 1.55;
     color: var(--ep-text-muted);
   }
@@ -3285,7 +3285,7 @@
     padding: 2px 7px;
     border-radius: 999px;
     border: 1px solid var(--ep-border-strong);
-    font-size: 10px;
+    font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.6px;
     color: var(--ep-text-dim);
@@ -3294,12 +3294,12 @@
   }
   .empty {
     margin: 0;
-    font-size: 13px;
+    font-size: 0.875rem;
     color: var(--ep-text-dim);
   }
   .scanmeta {
     margin: 0 0 10px;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
   }
 
@@ -3351,7 +3351,7 @@
      mal, mais il ne doit pas concurrencer le chiffre. */
   .uon {
     display: block;
-    font-size: 10.5px;
+    font-size: 0.75rem;
     color: var(--ep-text-muted);
   }
   /* ⚠️ Une réserve sur la lecture du taux, pas une panne : la teinte
@@ -3361,14 +3361,14 @@
     color: var(--ep-warning);
   }
   .slaerr {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
   }
 
   /* L'avancement du hub : une note, pas une alerte. Rien ne va mal — le
      classeur se prépare, et le dire évite qu'on reclique. */
   .slastep {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
   }
 
@@ -3376,7 +3376,7 @@
      elle est simplement moyennée, et l'écran le dit. */
   .agg {
     margin: 6px 0 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     line-height: 1.5;
     color: var(--ep-text-muted);
   }
@@ -3384,14 +3384,14 @@
   /* ── Disponibilité par IP publique ─────────────────────────────────── */
   .ipcap {
     margin: 14px 0 6px;
-    font-size: 11px;
+    font-size: 0.8125rem;
     text-transform: uppercase;
     letter-spacing: 0.8px;
     color: var(--ep-text-dim);
   }
   .ipnote {
     margin: 10px 0 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
   }
   .ipnote.err {
@@ -3405,7 +3405,7 @@
   .labinput {
     min-height: 28px;
     padding: 4px 8px;
-    font-size: 12px;
+    font-size: 0.8125rem;
     max-width: 150px;
   }
   /* L'indéterminé se lit comme une réponse assumée, pas comme une case
@@ -3452,7 +3452,7 @@
     background: var(--ep-bg-tertiary);
     color: inherit;
     font: inherit;
-    font-size: 13px;
+    font-size: 0.875rem;
     text-align: left;
     cursor: pointer;
   }
@@ -3489,18 +3489,18 @@
   }
   .hostn {
     margin-left: auto;
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
   }
   /* Le profil employé, entre le nombre de ports et la date. */
   .hostprofile {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     white-space: nowrap;
   }
   /* La date de la machine, après son nombre de ports. */
   .hostwhen {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     white-space: nowrap;
   }
@@ -3516,7 +3516,7 @@
   }
   .stale-note {
     margin: 10px 0 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
   }
   /* La note devenue lien garde exactement l'allure de la note : c'est toujours
@@ -3557,17 +3557,17 @@
      l'adresse, puis quand, puis on décide. */
   .rwhen {
     flex: 1;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
   }
   .rnote {
     margin: 10px 0 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
   }
 
   .cstate {
-    font-size: 11px;
+    font-size: 0.8125rem;
     padding: 1px 6px;
     border-radius: 3px;
     border: 1px solid var(--ep-border);
@@ -3584,13 +3584,13 @@
   .cnote {
     display: block;
     margin-top: 2px;
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
     overflow-wrap: anywhere;
   }
 
   .engine {
-    font-size: 10px;
+    font-size: 0.75rem;
     letter-spacing: 0.4px;
     color: var(--ep-text-dim);
     white-space: nowrap;
@@ -3603,6 +3603,6 @@
   }
   .muted {
     color: var(--ep-text-muted);
-    font-size: 12px;
+    font-size: 0.8125rem;
   }
 </style>

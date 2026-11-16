@@ -66,7 +66,7 @@
     grid-template-columns: 58px 1fr;
   }
   select {
-    font-size: 11px;
+    font-size: 0.8125rem;
     padding: 4px 7px;
     width: 100%;
     /* En barre horizontale, ces sélecteurs sont les derniers de la ligne : sans
@@ -94,11 +94,11 @@
     gap: 5px;
   }
   .cap {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
   }
   .labelled select {
-    font-size: 13px;
+    font-size: 0.875rem;
     padding: 8px 10px;
     min-height: 36px;
   }

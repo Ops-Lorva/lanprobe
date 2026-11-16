@@ -73,7 +73,7 @@
     gap: 3px;
   }
   .note {
-    font-size: 10.5px;
+    font-size: 0.75rem;
     color: var(--ep-text-dim);
     max-width: 220px;
   }

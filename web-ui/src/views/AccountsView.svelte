@@ -596,7 +596,7 @@
     padding: 6px 4px;
     border-bottom: 1px solid var(--ep-border);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: 0.875rem;
   }
   .scope-name {
     overflow: hidden;
@@ -604,7 +604,7 @@
     white-space: nowrap;
   }
   .scope-count {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
   }
   /* Les dialogues de cet écran n'avaient encore ni texte d'introduction ni
@@ -612,18 +612,18 @@
      ici avec la même forme que dans le parc. */
   .dlg-lead {
     margin: 0 0 8px;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.5;
   }
   .dlg-err {
     margin: 8px 0 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger, #c0392b);
   }
   .dlg-note {
     margin: 6px 0 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
   }
   /* « Aucune case = rien » doit se voir quand c'est l'état courant. */
@@ -647,19 +647,19 @@
 
 
   .hint {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     line-height: 1.5;
   }
   .err {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     margin: 0 0 10px;
     border-left: 2px solid var(--ep-danger);
     padding-left: 8px;
   }
   .ok {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-success);
     margin: 0 0 10px;
   }

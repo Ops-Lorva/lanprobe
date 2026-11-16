@@ -39,7 +39,7 @@
     width: 100%;
     border-collapse: collapse;
     font-family: var(--ep-font-mono);
-    font-size: 11px;
+    font-size: 0.8125rem;
     font-variant-numeric: tabular-nums;
   }
   th {
@@ -47,10 +47,8 @@
     top: 0;
     background: var(--ep-bg-secondary);
     text-align: left;
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--ep-text-dim);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
     padding: 6px 8px;
     border-bottom: 1px solid var(--ep-border);
   }

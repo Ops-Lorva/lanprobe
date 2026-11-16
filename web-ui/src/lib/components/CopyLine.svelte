@@ -85,7 +85,7 @@
     flex: 1;
     min-width: 0;
     font-family: var(--ep-font-mono);
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     line-height: 1.5;
     background: var(--ep-bg-primary);
     border: 1px solid var(--ep-border);

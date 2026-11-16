@@ -768,11 +768,9 @@
     margin-top: 6px;
   }
   .group-title {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.9px;
+    font-size: 0.8125rem;
     font-weight: 700;
-    color: var(--ep-text-dim);
+    color: var(--color-muted);
     flex-shrink: 0;
   }
   .group-rule {
@@ -819,11 +817,11 @@
     padding: 6px 0;
     border-top: 1px solid var(--ep-border, #2a2a35);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: 0.875rem;
   }
   .kind-why {
     grid-column: 2;
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.45;
   }
@@ -835,26 +833,26 @@
     min-width: 0;
   }
   .lead {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     margin: 0;
   }
   .sub {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.6;
     margin: -6px 0 0;
     max-width: 74ch;
   }
   .hint {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     line-height: 1.5;
     max-width: 74ch;
   }
   .muted {
     color: var(--ep-text-muted);
-    font-size: 12px;
+    font-size: 0.8125rem;
     margin: 0;
   }
 
@@ -869,7 +867,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-primary);
     cursor: pointer;
   }
@@ -896,7 +894,7 @@
     border-bottom: none;
   }
   .pname {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     font-weight: 500;
     color: var(--ep-text-primary);
     overflow-wrap: anywhere;
@@ -907,14 +905,14 @@
   .prow .sel {
     min-height: 30px;
     padding: 5px 8px;
-    font-size: 12px;
+    font-size: 0.8125rem;
   }
   /* L'état effectif est du texte, pas une couleur seule : « inactif » doit se
      lire, y compris quand la ligne est parcourue en diagonale. */
   .eff {
     display: flex;
     flex-direction: column;
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     text-align: right;
   }
@@ -923,7 +921,7 @@
     font-weight: 600;
   }
   .from {
-    font-size: 10px;
+    font-size: 0.75rem;
     color: var(--ep-text-dim);
     font-weight: 400;
   }
@@ -994,10 +992,8 @@
     text-align: right;
   }
   .pill {
-    font-size: 10px;
+    font-size: 0.8125rem;
     font-weight: 700;
-    letter-spacing: 0.4px;
-    text-transform: uppercase;
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--ep-border-strong);
@@ -1024,7 +1020,7 @@
     background: color-mix(in srgb, var(--ep-danger) 7%, transparent);
     padding: 11px 13px;
     margin: 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     line-height: 1.6;
     color: var(--ep-text-secondary);
     max-width: 78ch;
@@ -1062,7 +1058,7 @@
     font-variant-numeric: tabular-nums;
   }
   .unit {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
   }
   .area {
@@ -1074,7 +1070,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     cursor: pointer;
   }
@@ -1119,7 +1115,7 @@
     align-items: baseline;
     gap: 10px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: 0.8125rem;
     padding: 8px 11px;
     margin: 0;
     border: 1px solid var(--ep-border);
@@ -1142,12 +1138,12 @@
   }
   .verdict .why {
     font-family: var(--ep-font-mono);
-    font-size: 11px;
+    font-size: 0.8125rem;
     overflow-wrap: anywhere;
   }
 
   .err {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     margin: 0;
     border-left: 2px solid var(--ep-danger);
@@ -1157,7 +1153,7 @@
     margin-bottom: 12px;
   }
   .ok {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-success);
     margin: 0;
   }

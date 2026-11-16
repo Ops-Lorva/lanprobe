@@ -119,15 +119,13 @@
      décider s'il vaut la peine de déplier. */
   .sum {
     margin-left: auto;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     font-variant-numeric: tabular-nums;
   }
   .always {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--ep-text-dim);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
   }
 
   .body {

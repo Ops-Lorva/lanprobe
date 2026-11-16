@@ -205,8 +205,8 @@
             {#each list.backups as a (a.file)}
               <tr>
                 <td title={a.file}>{stamp.format(new Date(a.created_at_unix * 1000))}</td>
-                <td class="right lp-mono">{humanBytes(a.bytes, lang)}</td>
-                <td class="right lp-mono">{a.hub_version}</td>
+                <td class="right lp-num">{humanBytes(a.bytes, lang)}</td>
+                <td class="right lp-num">{a.hub_version}</td>
                 <td class="right">
                   <button class="lp-btn tiny" onclick={() => askDownload(a)}>
                     {$_('backup.download')}
@@ -322,7 +322,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-primary);
     cursor: pointer;
   }
@@ -346,11 +346,11 @@
     font-variant-numeric: tabular-nums;
   }
   .unit {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
   }
   .hint {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     line-height: 1.55;
     max-width: 74ch;
@@ -365,14 +365,12 @@
   .rows {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
   }
   .rows th {
     text-align: left;
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--ep-text-dim);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
     padding: 5px 8px;
     border-bottom: 1px solid var(--ep-border);
     font-weight: 500;
@@ -396,13 +394,13 @@
   }
 
   .dir {
-    font-size: 10.5px;
+    font-size: 0.75rem;
     color: var(--ep-text-muted);
     margin: 0;
     overflow-wrap: anywhere;
   }
   .secret {
-    font-size: 11px;
+    font-size: 0.8125rem;
     line-height: 1.55;
     color: var(--ep-text-secondary);
     border-left: 2px solid var(--ep-warning);
@@ -416,11 +414,11 @@
      hauteur pour une action qu'on utilise rarement. */
   .tiny {
     padding: 3px 9px;
-    font-size: 11px;
+    font-size: 0.8125rem;
     min-height: 0;
   }
   .id {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-primary);
     overflow-wrap: anywhere;
     margin: 0;
@@ -435,10 +433,8 @@
     gap: 8px;
   }
   .choice legend {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--ep-text-dim);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
     padding: 0 4px;
   }
   /* Une ligne par option, l'intitulé seul : les deux phrases qui expliquaient
@@ -454,7 +450,7 @@
     accent-color: var(--ep-accent);
   }
   .opt-name {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-text-primary);
   }
 
@@ -466,20 +462,20 @@
   }
   .muted {
     color: var(--ep-text-muted);
-    font-size: 12px;
+    font-size: 0.8125rem;
     line-height: 1.6;
     margin: 0;
     max-width: 74ch;
   }
   .err {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     margin: 0;
     border-left: 2px solid var(--ep-danger);
     padding-left: 8px;
   }
   .ok {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-success);
     margin: 0;
     overflow-wrap: anywhere;
@@ -492,13 +488,13 @@
     padding: 11px 13px;
   }
   .warn strong {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-text-primary);
     display: block;
     margin-bottom: 4px;
   }
   .warn p {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.6;
     margin: 0;

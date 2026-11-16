@@ -72,7 +72,7 @@
   .body {
     /* ~65 caractères : au-delà, l'œil perd la ligne suivante. */
     max-width: 52ch;
-    font-size: 13px;
+    font-size: 0.875rem;
     line-height: 1.6;
     color: var(--ep-text-secondary);
     margin: 0;

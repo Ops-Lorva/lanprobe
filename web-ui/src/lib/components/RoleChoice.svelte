@@ -87,12 +87,12 @@
     min-width: 0;
   }
   .nm {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     font-weight: 600;
     color: var(--ep-text-primary);
   }
   .can {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     line-height: 1.5;
     color: var(--ep-text-secondary);
   }

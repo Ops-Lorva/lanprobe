@@ -107,12 +107,12 @@
     gap: 13px;
   }
   .hint {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     line-height: 1.5;
   }
   .err {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     margin: 0;
     border-left: 2px solid var(--ep-danger);
@@ -124,7 +124,7 @@
     display: flex;
     flex-direction: column;
     gap: 9px;
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-text-secondary);
     line-height: 1.6;
   }
@@ -135,7 +135,7 @@
     margin-top: 4px !important;
   }
   .note {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
   }
 </style>

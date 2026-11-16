@@ -161,7 +161,7 @@
   @media (max-width: 560px) {
     .vals {
       gap: 8px;
-      font-size: 11px;
+      font-size: 0.8125rem;
     }
     /* Sur un écran étroit, l'unité est déjà dans le titre de la carte. */
     .unit {

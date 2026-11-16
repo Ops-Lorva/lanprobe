@@ -118,7 +118,7 @@
     flex: 1 1 200px;
   }
   .url {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-primary);
     overflow-wrap: anywhere;
   }
@@ -133,14 +133,14 @@
     color: var(--ep-text-dim);
   }
   .src {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
   }
   .origin {
     display: inline-flex;
     align-items: center;
     align-self: flex-start;
-    font-size: 11px;
+    font-size: 0.8125rem;
     font-weight: 600;
     border-radius: 999px;
     padding: 2px 8px;
@@ -156,7 +156,7 @@
   }
   .guess-note {
     margin: 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     line-height: 1.6;
     color: var(--ep-text-secondary);
     border-left: 2px solid color-mix(in srgb, var(--ep-warning) 55%, var(--ep-border));
@@ -169,7 +169,7 @@
 
   .verdict p {
     margin: 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     line-height: 1.6;
   }
   .muted {
@@ -189,7 +189,7 @@
   }
   .fail strong {
     display: block;
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-danger);
     margin-bottom: 4px;
   }

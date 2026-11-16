@@ -147,7 +147,7 @@
     flex-wrap: wrap;
   }
   .ttl {
-    font-size: 12px;
+    font-size: 0.8125rem;
     font-weight: 700;
     color: var(--ep-warning);
     border: 1px solid color-mix(in srgb, var(--ep-warning) 45%, var(--ep-border));
@@ -160,7 +160,7 @@
 
   .dictate {
     margin: 0;
-    font-size: 13px;
+    font-size: 0.875rem;
     line-height: 1.6;
     color: var(--ep-text-primary);
     background: var(--ep-accent-dim);
@@ -182,10 +182,10 @@
     gap: 8px;
   }
   .gone strong {
-    font-size: 12.5px;
+    font-size: 0.875rem;
   }
   .gone p {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     margin: 0;
     line-height: 1.6;

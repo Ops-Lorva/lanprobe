@@ -361,7 +361,7 @@
     border-left: 3px solid color-mix(in srgb, var(--ep-danger) 55%, var(--ep-border));
   }
   .sub {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.6;
     margin: -6px 0 0;
@@ -383,7 +383,7 @@
   .file {
     width: 100%;
     font-family: var(--ep-font-sans);
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     min-width: 0;
   }
@@ -395,7 +395,7 @@
     background: var(--ep-bg-tertiary);
     color: var(--ep-text-primary);
     font-family: var(--ep-font-sans);
-    font-size: 12px;
+    font-size: 0.8125rem;
     font-weight: 600;
     cursor: pointer;
   }
@@ -404,7 +404,7 @@
      caractère rend la version du hub visible, et c'est elle qui décide si
      l'archive est restaurable. */
   select.lp-input {
-    font-size: 12px;
+    font-size: 0.8125rem;
   }
   .rule {
     height: 1px;
@@ -412,11 +412,11 @@
   }
   .muted {
     color: var(--ep-text-muted);
-    font-size: 12px;
+    font-size: 0.8125rem;
     margin: 0;
   }
   .small {
-    font-size: 10.5px;
+    font-size: 0.75rem;
     overflow-wrap: anywhere;
   }
 
@@ -428,13 +428,13 @@
     padding: 11px 13px;
   }
   .warn strong {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-text-primary);
     display: block;
     margin-bottom: 4px;
   }
   .warn p {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.6;
     margin: 0;
@@ -462,11 +462,11 @@
     background: color-mix(in srgb, var(--ep-warning) 8%, transparent);
   }
   .done > strong {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-text-primary);
   }
   .done p {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.6;
     margin: 0;
@@ -480,14 +480,14 @@
   .rt {
     color: var(--ep-danger);
     display: block;
-    font-size: 12px;
+    font-size: 0.8125rem;
   }
   .ko {
     color: var(--ep-warning);
   }
 
   .id {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-primary);
     overflow-wrap: anywhere;
     margin: 0;
@@ -501,7 +501,7 @@
     display: flex;
     gap: 9px;
     align-items: flex-start;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-primary);
     line-height: 1.5;
     cursor: pointer;

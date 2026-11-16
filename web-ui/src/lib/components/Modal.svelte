@@ -112,7 +112,7 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    font-size: 13px;
+    font-size: 0.875rem;
     line-height: 1.6;
     color: var(--ep-text-secondary);
     overflow-y: auto;

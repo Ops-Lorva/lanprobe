@@ -997,7 +997,7 @@
 <style>
   .slalead {
     margin: 0 0 12px;
-    font-size: 13px;
+    font-size: 0.875rem;
     color: var(--ep-text-secondary);
   }
   .sladates {
@@ -1021,7 +1021,7 @@
     gap: 8px;
     padding: 6px 8px;
     border-radius: 5px;
-    font-size: 13px;
+    font-size: 0.875rem;
     cursor: pointer;
   }
   .slapick label:hover {
@@ -1029,12 +1029,12 @@
   }
   .slastat {
     margin-left: auto;
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
   }
   .slaerr {
     margin: 10px 0 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
   }
 
@@ -1042,7 +1042,7 @@
      classeur se prépare, et le dire évite qu'on reclique. */
   .slastep {
     margin: 10px 0 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
   }
 
@@ -1056,13 +1056,13 @@
   }
   .slahist h4 {
     margin: 0 0 8px;
-    font-size: 12px;
+    font-size: 0.8125rem;
     font-weight: 600;
     color: var(--ep-text-secondary);
   }
   .slahist-empty {
     margin: 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
   }
   .slahist ul {
@@ -1091,12 +1091,12 @@
     min-width: 0;
   }
   .slahist-when {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-text-primary);
   }
   .slahist-who,
   .slahist-what {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
   }
   .slahist-state {
@@ -1107,14 +1107,14 @@
     text-align: right;
   }
   .slahist-note {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-dim);
     max-width: 260px;
   }
   /* Un échec porte sa cause NOMMÉE : c'est elle qui dit s'il faut réessayer
      ou appeler. */
   .slahist-failed {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     max-width: 260px;
   }
@@ -1167,16 +1167,16 @@
     padding-left: 10px;
   }
   .warn strong {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-warning);
   }
   .warn p {
     margin: 4px 0 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     line-height: 1.55;
   }
   .dlg-err {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     margin: 0;
     border-left: 2px solid var(--ep-danger);

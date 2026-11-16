@@ -191,13 +191,13 @@
   }
   .werr {
     margin: 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     flex: 1 1 220px;
   }
   .whint {
     margin: 0;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     flex: 1 1 220px;
   }

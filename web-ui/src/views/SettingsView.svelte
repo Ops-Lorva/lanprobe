@@ -818,8 +818,9 @@
   function onTabKey(e: KeyboardEvent) {
     const i = TABS.findIndex((t) => t.id === tab);
     let next: SettingsTab;
-    if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length].id;
-    else if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length].id;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = TABS[(i + 1) % TABS.length].id;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp')
+      next = TABS[(i - 1 + TABS.length) % TABS.length].id;
     else return;
     e.preventDefault();
     openTab(next);
@@ -944,9 +945,7 @@
   }
 </script>
 
-<header class="head">
-  <h1>{accountOnly ? $_('settings.tab_account') : $_('settings.title')}</h1>
-</header>
+<header class="lp-head"><h1>{$_('settings.title')}</h1></header>
 
 {#if loading}
   <StateBlock tone="loading" title={$_('settings.loading')} />
@@ -955,36 +954,44 @@
     <button class="lp-btn primary" onclick={load}>{$_('common.retry')}</button>
   </StateBlock>
 {:else}
-  <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-  {#if !accountOnly}
-  <div
-    class="tabs"
-    role="tablist"
-    tabindex="-1"
-    aria-label={$_('settings.tabs_aria')}
-    onkeydown={onTabKey}
-  >
-    {#each TABS as t (t.id)}
-      <button
-        class="tab"
-        class:on={tab === t.id}
-        role="tab"
-        data-tab={t.id}
-        id="tab-{t.id}"
-        aria-selected={tab === t.id}
-        aria-controls="panel-{t.id}"
-        tabindex={tab === t.id ? 0 : -1}
-        onclick={() => openTab(t.id)}
-      >
-        {$_(t.key)}
-        {#if dirtyTabs[t.id]}
-          <span class="dot" title={$_('settings.tab_dirty')} aria-label={$_('settings.tab_dirty')}
-          ></span>
-        {/if}
-      </button>
-    {/each}
-  </div>
-  {/if}
+  <div class="layout">
+  <!-- Navigation latérale : « Mon compte » d'abord, par SA route (voir
+       `nav-active.ts`), puis les onglets des réglages du hub. -->
+  <nav class="side" aria-label={$_('settings.tabs_aria')}>
+    <a class="tab" class:on={accountOnly} href="#/account" aria-current={accountOnly ? 'page' : undefined}>
+      {$_('settings.tab_account')}
+    </a>
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+    <div
+      class="tablist"
+      role="tablist"
+      tabindex="-1"
+      aria-orientation="vertical"
+      aria-label={$_('settings.tabs_aria')}
+      onkeydown={onTabKey}
+    >
+      {#each TABS as t (t.id)}
+        <button
+          class="tab"
+          class:on={tab === t.id}
+          role="tab"
+          data-tab={t.id}
+          id="tab-{t.id}"
+          aria-selected={tab === t.id}
+          aria-controls="panel-{t.id}"
+          tabindex={tab === t.id ? 0 : -1}
+          onclick={() => openTab(t.id)}
+        >
+          {$_(t.key)}
+          {#if dirtyTabs[t.id]}
+            <span class="dot" title={$_('settings.tab_dirty')} aria-label={$_('settings.tab_dirty')}
+            ></span>
+          {/if}
+        </button>
+      {/each}
+    </div>
+  </nav>
+  <div class="content">
 
   <!-- `GET /api/settings` est ouverte à `viewer`, son écriture est réservée à
        `admin` (contrat § 11). On montre donc les valeurs — c'est souvent ce
@@ -1998,6 +2005,8 @@
       </button>
     </div>
   {/if}
+  </div>
+  </div>
 
   <!-- Jeton affiché une seule fois : le dire avant de le montrer, pas après. -->
   <Modal
@@ -2134,7 +2143,7 @@
      sections viennent d'installer se défait. */
   .subhead {
     margin: 0;
-    font-size: 13px;
+    font-size: 0.875rem;
     color: var(--ep-text-secondary);
   }
   .subhead:not(:first-child) {
@@ -2147,10 +2156,8 @@
     margin: 10px 0 0;
   }
   .idlist dt {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--ep-text-dim);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
   }
   .idlist dd {
     margin: 2px 0 0;
@@ -2164,68 +2171,73 @@
     margin-top: 4px;
   }
   .pwerr {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
   }
   .pwok {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-success);
   }
 
-  .head {
-    margin-bottom: 14px;
-    max-width: 74ch;
+  /* Réglages : une colonne de navigation, puis le panneau. */
+  .layout {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 40px;
+    align-items: start;
   }
-  h1 {
-    font-size: 20px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    margin: 0;
-  }
-
-  /* Onglets soulignés plutôt qu'en pastilles : le trait actif prolonge la ligne
-     qui sépare la barre du contenu, donc l'onglet et son panneau se lisent
-     comme une seule pièce. */
-  .tabs {
-    display: flex;
+  .side {
+    position: sticky;
+    top: 76px;
+    display: grid;
     gap: 2px;
-    flex-wrap: wrap;
-    border-bottom: 1px solid var(--ep-border);
-    margin-bottom: 14px;
+  }
+  .tablist {
+    display: grid;
+    gap: 2px;
+    margin-top: 16px;
   }
   .tab {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 6px;
+    justify-content: space-between;
+    gap: 8px;
     padding: 8px 12px;
-    margin-bottom: -1px;
     border: none;
-    border-bottom: 2px solid transparent;
+    border-radius: 5px;
     background: transparent;
-    color: var(--ep-text-secondary);
-    font-family: var(--ep-font-sans);
-    font-size: 12.5px;
-    font-weight: 500;
+    color: var(--color-ink-2);
+    font: 500 0.875rem/1.3 var(--ep-font-sans);
+    text-align: left;
+    text-decoration: none;
     cursor: pointer;
-    border-radius: var(--ep-radius-sm) var(--ep-radius-sm) 0 0;
   }
   .tab:hover:not(.on) {
-    color: var(--ep-text-primary);
-    background: var(--ep-glass-bg-md);
+    color: var(--color-ink);
+    background: var(--color-paper-3);
   }
   .tab.on {
-    color: var(--ep-accent-bright);
-    border-bottom-color: var(--ep-accent);
-    font-weight: 600;
+    color: var(--color-accent);
+    background: var(--color-accent-wash);
   }
-  /* Sous 520 px, la rangée occupe sa ligne à elle seule : on lui rend de la
-     place en resserrant les flancs plutôt que de la laisser se replier. Un
-     onglet passé à la ligne du dessous se lit comme s'il appartenait à une
-     autre famille — c'est précisément ce qu'un regroupement doit éviter. Le
-     pouce n'y perd rien, la hauteur de cible passe de 32 à 36 px. */
-  @media (max-width: 520px) {
-    .tab {
-      padding: 10px 8px;
+  .tab:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+  @media (max-width: 52rem) {
+    .layout {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 16px;
+    }
+    .side {
+      position: static;
+      display: flex;
+      flex-wrap: wrap;
+    }
+    .tablist {
+      display: flex;
+      flex-wrap: wrap;
+      margin-top: 0;
     }
   }
 
@@ -2240,7 +2252,7 @@
   }
 
   .readonly {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     border-left: 2px solid var(--ep-border);
     padding-left: 10px;
@@ -2285,9 +2297,7 @@
     gap: 10px;
   }
   .zone-title {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.9px;
+    font-size: 0.8125rem;
     font-weight: 700;
     color: var(--ep-danger);
     flex-shrink: 0;
@@ -2303,20 +2313,20 @@
     border-left: 3px solid color-mix(in srgb, var(--ep-danger) 55%, var(--ep-border));
   }
   .sub {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.6;
     margin: -6px 0 0;
     max-width: 74ch;
   }
   .hint {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
     line-height: 1.55;
     max-width: 74ch;
   }
   .cur {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
   }
   /* « Enregistré mais pas appliqué » n'est ni une erreur ni un succès : c'est
@@ -2333,7 +2343,7 @@
     gap: 10px;
     padding: 7px 0;
     border-top: 1px solid var(--ep-border);
-    font-size: 12.5px;
+    font-size: 0.875rem;
   }
   .pk-name {
     overflow: hidden;
@@ -2341,14 +2351,14 @@
     white-space: nowrap;
   }
   .pk-when {
-    font-size: 11px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
   }
   /* L'avertissement remplace le bouton : il doit se lire comme une raison,
      pas comme une note de bas de page. */
   .warn-inline {
     margin: 6px 0 0;
-    font-size: 12px;
+    font-size: 0.8125rem;
     line-height: 1.5;
     color: var(--ep-accent, #b8860b);
   }
@@ -2387,7 +2397,7 @@
   }
   .pair-url {
     margin: 0;
-    font-size: 13px;
+    font-size: 0.875rem;
     font-weight: 700;
     color: var(--ep-text-primary);
     overflow-wrap: anywhere;
@@ -2397,7 +2407,7 @@
   .ttl {
     margin: 0;
     align-self: flex-start;
-    font-size: 12px;
+    font-size: 0.8125rem;
     font-weight: 700;
     color: var(--ep-warning);
     border: 1px solid color-mix(in srgb, var(--ep-warning) 45%, var(--ep-border));
@@ -2421,7 +2431,7 @@
   }
   .secret {
     margin: 4px 0 10px;
-    font-size: 13px;
+    font-size: 0.875rem;
     letter-spacing: 0.12em;
     word-break: break-all;
     user-select: all;
@@ -2440,7 +2450,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 13px;
+    font-size: 0.875rem;
     cursor: pointer;
   }
   .tls-list {
@@ -2465,7 +2475,7 @@
     font-variant-numeric: tabular-nums;
   }
   .unit {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-muted);
   }
 
@@ -2479,13 +2489,13 @@
     padding: 11px 13px;
   }
   .warn strong {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-danger);
     display: block;
     margin-bottom: 4px;
   }
   .warn p {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-text-secondary);
     line-height: 1.6;
     margin: 0;
@@ -2506,15 +2516,13 @@
     min-width: 0;
   }
   .stats dt {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--ep-text-dim);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
     margin-bottom: 3px;
   }
   .stats dd {
     margin: 0;
-    font-size: 12.5px;
+    font-size: 0.875rem;
     font-weight: 600;
     color: var(--ep-text-primary);
     overflow-wrap: anywhere;
@@ -2527,7 +2535,7 @@
   }
 
   .ro {
-    font-size: 11.5px;
+    font-size: 0.8125rem;
     color: var(--ep-success);
     margin: 0;
   }
@@ -2544,14 +2552,12 @@
   .tok-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11.5px;
+    font-size: 0.8125rem;
   }
   .tok-table th {
     text-align: left;
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--ep-text-dim);
+    font-size: 0.8125rem;
+    color: var(--color-muted);
     padding: 5px 8px;
     border-bottom: 1px solid var(--ep-border);
     font-weight: 500;
@@ -2568,7 +2574,7 @@
     text-align: right;
   }
   .id {
-    font-size: 10.5px;
+    font-size: 0.75rem;
     color: var(--ep-text-muted);
     overflow-wrap: anywhere;
   }
@@ -2587,14 +2593,14 @@
     margin-left: auto;
   }
   .err {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-danger);
     margin: 0;
     border-left: 2px solid var(--ep-danger);
     padding-left: 8px;
   }
   .ok {
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-success);
     margin: 0;
   }
@@ -2608,19 +2614,19 @@
      pertes : avec une seule, le titre du dialogue le dit déjà et le répéter
      ferait lire deux fois la même chose. */
   .loss-head {
-    font-size: 12.5px;
+    font-size: 0.875rem;
     color: var(--ep-text-primary);
     margin-top: 4px;
   }
   .muted {
     color: var(--ep-text-muted);
-    font-size: 12px;
+    font-size: 0.8125rem;
   }
   .ack {
     display: flex;
     gap: 9px;
     align-items: flex-start;
-    font-size: 12px;
+    font-size: 0.8125rem;
     color: var(--ep-text-primary);
     line-height: 1.5;
     cursor: pointer;

@@ -195,7 +195,7 @@
   }
   .hint {
     color: var(--ep-text-muted);
-    font-size: 11.5px;
+    font-size: 0.8125rem;
   }
 
   .table {
