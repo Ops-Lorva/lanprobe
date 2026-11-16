@@ -104,7 +104,7 @@ curl -fsSL -o install-server.sh https://raw.githubusercontent.com/Ops-Lorva/lanp
 sudo bash install-server.sh
 ```
 
-**The headless probe listens on no port.** It used to serve its own web interface over HTTPS on 8443, with its own accounts and self-signed certificate. That role now belongs to the hub: a probe exposing its own interface as well would be a second surface to secure for the very same measurements. So you drive it from the command line, and you look at it from the hub.
+**The headless probe listens on no port.** The web interface is the hub: a probe exposing its own would be a second surface to secure for the very same measurements. You drive it from the command line, and you look at it from the hub.
 
 **Attaching.** In the hub, create an enrolment code (Fleet → “+” on a site), then:
 
@@ -370,7 +370,7 @@ lanprobe/
 └── web-ui/                     # Hub interface (Svelte 5), embedded in its binary
 ```
 
-`lanprobe-server` is **no longer a server** despite its name: it listens on no port. It carries the measurement scheduler, the export buffer and the hub attachment, shared between the desktop app and the headless binary.
+`lanprobe-server` is **not a server** despite its name: it listens on no port. It carries the measurement scheduler, the export buffer and the hub attachment, shared between the desktop app and the headless binary.
 
 ---
 

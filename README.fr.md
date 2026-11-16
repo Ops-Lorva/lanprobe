@@ -104,7 +104,7 @@ curl -fsSL -o install-server.sh https://raw.githubusercontent.com/Ops-Lorva/lanp
 sudo bash install-server.sh
 ```
 
-**La sonde headless n'écoute sur aucun port.** Elle servait autrefois sa propre interface web en HTTPS sur 8443, avec ses comptes et son certificat auto-signé. Ce rôle appartient maintenant au hub : une sonde qui exposerait la sienne en plus serait une seconde surface à sécuriser pour montrer les mêmes mesures. On la pilote donc en ligne de commande, et on la consulte depuis le hub.
+**La sonde headless n'écoute sur aucun port.** L'interface web, c'est le hub : une sonde qui exposerait la sienne serait une seconde surface à sécuriser pour montrer les mêmes mesures. On la pilote en ligne de commande, et on la consulte depuis le hub.
 
 **Rattachement.** Dans le hub, créez un code d'enrôlement (Parc → « + » sur un site), puis :
 
@@ -372,7 +372,7 @@ lanprobe/
 └── web-ui/                     # Interface du hub (Svelte 5), embarquée dans son binaire
 ```
 
-`lanprobe-server` **n'est plus un serveur** malgré son nom : il n'écoute sur aucun port. Il porte l'ordonnanceur des mesures, le tampon d'export et le rattachement au hub, partagés entre l'application de bureau et le binaire headless.
+`lanprobe-server` **n'est pas un serveur** malgré son nom : il n'écoute sur aucun port. Il porte l'ordonnanceur des mesures, le tampon d'export et le rattachement au hub, partagés entre l'application de bureau et le binaire headless.
 
 ---
 
