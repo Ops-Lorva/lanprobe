@@ -271,3 +271,78 @@ table.t { width: 100%; border-collapse: collapse; font-size: var(--text-md); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* ─── Coque de l'app : les trois dispositions ─────────────────────────── */
+
+/* Un écran : en-tête puis corps. Dans une case de la grille, le corps défile. */
+.screen { min-width: 0; }
+.appbar.bare { margin-bottom: var(--space-md); }
+
+/* Barre latérale */
+.app-side { display: grid; grid-template-columns: 196px minmax(0, 1fr); height: 100vh; }
+.side { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--space-3xs); padding: var(--space-md) var(--space-xs); background: var(--color-paper-2); border-right: 1px solid var(--color-rule); }
+.brand { display: inline-flex; align-items: center; gap: var(--space-xs); font-weight: 600; font-size: var(--text-lg); color: var(--color-ink); letter-spacing: -0.01em; }
+.side .brand { padding: 0 var(--space-xs) var(--space-md); }
+.side .it { display: flex; align-items: center; gap: var(--space-sm); height: 34px; padding: 0 var(--space-sm); border: 0; border-radius: var(--radius-ctl); background: transparent; color: var(--color-ink-2); font-weight: 500; text-align: left; cursor: pointer; }
+.side .it svg { width: 16px; height: 16px; color: var(--color-muted); flex: none; }
+.side .it:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.side .it[aria-current='page'] { background: var(--color-accent-wash); color: var(--color-accent-text); }
+.side .it[aria-current='page'] svg { color: var(--color-accent-text); }
+.side .it:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; transition: none; }
+.side .grow { flex: 1; }
+.side .hubstate { margin-top: var(--space-xs); padding: var(--space-sm); border-top: 1px solid var(--color-rule); display: grid; gap: var(--space-2xs); font-size: var(--text-sm); }
+.side .hubstate .muted { font-size: var(--text-xs); overflow-wrap: anywhere; }
+.appmain { min-width: 0; min-height: 0; overflow-y: auto; padding: var(--space-lg) var(--space-xl) var(--space-2xl); }
+@media (max-width: 52rem) {
+  .app-side { grid-template-columns: 60px minmax(0, 1fr); }
+  .side .lbl, .side .brand span, .side .hubstate { display: none; }
+  .side .it { justify-content: center; padding: 0; }
+  .appmain { padding: var(--space-md); }
+}
+
+/* Barre haute (une page, trois onglets) */
+.app-top { display: flex; flex-direction: column; height: 100vh; }
+.apptop { flex: none; display: flex; align-items: center; gap: var(--space-md); height: 48px; padding: 0 var(--space-md); border-bottom: 1px solid var(--color-rule); background: var(--color-paper-2); }
+.apptop .grow { flex: 1; }
+.apptabs { border-bottom: 0; margin: 0; align-self: stretch; align-items: stretch; }
+.apptabs button { display: inline-flex; align-items: center; }
+.app-top > .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.app-top > .banners, .app-side .banners { flex: none; }
+.banners .banner { margin: var(--space-sm) var(--space-md) 0; }
+.appmain .banners .banner { margin: 0 0 var(--space-md); }
+
+/* Une page : la grille 3×2 à hauteur de fenêtre, chaque case défile. */
+.dash-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: var(--space-sm); padding: var(--space-sm); }
+.cell { container-type: inline-size; display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--color-rule); border-radius: var(--radius-card); background: var(--color-paper-2); overflow: hidden; }
+.cell > .screen { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.cell-h { flex: none; display: flex; align-items: center; gap: var(--space-xs); min-height: 45px; padding: var(--space-xs) var(--space-sm); border-bottom: 1px solid var(--color-rule); }
+.cell-h h2 { font-size: var(--text-lg); white-space: nowrap; }
+.cell-h .acts { margin-left: auto; display: flex; gap: var(--space-2xs); align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.cell .screen-body { flex: 1; min-height: 0; overflow: auto; padding: var(--space-sm); }
+.cell .tbl-wrap { border: 0; }
+.cell .panel { padding: var(--space-sm); }
+.cell .big { font-size: 1.75rem; }
+.cell .banner { margin-bottom: var(--space-xs); }
+.cell .sec-head { margin: var(--space-md) 0 var(--space-xs); }
+@container (max-width: 640px) {
+  .split, .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); }
+  .t .opt { display: none; }
+  .cell .t td, .cell .t th { padding-inline: var(--space-xs); }
+}
+@media (max-width: 68.75rem) {
+  .app-top > .dash-grid { overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; grid-auto-rows: minmax(300px, 60vh); }
+}
+@media (max-width: 43.75rem) { .app-top > .dash-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 48rem) { .t .opt { display: none; } }
+
+/* Trois onglets : chaque onglet empile ses écrans en sections. */
+.gmain { max-width: 1440px; margin-inline: auto; padding: var(--space-lg) var(--space-xl) var(--space-2xl); }
+.gsec { scroll-margin-top: var(--space-md); padding-bottom: var(--space-xl); margin-bottom: var(--space-xl); border-bottom: 1px solid var(--color-rule); }
+.gsec:last-child { border-bottom: 0; }
+.jump { display: flex; flex-wrap: wrap; gap: var(--space-2xs) var(--space-md); margin-bottom: var(--space-lg); font-size: var(--text-sm); }
+.jump a { color: var(--color-ink-2); }
+@media (max-width: 52rem) { .gmain { padding: var(--space-md); } .apptop .brand span { display: none; } }
+
+/* Les réglages en surimpression (une page) */
+.overlay-panel { max-width: 720px; padding: 0; gap: 0; overflow: hidden; display: flex; flex-direction: column; }
+.overlay-panel .ov-body { overflow: auto; padding: var(--space-md); }

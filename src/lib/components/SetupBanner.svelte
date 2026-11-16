@@ -32,59 +32,13 @@
 </script>
 
 {#if !hasPerms && !done}
-  <div class="banner">
-    <div class="banner-content">
-      <span class="icon">🔐</span>
-      <div class="text">
-        <strong>{$_('banners.setup_title')}</strong>
-        <span>{$_('banners.setup_desc')}</span>
-      </div>
-      {#if error}
-        <span class="error">{error}</span>
-      {/if}
-      <button onclick={setup} disabled={installing}>
-        {installing ? $_('banners.setup_installing') : $_('banners.setup_install')}
-      </button>
-      <button class="dismiss" onclick={() => { done = true; }} title={$_('banners.dismiss')}>✕</button>
-    </div>
+  <div class="banner" role="status">
+    <svg viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="3.9" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M5 1.1A3.9 3.9 0 0 1 5 8.9Z" fill="currentColor" /></svg>
+    <span class="grow"><b>{$_('banners.setup_title')}</b> <span class="ink2">{$_('banners.setup_desc')}</span></span>
+    {#if error}<span class="err-text">{error}</span>{/if}
+    <button class="btn sm primary" type="button" onclick={setup} disabled={installing} aria-busy={installing}>
+      {installing ? $_('banners.setup_installing') : $_('banners.setup_install')}
+    </button>
+    <button class="btn sm quiet" type="button" onclick={() => { done = true; }}>{$_('banners.dismiss')}</button>
   </div>
 {/if}
-
-<style>
-  .banner {
-    background: color-mix(in srgb, var(--ep-accent) 12%, var(--ep-bg-secondary));
-    border-bottom: 1px solid color-mix(in srgb, var(--ep-accent) 30%, var(--ep-border));
-    padding: 10px 20px;
-    flex-shrink: 0;
-  }
-  .banner-content {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    max-width: 900px;
-  }
-  .icon { font-size: 18px; flex-shrink: 0; }
-  .text { flex: 1; display: flex; gap: 8px; align-items: baseline; font-size: 13px; flex-wrap: wrap; }
-  .text strong { font-weight: 700; white-space: nowrap; }
-  .text span { color: var(--ep-text-secondary); }
-  .error { color: var(--ep-danger); font-size: 12px; }
-  button {
-    padding: 6px 14px;
-    border-radius: 6px;
-    border: none;
-    background: var(--ep-accent);
-    color: #fff;
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 700;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  button:disabled { opacity: 0.6; cursor: not-allowed; }
-  button.dismiss {
-    background: transparent;
-    color: var(--ep-text-muted);
-    padding: 4px 8px;
-    font-size: 14px;
-  }
-</style>

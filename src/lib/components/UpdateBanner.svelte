@@ -59,54 +59,19 @@
 </script>
 
 {#if info && !dismissed}
-  <div class="banner">
-    <span class="icon" title={$_('banners.update_icon_title')}>↑</span>
-    <span class="text">
-      {$_('banners.update_available_prefix')} <strong>v{info.latest_version}</strong>
-      {#if error} — <span class="err">{$_('banners.update_install_error')}: {error}</span>{/if}
+  <div class="banner info" role="status">
+    <span class="grow">
+      {$_('banners.update_available', { values: { v: info.latest_version } })}
+      {#if error}<span class="err-text"> {$_('banners.update_install_error')} : {error}</span>{/if}
+      {#if !info.asset_url && info.release_notes_url}<span class="muted"> {$_('banners.update_unsupported')}</span>{/if}
     </span>
     {#if info.asset_url}
-      <button class="install" onclick={install} disabled={installing}>
+      <button class="btn sm primary" type="button" onclick={install} disabled={installing} aria-busy={installing}>
         {installing ? $_('banners.update_installing') : $_('banners.update_install')}
       </button>
     {:else if info.release_notes_url}
-      <a class="link" href={info.release_notes_url} target="_blank" rel="noopener noreferrer">
-        {$_('banners.update_view')}
-      </a>
-      <span class="hint">{$_('banners.update_unsupported')}</span>
+      <a class="link" href={info.release_notes_url} target="_blank" rel="noopener noreferrer">{$_('banners.update_view')}</a>
     {/if}
-    <button class="dismiss" onclick={dismiss} title={$_('banners.dismiss')} disabled={installing}>✕</button>
+    <button class="btn sm quiet" type="button" onclick={dismiss} disabled={installing}>{$_('banners.dismiss')}</button>
   </div>
 {/if}
-
-<style>
-  .banner {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 16px;
-    background: var(--ep-accent);
-    color: #fff;
-    font-size: 13px;
-    flex-shrink: 0;
-  }
-  .icon { font-size: 14px; }
-  .text { flex: 1; }
-  .err { opacity: 0.9; }
-  .hint { font-size: 11px; opacity: 0.8; }
-  .link { color: #fff; font-weight: 700; text-decoration: underline; cursor: pointer; white-space: nowrap; }
-  .install {
-    background: rgba(255,255,255,0.18);
-    border: 1px solid rgba(255,255,255,0.4);
-    color: #fff;
-    font-weight: 600;
-    padding: 4px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .install:hover:not(:disabled) { background: rgba(255,255,255,0.28); }
-  .install:disabled { opacity: 0.7; cursor: wait; }
-  .dismiss { background: transparent; border: none; color: rgba(255,255,255,0.8); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 4px; }
-  .dismiss:hover:not(:disabled) { background: rgba(255,255,255,0.2); }
-</style>

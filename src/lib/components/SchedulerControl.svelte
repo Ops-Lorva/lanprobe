@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { _ } from 'svelte-i18n';
   import { get } from 'svelte/store';
   import { scheduler, type SchedulerConfig } from '../stores/scheduler';
@@ -16,6 +17,10 @@
 
   let value = $state<number>(0);
 
+  // Idempotent : le contrôle vit aussi au tableau de bord et dans les
+  // réglages, où personne d'autre ne charge le planificateur.
+  onMount(() => { scheduler.init(); });
+
   // Reflète la valeur du store (après chargement async de la config).
   $effect(() => {
     const v = ($scheduler as SchedulerConfig)[field];
@@ -30,29 +35,17 @@
   }
 </script>
 
-<div class="sched" title={$_('scheduler.auto_run')}>
-  <span class="sched-icon">⏱</span>
-  <span class="sched-label">{label || $_('scheduler.auto_run')}</span>
-  <select bind:value onchange={save}>
+<label class="sched" title={$_('scheduler.auto_run')}>
+  <span class="sched-label">{label || $_('scheduler.every')}</span>
+  <select class="select" bind:value onchange={save}>
     {#each OPTIONS as opt}
       <option value={opt}>{opt === 0 ? $_('scheduler.off') : `${opt} min`}</option>
     {/each}
   </select>
-</div>
+</label>
 
 <style>
-  .sched {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 5px 10px; border-radius: 8px;
-    background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border);
-    font-size: 12px;
-  }
-  .sched-icon { color: var(--ep-text-muted); }
-  .sched-label { color: var(--ep-text-secondary); font-weight: 600; white-space: nowrap; }
-  .sched select {
-    background: var(--ep-bg-secondary); border: 1px solid var(--ep-border);
-    border-radius: 6px; padding: 3px 6px; color: var(--ep-text-primary);
-    font-size: 12px; font-weight: 600; cursor: pointer;
-  }
-  .sched select:focus { outline: none; border-color: var(--ep-accent); }
+  .sched { display: inline-flex; align-items: center; gap: var(--space-xs); font-size: var(--text-sm); }
+  .sched-label { color: var(--color-muted); white-space: nowrap; }
+  .sched .select { width: auto; min-height: 30px; }
 </style>
