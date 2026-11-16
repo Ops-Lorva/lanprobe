@@ -9,6 +9,7 @@
   import '@fontsource/geist-mono/600.css';
   import '@fontsource/geist-mono/700.css';
   import '../app.css';
+  import '$lib/theme/releve.css';
   import type { Snippet } from 'svelte';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';

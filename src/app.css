@@ -1,3 +1,101 @@
+/* ─── DA « Relevé » ─────────────────────────────────────
+   Tokens de la maquette validée (design/lanprobe-da-releve/lanprobe-da/
+   tokens.css), communs à l'app desktop et au hub, qui importe ce fichier.
+   Seule différence avec la maquette : l'attribut. Le produit bascule le thème
+   par `data-theme` sur <html> (absent = système), la maquette par `data-mode`.
+
+   La santé se tait : seuls le défaut, l'action et le temps réel portent une
+   couleur franche. Les `--ep-*` plus bas restent pour les écrans du hub qui
+   les lisent encore ; l'app desktop les rabat sur ces tokens
+   (`src/lib/theme/releve.css`). */
+:root {
+  color-scheme: dark;
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px;
+  --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px; --space-3xl: 96px;
+  --text-xs: 0.75rem; --text-sm: 0.8125rem; --text-md: 0.875rem; --text-lg: 1rem;
+  --text-xl: 1.125rem; --text-2xl: 1.375rem; --text-3xl: 1.75rem;
+  --text-display: 1.75rem; --text-section: 1.125rem;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-micro: 120ms; --dur-short: 220ms;
+  --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-modal: 400; --z-tooltip: 600;
+  /* ⚠️ `Geist Sans` : c'est le nom que déclare @fontsource/geist-sans. */
+  --font-body: 'Geist Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-outlier: 'Geist Mono', ui-monospace, 'SF Mono', monospace;
+  --radius-card: 6px; --radius-ctl: 5px; --radius-pill: 999px; --tick: 8px;
+  --ctl: 34px; --row: 40px;
+  --color-paper: #080c14; --color-paper-2: #0d1220; --color-paper-3: #131929; --color-paper-4: #1a2133;
+  --color-ink: #e8eaf0; --color-ink-2: #b8c0cf; --color-muted: #8892a4;
+  --color-rule: #1c2434; --color-rule-2: #2a3347; --color-field: #66728c;
+  --color-accent: #4f46e5; --color-accent-hi: #5b52f0; --color-accent-ink: #ffffff;
+  --color-accent-text: #a5b4fc; --color-accent-wash: rgba(99, 102, 241, 0.14);
+  --color-focus: #a5b4fc;
+  --st-ok: #22c55e; --st-warn: #f59e0b; --st-bad: #f87171; --st-none: #55627a;
+  --st-ok-wash: rgba(34, 197, 94, 0.12); --st-warn-wash: rgba(245, 158, 11, 0.13); --st-bad-wash: rgba(248, 113, 113, 0.13);
+  --lp-armed: #818cf8; --lp-armed-line: rgba(129, 140, 248, 0.55); --lp-armed-dim: rgba(129, 140, 248, 0.15);
+  --color-error: #f87171; --on-bad: #080c14;
+  --lp-series-1: #6366f1; --lp-series-2: #14a3bd; --lp-series-3: #cf6f50;
+  --lp-grid: rgba(255, 255, 255, 0.07);
+  --loss-0: #131929; --loss-1: #2d3650; --loss-2: #56607a; --loss-3: #98a1b5; --loss-4: #e8eaf0;
+  --strip-ok: #1d3b2c;
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+[data-theme='dark'] {
+  color-scheme: dark;
+  --color-paper: #080c14; --color-paper-2: #0d1220; --color-paper-3: #131929; --color-paper-4: #1a2133;
+  --color-ink: #e8eaf0; --color-ink-2: #b8c0cf; --color-muted: #8892a4;
+  --color-rule: #1c2434; --color-rule-2: #2a3347; --color-field: #66728c;
+  --color-accent: #4f46e5; --color-accent-hi: #5b52f0; --color-accent-ink: #ffffff;
+  --color-accent-text: #a5b4fc; --color-accent-wash: rgba(99, 102, 241, 0.14);
+  --color-focus: #a5b4fc;
+  --st-ok: #22c55e; --st-warn: #f59e0b; --st-bad: #f87171; --st-none: #55627a;
+  --st-ok-wash: rgba(34, 197, 94, 0.12); --st-warn-wash: rgba(245, 158, 11, 0.13); --st-bad-wash: rgba(248, 113, 113, 0.13);
+  --lp-armed: #818cf8; --lp-armed-line: rgba(129, 140, 248, 0.55); --lp-armed-dim: rgba(129, 140, 248, 0.15);
+  --color-error: #f87171; --on-bad: #080c14;
+  --lp-series-1: #6366f1; --lp-series-2: #14a3bd; --lp-series-3: #cf6f50;
+  --lp-grid: rgba(255, 255, 255, 0.07);
+  --loss-0: #131929; --loss-1: #2d3650; --loss-2: #56607a; --loss-3: #98a1b5; --loss-4: #e8eaf0;
+  --strip-ok: #1d3b2c;
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+[data-theme='light'] {
+  color-scheme: light;
+  --color-paper: #f3f5f9; --color-paper-2: #ffffff; --color-paper-3: #eaeef5; --color-paper-4: #dfe4ee;
+  --color-ink: #0f1220; --color-ink-2: #39404f; --color-muted: #5b6578;
+  --color-rule: #dde2ec; --color-rule-2: #c5ccda; --color-field: #737d93;
+  --color-accent: #4f46e5; --color-accent-hi: #4338ca; --color-accent-ink: #ffffff;
+  --color-accent-text: #4338ca; --color-accent-wash: rgba(79, 70, 229, 0.08);
+  --color-focus: #4f46e5;
+  --st-ok: #15803d; --st-warn: #b45309; --st-bad: #c42020; --st-none: #8a93a8;
+  --st-ok-wash: #e6f4ea; --st-warn-wash: #fbf0e1; --st-bad-wash: #fde8e8;
+  --lp-armed: #4f46e5; --lp-armed-line: rgba(79, 70, 229, 0.45); --lp-armed-dim: rgba(79, 70, 229, 0.1);
+  --color-error: #c42020; --on-bad: #ffffff;
+  --lp-series-1: #4f46e5; --lp-series-2: #0891b2; --lp-series-3: #c2410c;
+  --lp-grid: rgba(15, 18, 32, 0.09);
+  --loss-0: #eaeef5; --loss-1: #c9d0dd; --loss-2: #8f99ad; --loss-3: #4d566a; --loss-4: #0f1220;
+  --strip-ok: #d2e4d8;
+  --shadow-pop: 0 12px 32px rgba(15, 18, 32, 0.16);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --color-paper: #f3f5f9; --color-paper-2: #ffffff; --color-paper-3: #eaeef5; --color-paper-4: #dfe4ee;
+    --color-ink: #0f1220; --color-ink-2: #39404f; --color-muted: #5b6578;
+    --color-rule: #dde2ec; --color-rule-2: #c5ccda; --color-field: #737d93;
+    --color-accent: #4f46e5; --color-accent-hi: #4338ca; --color-accent-ink: #ffffff;
+    --color-accent-text: #4338ca; --color-accent-wash: rgba(79, 70, 229, 0.08);
+    --color-focus: #4f46e5;
+    --st-ok: #15803d; --st-warn: #b45309; --st-bad: #c42020; --st-none: #8a93a8;
+    --st-ok-wash: #e6f4ea; --st-warn-wash: #fbf0e1; --st-bad-wash: #fde8e8;
+    --lp-armed: #4f46e5; --lp-armed-line: rgba(79, 70, 229, 0.45); --lp-armed-dim: rgba(79, 70, 229, 0.1);
+    --color-error: #c42020; --on-bad: #ffffff;
+    --lp-series-1: #4f46e5; --lp-series-2: #0891b2; --lp-series-3: #c2410c;
+    --lp-grid: rgba(15, 18, 32, 0.09);
+    --loss-0: #eaeef5; --loss-1: #c9d0dd; --loss-2: #8f99ad; --loss-3: #4d566a; --loss-4: #0f1220;
+    --strip-ok: #d2e4d8;
+    --shadow-pop: 0 12px 32px rgba(15, 18, 32, 0.16);
+}
+}
+
 /* ─── Glass & Depth tokens ──────────────────────────── */
 
 :root {
@@ -419,7 +517,9 @@
   --ep-radius-sm: 5px;
   --ep-radius-md: 8px;
   --ep-radius-lg: 12px;
-  --ep-font-sans: 'Geist', system-ui, -apple-system, sans-serif;
+  /* ⚠️ `Geist Sans`, pas `Geist` : aucune police ne portait ce nom-là, l'app
+     retombait sur la police système. */
+  --ep-font-sans: 'Geist Sans', system-ui, -apple-system, sans-serif;
   --ep-font-mono: 'Geist Mono', ui-monospace, 'SF Mono', monospace;
 }
 

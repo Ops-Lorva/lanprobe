@@ -16,7 +16,8 @@
     "test:web": "vitest run --config web-ui/vitest.config.ts",
     "test:web:watch": "vitest --config web-ui/vitest.config.ts",
     "check:web": "svelte-check --tsconfig ./web-ui/tsconfig.json",
-    "test": "npm run check:web && npm run test:web"
+    "test": "npm run check:web && npm run test:web && npm run test:desktop",
+    "test:desktop": "vitest run --config vitest.desktop.config.ts"
   },
   "license": "MIT",
   "dependencies": {
