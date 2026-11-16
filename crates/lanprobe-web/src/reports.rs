@@ -162,8 +162,34 @@ pub(crate) struct ReportRequest {
     pub device_id: Option<String>,
 }
 
+/// Demandes de rapport par compte et par heure glissante (audit F6).
+pub(crate) const REPORTS_PER_HOUR: i64 = 20;
+
 /// Le stockage des rapports, hors de `db.rs`.
 impl Db {
+    /// Ce que ce compte occupe déjà : un rapport en préparation depuis moins
+    /// d'une heure, et le nombre de ses demandes de la dernière heure.
+    ///
+    /// ⚠️ Une préparation de plus d'une heure ne bloque plus : un hub arrêté
+    /// en pleine génération laisse une ligne `preparing` que personne ne
+    /// clora, et le compte ne doit pas rester muet pour autant.
+    pub(crate) fn report_load(&self, username: &str, now: i64) -> DbResult<(bool, i64)> {
+        let conn = self.conn().lock().map_err(|_| poisoned())?;
+        let since = now - 3_600;
+        let preparing: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM reports
+             WHERE requested_by = ?1 AND state = ?2 AND requested_at > ?3",
+            rusqlite::params![username, ReportState::Preparing.as_str(), since],
+            |r| r.get(0),
+        )?;
+        let last_hour: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM reports WHERE requested_by = ?1 AND requested_at > ?2",
+            rusqlite::params![username, since],
+            |r| r.get(0),
+        )?;
+        Ok((preparing > 0, last_hour))
+    }
+
     /// Ouvre une demande en `preparing` et rend son identifiant.
     pub(crate) fn create_report(&self, request: &ReportRequest) -> DbResult<String> {
         // UUIDv4 : l'identifiant sert d'URL de téléchargement. Un compteur
@@ -516,6 +542,28 @@ async fn request_report(
         requested_by: actor.username.clone(),
         device_id: actor.device_id.clone(),
     };
+    // 🔴 F6 : l'ouvrier prépare un rapport à la fois pour TOUT le hub. Sans
+    // borne par compte, un seul compte — un viewer de démo — empilait des
+    // rapports de 90 jours et retardait ceux de tous les autres.
+    match state.db.report_load(&actor.username, crate::db::now()) {
+        Ok((true, _)) => {
+            return too_many_reports(
+                &state,
+                &actor,
+                "un rapport est déjà en préparation pour ce compte — attendez qu'il soit prêt",
+            )
+        }
+        Ok((false, n)) if n >= REPORTS_PER_HOUR => {
+            return too_many_reports(
+                &state,
+                &actor,
+                &format!("{REPORTS_PER_HOUR} rapports par heure au plus — réessayez plus tard"),
+            )
+        }
+        Ok(_) => {}
+        Err(e) => return crate::web::error_response(e),
+    }
+
     let report_id = match state.db.create_report(&demande) {
         Ok(id) => id,
         Err(e) => return crate::web::error_response(e),
@@ -549,6 +597,23 @@ async fn request_report(
             "report_id": report_id,
             "state": ReportState::Preparing.as_str(),
         })),
+    )
+        .into_response()
+}
+
+fn too_many_reports(state: &AppState, actor: &Identity, why: &str) -> Response {
+    crate::web::audit(
+        state,
+        Some(&actor.username),
+        "report.request",
+        None,
+        Outcome::Failure,
+        Some(why),
+    );
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, "60")],
+        Json(serde_json::json!({ "error": why, "retry_after": 60 })),
     )
         .into_response()
 }
@@ -1649,4 +1714,112 @@ mod routes_tests {
         let (_, journal) = h.get("/api/audit?action=report.download", &cookie).await;
         assert_eq!(journal["entries"].as_array().unwrap().len(), 1, "{journal}");
     }
+
+    // ── F6 : un rapport en préparation par compte, et un quota horaire ────
+
+    fn demande_brute(site_id: &str, probe_id: &str, qui: &str) -> ReportRequest {
+        let (start, stop) = fenetre();
+        ReportRequest {
+            site_id: site_id.to_string(),
+            probe_ids: vec![probe_id.to_string()],
+            range_start: start,
+            range_stop: stop,
+            locale: "fr".into(),
+            requested_by: qui.to_string(),
+            device_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_report_waits_for_the_first_one() {
+        // 🔴 F6 : un viewer empilait des rapports de 90 jours sur toutes ses
+        // sondes. L'ouvrier les traite un à un pour tout le hub : la file d'un
+        // seul compte bloquait les rapports de tous les autres.
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, probe_id) = h.site_avec_sonde("Durand", "Lyon");
+        let en_cours = h
+            .state
+            .db
+            .create_report(&demande_brute(&site_id, &probe_id, "admin"))
+            .unwrap();
+        let (start, stop) = fenetre();
+        let corps = serde_json::json!({ "start": start, "stop": stop });
+
+        let (status, body) = h
+            .post(&format!("/api/sites/{site_id}/reports"), &cookie, corps.clone())
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+
+        // Un autre compte n'est pas bloqué par celui-ci.
+        h.state
+            .db
+            .create_user("olivier", "mot-de-passe-de-test", crate::db::Role::Operator)
+            .unwrap();
+        let autre = h.session("olivier");
+        let (status, body) = h
+            .post(&format!("/api/sites/{site_id}/reports"), &autre, corps.clone())
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+
+        // Le premier clos, le suivant passe.
+        h.state
+            .db
+            .conn()
+            .lock()
+            .unwrap()
+            .execute("UPDATE reports SET state = 'failed' WHERE report_id = ?1", [&en_cours])
+            .unwrap();
+        let (status, body) = h
+            .post(&format!("/api/sites/{site_id}/reports"), &cookie, corps)
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    }
+
+    #[tokio::test]
+    async fn twenty_reports_an_hour_per_account_and_no_more() {
+        let h = Harness::new().await;
+        let cookie = h.session("admin");
+        let (site_id, probe_id) = h.site_avec_sonde("Durand", "Lyon");
+        for _ in 0..REPORTS_PER_HOUR {
+            h.state
+                .db
+                .create_report(&demande_brute(&site_id, &probe_id, "admin"))
+                .unwrap();
+        }
+        h.state
+            .db
+            .conn()
+            .lock()
+            .unwrap()
+            .execute("UPDATE reports SET state = 'ready'", [])
+            .unwrap();
+        let (start, stop) = fenetre();
+        let (status, body) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+
+        // Une heure plus tard, le compteur est retombé.
+        h.state
+            .db
+            .conn()
+            .lock()
+            .unwrap()
+            .execute("UPDATE reports SET requested_at = requested_at - 3601", [])
+            .unwrap();
+        let (status, body) = h
+            .post(
+                &format!("/api/sites/{site_id}/reports"),
+                &cookie,
+                serde_json::json!({ "start": start, "stop": stop }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    }
 }
+

@@ -3070,6 +3070,9 @@ et une régénération ne rendrait plus le même document.
 ```
 POST /api/sites/{id}/reports   { probe_ids?: [...], range | start/stop }
                                → 202 { report_id, state: "preparing" }
+                               → 429 { error, retry_after } + Retry-After si le
+                                 compte a déjà un rapport en préparation (< 1 h)
+                                 ou 20 demandes dans l'heure (§ 27, F6)
 GET  /api/sites/{id}/reports   l'historique du site
 GET  /api/reports/{id}         le suivi — state, step, error, file_size, expires_at
 GET  /api/reports/{id}/file    le fichier : Content-Length garanti + empreinte
@@ -3803,4 +3806,13 @@ Un compte **restreint à des sites** (§ 17) :
 
 Un `admin` et tout compte « tous les sites » ne voient aucun changement.
 L'interface tolère la réponse réduite (champs absents laissés vides).
+
+### F6 — la file des rapports n'appartient pas à un seul compte
+
+L'ouvrier prépare un rapport à la fois pour tout le hub. `POST
+/api/sites/{id}/reports` répond `429` (ligne `report.request` en échec) si le
+compte a déjà un rapport `preparing` demandé il y a moins d'une heure, ou
+`REPORTS_PER_HOUR` (20) demandes sur l'heure glissante. Une préparation de plus
+d'une heure — hub arrêté en pleine génération — ne bloque plus. Aucune colonne
+ajoutée : le décompte lit `reports.requested_by` et `requested_at`.
 
