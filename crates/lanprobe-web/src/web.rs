@@ -5520,6 +5520,13 @@ async fn probe_uptime(
 /// donc les trois graphes de la fiche d'un coup. Ils sont isolés par leur type
 /// et rendus bruts, dans un `yield` séparé — une union les rejetterait de toute
 /// façon, leur `_value` n'ayant pas le type des autres.
+///
+/// 🔴 **Le tri se fait sur le NOM du champ quand on le connaît** (voir
+/// `known_fields`), et chaque rendu relit sa source au lieu de partager une
+/// table. Mesuré en prod sur 6 h de ping temps réel : 7,3 s avec `isType` sur
+/// chaque ligne d'une table partagée, 0,24 s ainsi — Influx calcule alors
+/// `mean` et `max` dans le stockage au lieu de remonter chaque point. Un champ
+/// absent du catalogue garde l'ancien tri par type.
 fn metrics_flux(
     bucket: &str,
     probe_id: &str,
@@ -5542,37 +5549,128 @@ fn metrics_flux(
     let Some(every) = every else {
         return source;
     };
+    let known = measurement.and_then(known_fields).unwrap_or_default();
+    let named = |names: &[&str]| {
+        let test = names
+            .iter()
+            .map(|n| format!("r[\"_field\"] == {}", flux_string(n)))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        format!("source(champ: (r) => {test})")
+    };
+    let all_known: Vec<&str> = [known.numeric, known.bool, known.text].concat();
+    let inconnus = if all_known.is_empty() {
+        "true".to_string()
+    } else {
+        all_known
+            .iter()
+            .map(|n| format!("r[\"_field\"] != {}", flux_string(n)))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    };
+    // `union` exige deux tables au moins : une branche seule passe telle quelle.
+    let union = |branches: Vec<String>| match branches.len() {
+        1 => branches.into_iter().next().unwrap_or_default(),
+        _ => format!("union(tables: [\n  {},\n])", branches.join(",\n  ")),
+    };
+    let window = |f: &str| format!("aggregateWindow(every: {every}, fn: {f}, createEmpty: false)");
+    let mut raw = Vec::new();
+    let mut mean = Vec::new();
+    let mut max = Vec::new();
+    let mut uptime = Vec::new();
+    if !known.text.is_empty() {
+        raw.push(named(known.text));
+    }
+    // ⚠️ `aggregateWindow` DIRECTEMENT après le filtre de champ : c'est ce qui
+    // le fait calculer par le stockage. `max` d'un entier reste un entier, d'où
+    // le `toFloat` APRÈS, pour rendre le même type que les champs inconnus.
+    if !known.numeric.is_empty() {
+        mean.push(format!("{} |> {}", named(known.numeric), window("mean")));
+        max.push(format!("{} |> {} |> toFloat()", named(known.numeric), window("max")));
+    }
+    if !known.bool.is_empty() {
+        uptime.push(named(known.bool));
+    }
+    let mesures = "source(champ: inconnus) |> filter(fn: (r) => not types.isType(v: r._value, type: \"string\") and not types.isType(v: r._value, type: \"bool\")) |> toFloat()";
+    raw.push("source(champ: inconnus) |> filter(fn: (r) => types.isType(v: r._value, type: \"string\"))".to_string());
+    mean.push(format!("{mesures} |> {}", window("mean")));
+    max.push(format!("{mesures} |> {}", window("max")));
+    uptime.push("source(champ: inconnus) |> filter(fn: (r) => types.isType(v: r._value, type: \"bool\"))".to_string());
+    let (raw, mean, max, uptime) = (union(raw), union(mean), union(max), union(uptime));
+    let dispo = window("mean");
     format!(
         r#"import "types"
 
-source = {source}
+// Une FONCTION, pas une table : chaque rendu relit sa propre source, ce qui
+// laisse Influx agreger dans le stockage. Une table partagee l'en empeche.
+source = (champ) => {source}
+  |> filter(fn: champ)
+
+// Champs absents du catalogue : tries par leur type, comme les connus.
+inconnus = (r) => {inconnus}
 
 // Le texte ne se moyenne pas : il passe brut, dans son propre rendu.
-texte = source |> filter(fn: (r) => types.isType(v: r._value, type: "string"))
+{raw} |> yield(name: "raw")
+
+// Les valeurs continues (latence, debits) : c'est le MAXIMUM qui preserve le
+// pic que la moyenne gomme.
+{mean} |> yield(name: "mean")
+{max}
+  |> map(fn: (r) => ({{r with _field: r._field + "_max"}}))
+  |> yield(name: "max")
 
 // Les booleens sont des DISPONIBILITES (alive, icmp_ok, dns_ok...). Leur
 // moyenne EST le taux de disponibilite de l'intervalle : ni minimum ni
 // maximum, un taux. « 95 % sur la periode » se lit d'un coup d'oeil ; un
 // minimum entre 0 et 1 ne se lit pas.
-dispo = source
-  |> filter(fn: (r) => types.isType(v: r._value, type: "bool"))
-  |> toFloat()
-
-// Les valeurs continues (latence, debits) vont dans l'autre sens : c'est le
-// MAXIMUM qui preserve le pic que la moyenne gomme.
-mesures = source
-  |> filter(fn: (r) => not types.isType(v: r._value, type: "string") and not types.isType(v: r._value, type: "bool"))
-  |> toFloat()
-
-texte |> yield(name: "raw")
-mesures |> aggregateWindow(every: {every}, fn: mean, createEmpty: false) |> yield(name: "mean")
-mesures
-  |> aggregateWindow(every: {every}, fn: max, createEmpty: false)
-  |> map(fn: (r) => ({{r with _field: r._field + "_max"}}))
-  |> yield(name: "max")
-dispo |> aggregateWindow(every: {every}, fn: mean, createEmpty: false) |> yield(name: "uptime")
+{uptime} |> toFloat() |> {dispo} |> yield(name: "uptime")
 "#
     )
+}
+
+/// Champs qu'écrit la sonde, par mesure et par type Influx — relevés dans
+/// `event_to_points` (`crates/lanprobe-server/src/influxdb.rs`). La sonde iOS
+/// n'écrit pas dans Influx.
+///
+/// ⚠️ Un champ ajouté côté sonde sans l'être ici n'est pas perdu : il passe par
+/// le tri par type des champs inconnus, juste plus lentement.
+#[derive(Default)]
+struct KnownFields {
+    text: &'static [&'static str],
+    bool: &'static [&'static str],
+    numeric: &'static [&'static str],
+}
+
+fn known_fields(measurement: &str) -> Option<KnownFields> {
+    let fields = match measurement {
+        "ping_latency" => KnownFields {
+            text: &[],
+            bool: &["alive"],
+            numeric: &["latency_ms"],
+        },
+        "internet_status" => KnownFields {
+            text: &["state"],
+            bool: &["icmp_ok", "http_ok", "dns_ok"],
+            numeric: &["icmp_ms", "http_ms", "dns_ms", "uptime_pct"],
+        },
+        "speedtest" => KnownFields {
+            text: &["server", "result_url"],
+            bool: &[],
+            numeric: &["download_mbps", "upload_mbps", "latency_ms", "jitter_ms"],
+        },
+        "discovery" => KnownFields {
+            text: &[],
+            bool: &[],
+            numeric: &["hosts_found"],
+        },
+        "port_scan" => KnownFields {
+            text: &[],
+            bool: &[],
+            numeric: &["open_tcp", "open_udp"],
+        },
+        _ => return None,
+    };
+    Some(fields)
 }
 
 /// Requête Flux proxifiée. Le navigateur ne parle jamais directement à
@@ -9798,14 +9896,15 @@ mod tests {
         assert!(flux.contains("fn: mean"), "{flux}");
         assert!(flux.contains("fn: max"), "{flux}");
         assert!(flux.contains("_field + \"_max\""), "{flux}");
-        // Trois fenêtres : moyenne et maximum des valeurs continues, TAUX des
-        // disponibilités (voir le test de l'agrégation en taux).
-        assert_eq!(flux.matches("every: 3h").count(), 3, "{flux}");
+        // Cinq fenêtres : moyenne et maximum des champs continus connus, puis
+        // des champs inconnus, et TAUX des disponibilités (voir le test de
+        // l'agrégation en taux).
+        assert_eq!(flux.matches("every: 3h").count(), 5, "{flux}");
 
         // ⚠️ Un intervalle sans mesure ne produit AUCUN point — ni zéro, ni
         // valeur interpolée. Un trou reste un trou : on ne déduit pas un fait
         // d'un silence.
-        assert_eq!(flux.matches("createEmpty: false").count(), 3, "{flux}");
+        assert_eq!(flux.matches("createEmpty: false").count(), 5, "{flux}");
         assert!(!flux.contains("createEmpty: true"), "{flux}");
 
         // Les champs texte (`state` d'`internet_status`) ne se moyennent pas :
@@ -9843,10 +9942,70 @@ mod tests {
         assert!(flux.contains("types.isType(v: r._value, type: \"bool\")"), "{flux}");
 
         // Trois familles disjointes : texte brut, booléens en TAUX, valeurs
-        // continues en moyenne + maximum.
-        assert_eq!(flux.matches("fn: mean").count(), 2, "{flux}");
-        assert_eq!(flux.matches("every: 3h").count(), 3, "{flux}");
-        assert_eq!(flux.matches("createEmpty: false").count(), 3, "{flux}");
+        // continues en moyenne + maximum (connues et inconnues : deux `mean`).
+        assert_eq!(flux.matches("fn: mean").count(), 3, "{flux}");
+        assert_eq!(flux.matches("every: 3h").count(), 5, "{flux}");
+        assert_eq!(flux.matches("createEmpty: false").count(), 5, "{flux}");
+    }
+
+    #[test]
+    fn known_fields_are_sorted_by_name_so_influx_aggregates_them_in_storage() {
+        // 🔴 Mesuré en prod : 6 h de `ping_latency` d'une sonde temps réel
+        // (169 000 points) prenaient 7,3 s quand chaque ligne passait par
+        // `types.isType` dans une table partagée entre trois rendus ; 0,24 s une
+        // fois le tri fait sur `_field`. Deux conditions, toutes deux
+        // nécessaires :
+        let flux = metrics_flux("lanprobe", "sonde-1", Some("ping_latency"), "start: -6h", Some("15s"));
+
+        //   1. la source est une FONCTION, rappelée par chaque rendu. Une table
+        //      partagée (`source = from(...)`) empêche Influx de déléguer
+        //      l'agrégation au stockage : 3,0 s au lieu de 0,13 s ;
+        assert!(flux.contains("source = (champ) => from(bucket: \"lanprobe\")"), "{flux}");
+        assert!(flux.contains("|> filter(fn: champ)"), "{flux}");
+        //   2. `aggregateWindow` suit DIRECTEMENT le filtre de champ : un
+        //      `isType` ou un `toFloat` intercalé fait tout remonter dans le
+        //      moteur Flux, ligne par ligne.
+        let latence = "source(champ: (r) => r[\"_field\"] == \"latency_ms\")";
+        assert!(flux.contains(&format!("{latence} |> aggregateWindow(every: 15s, fn: mean, createEmpty: false)")), "{flux}");
+        assert!(flux.contains(&format!("{latence} |> aggregateWindow(every: 15s, fn: max, createEmpty: false) |> toFloat()")), "{flux}");
+        // Un booléen ne se moyenne qu'en flottant : la conversion précède.
+        assert!(flux.contains("source(champ: (r) => r[\"_field\"] == \"alive\")"), "{flux}");
+
+        // Le repli : un champ que le catalogue ignore (sonde plus récente que le
+        // hub) reste trié par son type, comme avant. Sur une sonde à jour, ce
+        // filtre ne lit rien et ne coûte rien.
+        assert!(flux.contains("inconnus = (r) => r[\"_field\"] != \"latency_ms\" and r[\"_field\"] != \"alive\""), "{flux}");
+        assert!(flux.contains("source(champ: inconnus) |> filter(fn: (r) => types.isType(v: r._value, type: \"string\"))"), "{flux}");
+
+        // Les quatre rendus que lit l'interface, une fois chacun : Flux refuse
+        // deux `yield` du même nom.
+        for name in ["raw", "mean", "max", "uptime"] {
+            assert_eq!(flux.matches(&format!("yield(name: \"{name}\")")).count(), 1, "{name} : {flux}");
+        }
+    }
+
+    #[test]
+    fn text_fields_of_a_known_measurement_pass_raw_by_name() {
+        let flux = metrics_flux("lanprobe", "sonde-1", Some("internet_status"), "start: -6h", Some("15s"));
+        assert!(flux.contains("source(champ: (r) => r[\"_field\"] == \"state\")"), "{flux}");
+        assert!(flux.contains("r[\"_field\"] == \"icmp_ok\" or r[\"_field\"] == \"http_ok\" or r[\"_field\"] == \"dns_ok\""), "{flux}");
+        assert!(flux.contains("r[\"_field\"] == \"icmp_ms\" or r[\"_field\"] == \"http_ms\" or r[\"_field\"] == \"dns_ms\" or r[\"_field\"] == \"uptime_pct\""), "{flux}");
+    }
+
+    #[test]
+    fn an_unknown_measurement_falls_back_to_sorting_every_field_by_type() {
+        // Rien au catalogue : tous les champs sont « inconnus », triés par
+        // leur type Influx — la requête d'avant, en plus lent mais juste.
+        for measurement in [Some("mesure_de_demain"), None] {
+            let flux = metrics_flux("lanprobe", "sonde-1", measurement, "start: -6h", Some("15s"));
+            assert!(flux.contains("inconnus = (r) => true"), "{flux}");
+            assert!(!flux.contains("r[\"_field\"] =="), "{flux}");
+            assert!(!flux.contains("union("), "{flux}");
+            assert!(flux.contains("types.isType(v: r._value, type: \"bool\")"), "{flux}");
+            for name in ["raw", "mean", "max", "uptime"] {
+                assert_eq!(flux.matches(&format!("yield(name: \"{name}\")")).count(), 1, "{name} : {flux}");
+            }
+        }
     }
 
     /// Réponse RÉELLE d'un InfluxDB 2.9.1 sur une fenêtre où la cible ne
@@ -15159,4 +15318,3 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 }
-
