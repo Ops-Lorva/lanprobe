@@ -12,6 +12,21 @@
   import { selectedInterface } from '../stores/selectedInterface';
   import SchedulerControl from './SchedulerControl.svelte';
   import { matchingHosts } from '../discovery-search';
+  import { locale } from 'svelte-i18n';
+  import ScreenHead from './ScreenHead.svelte';
+  import { fmtNum } from '../format';
+  import { screenKind } from '../screen';
+
+  const isCell = screenKind() === 'cell';
+  const lang = $derived($locale ?? 'en');
+  /** Retour bref après « Surveiller » ou « Ports » : l'action part ailleurs. */
+  let sent = $state('');
+  let sentTimer: ReturnType<typeof setTimeout> | null = null;
+  function flashSent(msg: string) {
+    sent = msg;
+    if (sentTimer) clearTimeout(sentTimer);
+    sentTimer = setTimeout(() => { sent = ''; sentTimer = null; }, 4000);
+  }
 
   // L'état vit dans le store — persiste pendant toute la session même si on change de page
   let cidr = $state('');
@@ -136,10 +151,12 @@
     // une liste de ports que l'écran ne montre nulle part serait invérifiable.
     const active = get(portscanProfiles.current);
     portscan.add(ip, active?.tcp_ports, active?.udp_ports, active?.id ?? null, active?.name ?? null);
+    flashSent($_('discovery.sent_ports', { values: { ip } }));
   }
   async function addPingMonitorFor(ip: string) {
     monitoring.addHost(ip);
     try { await invoke('cmd_start_ping', { ip }); } catch (e) { console.error(e); }
+    flashSent($_('discovery.sent_monitor', { values: { ip } }));
   }
 
   function ctxScanPorts() {
@@ -156,167 +173,154 @@
 
 <svelte:window onclick={closeContextMenu} oncontextmenu={(e) => { if (!(e.target as HTMLElement).closest('.host-row')) closeContextMenu(); }} />
 
-<div class="page">
-  <div class="header">
-    <div class="title-row">
-      <h1>{$_('discovery.title')}</h1>
-      {#if $discoveryStore.scanning}
-        <span class="badge scanning">{$_('discovery.scanning')}</span>
-      {:else if found.length > 0}
-        <span class="badge done">{$_('discovery.hosts_count', { values: { n: found.length } })}</span>
-      {/if}
-    </div>
-    <div class="scan-row">
-      <input
-        class="cidr-input mono"
-        bind:value={cidr}
-        oninput={(e) => discoveryStore.setCidr((e.currentTarget as HTMLInputElement).value)}
-        placeholder={detecting ? '…' : '192.168.1.0/24'}
-        disabled={detecting || $discoveryStore.scanning}
-        onkeydown={(e) => e.key === 'Enter' && !$discoveryStore.scanning && scan()}
-        title={$_('discovery.cidr_hint')}
-      />
-      <button class="btn-icon" onclick={autoDetect} disabled={detecting || $discoveryStore.scanning} title={$_('discovery.auto_detect')}>⟳</button>
-      {#if $discoveryStore.scanning}
-        <button class="danger" onclick={cancelScan}>{$_('discovery.cancel')}</button>
+{#snippet scanControls()}
+  {#if $discoveryStore.scanning}
+    <button class="btn" class:sm={isCell} type="button" onclick={cancelScan}>{$_('discovery.cancel')}</button>
+  {:else}
+    <button class="btn primary" class:sm={isCell} type="button" onclick={scan} disabled={detecting || !cidr}>{$_('discovery.scan')}</button>
+  {/if}
+{/snippet}
+
+<div class="screen">
+  <ScreenHead title={$_('discovery.title')}>
+    {#snippet acts()}
+      {#if isCell}
+        {@render scanControls()}
       {:else}
-        <button class="primary" onclick={scan} disabled={detecting || !cidr}>{$_('discovery.scan')}</button>
-      {/if}
-      <SchedulerControl field="discovery_interval_min" />
-    </div>
-    {#if found.length > 0}
-      <div class="scan-row">
         <input
-          class="cidr-input"
-          bind:value={search}
-          placeholder={$_('discovery.search')}
-          aria-label={$_('discovery.search')}
+          class="input m"
+          style="width:180px"
+          bind:value={cidr}
+          oninput={(e) => discoveryStore.setCidr((e.currentTarget as HTMLInputElement).value)}
+          placeholder={detecting ? '…' : '192.168.1.0/24'}
+          disabled={detecting || $discoveryStore.scanning}
+          onkeydown={(e) => e.key === 'Enter' && !$discoveryStore.scanning && scan()}
+          title={$_('discovery.cidr_hint')}
+          aria-label={$_('discovery.cidr_label')}
         />
+        <button class="btn" type="button" onclick={autoDetect} disabled={detecting || $discoveryStore.scanning} title={$_('discovery.auto_detect')}>{$_('discovery.local_network')}</button>
+        {@render scanControls()}
+      {/if}
+    {/snippet}
+  </ScreenHead>
+
+  <div class="screen-body">
+    {#if isCell}
+      <div class="input-row" style="margin-bottom:8px">
+        <input class="input m" style="flex:1;min-width:140px" bind:value={cidr}
+          oninput={(e) => discoveryStore.setCidr((e.currentTarget as HTMLInputElement).value)}
+          placeholder={detecting ? '…' : '192.168.1.0/24'} disabled={detecting || $discoveryStore.scanning}
+          onkeydown={(e) => e.key === 'Enter' && !$discoveryStore.scanning && scan()}
+          title={$_('discovery.cidr_hint')} aria-label={$_('discovery.cidr_label')} />
+        <button class="btn" type="button" onclick={autoDetect} disabled={detecting || $discoveryStore.scanning} title={$_('discovery.auto_detect')}>{$_('discovery.local_network')}</button>
+      </div>
+    {:else}
+      <div class="filters">
+        <SchedulerControl field="discovery_interval_min" />
       </div>
     {/if}
-  </div>
 
-  {#if $discoveryStore.error}
-    <div class="error">{$discoveryStore.error}</div>
-  {/if}
-
-  {#if found.length > 0}
-    <table>
-      <thead>
-        <tr><th>{$_('discovery.table.ip')}</th><th>{$_('discovery.table.hostname')}</th><th>{$_('discovery.table.mac')}</th><th>{$_('discovery.table.latency')}</th><th class="col-actions">{$_('discovery.table.actions')}</th></tr>
-      </thead>
-      <tbody>
-        {#each shown as h (h.ip)}
-          <tr class="host-row" oncontextmenu={(e) => openContextMenu(e, h.ip)}>
-            <td class="mono">{h.ip}</td>
-            <td class="secondary">{h.hostname ?? '—'}</td>
-            <td class="mono secondary mac-cell">
-              <span class="mac-addr">{h.mac ?? '—'}</span>
-              {#if h.vendor}<span class="vendor">{h.vendor}</span>{/if}
-            </td>
-            <td class="mono">
-              {#if h.latency_ms != null}
-                <span class="latency" class:fast={h.latency_ms < 5} class:ok={h.latency_ms >= 5 && h.latency_ms < 50}>{h.latency_ms}ms</span>
-              {:else if $discoveryStore.scanning}
-                <span class="ping-pending">…</span>
-              {:else}—{/if}
-            </td>
-            <td class="actions-cell">
-              <button class="act" title={$_('discovery.actions.scan_ports')} onclick={() => scanPortsFor(h.ip)}>{$_('discovery.actions.ports_label')}</button>
-              <button class="act" title={$_('discovery.actions.add_ping')} onclick={() => addPingMonitorFor(h.ip)}>{$_('discovery.actions.ping_label')}</button>
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-    {#if shown.length === 0}
-      <!-- ⚠️ « Rien ne correspond » n'est pas « rien trouvé » : le scan, lui,
-           a vu des machines. Les confondre ferait relancer un balayage. -->
-      <div class="secondary">{$_('discovery.no_match')}</div>
+    {#if $discoveryStore.scanning}
+      <div class="banner info" role="status">
+        <span class="grow">{$_('discovery.scanning_found', { values: { n: found.length } })}</span>
+        <span class="progress indet"><span></span></span>
+      </div>
     {/if}
-  {:else if !$discoveryStore.scanning}
-    <div class="placeholder">{$_('discovery.empty')}</div>
-  {/if}
+    {#if $discoveryStore.error}
+      <div class="banner bad" role="alert"><span class="grow">{$discoveryStore.error}</span></div>
+    {/if}
+    {#if sent}
+      <div class="banner info" role="status"><span class="grow">{sent}</span></div>
+    {/if}
 
-  {#if ctxMenu}
-    <div
-      class="ctx-menu"
-      style="left: {ctxMenu.x}px; top: {ctxMenu.y}px;"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => { if (e.key === 'Escape') closeContextMenu(); }}
-      oncontextmenu={(e) => e.preventDefault()}
-      role="menu"
-      tabindex="-1"
-    >
-      <div class="ctx-header mono">{ctxMenu.ip}</div>
-      <button class="ctx-item" onclick={ctxScanPorts}>{$_('discovery.ctx.scan_ports')}</button>
-      <button class="ctx-item" onclick={ctxAddPingMonitor}>{$_('discovery.ctx.add_ping')}</button>
-    </div>
-  {/if}
+    {#if found.length > 0}
+      <div class="filters">
+        <input class="input search" type="search" bind:value={search} placeholder={$_('discovery.search')} aria-label={$_('discovery.search')} />
+        <span class="grow"></span>
+        <span class="muted">{$_('discovery.hosts_count', { values: { n: found.length } })}</span>
+      </div>
+    {/if}
+
+    {#if found.length > 0 || $discoveryStore.scanning}
+      <div class="tbl-wrap">
+        <table class="t">
+          <thead>
+            <tr>
+              <th>{$_('discovery.table.ip')}</th>
+              <th>{$_('discovery.table.hostname')}</th>
+              <th class="opt">{$_('discovery.table.mac')}</th>
+              <th class="opt">{$_('discovery.table.vendor')}</th>
+              <th class="num">{$_('discovery.table.latency')}</th>
+              <th class="opt"><span class="visually-hidden">{$_('discovery.table.actions')}</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each shown as h (h.ip)}
+              <tr class="host-row" oncontextmenu={(e) => openContextMenu(e, h.ip)}>
+                <td class="m">{h.ip}</td>
+                <td style="white-space:nowrap">{h.hostname ?? '—'}</td>
+                <td class="m muted opt">{h.mac ?? '—'}</td>
+                <td class="opt">{h.vendor ?? '—'}</td>
+                <td class="num">
+                  {#if h.latency_ms != null}{fmtNum(h.latency_ms, lang)} ms
+                  {:else if $discoveryStore.scanning}<span class="muted">…</span>
+                  {:else}—{/if}
+                </td>
+                <td class="act opt">
+                  <button class="btn sm quiet" type="button" title={$_('discovery.actions.add_ping')} onclick={() => addPingMonitorFor(h.ip)}>{$_('discovery.actions.ping_label')}</button>
+                  <button class="btn sm quiet" type="button" title={$_('discovery.actions.scan_ports')} onclick={() => scanPortsFor(h.ip)}>{$_('discovery.actions.ports_label')}</button>
+                </td>
+              </tr>
+            {/each}
+            {#if $discoveryStore.scanning}
+              {#each [0, 1] as _i}
+                <tr aria-hidden="true">
+                  <td><div class="skel" style="width:110px"></div></td>
+                  <td><div class="skel" style="width:90px"></div></td>
+                  <td class="opt"><div class="skel" style="width:130px"></div></td>
+                  <td class="opt"><div class="skel" style="width:60px"></div></td>
+                  <td><div class="skel" style="width:40px;margin-left:auto"></div></td>
+                  <td class="opt"></td>
+                </tr>
+              {/each}
+            {/if}
+          </tbody>
+        </table>
+        {#if found.length > 0 && shown.length === 0}
+          <!-- ⚠️ « Rien ne correspond » n'est pas « rien trouvé » : le scan, lui,
+               a vu des machines. Les confondre ferait relancer un balayage. -->
+          <div class="state"><p>{$_('discovery.no_match')}</p></div>
+        {/if}
+      </div>
+    {:else}
+      <div class="tbl-wrap"><div class="state"><p>{$_('discovery.empty')}</p></div></div>
+    {/if}
+  </div>
 </div>
 
+{#if ctxMenu}
+  <div
+    class="ctx-menu"
+    style="left: {ctxMenu.x}px; top: {ctxMenu.y}px;"
+    onclick={(e) => e.stopPropagation()}
+    onkeydown={(e) => { if (e.key === 'Escape') closeContextMenu(); }}
+    oncontextmenu={(e) => e.preventDefault()}
+    role="menu"
+    tabindex="-1"
+  >
+    <div class="ctx-header m">{ctxMenu.ip}</div>
+    <button class="ctx-item" type="button" role="menuitem" onclick={ctxAddPingMonitor}>{$_('discovery.ctx.add_ping')}</button>
+    <button class="ctx-item" type="button" role="menuitem" onclick={ctxScanPorts}>{$_('discovery.ctx.scan_ports')}</button>
+  </div>
+{/if}
+
 <style>
-  .page { padding: 24px; overflow-x: auto; }
-  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
-  .title-row { display: flex; align-items: center; gap: 10px; }
-  h1 { font-size: 20px; font-weight: 700; }
-  .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 10px; }
-  .badge.scanning { background: color-mix(in srgb, var(--ep-accent) 15%, transparent); color: var(--ep-accent); }
-  .badge.done { background: color-mix(in srgb, var(--ep-success) 15%, transparent); color: var(--ep-success); }
-  .scan-row { display: flex; gap: 6px; align-items: center; }
-  .cidr-input {
-    background: var(--ep-bg-tertiary);
-    border: 1px solid var(--ep-border);
-    border-radius: 6px;
-    padding: 7px 12px;
-    color: var(--ep-text-primary);
-    font-size: 13px;
-    font-weight: 600;
-    width: 160px;
-  }
-  .cidr-input:focus {
-    outline: none;
-    border-color: var(--ep-accent);
-  }
-  .cidr-input:disabled { opacity: 0.6; }
-  button { padding: 7px 14px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); cursor: pointer; font-size: 13px; font-weight: 600; }
-  button.primary { background: var(--ep-accent); border-color: var(--ep-accent); color: #fff; }
-  button.danger { background: var(--ep-danger); border-color: var(--ep-danger); color: #fff; }
-  button.btn-icon { width: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-size: 16px; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .error { color: var(--ep-danger); font-size: 13px; margin-bottom: 12px; }
-  .placeholder { background: var(--ep-glass-bg); border: 1px dashed var(--ep-glass-border); border-radius: var(--ep-radius-lg); padding: 40px; text-align: center; color: var(--ep-text-muted); font-size: 14px; }
-  table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--ep-glass-border); color: var(--ep-text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
-  td { padding: 8px 12px; border-bottom: 1px solid var(--ep-glass-border); }
-  .host-row:hover { background: var(--ep-glass-bg); }
-  .col-actions { text-align: right; }
-  .actions-cell { text-align: right; white-space: nowrap; }
-  .actions-cell .act { padding: 4px 10px; margin-left: 4px; font-size: 11px; font-weight: 600; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); border-radius: 6px; cursor: pointer; }
-  .actions-cell .act:hover { border-color: var(--ep-accent); color: var(--ep-accent); }
-  .mono { font-family: var(--ep-font-mono); }
-  .secondary { color: var(--ep-text-secondary); }
-  .mac-cell { display: flex; flex-direction: column; line-height: 1.25; }
-  .vendor { font-size: 10px; color: var(--ep-text-muted); }
-  .latency { font-weight: 600; color: var(--ep-text-secondary); }
-  .latency.fast { color: var(--ep-success); }
-  .latency.ok { color: var(--ep-accent); }
-  .ping-pending { color: var(--ep-text-muted); animation: pulse 1s ease-in-out infinite; }
-  @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
-  .host-row { cursor: context-menu; }
   .ctx-menu {
-    position: fixed; z-index: 1000;
-    background: var(--ep-bg-secondary); border: 1px solid var(--ep-glass-border-strong);
-    border-radius: var(--ep-radius-md); padding: 4px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    min-width: 220px;
+    position: fixed; z-index: var(--z-dropdown); min-width: 220px; padding: var(--space-2xs);
+    background: var(--color-paper-4); border: 1px solid var(--color-rule-2);
+    border-radius: var(--radius-ctl); box-shadow: var(--shadow-pop);
   }
-  .ctx-header { padding: 6px 10px 4px; font-size: 11px; color: var(--ep-text-muted); border-bottom: 1px solid var(--ep-glass-border); margin-bottom: 4px; }
-  .ctx-item {
-    display: block; width: 100%; text-align: left;
-    padding: 8px 10px; border: none; background: transparent;
-    color: var(--ep-text-primary); font-size: 12px; cursor: pointer;
-    border-radius: 4px;
-  }
-  .ctx-item:hover { background: var(--ep-glass-bg-md); }
+  .ctx-header { padding: var(--space-2xs) var(--space-xs); color: var(--color-muted); font-size: var(--text-xs); }
+  .ctx-item { display: block; width: 100%; padding: var(--space-xs); border: 0; border-radius: 3px; background: none; text-align: left; cursor: pointer; }
+  .ctx-item:hover, .ctx-item:focus-visible { background: var(--color-accent-wash); color: var(--color-accent-text); }
 </style>
