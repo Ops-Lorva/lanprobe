@@ -374,6 +374,30 @@
   // Révocation immédiate : c'est la seule des trois qui coupe une sonde, donc
   // la seule à demander une confirmation. Tout confirmer reviendrait à ne
   // rien faire lire.
+  // Archiver : la sonde quitte le parc (listes, décomptes, alertes), rien
+  // n'est supprimé. Une sonde archivée ne se voit qu'avec « Afficher les
+  // archivés » : après l'archivage, on revient au parc.
+  let archiveOpen = $state(false);
+  let archiveBusy = $state(false);
+  let archiveError = $state('');
+  async function setArchived() {
+    if (!probe) return;
+    const archived = !probe.archived_at;
+    archiveBusy = true;
+    archiveError = '';
+    try {
+      await api.archiveProbe(probe.probe_id, archived);
+      archiveOpen = false;
+      await fleet.load(onExpired, { quiet: true });
+      if (archived && !$fleet.showArchived) location.hash = '#/';
+    } catch (e) {
+      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
+      archiveError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      archiveBusy = false;
+    }
+  }
+
   let killOpen = $state(false);
   let killBusy = $state(false);
   let killDone = $state('');
@@ -1545,6 +1569,19 @@
               {reBusy ? $_('probe.reenroll_working') : $_('probe.reenroll')}
             </span>
             <span class="mi-hint">{$_('probe.reenroll_hint')}</span>
+          </button>
+
+          <button
+            class="mi"
+            role="menuitem"
+            onclick={() => {
+              close();
+              archiveError = '';
+              archiveOpen = true;
+            }}
+          >
+            <span class="mi-label">{probe.archived_at ? $_('probe.unarchive') : $_('probe.archive')}</span>
+            <span class="mi-hint">{probe.archived_at ? $_('probe.unarchive_hint') : $_('probe.archive_hint')}</span>
           </button>
 
           <div class="mdanger">
@@ -2770,6 +2807,22 @@
       {/if}
     </div>
   {/if}
+
+  <Modal
+    open={archiveOpen}
+    title={$_(probe.archived_at ? 'probe.unarchive_title' : 'probe.archive_title', { values: { name: probe.name } })}
+    onclose={() => (archiveOpen = false)}
+  >
+    <p>{probe.archived_at ? $_('probe.unarchive_body') : $_('probe.archive_body')}</p>
+    {#if !probe.archived_at}<p class="keep"><strong>{$_('probe.archive_keeps')}</strong></p>{/if}
+    {#if archiveError}<p class="err" role="alert">{archiveError}</p>{/if}
+    {#snippet footer()}
+      <button class="lp-btn" onclick={() => (archiveOpen = false)}>{$_('common.cancel')}</button>
+      <button class="lp-btn accent" onclick={setArchived} disabled={archiveBusy}>
+        {probe.archived_at ? $_('probe.unarchive') : $_('probe.archive')}
+      </button>
+    {/snippet}
+  </Modal>
 
   <Modal
     open={killOpen}

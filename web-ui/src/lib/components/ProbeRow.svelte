@@ -86,6 +86,7 @@
 >
   <td>
     <a class="nm" {href}>{probe.name}</a>
+    {#if probe.archived_at}<span class="lp-tag">{$_('probe.archived_badge')}</span>{/if}
     <span class="sub2">{platformLabel(probe.platform, $_('common.none'))}</span>
   </td>
 

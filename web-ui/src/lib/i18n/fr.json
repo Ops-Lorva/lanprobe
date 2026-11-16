@@ -637,7 +637,17 @@
       "placeholder": "Maison, Bureau…",
       "save": "Enregistrer",
       "error": "Le libellé n'a pas pu être enregistré : {message}"
-    }
+    },
+    "archive": "Archiver la sonde",
+    "archive_hint": "La retire du parc, sans rien supprimer",
+    "unarchive": "Remettre dans le parc",
+    "unarchive_hint": "La sonde revient dans les listes et les alertes",
+    "archived_badge": "archivée",
+    "archive_title": "Archiver « {name} » ?",
+    "unarchive_title": "Remettre « {name} » dans le parc ?",
+    "archive_body": "La sonde disparaît du parc : listes, décomptes et alertes.",
+    "archive_keeps": "Rien n'est supprimé : mesures, inventaire et historique restent, et vous pouvez la remettre dans le parc à tout moment.",
+    "unarchive_body": "La sonde revient dans le parc."
   },
   "charts": {
     "aggregated": "Moyenné par {every} — le maximum de chaque intervalle est tracé en fond, pour qu'un pic ne disparaisse pas dans sa moyenne.",

@@ -637,7 +637,17 @@
       "placeholder": "Home, Office…",
       "save": "Save",
       "error": "The label could not be saved: {message}"
-    }
+    },
+    "archive": "Archive probe",
+    "archive_hint": "Removes it from the fleet, deletes nothing",
+    "unarchive": "Restore to fleet",
+    "unarchive_hint": "The probe returns to lists and alerts",
+    "archived_badge": "archived",
+    "archive_title": "Archive “{name}”?",
+    "unarchive_title": "Restore “{name}” to the fleet?",
+    "archive_body": "The probe leaves the fleet: lists, counts and alerts.",
+    "archive_keeps": "Nothing is deleted: measurements, inventory and history remain, and you can restore it at any time.",
+    "unarchive_body": "The probe returns to the fleet."
   },
   "charts": {
     "aggregated": "Averaged over {every} — each interval's maximum is drawn behind, so a spike does not vanish into its own average.",

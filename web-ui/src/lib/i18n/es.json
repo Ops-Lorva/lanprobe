@@ -637,7 +637,17 @@
       "placeholder": "Casa, Oficina…",
       "save": "Guardar",
       "error": "No se pudo guardar la etiqueta: {message}"
-    }
+    },
+    "archive": "Archivar la sonda",
+    "archive_hint": "La retira del parque, sin borrar nada",
+    "unarchive": "Devolver al parque",
+    "unarchive_hint": "La sonda vuelve a las listas y alertas",
+    "archived_badge": "archivada",
+    "archive_title": "¿Archivar «{name}»?",
+    "unarchive_title": "¿Devolver «{name}» al parque?",
+    "archive_body": "La sonda sale del parque: listas, recuentos y alertas.",
+    "archive_keeps": "No se borra nada: mediciones, inventario e historial se conservan, y puede devolverla al parque en cualquier momento.",
+    "unarchive_body": "La sonda vuelve al parque."
   },
   "charts": {
     "aggregated": "Promediado cada {every} — el máximo de cada intervalo se dibuja de fondo, para que un pico no desaparezca en su media.",
