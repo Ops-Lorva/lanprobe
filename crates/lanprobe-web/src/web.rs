@@ -3853,6 +3853,7 @@ async fn probe_inventory(
 /// en code.
 async fn probe_sla_samples(
     State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
@@ -3866,9 +3867,7 @@ async fn probe_sla_samples(
         // injoignable un 502. Les confondre ferait réessayer là où il n'y a
         // rien à retrouver.
         Err(crate::sla_payload::SlaPayloadError::Db(e)) => error_response(e),
-        Err(crate::sla_payload::SlaPayloadError::Influx(e)) => {
-            fail(StatusCode::BAD_GATEWAY, &e)
-        }
+        Err(crate::sla_payload::SlaPayloadError::Influx(e)) => influx_failure(&actor, &e),
     }
 }
 
@@ -4123,6 +4122,7 @@ pub(crate) fn samples_from_flux_csv(csv: &str, window: (i64, i64)) -> Vec<serde_
 /// dans l'URL : le rapport doit dire sur quoi il porte.
 async fn probe_sla_csv(
     State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
@@ -4149,7 +4149,7 @@ async fn probe_sla_csv(
     );
     let csv = match state.influx.query_flux(&flux).await {
         Ok(csv) => csv,
-        Err(e) => return fail(StatusCode::BAD_GATEWAY, &e),
+        Err(e) => return influx_failure(&actor, &e),
     };
 
     let report = sla_from_flux_csv(&csv, (window.from, window.to));
@@ -4969,6 +4969,7 @@ fn uptime_from_flux_csv(csv: &str) -> Vec<serde_json::Value> {
 /// Taux de disponibilité par cible sur la fenêtre — indicateur vivant.
 async fn probe_uptime(
     State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
@@ -4985,7 +4986,7 @@ async fn probe_uptime(
             "range": window.label,
             "targets": uptime_from_flux_csv(&csv),
         })),
-        Err(e) => fail(StatusCode::BAD_GATEWAY, &e),
+        Err(e) => influx_failure(&actor, &e),
     }
 }
 
@@ -5085,11 +5086,19 @@ dispo |> aggregateWindow(every: {every}, fn: mean, createEmpty: false) |> yield(
 /// Influx : le jeton de lecture reste côté serveur.
 async fn probe_metrics(
     State(state): State<AppState>,
+    Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
     if state.db.get_probe(&id).is_err() {
         return fail(StatusCode::NOT_FOUND, "sonde inconnue");
+    }
+    let measurement = query.measurement.as_deref().filter(|m| !m.is_empty());
+    if measurement.is_some_and(|m| !is_measurement_name(m)) {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "nom de mesure invalide : lettres, chiffres et « _ » seulement",
+        );
     }
     // ⚠️ `flux_window`, comme `/sla` et `/public-ips` — et non plus le seul
     // `range`. Cette route déclarait `start`/`stop` dans sa requête et les
@@ -5106,13 +5115,7 @@ async fn probe_metrics(
     // réellement lue — deux affirmations vraies séparément, fausses ensemble.
     let every = aggregate_every(window.to - window.from, clamp_max_points(query.max_points));
     let bucket = state.settings.influx_bucket();
-    let flux = metrics_flux(
-        &bucket,
-        &id,
-        query.measurement.as_deref().filter(|m| !m.is_empty()),
-        &window.clause,
-        every,
-    );
+    let flux = metrics_flux(&bucket, &id, measurement, &window.clause, every);
     match state.influx.query_flux(&flux).await {
         Ok(csv) => {
             let mut body = serde_json::json!({
@@ -5128,7 +5131,7 @@ async fn probe_metrics(
             }
             ok_json(body)
         }
-        Err(e) => fail(StatusCode::BAD_GATEWAY, &e),
+        Err(e) => influx_failure(&actor, &e),
     }
 }
 
@@ -5328,8 +5331,48 @@ fn rfc3339_to_millis(s: &str) -> Option<i64> {
 
 /// Littéral de chaîne Flux échappé — les valeurs viennent de l'URL, elles ne
 /// sont pas de confiance.
+///
+/// 🔴 **`$` aussi** (audit RSSI du 16/11, F2). `${…}` est l'interpolation de
+/// chaîne de Flux : sans `\$`, une valeur de l'URL devenait une EXPRESSION,
+/// évaluée avec le jeton opérateur, et dont le résultat pouvait revenir dans le
+/// message d'erreur. Échapper chaque `$` neutralise `${` quel que soit ce qui
+/// suit ; `\` est échappé d'abord, sinon `\${` redeviendrait `\\${`.
 pub(crate) fn flux_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+    )
+}
+
+/// Un nom de mesure acceptable dans une requête : `[A-Za-z0-9_]+`.
+///
+/// ⚠️ Liste blanche EN PLUS de [`flux_string`], pas à la place : les noms de
+/// mesure de la sonde n'ont jamais eu besoin d'autre chose, et un échappement
+/// qu'on oublierait un jour ne doit pas suffire à rouvrir la route.
+fn is_measurement_name(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Refus d'une lecture qu'InfluxDB n'a pas su servir.
+///
+/// 🔴 **Le détail ne sort que pour un `admin`** (audit RSSI, F2). Le corps
+/// d'erreur d'Influx remontait tel quel : c'est le canal par lequel une
+/// injection fait sortir une valeur, et il dit l'adresse interne d'Influx à
+/// quiconque le lit. Les autres reçoivent une phrase sans contenu ; le détail
+/// part au journal du conteneur, où l'opérateur le retrouve.
+pub(crate) fn influx_failure(actor: &Identity, detail: &str) -> Response {
+    tracing::warn!("lecture InfluxDB refusée pour {} : {detail}", actor.username);
+    if actor.role == Role::Admin {
+        fail(StatusCode::BAD_GATEWAY, detail)
+    } else {
+        fail(
+            StatusCode::BAD_GATEWAY,
+            "InfluxDB n'a pas pu répondre — le détail est dans le journal du hub",
+        )
+    }
 }
 
 // `flux_duration` a été remplacée par `SlidingWindow`. Elle laissait passer
@@ -13982,5 +14025,85 @@ mod tests {
             ))
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    // ── F2 : injection Flux par `?measurement=` (audit RSSI du 16/11) ──────
+
+    #[test]
+    fn flux_string_neutralise_l_interpolation() {
+        // 🔴 `${…}` est l'interpolation de chaîne de Flux : sans échappement,
+        // une valeur venue de l'URL devenait une EXPRESSION exécutée avec le
+        // jeton opérateur.
+        assert_eq!(flux_string("a${b}"), "\"a\\${b}\"");
+        assert_eq!(flux_string("$"), "\"\\$\"");
+        assert_eq!(flux_string("\\\""), "\"\\\\\\\"\"");
+    }
+
+    #[tokio::test]
+    async fn a_measurement_outside_the_whitelist_is_refused_before_influx() {
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let (probe_id, _) = h.enroll(&admin, "Durand", "Paris").await;
+        h.user("claire", Role::Viewer).await;
+        let viewer = h.login_as("claire").await;
+
+        for bad in ["%24%7Bx%7D", "ping%22", "ping%20latency", "a-b"] {
+            let (status, body, _) = h
+                .call(with_cookie(
+                    empty_request(
+                        "GET",
+                        &format!("/api/probes/{probe_id}/metrics?measurement={bad}&range=-1h"),
+                    ),
+                    &viewer,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad} : {body}");
+        }
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request(
+                    "GET",
+                    &format!("/api/probes/{probe_id}/metrics?measurement=ping_latency&range=-1h"),
+                ),
+                &viewer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn influx_errors_are_not_relayed_verbatim_to_a_non_admin() {
+        // 🔴 Le corps d'erreur d'Influx remontait tel quel au navigateur : c'est
+        // le canal par lequel une injection aurait fait sortir une valeur, et
+        // il dit l'adresse interne d'Influx à qui le lit.
+        let h = Harness::with_admin().await;
+        let admin = h.login().await;
+        let (probe_id, _) = h.enroll(&admin, "Durand", "Paris").await;
+        h.user("claire", Role::Viewer).await;
+        let viewer = h.login_as("claire").await;
+        h.state
+            .settings
+            .put(crate::settings::keys::INFLUX_URL, "http://127.0.0.1:9", false)
+            .unwrap();
+
+        for route in ["metrics", "uptime", "sla", "sla.csv"] {
+            let uri = format!("/api/probes/{probe_id}/{route}?range=-1h");
+            let (status, body, _) =
+                h.call(with_cookie(empty_request("GET", &uri), &viewer)).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{route} : {body}");
+            assert!(
+                !body.to_string().contains("127.0.0.1"),
+                "{route} : le détail d'Influx ne sort pas pour un viewer : {body}"
+            );
+        }
+
+        let (status, body, _) = h
+            .call(with_cookie(
+                empty_request("GET", &format!("/api/probes/{probe_id}/metrics?range=-1h")),
+                &admin,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.to_string().contains("injoignable"), "l'admin garde le détail : {body}");
     }
 }

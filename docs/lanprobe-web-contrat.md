@@ -276,10 +276,18 @@ côté serveur.
 
 | Paramètre | Défaut | Rôle |
 |---|---|---|
-| `measurement` | — | filtre sur `_measurement`. Absent ou vide : tout ce que la sonde écrit. |
+| `measurement` | — | filtre sur `_measurement`. Absent ou vide : tout ce que la sonde écrit. `[A-Za-z0-9_]+` seulement, sinon `400`. |
 | `range` | `-24h` | fenêtre glissante (`-30m`, `-7d`, `-4w`…) |
 | `start`, `stop` | — | bornes explicites, **en secondes epoch** |
 | `max_points` | `800` | points affichables — en pratique la largeur du graphe en pixels |
+
+🔴 **`measurement` passe une liste blanche, puis `flux_string`, qui échappe aussi
+`$`** (audit RSSI du 16/11, F2). `${…}` est l'interpolation de chaîne de Flux :
+une valeur de l'URL devenait une expression évaluée avec le jeton opérateur.
+Et **un refus d'Influx ne remonte plus tel quel** sur `/metrics`, `/uptime`,
+`/sla`, `/sla.csv` ni dans la cause d'un rapport : `502` avec le détail pour un
+`admin`, une phrase sans contenu pour les autres — le détail part au journal du
+conteneur.
 
 **`start`/`stop` priment sur `range`**, et seulement s'ils tiennent debout : les
 deux présents, et `stop > start`. Des bornes incomplètes ou inversées retombent
@@ -3650,4 +3658,17 @@ de l'app iOS), et valable pour tous les hubs. Les findings sont ceux de
 
 Voir § 17 : `users.scope_all` (v31), portée restreinte vide = rien, portée
 illisible = `401`.
+
+### F2 — Flux : liste blanche, `$` échappé, erreurs masquées
+
+Voir § 3, `GET /api/probes/{id}/metrics`.
+
+**Reste à faire : un jeton InfluxDB en lecture seule pour les lectures du
+hub.** Le hub interroge toujours Influx avec le jeton opérateur. Frapper un
+jeton de lecture (`mint_read_token`) est simple ; le tenir ne l'est pas : il
+faut le sceller, le retrouver au redémarrage sans en frapper un nouveau à
+chaque fois, le refrapper après une restauration de sauvegarde ou un Influx
+réinitialisé, et retomber proprement quand il a été révoqué depuis Influx.
+Écarté de ce correctif : la liste blanche et l'échappement ferment l'injection
+à la source.
 

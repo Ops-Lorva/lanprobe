@@ -626,7 +626,17 @@ async fn prepare(state: &AppState, report_id: &str) -> Result<(), String> {
             Some(record.range_stop),
         )
         .await
-        .map_err(|e| format!("relevés de {nom} indisponibles : {e}"))?;
+        .map_err(|e| match e {
+            // ⚠️ La cause s'affiche à QUI a demandé le rapport, `viewer`
+            // compris : le corps d'erreur d'Influx — son adresse interne, ce
+            // qu'il a répondu — part au journal du conteneur, pas dans
+            // l'écran (audit RSSI, F2).
+            crate::sla_payload::SlaPayloadError::Influx(detail) => {
+                tracing::warn!("rapport {report_id} : relevés de {nom} indisponibles : {detail}");
+                format!("relevés de {nom} indisponibles : InfluxDB n'a pas pu répondre")
+            }
+            other => format!("relevés de {nom} indisponibles : {other}"),
+        })?;
         payloads.push(payload);
     }
 
