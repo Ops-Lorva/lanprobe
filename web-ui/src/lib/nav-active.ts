@@ -35,6 +35,6 @@ const NAV_IDS: NavId[] = ['fleet', 'notifications', 'accounts', 'audit', 'settin
 export function activeNavId(route: Route): NavId | null {
   // « Ajouter une sonde » se lance depuis le parc et y ramène : c'est une
   // étape du parc, pas une destination à elle.
-  if (route.name === 'add') return 'fleet';
+  if (route.name === 'add' || route.name === 'report') return 'fleet';
   return NAV_IDS.find((id) => id === route.name) ?? null;
 }

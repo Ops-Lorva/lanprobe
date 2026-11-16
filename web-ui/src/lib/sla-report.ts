@@ -97,6 +97,48 @@ export interface TargetSeries {
  * nombre se retrouve dans une moyenne de colonne et fait naître un chiffre que
  * personne n'a calculé.
  */
+/**
+ * Une ligne de synthèse : une cible d'une sonde (l'accès internet d'abord).
+ *
+ * ⚠️ Partagée par le classeur et l'aperçu de la page Rapport : l'écran doit
+ * montrer EXACTEMENT les chiffres du document remis au client.
+ */
+export interface SummaryLine {
+  probe: string;
+  label: string;
+  samples: Sample[];
+  coverage?: Coverage;
+  stats: Stats;
+  outages: Outage[];
+}
+
+export function summaryLines(payloads: SlaPayload[], t: Translate): SummaryLine[] {
+  return payloads.flatMap((p) => {
+    const lines: Omit<SummaryLine, 'stats' | 'outages'>[] = [
+      ...(p.internet.length ? [{ probe: p.probe, label: t('sla.internet'), samples: p.internet }] : []),
+      ...p.targets.map((tg) => ({
+        probe: p.probe,
+        label: tg.ip,
+        samples: tg.samples,
+        coverage: tg.coverage,
+      })),
+    ];
+    return lines.map((l) => ({ ...l, stats: stats(l.samples), outages: outages(l.samples) }));
+  });
+}
+
+/** Les coupures de tout le site, la plus récente d'abord ; celles en cours en tête. */
+export function siteOutages(
+  lines: SummaryLine[],
+): (Outage & { probe: string; label: string })[] {
+  return lines
+    .flatMap((l) => l.outages.map((o) => ({ ...o, probe: l.probe, label: l.label })))
+    .sort((a, b) => {
+      if ((a.end == null) !== (b.end == null)) return a.end == null ? -1 : 1;
+      return b.start - a.start;
+    });
+}
+
 export function coverageLabel(
   coverage: Coverage | undefined,
   t: Translate = (k) => k,
@@ -553,21 +595,7 @@ export async function buildSlaWorkbook(
     ws.addRow([]);
   };
 
-  interface Line {
-    probe: string;
-    label: string;
-    samples: Sample[];
-    coverage?: Coverage;
-  }
-  const rows: Line[] = payloads.flatMap((p) => [
-    ...(p.internet.length ? [{ probe: p.probe, label: t('sla.internet'), samples: p.internet }] : []),
-    ...p.targets.map((tg) => ({
-      probe: p.probe,
-      label: tg.ip,
-      samples: tg.samples,
-      coverage: tg.coverage,
-    })),
-  ]);
+  const rows = summaryLines(payloads, t);
 
   // ── Synthèse ────────────────────────────────────────────────────────────
   const sum = wb.addWorksheet(t('sla.sheet_summary'));

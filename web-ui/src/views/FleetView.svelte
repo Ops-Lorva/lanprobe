@@ -2,33 +2,19 @@
   import { onMount, onDestroy } from 'svelte';
   import { newestVersion } from '$lib/probe-version';
   import { canOperate } from '$lib/session';
-  import { SvelteSet } from 'svelte/reactivity';
-  import { RANGES, type Range } from '$lib/metrics';
   import { _, locale } from 'svelte-i18n';
   import { fleet } from '$lib/fleet';
+  import { go } from '$lib/router';
   import { flash } from '$lib/flash';
-  import { absoluteTime, humanBytes, now, relativeTime } from '$lib/time';
-  import { api, ApiError, type MetricsWindow, type Probe, type Site } from '$lib/api';
+  import { now, relativeTime } from '$lib/time';
+  import { api, ApiError, type Probe, type Site } from '$lib/api';
   import { LANGS, type Lang } from '$lib/i18n';
-  // Le classeur vient du hub (contrat § 23). `sla-report` reste le repli.
-  import {
-    fetchReportFile,
-    hubLacksReports,
-    parseReports,
-    pollReport,
-    reportErrorMessage,
-    reportRows,
-    reportsApi,
-    saveReportFile,
-    type ReportRow,
-  } from '$lib/reports';
   import type { LivenessState } from '$lib/probe-liveness';
   // ⚠️ Filtres, compteurs et tris passent TOUS par ce module, jamais par
   // `p.status` : le hub tolère trois battements manqués, et une sonde affichée
   // « Silencieuse » sur sa ligne se retrouvait comptée « En ligne » dans le
   // bandeau et retenue par le filtre « En ligne ».
   import {
-    livenessOf,
     matchesFleetFilter,
     needsAttention,
     siteSeverity,
@@ -289,192 +275,12 @@
     alertsSiteName = siteName;
   }
 
-  let slaSiteId = $state('');
-  let slaSiteName = $state('');
-  let slaPicked = $state(new SvelteSet<string>());
-  let slaRange = $state<Range | 'custom'>('-7d');
-  // Bornes explicites, au format `YYYY-MM-DD` des champs date.
-  let slaFrom = $state('');
-  let slaTo = $state('');
-  let slaBusy = $state(false);
-  let slaError = $state('');
-  /** Où en est le hub : « sonde 2 sur 3 — Lyon », puis le téléchargement. */
-  let slaStep = $state('');
-  /** Le classeur vient du navigateur, pas du hub. Se dit, ne se devine pas. */
-  let slaFallback = $state(false);
-  /** Modal fermé : le suivi cesse d'interroger le hub. */
-  let slaAbort = { aborted: false };
-
-  /** Une période précise n'est exportable que si elle est complète et ordonnée. */
-  const slaReady = $derived(
-    slaRange !== 'custom' || (slaFrom !== '' && slaTo !== '' && slaFrom <= slaTo),
-  );
-
-  const slaCandidates = $derived(
-    $fleet.probes.filter((p) => p.site_id === slaSiteId),
-  );
-
-  function openSlaExport(siteId: string, siteName: string) {
-    slaSiteId = siteId;
-    slaSiteName = siteName;
-    slaError = '';
-    slaFallback = false;
-    slaHistory = [];
-    void loadSlaHistory();
-    // Toutes cochées par défaut : le cas courant est « tout le site », et
-    // décocher est plus rapide que cocher trente lignes.
-    slaPicked = new SvelteSet(
-      $fleet.probes.filter((p) => p.site_id === siteId).map((p) => p.probe_id),
-    );
-  }
-
   /**
-   * Ferme la fenêtre et cesse d'interroger le hub.
-   *
-   * ⚠️ Le rapport, lui, continue d'être produit : il figure dans l'historique
-   * du site, prêt à télécharger. Rien n'est perdu, et rien n'est annulé — aucune
-   * route ne supprime un rapport.
+   * Le rapport SLA a sa page (`#/report/{site}`) : aperçu, demande au hub et
+   * historique y vivent. Le menu du site y mène.
    */
-  function closeSlaExport() {
-    slaAbort.aborted = true;
-    slaSiteId = '';
-  }
-
-  function togglePicked(probeId: string) {
-    if (slaPicked.has(probeId)) slaPicked.delete(probeId);
-    else slaPicked.add(probeId);
-  }
-
-  /**
-   * La fenêtre du rapport, résolue en bornes exactes.
-   *
-   * ⚠️ La borne de fin couvre le jour ENTIER : « du 1er au 31 » sans ça
-   * s'arrêterait à minuit le 31 au matin, et le dernier jour manquerait au
-   * rapport sans que personne ne s'en aperçoive.
-   */
-  function slaWindow(): MetricsWindow {
-    return slaRange === 'custom'
-      ? {
-          start: Math.floor(new Date(`${slaFrom}T00:00:00`).getTime() / 1000),
-          stop: Math.floor(new Date(`${slaTo}T23:59:59`).getTime() / 1000),
-        }
-      : { range: slaRange };
-  }
-
-  /**
-   * 🔴 **Le classeur est produit par le HUB** (contrat § 23) : un seul
-   * générateur pour un seul document. Le chemin navigateur reste en repli pour
-   * un hub plus ancien que la route — on ajoute un chemin, on n'en enlève pas.
-   */
-  async function runSlaExport() {
-    slaBusy = true;
-    slaError = '';
-    slaFallback = false;
-    slaStep = $_('report.hub_preparing');
-    slaAbort = { aborted: false };
-    const window = slaWindow();
-    const chosen = slaCandidates.filter((p) => slaPicked.has(p.probe_id));
-    try {
-      const { report_id } = await reportsApi.requestReport(slaSiteId, {
-        // ⚠️ La liste part TOUJOURS explicite : « absent » voudrait dire
-        // « toutes les sondes du site », et une case décochée passerait quand
-        // même dans le classeur remis au client.
-        probe_ids: chosen.map((p) => p.probe_id),
-        window,
-      });
-      const record = await pollReport(report_id, {
-        signal: slaAbort,
-        // Le hub ne prépare qu'un rapport à la fois pour tout le parc :
-        // l'attente peut durer, et un bouton muet se lit comme une panne.
-        onStep: (r) => (slaStep = r.step ?? $_('report.hub_preparing')),
-      });
-      await loadSlaHistory();
-      if (record.state !== 'ready') {
-        slaError = $_('report.hub_failed', { values: { cause: record.error ?? '—' } });
-        return;
-      }
-      slaStep = $_('report.hub_download');
-      saveReportFile(await fetchReportFile(record.report_id, record.file_name ?? ''));
-      slaSiteId = '';
-    } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      if (hubLacksReports(e)) return void (await exportSlaInBrowser(chosen, window));
-      slaError = reportErrorMessage(e, (k, v) => $_(k, { values: v }), lang);
-    } finally {
-      slaBusy = false;
-      slaStep = '';
-    }
-  }
-
-  /**
-   * Le générateur du navigateur, en repli.
-   *
-   * ⚠️ Séquentiel : trente sondes en parallèle, ce sont trente requêtes Flux
-   * simultanées sur le même Influx, et un hub qui ne répond plus pendant qu'on
-   * produit un rapport. C'est aussi ce que le hub fait de son côté.
-   */
-  async function exportSlaInBrowser(chosen: Probe[], window: MetricsWindow) {
-    try {
-      const payloads = [];
-      for (const p of chosen) {
-        payloads.push(await api.sla(p.probe_id, window));
-      }
-      const { downloadSlaWorkbook } = await import('$lib/sla-report');
-      await downloadSlaWorkbook(payloads, slaSiteName, (k, v) => $_(k, { values: v }), lang);
-      slaFallback = true;
-    } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      slaError = e instanceof ApiError ? e.message : String(e);
-    }
-  }
-
-  // ── Historique des rapports du site ──────────────────────────────────────
-  //
-  // 🔴 **Une ligne d'historique n'est pas un fichier, c'est une trace** : qui a
-  // extrait les données de ce client, quand, sur quelle fenêtre, quelles
-  // sondes. Le fichier part à la purge ; la ligne, jamais. C'est pourquoi une
-  // ligne sans bouton de téléchargement doit DIRE « fichier purgé le … » —
-  // sinon elle se lit comme une panne.
-  let slaHistory = $state<ReportRow[]>([]);
-  let slaHistoryError = $state('');
-  /** Le rapport qu'on retélécharge — un seul à la fois, le bouton le montre. */
-  let slaRedownloading = $state('');
-
-  async function loadSlaHistory() {
-    slaHistoryError = '';
-    try {
-      slaHistory = reportRows(parseReports(await reportsApi.listSiteReports(slaSiteId)));
-    } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      // Un hub plus ancien n'a pas d'historique : ce n'est pas une panne, et la
-      // liste reste vide sans message rouge.
-      slaHistory = [];
-      if (!hubLacksReports(e)) {
-        slaHistoryError = e instanceof ApiError ? e.message : String(e);
-      }
-    }
-  }
-
-  /**
-   * Retélécharge un rapport déjà produit.
-   *
-   * ⚠️ Le retéléchargement subit EXACTEMENT les mêmes contrôles que le premier :
-   * longueur annoncée et empreinte. Un fichier purgé entre-temps rend `410`, et
-   * l'écran dit la date plutôt qu'une erreur générique.
-   */
-  async function redownloadReport(reportId: string, fileName: string) {
-    slaRedownloading = reportId;
-    slaError = '';
-    try {
-      saveReportFile(await fetchReportFile(reportId, fileName));
-    } catch (e) {
-      if (e instanceof ApiError && e.isUnauthorized) return onExpired();
-      slaError = reportErrorMessage(e, (k, v) => $_(k, { values: v }), lang);
-      // Le hub vient peut-être de purger : la ligne doit refléter son état.
-      await loadSlaHistory();
-    } finally {
-      slaRedownloading = '';
-    }
+  function openSlaExport(siteId: string) {
+    go(`#/report/${encodeURIComponent(siteId)}`);
   }
 
   // ── Bande de battement ───────────────────────────────────────────────────
@@ -707,7 +513,7 @@
               name: g.site.name,
               archived: !g.site.archived_at,
             })}
-          onexportSla={() => openSlaExport(g.site.site_id, g.site.name)}
+          onexportSla={() => openSlaExport(g.site.site_id)}
           onfocusSite={() => fleet.selectSite(g.site.site_id, onExpired)}
           filtered={hasFilter}
         />
@@ -739,156 +545,6 @@
     </button>
   </div>
 {/if}
-
-<Modal
-  open={slaSiteId !== ''}
-  wide
-  title={$_('sla.export_title', { values: { name: slaSiteName } })}
-  onclose={closeSlaExport}
->
-  <p class="slalead">{$_('sla.export_lead')}</p>
-
-  <label class="lp-field">
-    {$_('probe.range')}
-    <select class="lp-input" bind:value={slaRange}>
-      {#each RANGES as r (r)}
-        <option value={r}>{$_(`probe.range_${r.replace('-', '')}`)}</option>
-      {/each}
-      <!-- ⚠️ Au-delà de sept jours, et pour tout rapport contractuel, ce sont
-           des dates qu'il faut : une fenêtre glissante donne un chiffre
-           différent à chaque ouverture du document. -->
-      <option value="custom">{$_('sla.custom')}</option>
-    </select>
-  </label>
-
-  {#if slaRange === 'custom'}
-    <div class="sladates">
-      <label class="lp-field">
-        {$_('sla.from')}
-        <input class="lp-input" type="date" bind:value={slaFrom} max={slaTo || undefined} />
-      </label>
-      <label class="lp-field">
-        {$_('sla.to')}
-        <input class="lp-input" type="date" bind:value={slaTo} min={slaFrom || undefined} />
-      </label>
-    </div>
-  {/if}
-
-  <!-- ⚠️ Toutes cochées d'office : le cas courant est « tout le site », et
-       décocher deux lignes va plus vite que d'en cocher trente. Mais on peut
-       retirer une sonde — un rapport qui montre la sonde d'un autre client
-       serait pire qu'inutile. -->
-  <ul class="slapick">
-    {#each slaCandidates as p (p.probe_id)}
-      <li>
-        <label>
-          <input
-            type="checkbox"
-            checked={slaPicked.has(p.probe_id)}
-            onchange={() => togglePicked(p.probe_id)}
-          />
-          <span>{p.name}</span>
-          <!-- Même verdict que la ligne du parc : voir « En ligne » ici sur
-               une sonde affichée « Silencieuse » deux clics plus tôt ferait
-               douter du rapport avant même de l'ouvrir. -->
-          <span class="slastat">{$_(`status.${livenessOf(p, $now)}`)}</span>
-        </label>
-      </li>
-    {/each}
-  </ul>
-
-  <!-- ⚠️ L'avancement du hub, en clair. Il ne prépare qu'un rapport à la fois
-       pour tout le parc : sur trente sondes l'attente se compte en dizaines de
-       secondes, et un bouton qui ne répond pas se lit comme une panne. -->
-  {#if slaBusy && slaStep}<p class="slastep" role="status">{slaStep}</p>{/if}
-  {#if slaFallback}<p class="slastep">{$_('report.hub_fallback')}</p>{/if}
-  {#if slaError}<p class="slaerr" role="alert">{slaError}</p>{/if}
-
-  <!-- 🔴 L'historique : qui a extrait les données de ce client, quand, sur
-       quelle fenêtre et quelles sondes. Le fichier part à la purge ; la ligne,
-       jamais. Une ligne sans bouton de téléchargement DIT pourquoi. -->
-  <section class="slahist">
-    <h4>{$_('report.hub_history')}</h4>
-    {#if slaHistoryError}
-      <p class="slaerr" role="alert">{slaHistoryError}</p>
-    {:else if slaHistory.length === 0}
-      <p class="slahist-empty">{$_('report.hub_empty')}</p>
-    {:else}
-      <ul>
-        {#each slaHistory as row (row.report.report_id)}
-          <li>
-            <div class="slahist-main">
-              <span class="slahist-when">{absoluteTime(row.report.requested_at, lang)}</span>
-              <!-- « depuis le hub web » quand aucun appareil n'est en cause :
-                   `device_id` absent ne veut pas dire « inconnu ». -->
-              <span class="slahist-who">
-                {$_('report.hub_requested_by', { values: { actor: row.report.requested_by } })}
-                {#if row.report.device_id == null}· {$_('report.hub_requested_from_web')}{/if}
-              </span>
-              <span class="slahist-what">
-                {$_('report.hub_probes', { values: { n: row.report.probe_ids.length } })} ·
-                {absoluteTime(row.report.range_start, lang)} → {absoluteTime(
-                  row.report.range_stop,
-                  lang,
-                )}
-              </span>
-            </div>
-            <div class="slahist-state">
-              {#if row.downloadable}
-                <span class="slahist-note">
-                  {humanBytes(row.report.file_size, lang)}
-                  {#if row.report.expires_at != null}
-                    · {$_('report.hub_expires_at', {
-                      values: { date: absoluteTime(row.report.expires_at, lang) },
-                    })}
-                  {/if}
-                </span>
-                <button
-                  class="lp-btn ghost sm"
-                  disabled={slaRedownloading !== ''}
-                  onclick={() =>
-                    redownloadReport(row.report.report_id, row.report.file_name ?? '')}
-                >
-                  {slaRedownloading === row.report.report_id
-                    ? $_('sla.exporting')
-                    : $_('report.hub_download')}
-                </button>
-              {:else if row.purged}
-                <!-- ⚠️ « Fichier purgé le … », jamais une erreur ni un bouton
-                     qui échoue en silence : le rapport a existé, quelqu'un l'a
-                     eu, et le bon geste est de le redemander. -->
-                <span class="slahist-note">
-                  {$_('report.hub_purged_hint', {
-                    values: { date: absoluteTime(row.report.purged_at, lang) },
-                  })}
-                </span>
-              {:else if row.failed}
-                <span class="slahist-failed">
-                  {$_('report.hub_failed', { values: { cause: row.report.error ?? '—' } })}
-                </span>
-              {:else if row.preparing}
-                <span class="slahist-note">
-                  {row.report.step ?? $_('report.hub_preparing')}
-                </span>
-              {/if}
-            </div>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
-
-  {#snippet footer()}
-    <button class="lp-btn" onclick={closeSlaExport}>{$_('common.cancel')}</button>
-    <button
-      class="lp-btn primary"
-      onclick={runSlaExport}
-      disabled={slaBusy || slaPicked.size === 0 || !slaReady}
-    >
-      {slaBusy ? $_('sla.exporting') : $_('sla.export')}
-    </button>
-  {/snippet}
-</Modal>
 
 <Modal
   open={archiveTarget !== null}
@@ -996,127 +652,9 @@
 
 <style>
   .slalead {
-    margin: 0 0 12px;
-    font-size: 0.875rem;
-    color: var(--ep-text-secondary);
-  }
-  .sladates {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .slapick {
-    list-style: none;
-    margin: 12px 0 0;
-    padding: 0;
-    max-height: 280px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .slapick label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 8px;
-    border-radius: 5px;
-    font-size: 0.875rem;
-    cursor: pointer;
-  }
-  .slapick label:hover {
-    background: var(--ep-bg-tertiary);
-  }
-  .slastat {
-    margin-left: auto;
     font-size: 0.8125rem;
-    color: var(--ep-text-dim);
-  }
-  .slaerr {
-    margin: 10px 0 0;
-    font-size: 0.8125rem;
-    color: var(--ep-danger);
-  }
-
-  /* L'avancement du hub : une note, pas une alerte. Rien ne va mal — le
-     classeur se prépare, et le dire évite qu'on reclique. */
-  .slastep {
-    margin: 10px 0 0;
-    font-size: 0.8125rem;
-    color: var(--ep-text-secondary);
-  }
-
-  /* L'historique : une trace, pas une liste de fichiers. Il vit sous le
-     formulaire parce qu'on le consulte après avoir cherché à produire — et
-     qu'il répond souvent à la question « ne l'aurais-je pas déjà sorti ? ». */
-  .slahist {
-    margin-top: 18px;
-    border-top: 1px solid var(--ep-border);
-    padding-top: 12px;
-  }
-  .slahist h4 {
-    margin: 0 0 8px;
-    font-size: 0.8125rem;
-    font-weight: 600;
-    color: var(--ep-text-secondary);
-  }
-  .slahist-empty {
-    margin: 0;
-    font-size: 0.8125rem;
-    color: var(--ep-text-dim);
-  }
-  .slahist ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    max-height: 220px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .slahist li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 6px 8px;
-    border-radius: 5px;
-    background: var(--ep-bg-tertiary);
-  }
-  .slahist-main {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    min-width: 0;
-  }
-  .slahist-when {
-    font-size: 0.875rem;
-    color: var(--ep-text-primary);
-  }
-  .slahist-who,
-  .slahist-what {
-    font-size: 0.8125rem;
-    color: var(--ep-text-dim);
-  }
-  .slahist-state {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-    text-align: right;
-  }
-  .slahist-note {
-    font-size: 0.8125rem;
-    color: var(--ep-text-dim);
-    max-width: 260px;
-  }
-  /* Un échec porte sa cause NOMMÉE : c'est elle qui dit s'il faut réessayer
-     ou appeler. */
-  .slahist-failed {
-    font-size: 0.8125rem;
-    color: var(--ep-danger);
-    max-width: 260px;
+    color: var(--color-muted);
+    margin: -8px 0 0;
   }
 
   .filters {

@@ -52,6 +52,8 @@ export type Route =
   // L'enrôlement et l'installeur sur un seul écran. `site` vient du « + »
   // d'un site, qui le choisit d'avance.
   | { name: 'add'; site: string | null }
+  /** Rapport SLA d'un site : aperçu, demande et historique. */
+  | { name: 'report'; site: string }
   | { name: 'settings'; tab: SettingsTab };
 
 /**
@@ -102,6 +104,7 @@ export function parse(hash: string): Route {
   if (parts[0] === 'account') return { name: 'account' };
   if (parts[0] === 'notifications') return { name: 'notifications' };
   if (parts[0] === 'accounts') return { name: 'accounts' };
+  if (parts[0] === 'report' && parts[1]) return { name: 'report', site: decodeURIComponent(parts[1]) };
   if (parts[0] === 'add') return { name: 'add', site: parts[1] ? decodeURIComponent(parts[1]) : null };
   if (parts[0] === 'settings') return { name: 'settings', tab: isTab(parts[1]) ? parts[1] : 'general' };
   // `#/enroll` n'existe plus : l'enrôlement se fait sur la ligne du site, dans
@@ -122,6 +125,8 @@ export function href(r: Route): string {
       return '#/notifications';
     case 'accounts':
       return '#/accounts';
+    case 'report':
+      return `#/report/${encodeURIComponent(r.site)}`;
     case 'add':
       return r.site ? `#/add/${encodeURIComponent(r.site)}` : '#/add';
     case 'settings':

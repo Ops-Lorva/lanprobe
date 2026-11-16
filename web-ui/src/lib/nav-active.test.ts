@@ -32,6 +32,7 @@ describe('activeNavId', () => {
 
   it('surligne « Parc » sur « Ajouter une sonde », qui en part', () => {
     expect(activeNavId({ name: 'add', site: null })).toBe('fleet');
+    expect(activeNavId({ name: 'report', site: 's' })).toBe('fleet');
   });
 
   it('surligne « Mon compte », et PAS « Réglages », sur son écran', () => {

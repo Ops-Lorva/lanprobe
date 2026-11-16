@@ -8,6 +8,7 @@
   import NotificationsView from './NotificationsView.svelte';
   import AccountsView from './AccountsView.svelte';
   import AddProbeView from './AddProbeView.svelte';
+  import ReportView from './ReportView.svelte';
   import ProbeView from './ProbeView.svelte';
   import SettingsView from './SettingsView.svelte';
   import AuditView from './AuditView.svelte';
@@ -125,6 +126,8 @@
 <main class="page" bind:this={mainEl}>
   {#if $route.name === 'probe'}
     <ProbeView id={$route.id} {onExpired} />
+  {:else if $route.name === 'report'}
+    <ReportView site={$route.site} {onExpired} />
   {:else if $route.name === 'add'}
     <AddProbeView site={$route.site} {onExpired} />
   {:else if $route.name === 'audit'}

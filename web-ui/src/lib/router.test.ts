@@ -65,6 +65,10 @@ describe('adresses du hub', () => {
     expect(parse('#/add/s%201')).toEqual({ name: 'add', site: 's 1' });
     expect(href({ name: 'add', site: null })).toBe('#/add');
     expect(href({ name: 'add', site: 's 1' })).toBe('#/add/s%201');
+    expect(parse('#/report/s%201')).toEqual({ name: 'report', site: 's 1' });
+    expect(href({ name: 'report', site: 's 1' })).toBe('#/report/s%201');
+    // Sans site, il n'y a pas de rapport : retour au parc.
+    expect(parse('#/report')).toEqual({ name: 'fleet' });
   });
 
   it('garde la fiche d’une sonde collable dans un ticket', () => {
