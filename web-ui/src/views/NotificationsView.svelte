@@ -426,52 +426,47 @@
         <button class="lp-btn primary" onclick={loadChannels}>{$_('common.retry')}</button>
       </StateBlock>
     {:else if status}
-      <!-- Délai avant alerte -->
-      <section class="card lp-card">
-        <h2 class="lp-title">{$_('notify.delay_title')}</h2>
-        <p class="sub">{$_('notify.delay_sub')}</p>
-        <div class="inline">
-          <label class="lp-field">
-            <span class="lp-sr">{$_('notify.delay_title')}</span>
-            <span class="unit-row">
+      <!-- Ce qu'on reçoit, avant où on le reçoit : décider des canaux sans
+           savoir ce qui les empruntera met la question à l'envers. -->
+      <section class="sec full">
+        <h2>{$_('notify.alerts_title')}</h2>
+        <div class="set">
+          <div class="set-l">
+            <span class="set-n">{$_('notify.delay_title')}</span>
+            <span class="set-s">{$_('notify.delay_sub')}</span>
+          </div>
+          <div class="set-r">
+            <label class="unit-row">
+              <span class="lp-sr">{$_('notify.delay_title')}</span>
               <input class="lp-input num" type="number" min="1" step="1" bind:value={delay} />
               <span class="unit">{$_('notify.delay_unit')}</span>
               {#if delayHuman}<span class="unit">{delayHuman}</span>{/if}
-            </span>
-          </label>
-          <button
-            class="lp-btn primary"
-            onclick={saveDelay}
-            disabled={busy || delayNum === delaySaved}
-          >
-            {$_('common.save')}
-          </button>
+            </label>
+            <button class="lp-btn sm" onclick={saveDelay} disabled={busy || delayNum === delaySaved}>
+              {$_('common.save')}
+            </button>
+          </div>
         </div>
         {#if delayError}<p class="err" role="alert">{delayError}</p>{/if}
         {#if delayNotice}<p class="ok" role="status">{delayNotice}</p>{/if}
-      </section>
 
-      <!-- Ce qu'on reçoit, avant où on le reçoit : décider des canaux sans
-           savoir ce qui les empruntera met la question à l'envers. -->
-      <section class="card lp-card">
-        <h2 class="lp-title">{$_('notify.kinds_title')}</h2>
-        <p class="sub">{$_('notify.kinds_lead')}</p>
-
-        <div class="kinds">
-          {#each ALERT_KINDS as k (k)}
-            <label class="kind">
+        {#each ALERT_KINDS as k (k)}
+          <label class="set">
+            <span class="set-l">
+              <span class="set-n">{$_(`notify.kind_${k.replace('.', '_')}`)}</span>
+              <span class="set-s">{$_(`notify.kind_${k.replace('.', '_')}_why`)}</span>
+            </span>
+            <span class="set-r">
               <input
+                class="lp-switch"
                 type="checkbox"
                 checked={kinds.includes(k)}
                 disabled={kindsBusy}
                 onchange={() => toggleKind(k)}
               />
-              <span class="kind-name">{$_(`notify.kind_${k.replace('.', '_')}`)}</span>
-              <span class="kind-why">{$_(`notify.kind_${k.replace('.', '_')}_why`)}</span>
-            </label>
-          {/each}
-        </div>
-
+            </span>
+          </label>
+        {/each}
         {#if kinds.length === 0}
           <!-- Rien de coché est un choix valide, pas un oubli : le dire évite
                de chercher pourquoi les canaux configurés restent muets. -->
@@ -481,21 +476,11 @@
         {#if kindsNotice}<p class="ok" role="status">{kindsNotice}</p>{/if}
       </section>
 
-      <!--
-        Un intitulé de groupe et un filet, pas un titre de plus : les cartes
-        portent déjà leur nom, ce qu'il manque c'est de dire où commence la
-        série. Même forme que la séparation « Réglage destructif » de
-        Réglages — un seul motif pour « groupe de cartes » vaut mieux que
-        deux ; c'est la couleur, rouge là-bas, qui distingue l'avertissement.
-      -->
-      <div class="group full">
-        <span class="group-title">{$_('notify.tab_channels')}</span>
-        <span class="group-rule" aria-hidden="true"></span>
-      </div>
+      <h2 class="sec-h full">{$_('notify.tab_channels')}</h2>
 
       <!-- Webhook -->
       {@const hookOpen = chOpen('webhook', status.webhook.configured, status.webhook.unreadable)}
-      <section class="card lp-card">
+      <section class="chan lp-card">
         <button
           class="ch-head"
           type="button"
@@ -569,7 +554,7 @@
 
       <!-- SMTP -->
       {@const smtpOpen = chOpen('smtp', status.smtp.configured, status.smtp.unreadable)}
-      <section class="card lp-card">
+      <section class="chan lp-card">
         <button
           class="ch-head"
           type="button"
@@ -696,10 +681,7 @@
        confondus, pour repérer d'un coup d'œil celui qu'on a oublié
        d'activer. C'est un état, pas un formulaire. -->
   {#if $isAdmin}
-    <div class="group full">
-      <span class="group-title">{$_('notify.tab_subs')}</span>
-      <span class="group-rule" aria-hidden="true"></span>
-    </div>
+    <h2 class="sec-h full">{$_('notify.tab_subs')}</h2>
   {/if}
 
   {#if subsLoading}
@@ -709,33 +691,44 @@
       <button class="lp-btn primary" onclick={loadSubs}>{$_('common.retry')}</button>
     </StateBlock>
   {:else if groups.length === 0}
-    <StateBlock tone="empty" title={$_('notify.no_site_title')} body={$_('notify.no_site_body')}>
-      <a class="lp-btn primary" href="#/">{$_('notify.no_site_cta')}</a>
-    </StateBlock>
+    <div class="full">
+      <StateBlock tone="empty" title={$_('notify.no_site_title')} body={$_('notify.no_site_body')}>
+        <a class="lp-btn primary" href="#/">{$_('notify.no_site_cta')}</a>
+      </StateBlock>
+    </div>
   {:else}
-    <section class="card lp-card full">
-      <p class="lead">{$_('notify.subs_moved')}</p>
-
-      <div class="overview">
-        {#each groups as g (g.site_id)}
-          {@const on = g.probes.filter((p) => p.enabled).length}
-          <div class="orow">
-            <span class="oname">{g.name}</span>
-            <span class="ostate" class:on={g.enabled}>
-              {g.enabled ? $_('notify.eff_on') : $_('notify.eff_off')}
-            </span>
-            <!-- Le compte des sondes qui alertent VRAIMENT, exceptions
-                 comprises : un site éteint dont deux sondes alertent quand
-                 même ne se lit sur aucune case à cocher. -->
-            <span class="ocount">{$_('notify.subs_count', { values: { n: on, total: g.probes.length } })}</span>
-          </div>
-        {/each}
+    <div class="full">
+      <div class="lp-tbl-wrap">
+        <table class="lp-t">
+          <thead>
+            <tr>
+              <th>{$_('notify.col_site')}</th>
+              <th>{$_('notify.col_state')}</th>
+              <th class="num">{$_('notify.col_probes')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each groups as g (g.site_id)}
+              {@const on = g.probes.filter((p) => p.enabled).length}
+              <tr>
+                <td>{g.name}</td>
+                <td class:off={!g.enabled}>{g.enabled ? $_('notify.eff_on') : $_('notify.eff_off')}</td>
+                <!-- Le compte des sondes qui alertent VRAIMENT, exceptions
+                     comprises : un site éteint dont deux sondes alertent quand
+                     même ne se lit sur aucune case à cocher. -->
+                <td class="num">{$_('notify.subs_count', { values: { n: on, total: g.probes.length } })}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </div>
-
-      <div class="row-btns">
-        <a class="lp-btn" href="#/">{$_('notify.subs_goto_fleet')}</a>
-      </div>
-    </section>
+      <!-- Les abonnements se RÈGLENT sur le site, dans le parc ; ici, la vue
+           d'ensemble, pour repérer le site qu'on a oublié d'activer. -->
+      <p class="foot">
+        {$_('notify.subs_moved')}
+        <a class="lp-link" href="#/">{$_('notify.subs_goto_fleet')}</a>
+      </p>
+    </div>
   {/if}
 </div>
 
@@ -756,27 +749,64 @@
 </Modal>
 
 <style>
+  /* Sections à plat, comme Réglages : un titre, puis des rangées « libellé à
+     gauche, contrôle à droite » séparées par un filet. */
+  .sec {
+    display: grid;
+  }
+  .sec h2,
+  .sec-h {
+    font-size: 1.125rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 8px 0 8px;
+  }
+  .set {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 24px;
+    flex-wrap: wrap;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--color-rule);
+  }
+  label.set {
+    cursor: pointer;
+  }
+  .set-l {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    flex: 1 1 260px;
+  }
+  .set-n {
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+  .set-s {
+    font-size: 0.8125rem;
+    color: var(--color-muted);
+  }
+  .set-r {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  td.off {
+    color: var(--color-muted);
+  }
+  .foot {
+    font-size: 0.8125rem;
+    color: var(--color-muted);
+    margin: 8px 0 0;
+  }
+  .foot a {
+    margin-left: 8px;
+  }
   /* Intitulé de groupe : le même motif que la zone « Réglage destructif » de
      Réglages — petite capitale et filet — mais en gris. La forme dit « une
      série de cartes commence ici » ; c'est le rouge, là-bas, qui dit
      « attention », pas la forme. */
-  .group {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 6px;
-  }
-  .group-title {
-    font-size: 0.8125rem;
-    font-weight: 700;
-    color: var(--color-muted);
-    flex-shrink: 0;
-  }
-  .group-rule {
-    flex: 1;
-    height: 1px;
-    background: var(--ep-border);
-  }
 
   /* Deux colonnes : les cartes de cet écran sont étroites et hautes, et
      empilées elles laissaient les deux tiers de la largeur vides sur un
@@ -803,45 +833,12 @@
   .cards:focus {
     outline: none;
   }
-  .kinds {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .kind {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: baseline;
-    column-gap: 8px;
-    padding: 6px 0;
-    border-top: 1px solid var(--ep-border, #2a2a35);
-    cursor: pointer;
-    font-size: 0.875rem;
-  }
-  .kind-why {
-    grid-column: 2;
-    font-size: 0.8125rem;
-    color: var(--ep-text-secondary);
-    line-height: 1.45;
-  }
-  .card {
+  .chan {
     padding: 16px;
     display: flex;
     flex-direction: column;
     gap: 12px;
     min-width: 0;
-  }
-  .lead {
-    font-size: 0.8125rem;
-    color: var(--ep-text-secondary);
-    margin: 0;
-  }
-  .sub {
-    font-size: 0.8125rem;
-    color: var(--ep-text-secondary);
-    line-height: 1.6;
-    margin: -6px 0 0;
-    max-width: 74ch;
   }
   .hint {
     font-size: 0.8125rem;
@@ -849,81 +846,8 @@
     line-height: 1.5;
     max-width: 74ch;
   }
-  .muted {
-    color: var(--ep-text-muted);
-    font-size: 0.8125rem;
-    margin: 0;
-  }
 
-  .site-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .switch {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.8125rem;
-    color: var(--ep-text-primary);
-    cursor: pointer;
-  }
-  .switch input {
-    accent-color: var(--ep-accent);
-    width: 16px;
-    height: 16px;
-  }
 
-  .probes {
-    display: flex;
-    flex-direction: column;
-    border-top: 1px solid var(--ep-border);
-  }
-  .prow {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 190px 150px;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--ep-border);
-  }
-  .prow:last-child {
-    border-bottom: none;
-  }
-  .pname {
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: var(--ep-text-primary);
-    overflow-wrap: anywhere;
-  }
-  .sel {
-    font-family: var(--ep-font-sans);
-  }
-  .prow .sel {
-    min-height: 30px;
-    padding: 5px 8px;
-    font-size: 0.8125rem;
-  }
-  /* L'état effectif est du texte, pas une couleur seule : « inactif » doit se
-     lire, y compris quand la ligne est parcourue en diagonale. */
-  .eff {
-    display: flex;
-    flex-direction: column;
-    font-size: 0.8125rem;
-    color: var(--ep-text-muted);
-    text-align: right;
-  }
-  .eff.on {
-    color: var(--ep-success);
-    font-weight: 600;
-  }
-  .from {
-    font-size: 0.75rem;
-    color: var(--ep-text-dim);
-    font-weight: 400;
-  }
 
   /* L'en-tête est devenu le bouton de l'accordéon : il garde exactement
      l'apparence qu'il avait (aucun fond, aucune bordure de bouton), parce
@@ -958,59 +882,24 @@
     transform: rotate(90deg);
   }
   /* Vue d'ensemble des abonnements : un état, pas un formulaire. */
-  .overview {
-    display: flex;
-    flex-direction: column;
-    margin: 0.2rem 0 0.9rem;
-  }
-  .orow {
-    display: grid;
-    grid-template-columns: 1fr auto auto;
-    align-items: center;
-    gap: 0.8rem;
-    padding: 0.42rem 0;
-    border-top: 1px solid var(--lp-border);
-  }
-  .oname {
-    font-size: 0.87rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ostate {
-    font-size: 0.74rem;
-    color: var(--lp-muted);
-  }
-  .ostate.on {
-    color: var(--lp-ok, #2f9e5f);
-  }
-  .ocount {
-    font-size: 0.74rem;
-    color: var(--lp-muted);
-    min-width: 5.5rem;
-    text-align: right;
-  }
   .pill {
-    font-size: 0.8125rem;
-    font-weight: 700;
+    font-size: 0.75rem;
+    font-weight: 500;
     padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--ep-border-strong);
-    color: var(--ep-text-muted);
+    border-radius: 3px;
+    border: 1px solid var(--color-rule-2);
+    color: var(--color-muted);
     white-space: nowrap;
   }
   .pill.set {
-    border-color: color-mix(in srgb, var(--ep-success) 55%, var(--ep-border));
-    background: color-mix(in srgb, var(--ep-success) 10%, transparent);
-    color: var(--ep-success);
+    color: var(--color-ink-2);
   }
   /* Trois états, trois traitements. « Illisible » emprunte le rouge parce que
      c'est une perte : la valeur existe et ne servira plus. « Non configuré »
      reste gris — ce n'est pas une panne, c'est une étape pas encore faite. */
   .pill.unreadable {
-    border-color: var(--ep-danger);
-    background: color-mix(in srgb, var(--ep-danger) 10%, transparent);
-    color: var(--ep-danger);
+    border-color: var(--st-bad);
+    color: var(--st-bad);
   }
   .warn {
     border: 1px solid color-mix(in srgb, var(--ep-danger) 45%, var(--ep-border));
@@ -1027,7 +916,7 @@
 
   /* Un champ de saisie de 1 200 px est illisible : l'œil perd le début de la
      ligne. La carte prend toute la largeur, ses champs non. */
-  .card :global(.lp-field) {
+  .chan :global(.lp-field) {
     max-width: 620px;
   }
   .pair {
@@ -1039,12 +928,6 @@
   .grow {
     flex: 1 1 200px;
     min-width: 0;
-  }
-  .inline {
-    display: flex;
-    align-items: flex-end;
-    gap: 12px;
-    flex-wrap: wrap;
   }
   .unit-row {
     display: flex;
@@ -1163,20 +1046,4 @@
     margin: 0;
   }
 
-  /* À 390 px la ligne d'une sonde s'empile : le nom sur une ligne, la règle et
-     l'état effectif côte à côte en dessous. Une liste déroulante de 190 px et
-     un nom de sonde ne tiennent pas sur la même ligne sans écraser l'un des
-     deux — et c'est le nom qu'on lit en premier. */
-  @media (max-width: 700px) {
-    .prow {
-      grid-template-columns: minmax(0, 1fr) auto;
-      row-gap: 6px;
-    }
-    .pname {
-      grid-column: 1 / -1;
-    }
-    .eff {
-      text-align: right;
-    }
-  }
 </style>
