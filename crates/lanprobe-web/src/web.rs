@@ -5956,6 +5956,13 @@ fn is_measurement_name(value: &str) -> bool {
 /// part au journal du conteneur, où l'opérateur le retrouve.
 pub(crate) fn influx_failure(actor: &Identity, detail: &str) -> Response {
     tracing::warn!("lecture InfluxDB refusée pour {} : {detail}", actor.username);
+    // Saturation : ce n'est pas une panne, c'est « plus tard ». 503 + Retry-After
+    // pour que le front garde ses dernières courbes et relise au prochain tour.
+    if crate::influx::is_busy(detail) {
+        let mut r = fail(StatusCode::SERVICE_UNAVAILABLE, "hub occupé : réessayez dans quelques secondes");
+        r.headers_mut().insert("retry-after", axum::http::HeaderValue::from_static("5"));
+        return r;
+    }
     if actor.role == Role::Admin {
         fail(StatusCode::BAD_GATEWAY, detail)
     } else {
@@ -9946,6 +9953,22 @@ mod tests {
         assert_eq!(flux.matches("fn: mean").count(), 3, "{flux}");
         assert_eq!(flux.matches("every: 3h").count(), 5, "{flux}");
         assert_eq!(flux.matches("createEmpty: false").count(), 5, "{flux}");
+    }
+
+    #[test]
+    fn a_saturated_influx_answers_503_with_retry_after_and_a_real_failure_stays_502() {
+        let admin = Identity {
+            username: "a".into(),
+            role: Role::Admin,
+            scope: crate::db::Scope::All,
+            device_id: None,
+            demo: false,
+        };
+        let busy = influx_failure(&admin, &format!("{} : trop de lectures", crate::influx::BUSY_PREFIX));
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(busy.headers().get("retry-after").unwrap(), "5");
+        let down = influx_failure(&admin, "InfluxDB injoignable : refused");
+        assert_eq!(down.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]

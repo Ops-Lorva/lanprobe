@@ -9,7 +9,8 @@
 //! une politique de rétention, pas une frontière de sécurité — le contrôle
 //! d'accès est fait par le hub, en SQL.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -112,6 +113,40 @@ pub struct Influx {
     /// Empreinte du certificat d'Influx, calculée à la demande puis mise en
     /// cache : un handshake par enrôlement serait du gaspillage.
     tls_fingerprint: Mutex<Option<String>>,
+    /// Garde-fou des LECTURES Flux : au plus `QUERY_SLOTS` à la fois vers
+    /// Influx, attente bornée, délai maximal. Le front ne suffit pas : un
+    /// script, un vieil onglet ou dix opérateurs empilent des requêtes de
+    /// plusieurs secondes jusqu'à saturer tous les cœurs d'Influx (mesuré
+    /// le 16/11 : 280 % de CPU, hub muet, dès deux fiches ouvertes).
+    query_slots: Arc<tokio::sync::Semaphore>,
+    queue_wait: Duration,
+    query_timeout: Duration,
+}
+
+/// Lectures Flux simultanées admises. Les cœurs d'Influx se partagent avec les
+/// écritures des sondes : on garde de la marge pour elles.
+const QUERY_SLOTS: usize = 2;
+/// Attente maximale d'une place avant de répondre « occupé » (503).
+const QUEUE_WAIT: Duration = Duration::from_secs(8);
+/// Durée maximale d'une requête Flux, place comprise.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Préfixe des erreurs de saturation : `influx_failure` y reconnaît un 503
+/// (« réessayez ») plutôt qu'un 502 (« Influx est en panne »).
+pub const BUSY_PREFIX: &str = "InfluxDB occupé";
+
+/// Réglage par variable d'environnement ; une valeur illisible retombe sur le
+/// défaut, jamais sur 0 (un plafond nul bloquerait toutes les lectures).
+fn env_number(name: &str, default: u64) -> u64 {
+    parse_number(std::env::var(name).ok().as_deref(), default)
+}
+
+fn parse_number(raw: Option<&str>, default: u64) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default)
+}
+
+pub fn is_busy(detail: &str) -> bool {
+    detail.starts_with(BUSY_PREFIX)
 }
 
 impl Influx {
@@ -131,7 +166,25 @@ impl Influx {
             http,
             ids: Mutex::new(None),
             tls_fingerprint: Mutex::new(None),
+            query_slots: Arc::new(tokio::sync::Semaphore::new(
+                env_number("LANPROBE_INFLUX_QUERY_SLOTS", QUERY_SLOTS as u64).max(1) as usize,
+            )),
+            queue_wait: Duration::from_secs(env_number(
+                "LANPROBE_INFLUX_QUEUE_WAIT_SECS",
+                QUEUE_WAIT.as_secs(),
+            )),
+            query_timeout: Duration::from_secs(
+                env_number("LANPROBE_INFLUX_QUERY_TIMEOUT_SECS", QUERY_TIMEOUT.as_secs()).max(1),
+            ),
         }
+    }
+
+    /// Règle le garde-fou des lectures (les tests, ou un futur réglage).
+    pub fn with_query_limits(mut self, slots: usize, queue_wait: Duration, timeout: Duration) -> Self {
+        self.query_slots = Arc::new(tokio::sync::Semaphore::new(slots.max(1)));
+        self.queue_wait = queue_wait;
+        self.query_timeout = timeout;
+        self
     }
 
     /// Résout l'URL d'Influx à annoncer à une sonde, et dit d'où elle vient.
@@ -423,6 +476,28 @@ impl Influx {
     /// Proxifie une requête Flux. Le navigateur ne parle jamais directement à
     /// Influx : le jeton de lecture reste côté serveur.
     pub async fn query_flux(&self, flux: &str) -> Result<String, String> {
+        // 1. Une place, ou « occupé » : on ne fait pas attendre indéfiniment un
+        //    navigateur dont la prochaine relecture arrive dans 3 s.
+        let _slot = match tokio::time::timeout(self.queue_wait, self.query_slots.clone().acquire_owned()).await {
+            Ok(Ok(slot)) => slot,
+            _ => {
+                return Err(format!(
+                    "{BUSY_PREFIX} : trop de lectures en cours, réessayez dans quelques secondes"
+                ))
+            }
+        };
+        // 2. Un délai : la requête abandonnée rend sa place (le `drop` de la
+        //    connexion fait annuler la requête côté Influx).
+        match tokio::time::timeout(self.query_timeout, self.query_flux_unguarded(flux)).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "InfluxDB n'a pas répondu dans le délai de {} s — fenêtre trop large ?",
+                self.query_timeout.as_secs()
+            )),
+        }
+    }
+
+    async fn query_flux_unguarded(&self, flux: &str) -> Result<String, String> {
         let url = format!(
             "{}/api/v2/query?org={}",
             self.settings.influx_url().trim_end_matches('/'),
@@ -1686,5 +1761,115 @@ mod flux_refusal_tests {
         ] {
             assert_eq!(flux_refusal(flux), None, "refus à tort de : {flux}");
         }
+    }
+}
+
+#[cfg(test)]
+mod query_guard_tests {
+    //! Garde-fou des lectures Flux : plafond de requêtes simultanées, attente
+    //! bornée, délai maximal. Mesuré le 16/11 : sans lui, un script ou un vieil
+    //! onglet empile des requêtes de 8 à 20 s jusqu'à saturer tous les cœurs.
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    struct SlowInflux {
+        base_url: String,
+        peak: Arc<AtomicUsize>,
+        served: Arc<AtomicUsize>,
+    }
+
+    async fn slow_influx(hold: Duration) -> SlowInflux {
+        use axum::{routing::post, Router};
+        let (now, peak, served) = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let (n, p, s) = (now.clone(), peak.clone(), served.clone());
+        let app = Router::new().route(
+            "/api/v2/query",
+            post(move || {
+                let (n, p, s) = (n.clone(), p.clone(), s.clone());
+                async move {
+                    let cur = n.fetch_add(1, Ordering::SeqCst) + 1;
+                    p.fetch_max(cur, Ordering::SeqCst);
+                    tokio::time::sleep(hold).await;
+                    n.fetch_sub(1, Ordering::SeqCst);
+                    s.fetch_add(1, Ordering::SeqCst);
+                    "result,table,_value\n"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        SlowInflux { base_url: format!("http://{addr}"), peak, served }
+    }
+
+    #[tokio::test]
+    async fn never_more_than_the_cap_of_queries_reach_influx_at_once() {
+        let fake = slow_influx(Duration::from_millis(80)).await;
+        let influx = Arc::new(
+            influx_for_guard(&fake.base_url)
+                .with_query_limits(2, Duration::from_secs(5), Duration::from_secs(5)),
+        );
+        let tasks: Vec<_> = (0..10)
+            .map(|i| {
+                let influx = influx.clone();
+                tokio::spawn(async move { influx.query_flux(&format!("q{i}")).await })
+            })
+            .collect();
+        for t in tasks {
+            assert!(t.await.unwrap().is_ok(), "une requête patiente doit aboutir");
+        }
+        assert_eq!(fake.served.load(Ordering::SeqCst), 10);
+        assert!(fake.peak.load(Ordering::SeqCst) <= 2, "pic = {}", fake.peak.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_saturated_queue_answers_busy_instead_of_piling_up() {
+        let fake = slow_influx(Duration::from_millis(600)).await;
+        let influx = Arc::new(
+            influx_for_guard(&fake.base_url)
+                .with_query_limits(1, Duration::from_millis(100), Duration::from_secs(5)),
+        );
+        let first = {
+            let influx = influx.clone();
+            tokio::spawn(async move { influx.query_flux("long").await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let refused = influx.query_flux("second").await.expect_err("la file est pleine");
+        assert!(is_busy(&refused), "{refused}");
+        assert!(first.await.unwrap().is_ok(), "celle qui tenait la place aboutit");
+        assert_eq!(fake.served.load(Ordering::SeqCst), 1, "la refusée n'a jamais atteint Influx");
+    }
+
+    #[tokio::test]
+    async fn a_query_that_outlives_the_timeout_is_abandoned_and_frees_its_slot() {
+        let fake = slow_influx(Duration::from_secs(3)).await;
+        let influx = influx_for_guard(&fake.base_url)
+            .with_query_limits(1, Duration::from_secs(5), Duration::from_millis(150));
+        let err = influx.query_flux("trop longue").await.expect_err("délai dépassé");
+        assert!(err.contains("délai"), "{err}");
+        assert!(!is_busy(&err), "un délai n'est pas une saturation : {err}");
+        // La place est rendue : la requête suivante n'attend pas la précédente.
+        let t0 = std::time::Instant::now();
+        let _ = influx.query_flux("suivante").await;
+        assert!(t0.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn an_unreadable_setting_keeps_the_default() {
+        assert_eq!(parse_number(Some("2"), 4), 2);
+        assert_eq!(parse_number(Some(" 3 "), 4), 3);
+        assert_eq!(parse_number(Some("beaucoup"), 4), 4);
+        assert_eq!(parse_number(None, 4), 4);
+    }
+
+    fn influx_for_guard(url: &str) -> Influx {
+        super::testing::influx_for(url)
     }
 }
