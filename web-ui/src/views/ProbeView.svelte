@@ -154,7 +154,7 @@
     if ($fleet.probes.length === 0) void fleet.load(onExpired);
     timer = setInterval(() => {
       void fleet.load(onExpired, { quiet: true });
-      void loadMetrics();
+      void loadMetrics({ background: true });
     }, REFRESH_MS);
   });
 
@@ -517,7 +517,23 @@
     }
   }
 
-  async function loadMetrics() {
+  // Une relecture de fond encore en cours : la suivante attend son tour au
+  // lieu de s'empiler quand le hub répond en plus de 3 s.
+  let backgroundInFlight = false;
+
+  async function loadMetrics(opts: { background?: boolean } = {}) {
+    if (opts.background) {
+      if (backgroundInFlight) return;
+      backgroundInFlight = true;
+    }
+    try {
+      await readMetrics(!!opts.background);
+    } finally {
+      if (opts.background) backgroundInFlight = false;
+    }
+  }
+
+  async function readMetrics(background: boolean) {
     // ⚠️ Le premier chargement, et lui seul, a le droit de vider l'écran : il
     // n'y a rien à garder. Passé celui-là, on tient les dernières données
     // valides jusqu'à l'arrivée des nouvelles — la règle vit dans `charts.ts`,
@@ -535,7 +551,11 @@
     // ouverte. Une lecture qui aboutit en un dixième de seconde n'a rien à
     // annoncer ; celle qui traîne, si, et elle le dit désormais VRAIMENT au
     // lieu de se confondre avec les autres.
-    const annonce = dejaRepondu
+    // 🔴 Et jamais pour la relecture de fond : derrière un proxy distant, elle
+    // dépasse ce délai à chaque tour, et les cartes s'assombrissaient toutes
+    // les 3 s. Seul un changement de fenêtre, que l'utilisateur vient de
+    // demander, s'annonce.
+    const annonce = dejaRepondu && !background
       ? setTimeout(() => (refreshing = true), ANNONCE_LECTURE_MS)
       : null;
     // ⚠️ La fenêtre est figée pour tout le tour : lue trois fois, un clic

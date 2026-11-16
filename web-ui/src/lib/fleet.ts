@@ -47,7 +47,9 @@ function create() {
     update((s) => ({
       ...s,
       loading: opts.quiet ? s.loading : s.probes.length === 0,
-      refreshing: opts.quiet || s.probes.length > 0,
+      // Une relecture de fond (`quiet`) ne grise rien : elle tournait toutes
+      // les 30 s et faisait clignoter le parc. Seul le bouton « Rafraîchir » grise.
+      refreshing: opts.quiet ? s.refreshing : s.probes.length > 0,
       error: null,
     }));
     try {
