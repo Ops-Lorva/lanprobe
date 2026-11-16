@@ -1268,6 +1268,8 @@ d'`operator`. Sans ce contrôle, le chemin scripté contournait tous les autres.
 Et la portée (revue RSSI, N4) : un compte restreint à des sites n'enrôle que
 dans un site **existant de sa portée**, et n'en crée aucun — `403` sinon, que le
 site existe ou non, pour ne pas révéler les clients du hub.
+De même, `POST /api/sites` répond `403` à un compte restreint : le site
+naîtrait hors de sa portée, invisible et inutilisable pour lui.
 
 ### Comptes — `admin`
 
@@ -3716,6 +3718,14 @@ L'adresse est celle de `client_ip` — `X-Forwarded-For` n'est lu que depuis un
 proxy de `trusted_proxies` ; une IPv6 compte pour son /64. Un redémarrage remet
 les compteurs à zéro.
 
+🔴 **Réservé avant, rendu après** (revue RSSI, N1). Chaque essai prend son
+jeton AVANT la vérification (`Limits::take` : contrôle et décompte sous le même
+verrou) et le rend s'il réussit (`Limits::refund`) — ou s'il n'a rien essayé :
+portail argon2 plein, mot de passe juste mais code TOTP absent, aucune
+cérémonie WebAuthn en cours. Compter l'échec APRÈS argon2 laissait une rafale
+simultanée passer tout entière avant le premier décompte : 60 connexions
+concurrentes donnaient 60 réponses `401` pour un budget de 10.
+
 | Route | Clé | Budget |
 |---|---|---|
 | `POST /api/login`, `/api/login/passkey/finish`, `GET /api/sites` en `Basic` | adresse | 10 échecs / 5 min |
@@ -3724,6 +3734,7 @@ les compteurs à zéro.
 | `POST /api/pair` | adresse | 10 échecs / 5 min |
 | `POST /api/devices/token` | adresse | 30 échecs / 5 min |
 | `POST /api/probes/enroll` | adresse (+ compte sur le chemin scripté) | 10 échecs / 5 min |
+| `POST /api/me/password`, `DELETE /api/me/totp` (mot de passe courant) | adresse et compte, budgets de `/api/login` | 10 échecs / 5 min et / 15 min |
 
 Refus : `429 { "error", "retry_after" }` et `Retry-After`, journalisé
 `auth.throttled` sans acteur. Un TOTP faux compte comme un échec du compte :
@@ -3733,6 +3744,18 @@ c'est le budget par compte qui borne les six chiffres.
 handler passe par `web::off_reactor` (`spawn_blocking`) — connexion, `Basic`,
 changement de mot de passe, création de compte, appairage, renouvellement de
 jeton, enrôlement. Un compte inconnu paie un argon2 factice.
+
+🔴 **Portail argon2 de 4 places pour tout le hub** (`ARGON2_CONCURRENCY`,
+`web::off_reactor_argon2`, revue RSSI N1). `spawn_blocking` laissait jusqu'à
+512 argon2 de 19 Mio tourner ensemble — plus de 9 Gio sans s'authentifier.
+Passent par le portail : `/api/login`, `GET /api/sites` en `Basic`,
+`/api/pair`, `/api/devices/token`, `/api/probes/enroll`, `POST /api/me/password`
+et `DELETE /api/me/totp`. Portail plein : `429` immédiat avec `Retry-After: 1`,
+la réservation est rendue, rien ne s'empile. La place est tenue jusqu'à la fin
+du calcul, même si le client a raccroché. Hors portail, parce qu'ils exigent
+une session web d'admin ou suivent une vérification déjà freinée : le hachage
+d'un nouveau mot de passe (création de compte, réinitialisation, changement) et
+la création d'un code d'appairage.
 
 **`Basic` refusé à un compte qui a un second facteur** (TOTP ou clé d'accès).
 
@@ -3773,6 +3796,44 @@ Le mécanisme reste en l'état. **Consigne d'exploitation** :
 - en cas de verrouillage observé (échecs `auth.login` répétés sur un même
   compte, puis des `auth.throttled`), un redémarrage du hub remet les
   compteurs à zéro.
+
+### Session web seulement — ce qu'un jeton d'appareil n'atteint pas
+
+🔴 Revue RSSI, N2 et suite. Un jeton d'appareil (`Identity.device_id`) reçoit
+`403` et une ligne `access.denied` (« session web exigée ») sur toute route qui
+règle la sécurité du compte ou administre le hub : depuis un téléphone volé,
+chacune créait un accès qui survivait à la révocation de l'appareil. Couche
+`web::web_session_only`, posée après l'authentification et le rôle.
+
+Le critère : **l'app iOS l'appelle-t-elle ?** (`lanprobe-ios`,
+`Sources/LanProbeCore/HubClient.swift` et `HubSession.swift`).
+
+| Route | Rôle | Jeton d'appareil |
+|---|---|---|
+| `POST /api/pair`, `POST /api/devices/token` | publique | **app** |
+| `GET /api/me`, `/api/me/totp`, `/api/me/passkeys` | viewer | **app** (lecture) |
+| `GET /api/me/devices`, `PATCH /api/me/devices/{id}`, `POST …/revoke`, `…/archive` | viewer | **app** |
+| `POST /api/me/pair-codes` | viewer | web seulement (A3) |
+| `POST /api/me/password`, `/lang`, `/totp/start`, `/totp/confirm`, `DELETE /api/me/totp`, `POST /api/me/passkeys/start`, `/finish`, `DELETE /api/me/passkeys/{id}` | viewer | web seulement (N2) |
+| `GET /api/sites`, `/api/probes`, `/api/settings`, `/api/settings/influx-advertise`, `/api/influx`, `/api/probe-release`, `/api/notifications/subscriptions`, `/api/portscan-profiles` | viewer | **app** (consultation) |
+| `GET /api/probes/{id}/metrics`, `/uptime`, `/inventory`, `/sla`, `/sla.csv`, `/public-ips` | viewer | **app** |
+| `GET`/`POST /api/sites/{id}/reports`, `GET /api/reports/{id}`, `/file` | viewer | **app** |
+| `POST /api/enroll-codes` | operator | **app** (équiper un site depuis le terrain) |
+| `POST /api/probes/{id}/realtime`, `/monitors/revive`, `/monitors/remove`, `GET`/`POST /api/probes/{id}/commands` | operator | **app** |
+| `POST /api/sites`, `GET /api/enroll-codes/pending`, `PUT /api/networks/label`, `POST /api/settings/influx-advertise/test`, `PUT /api/notifications/subscriptions` | operator | web seulement |
+| `PATCH`/`DELETE /api/sites/{id}`, `POST /api/sites/{id}/archive` | operator | web seulement |
+| `PATCH`/`DELETE /api/probes/{id}`, `POST …/archive`, `…/rotate`, `…/revoke-token`, `…/reenroll-code` | operator | web seulement |
+| `GET /api/packages`, `POST /api/packages/{p}/fetch`, `GET /api/packages/{p}/file` | operator | web seulement |
+| `POST /api/portscan-profiles`, `PATCH`/`DELETE /api/portscan-profiles/{id}` | operator | web seulement |
+| `GET /api/devices`, `POST /api/devices/{id}/revoke`, `…/rotate`, `…/archive` | admin | web seulement |
+| `PUT /api/settings`, `PUT /api/settings/influx-advertise`, `POST /api/influx/read-token`, `GET /api/influx/read-tokens`, `DELETE /api/influx/read-tokens/{id}` | admin | web seulement |
+| `GET`/`POST /api/users`, `PATCH /api/users/{u}`, `POST /api/users/{u}/password` | admin | web seulement |
+| `GET /api/audit`, `GET /api/notifications`, `PUT`/`DELETE /api/notifications/webhook`, `…/smtp`, `POST /api/notifications/test`, `…/test/{channel}` | admin | web seulement |
+| `POST /api/backup`, `GET /api/backups`, `GET`/`POST /api/backups/{file}`, `POST /api/backup/restore`, `…/restore/{file}` | admin | web seulement |
+
+⚠️ Une route ajoutée demain dans l'un de ces groupes en hérite. Une route que
+l'app se met à appeler doit, elle, quitter son groupe « web seulement » — et
+la table ci-dessus avec.
 
 ### A3 — un appareil n'émet pas de code d'appairage
 
