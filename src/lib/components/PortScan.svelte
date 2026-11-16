@@ -6,6 +6,22 @@
   import { scheduler } from '../stores/scheduler';
   import { get } from 'svelte/store';
   import SchedulerControl from './SchedulerControl.svelte';
+  import ScreenHead from './ScreenHead.svelte';
+  import StateMark from './StateMark.svelte';
+  import { discoveryStore } from '../stores/discovery';
+  import { screenKind } from '../screen';
+  import { locale } from 'svelte-i18n';
+
+  const isCell = screenKind() === 'cell';
+  const lang = $derived($locale ?? 'en');
+  /** La machine dont le détail s'affiche à droite ; la première par défaut. */
+  let selectedIp = $state<string | null>(null);
+  const entries = $derived([...$portscan.values()]);
+  const current = $derived(entries.find((e) => e.ip === selectedIp) ?? entries[0] ?? null);
+  const hostOf = (ip: string) => $discoveryStore.results.get(ip);
+  const hm = (ts: number) => new Date(ts).toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' });
+  const profileLabel = (p: PortScanProfile) =>
+    $_('port_scan.profile_option', { values: { name: p.from_hub ? `★ ${p.name}` : p.name, t: p.tcp_ports.length, u: p.udp_ports.length } });
 
   let newIp = $state('');
   let showManager = $state(false);
@@ -53,6 +69,7 @@
     const ip = newIp.trim();
     if (!ip) return;
     newIp = '';
+    selectedIp = ip;
     await portscan.add(ip, activeProfile?.tcp_ports, activeProfile?.udp_ports, activeProfile?.id ?? null, activeProfile?.name ?? null);
     const sched = get(scheduler);
     scheduler.save({ ...sched, portscan_targets: [...new Set([...sched.portscan_targets, ip])] });
@@ -132,307 +149,203 @@
   }
 </script>
 
-<div class="page">
-  <div class="header">
-    <h1>{$_('port_scan.title')}</h1>
-    <div class="add-row">
-      <select class="profile-select" value={activeId} onchange={(e) => portscanProfiles.setActive((e.currentTarget as HTMLSelectElement).value)}>
-        {#each $visibleProfiles as p (p.id)}
-          <option value={p.id}>{p.from_hub ? `★ ${p.name}` : p.name} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
-        {/each}
-      </select>
-      <button class="icon-btn" title={$_('port_scan.manage_profiles')} onclick={() => showManager = true}>⚙</button>
-      <input bind:value={newIp} placeholder={$_('port_scan.placeholder')} onkeydown={(e) => e.key === 'Enter' && addHost()} />
-      <button class="primary" onclick={addHost}>{$_('port_scan.add')}</button>
-      <SchedulerControl field="portscan_interval_min" />
-    </div>
-  </div>
-
-  <div class="list">
-    {#each [...$portscan.values()] as entry (entry.ip)}
-      <div class="card">
-        <div
-          class="card-header"
-          role="button"
-          tabindex="0"
-          onclick={() => portscan.toggle(entry.ip)}
-          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); portscan.toggle(entry.ip); } }}
-        >
-          <span class="chevron" class:expanded={entry.expanded}>▸</span>
-          <span class="ip">{entry.ip}</span>
-          {#if entry.scanning}
-            <span class="badge scanning">{$_('port_scan.scanning')}</span>
-          {:else if entry.error}
-            <span class="badge err">{$_('port_scan.error')}</span>
-          {:else}
-            <span class="badge done">{$_('port_scan.open_count', { values: { n: openCount(entry) } })}</span>
-          {/if}
-          {#if entry.profileName}
-            <span class="badge profile" title={$_('port_scan.scanned_with')}>★ {entry.profileName}</span>
-          {/if}
-          {#if entry.scannedAt && !entry.scanning}
-            <span class="timestamp">{formatScannedAt(entry.scannedAt)}</span>
-          {/if}
-          <span class="spacer"></span>
-          <button class="mini" onclick={(e) => { e.stopPropagation(); rescan(entry); }} title={$_('port_scan.rescan')}>⟳</button>
-          <button class="mini" onclick={(e) => { e.stopPropagation(); removeHost(entry.ip); }} title={$_('port_scan.remove')}>✕</button>
-        </div>
-
-        {#if entry.expanded}
-          <div class="card-body">
-            <div class="entry-toolbar">
-              <label class="entry-profile">
-                <span class="entry-profile-label">{$_('port_scan.rescan_with')}</span>
-                <select
-                  value={entry.profileId ?? activeId}
-                  disabled={entry.scanning}
-                  onchange={(e) => rescanWith(entry.ip, (e.currentTarget as HTMLSelectElement).value)}
-                >
-                  {#each $visibleProfiles as p (p.id)}
-                    <option value={p.id}>{p.from_hub ? `★ ${p.name}` : p.name} ({p.tcp_ports.length}T/{p.udp_ports.length}U)</option>
-                  {/each}
-                </select>
-              </label>
-            </div>
-            {#if entry.error}
-              <div class="error">{entry.error}</div>
-            {/if}
-
-            <div class="section-title">{$_('port_scan.tcp')}</div>
-            {#if entry.tcpResults.length === 0 && entry.scanning}
-              <div class="pending">{$_('port_scan.pending')}</div>
-            {:else}
-              {@const openTcp = entry.tcpResults.filter(r => r.open)}
-              {#if openTcp.length === 0}
-                <div class="pending">{$_('port_scan.no_open')}</div>
-              {:else}
-                <div class="port-grid">
-                  {#each openTcp as r}
-                    <div class="port-row open">
-                      <span class="dot green"></span>
-                      <span class="port-num">{r.port}</span>
-                      <span class="service">{r.service}</span>
-                      <span class="status">{$_('port_scan.state_open')}</span>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            {/if}
-
-            <div class="section-title">
-              {$_('port_scan.udp')}
-              <span class="hint">{$_('port_scan.udp_hint')}</span>
-            </div>
-            {#if entry.udpResults.length === 0 && entry.scanning}
-              <div class="pending">{$_('port_scan.pending')}</div>
-            {:else}
-              {@const openUdp = entry.udpResults.filter(r => r.open)}
-              {#if openUdp.length === 0}
-                <div class="pending">{$_('port_scan.no_open')}</div>
-              {:else}
-                <div class="port-grid">
-                  {#each openUdp as r}
-                    <div class="port-row open">
-                      <span class="dot green"></span>
-                      <span class="port-num">{r.port}</span>
-                      <span class="service">{r.service}</span>
-                      <span class="status">{$_('port_scan.state_open')}</span>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            {/if}
-          </div>
-        {/if}
-      </div>
-    {:else}
-      <p class="empty">{$_('port_scan.empty')}</p>
+{#snippet profileSelect(cls: string)}
+  <select class="select {cls}" style="width:auto;max-width:220px" value={activeId} aria-label={$_('port_scan.profile')}
+          onchange={(e) => portscanProfiles.setActive((e.currentTarget as HTMLSelectElement).value)}>
+    {#each $visibleProfiles as p (p.id)}
+      <option value={p.id}>{profileLabel(p)}</option>
     {/each}
-  </div>
+  </select>
+{/snippet}
 
-  {#if showManager}
-    <div class="modal-backdrop" role="button" tabindex="0"
-      onclick={() => { showManager = false; editing = null; }}
-      onkeydown={(e) => { if (e.key === 'Escape') { showManager = false; editing = null; } }}>
-      <div class="modal" role="dialog" tabindex="-1"
-        onclick={(e) => e.stopPropagation()}
-        onkeydown={(e) => e.stopPropagation()}>
-        <div class="modal-head">
-          <h2>{$_('port_scan.manage_profiles')}</h2>
-          <button class="icon-btn" onclick={() => { showManager = false; editing = null; }}>✕</button>
+<div class="screen">
+  <ScreenHead title={$_('port_scan.title')}>
+    {#snippet acts()}
+      {#if isCell}
+        <button class="btn sm primary" type="button" onclick={addHost} disabled={!newIp.trim()}>{$_('port_scan.add')}</button>
+      {:else}
+        <input class="input m" style="width:200px" bind:value={newIp} placeholder={$_('port_scan.placeholder')}
+               aria-label={$_('port_scan.placeholder')} onkeydown={(e) => e.key === 'Enter' && addHost()} />
+        {@render profileSelect('')}
+        <button class="btn primary" type="button" onclick={addHost} disabled={!newIp.trim()}>{$_('port_scan.add')}</button>
+      {/if}
+    {/snippet}
+  </ScreenHead>
+
+  <div class="screen-body">
+    {#if isCell}
+      <div class="input-row" style="margin-bottom:8px">
+        <input class="input m" style="flex:1;min-width:120px" bind:value={newIp} placeholder={$_('port_scan.placeholder')}
+               aria-label={$_('port_scan.placeholder')} onkeydown={(e) => e.key === 'Enter' && addHost()} />
+        {@render profileSelect('')}
+      </div>
+    {/if}
+    <div class="filters">
+      <SchedulerControl field="portscan_interval_min" />
+      <span class="grow"></span>
+      <button class="btn sm quiet" type="button" onclick={() => showManager = true}>{$_('port_scan.manage_profiles')}</button>
+    </div>
+
+    {#if entries.length === 0}
+      <div class="tbl-wrap"><div class="state"><p>{$_('port_scan.empty')}</p></div></div>
+    {:else}
+      <div class="split">
+        <div class="tbl-wrap hosts">
+          <table class="t">
+            <tbody>
+              {#each entries as entry (entry.ip)}
+                {@const h = hostOf(entry.ip)}
+                <tr class="click" class:sel={current?.ip === entry.ip} class:trouble={!!entry.error}
+                    onclick={() => (selectedIp = entry.ip)}>
+                  <td>
+                    <button class="nm m rowbtn" type="button" aria-pressed={current?.ip === entry.ip}
+                            onclick={(e) => { e.stopPropagation(); selectedIp = entry.ip; }}>{entry.ip}</button>
+                    {#if h?.hostname}<span class="sub2">{h.hostname}</span>{/if}
+                  </td>
+                  <td class="num">
+                    {#if entry.scanning}<span class="muted">{$_('port_scan.scanning')}</span>
+                    {:else if entry.error}<StateMark mark={{ tone: 'bad', shape: 'square', key: 'port_scan.error' }} />
+                    {:else}{$_('port_scan.open_count', { values: { n: openCount(entry) } })}{/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
         </div>
 
-        {#if editing}
-          <div class="editor">
-            <label>
-              <span>{$_('port_scan.profile_name')}</span>
-              <input bind:value={editName} placeholder="My profile" />
-            </label>
-            <label>
-              <span>{$_('port_scan.tcp_ports')}</span>
-              <textarea bind:value={editTcpText} placeholder="22, 80, 443, 8000-8100"></textarea>
-            </label>
-            <label>
-              <span>{$_('port_scan.udp_ports')}</span>
-              <textarea bind:value={editUdpText} placeholder="53, 161, 500"></textarea>
-            </label>
-            <div class="editor-actions">
-              <button onclick={() => editing = null}>{$_('port_scan.cancel')}</button>
-              <button class="primary" onclick={saveEdit}>{$_('port_scan.save')}</button>
+        {#if current}
+          {@const h = hostOf(current.ip)}
+          {@const open = [...current.tcpResults, ...current.udpResults].filter(r => r.open)}
+          {@const shut = current.tcpResults.length + current.udpResults.length - open.length}
+          <section class="panel" aria-labelledby="h-ps">
+            <div class="chart-head">
+              <h2 id="h-ps" class="m">{current.ip}</h2>
+              {#if h?.hostname || h?.vendor}<span class="muted">{[h.hostname, h.vendor].filter(Boolean).join(', ')}</span>{/if}
+              <span class="acts">
+                <button class="btn sm" type="button" onclick={() => rescan(current)} disabled={current.scanning}>{$_('port_scan.rescan')}</button>
+                <button class="btn sm quiet" type="button" onclick={() => removeHost(current.ip)}>{$_('port_scan.remove')}</button>
+              </span>
             </div>
-          </div>
-        {:else}
-          <div class="profile-list">
-            {#if $visibleProfiles.some(p => p.from_hub)}
-              <p class="hub-note">{$_('port_scan.from_hub_hint')}</p>
+            <p class="psub">
+              {#if current.scanning}{$_('port_scan.pending')}
+              {:else if current.scannedAt}
+                {$_('port_scan.scanned_line', { values: {
+                  at: hm(current.scannedAt), ago: formatScannedAt(current.scannedAt),
+                  profile: current.profileName ?? '—', t: current.tcpResults.length, u: current.udpResults.length } })}
+              {/if}
+            </p>
+            <div class="input-row" style="margin-bottom:12px">
+              <label class="muted" for="rescan-with">{$_('port_scan.rescan_with')}</label>
+              <select id="rescan-with" class="select" style="width:auto" value={current.profileId ?? activeId} disabled={current.scanning}
+                      onchange={(e) => rescanWith(current.ip, (e.currentTarget as HTMLSelectElement).value)}>
+                {#each $visibleProfiles as p (p.id)}
+                  <option value={p.id}>{profileLabel(p)}</option>
+                {/each}
+              </select>
+            </div>
+            {#if current.error}
+              <div class="banner bad" role="alert"><span class="grow">{current.error}</span></div>
             {/if}
-            {#each $visibleProfiles as p (p.id)}
-              <div class="profile-row">
-                <div class="profile-meta">
-                  <div class="profile-name">{p.from_hub ? `★ ${p.name}` : p.name}</div>
-                  <div class="profile-sub">
-                    {p.tcp_ports.length} TCP · {p.udp_ports.length} UDP
-                    <!-- ⚠️ Le hub fait autorité sur ce profil : l'éditer ici
-                         tiendrait jusqu'au prochain battement, pas au-delà. Le
-                         dire vaut mieux que laisser découvrir que la
-                         modification a disparu toute seule. -->
-                    {#if p.from_hub}
-                      <span class="from-hub">· {$_('port_scan.from_hub')}</span>
-                    {/if}
-                  </div>
-                </div>
-                <div class="profile-actions">
-                  {#if !p.builtin}
-                    <button class="mini" onclick={() => openEdit(p)}>✎</button>
-                    <button class="mini" onclick={() => removeProfile(p)}>✕</button>
-                  {:else}
-                    <button class="mini" onclick={() => openEdit({ ...p, id: `custom:${Date.now()}`, name: `${p.name} copy`, builtin: false })}>⎘</button>
-                  {/if}
-                </div>
+            {#if current.scanning && open.length === 0}
+              <div class="skel" style="width:60%;margin:8px 0"></div>
+              <div class="skel" style="width:40%"></div>
+            {:else if open.length === 0}
+              <p class="muted">{$_('port_scan.no_open')}</p>
+            {:else}
+              <div class="tbl-wrap" style="border:0">
+                <table class="t">
+                  <thead><tr><th>{$_('port_scan.col_port')}</th><th>{$_('port_scan.col_proto')}</th><th>{$_('port_scan.col_service')}</th><th>{$_('port_scan.col_state')}</th></tr></thead>
+                  <tbody>
+                    {#each open as r (r.proto + r.port)}
+                      <tr>
+                        <td class="m num">{r.port}</td>
+                        <td>{r.proto.toUpperCase()}</td>
+                        <td class="m">{r.service || '—'}</td>
+                        <td><StateMark mark={{ tone: 'ok', shape: 'dot', key: 'port_scan.state_open' }} /></td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
               </div>
-            {/each}
-            <button class="primary new-profile" onclick={openNew}>+ {$_('port_scan.new_profile')}</button>
-          </div>
+            {/if}
+            {#if !current.scanning && shut > 0}
+              <p class="hint" style="margin-top:8px">{$_('port_scan.closed_count', { values: { n: shut } })}</p>
+            {/if}
+            {#if current.udpResults.length > 0}
+              <p class="hint">{$_('port_scan.udp_hint')}</p>
+            {/if}
+          </section>
         {/if}
       </div>
-    </div>
-  {/if}
+    {/if}
+  </div>
 </div>
 
+{#if showManager}
+  <div class="overlay" role="presentation"
+    onclick={() => { showManager = false; editing = null; }}
+    onkeydown={(e) => { if (e.key === 'Escape') { showManager = false; editing = null; } }}>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="h-psm" tabindex="-1"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}>
+      <div class="chart-head">
+        <h2 id="h-psm">{editing ? ($portscanProfiles.some(p => p.id === editing?.id) ? $_('port_scan.edit_profile') : $_('port_scan.new_profile')) : $_('port_scan.manage_profiles')}</h2>
+        <span class="acts"><button class="btn sm quiet" type="button" onclick={() => { showManager = false; editing = null; }}>{$_('common.close')}</button></span>
+      </div>
+
+      {#if editing}
+        <div class="field">
+          <label for="psp-name">{$_('port_scan.profile_name')}</label>
+          <input id="psp-name" class="input" bind:value={editName} placeholder={$_('port_scan.profile_name_ph')} />
+        </div>
+        <div class="field">
+          <label for="psp-tcp">{$_('port_scan.tcp_ports')}</label>
+          <textarea id="psp-tcp" class="textarea m" bind:value={editTcpText} placeholder="22, 80, 443, 8000-8100"></textarea>
+        </div>
+        <div class="field">
+          <label for="psp-udp">{$_('port_scan.udp_ports')}</label>
+          <textarea id="psp-udp" class="textarea m" bind:value={editUdpText} placeholder="53, 161, 500"></textarea>
+        </div>
+        <div class="row">
+          <button class="btn" type="button" onclick={() => editing = null}>{$_('port_scan.cancel')}</button>
+          <button class="btn primary" type="button" onclick={saveEdit} disabled={!editName.trim()}>{$_('port_scan.save')}</button>
+        </div>
+      {:else}
+        {#if $visibleProfiles.some(p => p.from_hub)}
+          <p class="hint">{$_('port_scan.from_hub_hint')}</p>
+        {/if}
+        <div class="tbl-wrap">
+          <table class="t">
+            <tbody>
+              {#each $visibleProfiles as p (p.id)}
+                <tr>
+                  <td>
+                    <span class="nm">{p.from_hub ? `★ ${p.name}` : p.name}</span>
+                    <!-- ⚠️ Le hub fait autorité sur ce profil : l'éditer ici
+                         tiendrait jusqu'au prochain battement, pas au-delà. -->
+                    <span class="sub2">{p.tcp_ports.length} TCP · {p.udp_ports.length} UDP{#if p.from_hub} · {$_('port_scan.from_hub')}{/if}</span>
+                  </td>
+                  <td class="act">
+                    {#if !p.builtin}
+                      <button class="btn sm quiet" type="button" onclick={() => openEdit(p)}>{$_('common.edit')}</button>
+                      <button class="btn sm quiet" type="button" onclick={() => removeProfile(p)}>{$_('common.delete')}</button>
+                    {:else}
+                      <button class="btn sm quiet" type="button" onclick={() => openEdit({ ...p, id: `custom:${Date.now()}`, name: $_('port_scan.copy_of', { values: { name: p.name } }), builtin: false })}>{$_('port_scan.duplicate')}</button>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <div class="row"><button class="btn primary" type="button" onclick={openNew}>{$_('port_scan.new_profile')}</button></div>
+      {/if}
+    </div>
+  </div>
+{/if}
+
 <style>
-  .page { padding: 24px; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
-  h1 { font-size: 20px; font-weight: 700; }
-  .add-row { display: flex; gap: 8px; }
-  input { background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border); border-radius: 6px; padding: 7px 12px; color: var(--ep-text-primary); font-family: var(--ep-font-mono); font-size: 13px; width: 200px; }
-  button { padding: 7px 14px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); cursor: pointer; font-size: 13px; font-weight: 600; }
-  button.primary { background: var(--ep-accent); border-color: var(--ep-accent); color: #fff; }
-  .list { display: flex; flex-direction: column; gap: 10px; }
-  .card {
-    background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-lg);
-    overflow: hidden;
-    transition: border-color 0.15s;
-  }
-  .card:hover { border-color: var(--ep-glass-border-strong); }
-  .card-header {
-    display: flex; align-items: center; gap: 12px;
-    width: 100%; padding: 14px 16px;
-    background: transparent; border: none; border-radius: 0;
-    color: var(--ep-text-primary); cursor: pointer; text-align: left;
-    font-size: 13px;
-  }
-  .card-header:hover { background: var(--ep-glass-bg-md); }
-  .chevron { display: inline-block; transition: transform 120ms ease; color: var(--ep-text-muted); font-size: 12px; }
-  .chevron.expanded { transform: rotate(90deg); }
-  .ip { font-family: var(--ep-font-mono); font-weight: 700; font-size: 14px; }
-  .spacer { flex: 1; }
-  .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 10px; }
-  .badge.scanning { background: color-mix(in srgb, var(--ep-accent) 15%, transparent); color: var(--ep-accent); }
-  .badge.done { background: color-mix(in srgb, var(--ep-success) 15%, transparent); color: var(--ep-success); }
-  .badge.err { background: color-mix(in srgb, var(--ep-danger) 15%, transparent); color: var(--ep-danger); }
-  .badge.profile { background: color-mix(in srgb, #06b6d4 15%, transparent); color: #06b6d4; }
-  .timestamp { font-size: 11px; color: var(--ep-text-muted); font-family: var(--ep-font-mono); }
-  .entry-toolbar { display: flex; justify-content: flex-end; padding-bottom: 10px; border-bottom: 1px dashed var(--ep-glass-border); margin-bottom: 10px; }
-  .entry-profile { display: flex; align-items: center; gap: 8px; font-size: 11px; }
-  .entry-profile-label { color: var(--ep-text-muted); text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
-  .entry-profile select {
-    background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border);
-    border-radius: 6px; padding: 5px 8px; color: var(--ep-text-primary);
-    font-size: 11px; font-weight: 600; cursor: pointer;
-  }
-  .mini { padding: 4px 8px; font-size: 12px; border-radius: 6px; background: transparent; border: 1px solid var(--ep-border); color: var(--ep-text-secondary); }
-  .mini:hover { background: var(--ep-bg-tertiary); color: var(--ep-text-primary); }
-  .card-body { padding: 12px 16px 16px; border-top: 1px solid var(--ep-glass-border); }
-  .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--ep-text-secondary); margin: 10px 0 8px; display: flex; gap: 8px; align-items: baseline; }
-  .section-title .hint { font-size: 10px; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--ep-text-muted); }
-  .port-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; }
-  .port-row {
-    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
-    border-radius: var(--ep-radius-sm); background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border); font-size: 12px;
-    transition: border-color 0.12s;
-  }
-  .port-row.open { border-color: var(--ep-success); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ep-border); flex-shrink: 0; }
-  .dot.green { background: var(--ep-success); }
-  .port-num { font-family: var(--ep-font-mono); font-weight: 700; min-width: 36px; }
-  .service { flex: 1; color: var(--ep-text-secondary); }
-  .status { font-size: 11px; font-weight: 600; color: var(--ep-text-muted); }
-  .port-row.open .status { color: var(--ep-success); }
-  .pending { font-size: 12px; color: var(--ep-text-muted); padding: 8px 0; }
-  .error { color: var(--ep-danger); font-size: 12px; padding: 4px 0 8px; }
-  .empty { color: var(--ep-text-muted); font-size: 14px; }
-
-  .profile-select {
-    background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border);
-    border-radius: 6px; padding: 7px 10px; color: var(--ep-text-primary);
-    font-size: 12px; font-weight: 600; cursor: pointer;
-  }
-  .icon-btn {
-    background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border);
-    color: var(--ep-text-secondary); padding: 6px 10px; border-radius: 6px;
-    font-size: 14px; cursor: pointer;
-  }
-  .icon-btn:hover { color: var(--ep-text-primary); }
-
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,.55);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 1000; padding: 20px;
-  }
-  .modal {
-    background: var(--ep-bg-secondary); border: 1px solid var(--ep-glass-border-strong);
-    border-radius: var(--ep-radius-lg); padding: 0; width: 480px; max-width: 100%;
-    max-height: 80vh; overflow: auto;
-  }
-  .modal-head {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 16px 20px; border-bottom: 1px solid var(--ep-glass-border);
-  }
-  .modal-head h2 { font-size: 15px; font-weight: 700; margin: 0; }
-  .profile-list { display: flex; flex-direction: column; gap: 6px; padding: 14px 20px 18px; }
-  .profile-row {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 12px; background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border); border-radius: var(--ep-radius-md);
-    transition: border-color 0.12s;
-  }
-  .profile-row:hover { border-color: var(--ep-glass-border-strong); }
-  .profile-name { font-size: 13px; font-weight: 700; }
-  .profile-sub { font-size: 11px; color: var(--ep-text-muted); margin-top: 2px; }
-  .from-hub { color: var(--ep-accent); }
-  .hub-note { font-size: 11px; color: var(--ep-text-muted); line-height: 1.5; margin-bottom: 4px; }
-  .profile-actions { display: flex; gap: 4px; }
-  .new-profile { margin-top: 6px; }
-  .editor { padding: 14px 20px 18px; display: flex; flex-direction: column; gap: 12px; }
-  .editor label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; font-weight: 600; color: var(--ep-text-secondary); text-transform: uppercase; letter-spacing: .5px; }
-  .editor input, .editor textarea {
-    background: var(--ep-bg-tertiary); border: 1px solid var(--ep-border);
-    border-radius: 6px; padding: 7px 10px; color: var(--ep-text-primary);
-    font-family: var(--ep-font-mono); font-size: 12px; width: 100%;
-  }
-  .editor textarea { resize: vertical; min-height: 60px; }
-  .editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .rowbtn { border: 0; background: none; padding: 0; cursor: pointer; text-align: left; }
+  .rowbtn:hover { text-decoration: underline; }
+  .hosts { max-height: 70vh; overflow-y: auto; }
 </style>
