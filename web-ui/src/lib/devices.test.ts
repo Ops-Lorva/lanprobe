@@ -261,3 +261,30 @@ describe('devicesApi', () => {
     await expect(devicesApi.myDevices()).rejects.toBeInstanceOf(ApiError);
   });
 });
+
+describe('devicesApi, appareils de tous les comptes (admin)', () => {
+  it('liste sur `/api/devices`, les masqués seulement sur demande', async () => {
+    const spy = captureFetch({ devices: [] });
+    await devicesApi.allDevices();
+    await devicesApi.allDevices(true);
+    expect(spy.mock.calls[0][0]).toBe('/api/devices');
+    expect(spy.mock.calls[1][0]).toBe('/api/devices?archived=true');
+  });
+
+  it('révoque par POST sur `/api/devices/{id}/revoke`', async () => {
+    const spy = captureFetch({ ok: true });
+    await devicesApi.revokeDevice('7f/3');
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('/api/devices/7f%2F3/revoke');
+    expect(init?.method).toBe('POST');
+  });
+
+  it('masque explicitement, dans les deux sens', async () => {
+    const spy = captureFetch({ ok: true });
+    await devicesApi.archiveDevice('d1', false);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('/api/devices/d1/archive');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({ archived: false });
+  });
+});

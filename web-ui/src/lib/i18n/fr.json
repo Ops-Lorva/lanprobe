@@ -839,7 +839,8 @@
     "scope_empty_means_nothing": "Aucune case cochée : ce compte ne verra RIEN. Un site supprimé sort de la portée sans jamais l'élargir.",
     "scope_selected": "{n} site(s) sélectionné(s). Ce compte ne verra rien d'autre.",
     "scope_probe_count": "{n, plural, =0 {aucune sonde} one {# sonde} other {# sondes}}",
-    "more": "Autres actions pour {name}"
+    "more": "Autres actions pour {name}",
+    "devices_all_scope": "tous les comptes"
   },
   "audit": {
     "title": "Journal d'audit",

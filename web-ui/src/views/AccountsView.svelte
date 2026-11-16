@@ -6,7 +6,8 @@
   import StateBlock from '$lib/components/StateBlock.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import RoleChoice from '$lib/components/RoleChoice.svelte';
-  import { dateOnly } from '$lib/time';
+  import { dateOnly, relativeTime, now } from '$lib/time';
+  import { devicesApi, deviceRows, parseDevices, type DeviceRow } from '$lib/devices';
   import { initialScope, scopePatch, scopeSummary, type ScopeMode } from '$lib/account-scope';
 
   const { onExpired } = $props<{ onExpired: () => void }>();
@@ -54,7 +55,54 @@
     }
   }
 
-  onMount(load);
+  // ── Appareils de tous les comptes ────────────────────────────────────────
+  // Un opérateur parti de l'entreprise ne révoque pas lui-même son téléphone.
+  let devices = $state<DeviceRow[]>([]);
+  let devicesError = $state('');
+  let showHidden = $state(false);
+  let devBusy = $state('');
+  let revokeTarget = $state<DeviceRow | null>(null);
+
+  async function loadDevices() {
+    devicesError = '';
+    try {
+      devices = deviceRows(parseDevices(await devicesApi.allDevices(showHidden)));
+    } catch (e) {
+      devicesError = handle(e);
+    }
+  }
+
+  async function confirmRevoke() {
+    if (!revokeTarget) return;
+    devBusy = revokeTarget.device.device_id;
+    try {
+      await devicesApi.revokeDevice(revokeTarget.device.device_id);
+      revokeTarget = null;
+      await loadDevices();
+    } catch (e) {
+      devicesError = handle(e);
+    } finally {
+      devBusy = '';
+    }
+  }
+
+  /** ⚠️ Seulement un appareil révoqué : le hub refuse les autres, l'écran n'offre pas le geste. */
+  async function setHidden(r: DeviceRow, archived: boolean) {
+    devBusy = r.device.device_id;
+    try {
+      await devicesApi.archiveDevice(r.device.device_id, archived);
+      await loadDevices();
+    } catch (e) {
+      devicesError = handle(e);
+    } finally {
+      devBusy = '';
+    }
+  }
+
+  onMount(() => {
+    void load();
+    void loadDevices();
+  });
 
   // Actifs d'abord : ce sont les comptes qui peuvent entrer, donc ceux qu'on
   // vient vérifier. Les désactivés restent visibles en dessous — ils ne sont
@@ -362,7 +410,90 @@
       </tbody>
     </table>
   </div>
+
+  <div class="lp-sec-head">
+    <h2>{$_('account.devices_title')} <span class="lp-sub">{$_('accounts.devices_all_scope')}</span></h2>
+    <div class="lp-acts">
+      <button class="lp-btn ghost sm" onclick={() => ((showHidden = !showHidden), loadDevices())}>
+        {showHidden ? $_('account.devices_hide_hidden') : $_('account.devices_show_hidden')}
+      </button>
+      <a class="lp-btn sm" href="#/account">{$_('account.devices_pair_cta')}</a>
+    </div>
+  </div>
+  {#if devicesError}<p class="err" role="alert">{devicesError}</p>{/if}
+  {#if devices.length === 0 && !devicesError}
+    <p class="empty">{$_('account.devices_empty')}</p>
+  {:else if devices.length > 0}
+    <div class="lp-tbl-wrap">
+      <table class="lp-t">
+        <thead>
+          <tr>
+            <th>{$_('account.devices_col_name')}</th>
+            <th>{$_('account.devices_owner')}</th>
+            <th>{$_('account.devices_col_platform')}</th>
+            <th class="num">{$_('account.devices_col_paired')}</th>
+            <th class="num">{$_('account.devices_col_last_seen')}</th>
+            <th>{$_('account.devices_col_last_ip')}</th>
+            <th class="act">{$_('accounts.col_actions')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each devices as r (r.device.device_id)}
+            {@const d = r.device}
+            <tr class:off={r.revoked}>
+              <td>
+                <span class="nm">{d.name}</span>
+                {#if r.revoked && d.revoked_at}
+                  <span class="sub2">{$_('account.devices_revoked', { values: { date: dateOnly(d.revoked_at, lang) } })}</span>
+                {/if}
+              </td>
+              <td>{d.username}</td>
+              <td>{[d.platform, d.app_version].filter(Boolean).join(' ') || '—'}</td>
+              <td class="num">{dateOnly(d.created_at, lang)}</td>
+              <!-- ⚠️ Affichée telle quelle, jamais convertie en verdict : il n'y a
+                   aucune révocation par inactivité. -->
+              <td class="num">
+                {#if d.last_seen == null}{$_('account.devices_never_seen')}
+                {:else if r.revoked}{dateOnly(d.last_seen, lang)}
+                {:else}{relativeTime(d.last_seen, lang, Math.max($now, d.last_seen * 1000))}{/if}
+              </td>
+              <td><span class="lp-mono ip">{d.last_ip ?? ''}</span></td>
+              <td class="act">
+                {#if !r.revoked}
+                  <button class="lp-btn ghost sm dis" disabled={devBusy !== ''} onclick={() => (revokeTarget = r)}>
+                    {$_('account.devices_revoke')}
+                  </button>
+                {:else if r.archived}
+                  <button class="lp-btn ghost sm" disabled={devBusy !== ''} title={$_('account.devices_unhide_hint')} onclick={() => setHidden(r, false)}>
+                    {$_('account.devices_unhide')}
+                  </button>
+                {:else}
+                  <button class="lp-btn ghost sm" disabled={devBusy !== ''} title={$_('account.devices_hide_hint')} onclick={() => setHidden(r, true)}>
+                    {$_('account.devices_hide')}
+                  </button>
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
 {/if}
+
+<Modal
+  open={revokeTarget !== null}
+  title={$_('account.devices_revoke')}
+  onclose={() => (revokeTarget = null)}
+>
+  <p>{$_('account.devices_revoke_confirm', { values: { name: revokeTarget?.device.name ?? '' } })}</p>
+  {#snippet footer()}
+    <button class="lp-btn" onclick={() => (revokeTarget = null)}>{$_('common.cancel')}</button>
+    <button class="lp-btn danger" onclick={confirmRevoke} disabled={devBusy !== ''}>
+      {$_('account.devices_revoke')}
+    </button>
+  {/snippet}
+</Modal>
 
 <!--
   Le choix de portée, partagé par la création et la modification. Deux
@@ -545,6 +676,21 @@
 </Modal>
 
 <style>
+  .lp-sec-head {
+    margin-top: 40px;
+  }
+  .lp-sec-head h2 .lp-sub {
+    font-weight: 400;
+    margin-left: 8px;
+  }
+  .ip {
+    font-size: 0.8125rem;
+    color: var(--color-ink-2);
+  }
+  .empty {
+    color: var(--color-muted);
+    font-size: 0.875rem;
+  }
   .nm {
     font-weight: 500;
   }

@@ -839,7 +839,8 @@
     "scope_empty_means_nothing": "Nothing ticked: this account will see NOTHING. A deleted site leaves the scope without ever widening it.",
     "scope_selected": "{n} site(s) selected. This account will see nothing else.",
     "scope_probe_count": "{n, plural, =0 {no probe} one {# probe} other {# probes}}",
-    "more": "More actions for {name}"
+    "more": "More actions for {name}",
+    "devices_all_scope": "all accounts"
   },
   "audit": {
     "title": "Audit log",

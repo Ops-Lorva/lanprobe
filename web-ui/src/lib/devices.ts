@@ -254,4 +254,23 @@ export const devicesApi = {
       method: 'POST',
       body: JSON.stringify({ archived }),
     }),
+
+  // ── Tous les comptes (admin) ───────────────────────────────────────────
+  // Un opérateur parti de l'entreprise ne révoque pas lui-même son téléphone.
+  // ⚠️ Pas de renommage ici : le hub ne l'ouvre qu'au titulaire
+  // (`PATCH /api/me/devices/{id}`).
+
+  /** ⚠️ Les masqués sont exclus sauf demande. */
+  allDevices: (archived = false) =>
+    request<unknown>(archived ? '/api/devices?archived=true' : '/api/devices'),
+
+  revokeDevice: (deviceId: string) =>
+    request<unknown>(`/api/devices/${encodeURIComponent(deviceId)}/revoke`, { method: 'POST' }),
+
+  /** Même règle que pour les siens : seulement un appareil déjà révoqué. */
+  archiveDevice: (deviceId: string, archived: boolean) =>
+    request<unknown>(`/api/devices/${encodeURIComponent(deviceId)}/archive`, {
+      method: 'POST',
+      body: JSON.stringify({ archived }),
+    }),
 };
