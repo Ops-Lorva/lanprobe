@@ -8,8 +8,17 @@
   import { selectedInterface } from '../stores/selectedInterface';
   import { settings } from '../stores/settings';
   import { api, type InterfaceDetails } from '../tauri';
-  import StatRail from './StatRail.svelte';
-  import HostRow from './HostRow.svelte';
+  import { locale } from 'svelte-i18n';
+  import ScreenHead from './ScreenHead.svelte';
+  import StateMark from './StateMark.svelte';
+  import LatencySpark from './LatencySpark.svelte';
+  import NavIcon from './NavIcon.svelte';
+  import SchedulerControl from './SchedulerControl.svelte';
+  import { internetStatus } from '../stores/internetStatus';
+  import { hubStatus } from '../stores/hub';
+  import { hubMark, internetMark, targetMark } from '../status';
+  import { fmtNum, targetStats } from '../format';
+  import { screenKind, navigateFn } from '../screen';
 
   const isWeb = typeof window !== 'undefined' && (window as any).__LANPROBE_WEB__ === true;
   const isHeadless = typeof window !== 'undefined' && (window as any).__LANPROBE_HEADLESS__ === true;
@@ -138,28 +147,22 @@
     }
   }
 
-  // Rattachement à un hub : visible seulement s'il y en a un. Le rattachement
-  // est optionnel, son absence n'est pas un défaut à signaler.
+  // Rattachement à un hub : relevé partagé (`stores/hub`). Le rattachement est
+  // optionnel, son absence n'est pas un défaut à signaler.
   // ⚠️ `refused_status` : `null` = rien n'a répondu, un code = on a répondu et
   // on a refusé. Sans lui, un 403 renvoyé par un proxy devant un hub en pleine
   // forme s'affichait « Hub injoignable », et on cherchait une panne réseau.
-  let hub = $state<{
-    state: string; url: string; buffered_points: number;
-    last_error: string | null; refused_status: number | null;
-  }>({
-    state: 'off', url: '', buffered_points: 0, last_error: null, refused_status: null,
-  });
-  let hubTimer: ReturnType<typeof setInterval> | undefined;
+  onMount(() => hubStatus.watch());
+  const hub = $derived($hubStatus);
 
-  async function refreshHub() {
-    try { hub = await invoke('cmd_hub_status'); } catch { /* optionnel */ }
-  }
-
-  onMount(() => {
-    refreshHub();
-    hubTimer = setInterval(refreshHub, 20000);
+  // Le dernier test de débit, pour le panneau Internet.
+  let lastSpeed = $state<{ download_mbps: number; upload_mbps: number } | null>(null);
+  onMount(async () => {
+    try {
+      const snap = await invoke<{ latest: { download_mbps: number; upload_mbps: number } | null }>('cmd_get_speedtest_snapshot');
+      lastSpeed = snap?.latest ?? null;
+    } catch { /* aucun test encore */ }
   });
-  onDestroy(() => clearInterval(hubTimer));
 
   onMount(async () => {
     await profiles.init();
@@ -202,15 +205,26 @@
 
   const pingHosts = $derived([...$monitoring.values()]);
   const aliveCount = $derived(pingHosts.filter(h => h.current?.alive).length);
-  // En single la mini-card monitoring est redondante avec le composant
-  // Monitoring affiché juste à côté dans la grille, on la masque.
-  const showMonitoringCard = $derived($settings.layout !== 'single');
-  // En single, tout le dashboard se résume à StatRail + active interface :
-  // les autres blocs (profiles card, monitoring mini, live hosts) font
-  // doublon avec les autres cells de la grille (Discovery, Monitoring…).
-  const isSingle = $derived($settings.layout === 'single');
+  // Dans une case de la grille (une page), le tableau de bord se résume au
+  // relevé chiffré et à l'interface : le reste fait doublon avec les cases
+  // voisines (Découverte, Surveillance…).
+  const kind = screenKind();
+  const isCell = kind === 'cell';
+  const navigate = navigateFn();
+  const lang = $derived($locale ?? 'en');
 
-  // Métriques dérivées pour StatRail depuis le store de découverte réseau
+  // La passerelle, si elle est surveillée : sa latence est le premier chiffre
+  // qu'on regarde quand « le réseau rame ».
+  const gatewayMs = $derived.by(() => {
+    const gw = activeInterface?.gateway;
+    return gw ? ($monitoring.get(gw)?.current?.latency_ms ?? null) : null;
+  });
+  const beatAgo = $derived.by(() => {
+    if (!hub.last_beat_at) return null;
+    return Math.max(0, Math.floor(Date.now() / 1000 - hub.last_beat_at));
+  });
+
+  // Le relevé chiffré, tiré du store de découverte réseau
   const discoveredHosts = $derived(Array.from($discoveryStore.results.values()));
   const hostsCount = $derived(discoveredHosts.length);
   const downCount = $derived(discoveredHosts.filter(h => h.latency_ms == null).length);
@@ -246,279 +260,203 @@
   });
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <h1>{$_('dashboard.title')}</h1>
-    {#if hub.state !== 'off'}
-      <!-- Trois états, trois conduites différentes : `degraded` se répare seul
-           au retour du lien, `broken` jamais — le hub a refusé le jeton, il
-           faut ré-enrôler. Les confondre ferait attendre une reconnexion
-           impossible.
+<div class="screen">
+  <ScreenHead title={$_('dashboard.title')}>
+    {#snippet acts()}
+      {#if ifaceOptions.length > 1 && !readOnly}
+        <select class="select" style="width:auto" value={selected} onchange={onSelect} aria-label={$_('dashboard.interface')}>
+          {#each ifaceOptions as name}
+            <option value={name}>{name === selected && selectedDown ? `${name} (${$_('dashboard.iface_disconnected')})` : name}</option>
+          {/each}
+        </select>
+      {/if}
+      <button class="btn icon" class:sm={isCell} type="button" onclick={refresh} disabled={loading}
+              aria-label={$_('dashboard.refresh')} title={$_('dashboard.refresh')} aria-busy={loading}>
+        <NavIcon name="refresh" />
+      </button>
+    {/snippet}
+  </ScreenHead>
 
-           🔴 Et `degraded` se dit de deux façons, parce qu'on ne cherche pas
-           au même endroit : rien n'a répondu (DNS, TCP, TLS, délai dépassé),
-           ou quelque chose a répondu et a refusé. Le 02/09, Cloudflare
-           renvoyait 403 devant un hub parfaitement sain — le ping vers CE hub
-           passait à 100 % dans cette même app — et l'écran affichait « Hub
-           injoignable ». Le code de retour dit de quel côté regarder ; il
-           était jeté. Le tampon et le repli, eux, ne changent pas. -->
-      <span class="hub-pill" class:ok={hub.state === 'ok'}
-            class:warn={hub.state === 'degraded'} class:bad={hub.state === 'broken'}
-            title={hub.last_error ? `${hub.url} — ${hub.last_error}` : hub.url}>
-        <span class="dot" aria-hidden="true"></span>
-        <!-- L'URL était affichée ici : sur un hub interne elle est longue,
-             tronquée, et ne dit rien de plus que le point de couleur. Elle
-             reste dans l'infobulle, où on la cherche quand on en a besoin. -->
-        <span class="hub-state">
-          {hub.state === 'broken'
-            ? $_('dashboard.hub_broken')
-            : hub.state !== 'degraded'
-              ? $_('dashboard.hub_ok')
-              : hub.refused_status != null
-                ? $_('dashboard.hub_refused', { values: { code: hub.refused_status } })
-                : $_('dashboard.hub_degraded')}
-        </span>
-        {#if hub.state === 'degraded' && hub.buffered_points > 0}
-          <span class="hub-buf">{$_('dashboard.hub_buffered', { values: { n: hub.buffered_points } })}</span>
-        {/if}
-      </span>
-    {/if}
-    <button onclick={refresh} disabled={loading}>{loading ? '…' : $_('dashboard.refresh')}</button>
-  </div>
+  <div class="screen-body">
+    {#if status}<div class="banner info" role="status"><span class="grow">{status}</span></div>{/if}
 
-  <StatRail
-    interfaceName={activeInterface?.name ?? selected}
-    hosts={hostsCount}
-    down={downCount}
-    avgRttMs={avgRtt}
-    downMbps={null}
-    upMbps={null}
-  />
-
-  <div class="grid" class:grid-compact={!showMonitoringCard} class:grid-single={isSingle}>
-    <div class="card wide">
-      <div class="card-label-row">
-        <span class="card-label">{$_('dashboard.active_interface')}</span>
-        {#if ifaceOptions.length > 1 && !readOnly}
-          <select class="iface-select" value={selected} onchange={onSelect}>
-            {#each ifaceOptions as name}
-              <option value={name}>{name === selected && selectedDown ? `${name} (${$_('dashboard.iface_disconnected')})` : name}</option>
-            {/each}
-          </select>
-        {/if}
+    <dl class="rail">
+      <div><dt>{$_('dashboard.rail.hosts')}</dt><dd>{hostsCount}</dd></div>
+      {#if downCount > 0}
+        <div class="bad"><dt>{$_('dashboard.rail.silent')}</dt><dd><StateMark mark={targetMark(false)} label={String(downCount)} /></dd></div>
+      {/if}
+      <div class:ok={pingHosts.length > 0 && aliveCount === pingHosts.length}
+           class:warn={aliveCount < pingHosts.length && aliveCount > 0}
+           class:bad={pingHosts.length > 0 && aliveCount === 0}>
+        <dt>{$_('dashboard.rail.targets')}</dt>
+        <dd class="num">{aliveCount}/{pingHosts.length}</dd>
       </div>
+      {#if !isCell}
+        <div><dt>{$_('dashboard.rail.avg_rtt')}</dt><dd>{avgRtt != null ? avgRtt : '—'}{#if avgRtt != null}<span class="u">ms</span>{/if}</dd></div>
+      {/if}
+      {#if gatewayMs != null}
+        <div><dt>{$_('dashboard.gateway')}</dt><dd>{fmtNum(gatewayMs, lang)}<span class="u">ms</span></dd></div>
+      {/if}
+      {#if !isCell}
+        <div><dt>{$_('dashboard.rail.profiles')}</dt><dd>{$profiles.length}</dd></div>
+      {/if}
+    </dl>
+
+    {#if isCell}
       {#if activeInterface}
-        <div class="card-title-row">
-          <div class="title-with-badge">
-            <div class="card-title">{activeInterface.name}</div>
-            {#if selectedDown}
-              <span class="iface-down">{$_('dashboard.iface_disconnected')}</span>
-            {/if}
-            {#if activeProfile}
-              <span class="profile-badge {activeProfile.kind}">{activeProfile.label}</span>
-            {/if}
-          </div>
-          {#if !readOnly}
-            <button class="dhcp-btn" class:on={activeInterface.dhcp_enabled} onclick={enableDhcp} disabled={dhcpBusy || activeInterface.dhcp_enabled}>
-              {dhcpBusy ? '…' : (activeInterface.dhcp_enabled ? $_('dashboard.dhcp_active') : $_('dashboard.dhcp_enable'))}
-            </button>
-          {/if}
-        </div>
-        <div class="info-grid">
-          <div class="info-item"><span class="info-label">{$_('dashboard.ip')}</span><span class="info-val accent">{activeInterface.ip ?? '—'}</span></div>
-          <div class="info-item"><span class="info-label">{$_('dashboard.mask')}</span><span class="info-val">{activeInterface.subnet ?? '—'}</span></div>
-          <div class="info-item"><span class="info-label">{$_('dashboard.gateway')}</span><span class="info-val">{activeInterface.gateway ?? '—'}</span></div>
-          <div class="info-item"><span class="info-label">{$_('dashboard.dns')}</span><span class="info-val">{activeInterface.dns.join(', ') || '—'}</span></div>
-          <div class="info-item"><span class="info-label">{$_('dashboard.dhcp')}</span><span class="info-val" class:dhcp-on={activeInterface.dhcp_enabled}>{activeInterface.dhcp_enabled ? $_('dashboard.dhcp_yes') : $_('dashboard.dhcp_no')}</span></div>
-          <div class="info-item public-ip-item">
-            <span class="info-label">Public IP</span>
-            {#if publicIpLoading}
-              <span class="info-val muted-val">…</span>
-            {:else if publicIp}
-              <span class="info-val accent">{publicIp.ip}</span>
-              {#if publicIp.city || publicIp.country}
-                <span class="info-sub">{[publicIp.city, publicIp.country].filter(Boolean).join(', ')}{publicIp.isp ? ` · ${publicIp.isp}` : ''}</span>
-              {/if}
-            {:else if publicIpError}
-              <span class="info-val muted-val" title={publicIpError}>—</span>
-            {:else}
-              <span class="info-val muted-val">—</span>
-            {/if}
-          </div>
-        </div>
-        {#if status}<div class="status-line">{status}</div>{/if}
+        <dl class="kv">
+          <dt>{$_('dashboard.interface')}</dt>
+          <dd>{activeInterface.name}{#if selectedDown} <span class="err-text">{$_('dashboard.iface_disconnected')}</span>{/if}{#if activeProfile} <span class="tag">{activeProfile.label}</span>{/if}</dd>
+          <dt>{$_('dashboard.ip')}</dt><dd class="m">{activeInterface.ip ?? '—'}{activeInterface.subnet ? ` / ${activeInterface.subnet}` : ''}</dd>
+          <dt>{$_('dashboard.gateway')}</dt><dd class="m">{activeInterface.gateway ?? '—'}</dd>
+          <dt>{$_('dashboard.dns')}</dt><dd class="m">{activeInterface.dns.join(', ') || '—'}</dd>
+          <dt>{$_('dashboard.public_ip')}</dt><dd class="m">{publicIpLoading ? '…' : (publicIp?.ip ?? '—')}</dd>
+          <dt>{$_('dashboard.hub')}</dt><dd><StateMark mark={hubMark(hub)} /></dd>
+        </dl>
       {:else}
         <p class="muted">{$_('dashboard.no_interface')}</p>
       {/if}
-    </div>
+    {:else}
+      <div class="grid3">
+        <section class="panel" aria-labelledby="h-if">
+          <h2 id="h-if">{$_('dashboard.interface')}</h2>
+          {#if activeInterface}
+            <p class="psub">
+              {activeInterface.name}{#if activeProfile}, {activeProfile.label}{/if}
+              {#if selectedDown}<span class="err-text"> · {$_('dashboard.iface_disconnected')}</span>{/if}
+            </p>
+            <dl class="kv">
+              <dt>{$_('dashboard.ip')}</dt><dd class="m">{activeInterface.ip ?? '—'}</dd>
+              <dt>{$_('dashboard.mask')}</dt><dd class="m">{activeInterface.subnet ?? '—'}</dd>
+              <dt>{$_('dashboard.gateway')}</dt><dd class="m">{activeInterface.gateway ?? '—'}</dd>
+              <dt>{$_('dashboard.dns')}</dt><dd class="m">{activeInterface.dns.join(', ') || '—'}</dd>
+              <dt>{$_('dashboard.dhcp')}</dt>
+              <dd>
+                {#if activeInterface.dhcp_enabled}
+                  <StateMark mark={{ tone: 'ok', shape: 'dot', key: 'dashboard.dhcp_active' }} />
+                {:else if readOnly}
+                  {$_('dashboard.dhcp_no')}
+                {:else}
+                  <button class="btn sm" type="button" onclick={enableDhcp} disabled={dhcpBusy} aria-busy={dhcpBusy}>
+                    {dhcpBusy ? '…' : $_('dashboard.dhcp_enable')}
+                  </button>
+                {/if}
+              </dd>
+            </dl>
+          {:else}
+            <p class="psub">{$_('dashboard.no_interface')}</p>
+          {/if}
+        </section>
 
-    {#if !isSingle}
-    <div class="card">
-      <div class="card-label">{$_('dashboard.profiles_card')}</div>
-      <div class="big-num">{$profiles.length}</div>
-      <div class="muted">{$_('dashboard.profiles_saved')}</div>
-    </div>
-    {/if}
+        <section class="panel" aria-labelledby="h-in">
+          <h2 id="h-in">{$_('dashboard.internet')}</h2>
+          <p class="psub"><StateMark mark={internetMark($internetStatus?.state)} /></p>
+          <dl class="kv">
+            <dt>{$_('dashboard.public_ip')}</dt>
+            <dd>
+              {#if publicIpLoading}<span class="muted">…</span>
+              {:else if publicIp}
+                <span class="m">{publicIp.ip}</span>
+                {#if publicIp.city || publicIp.country || publicIp.isp}
+                  <span class="muted"> · {[[publicIp.city, publicIp.country].filter(Boolean).join(', '), publicIp.isp].filter(Boolean).join(', ')}</span>
+                {/if}
+              {:else}<span class="muted" title={publicIpError || undefined}>—</span>{/if}
+            </dd>
+            {#if $internetStatus}
+              <dt>{$_('dashboard.availability')}</dt><dd class="num">{fmtNum($internetStatus.uptime_pct, lang, 1)} %</dd>
+            {/if}
+            {#if lastSpeed}
+              <dt>{$_('dashboard.last_speedtest')}</dt>
+              <dd class="num">{Math.round(lastSpeed.download_mbps)} / {Math.round(lastSpeed.upload_mbps)}<span class="u">Mbit/s</span></dd>
+            {/if}
+          </dl>
+        </section>
 
-    {#if showMonitoringCard}
-      <div class="card">
-        <div class="card-label">{$_('dashboard.monitoring_card')}</div>
-        <div class="big-num" class:ok={aliveCount > 0 && aliveCount === pingHosts.length} class:warn={aliveCount > 0 && aliveCount < pingHosts.length} class:bad={pingHosts.length > 0 && aliveCount === 0}>
-          {aliveCount}<span class="big-num-sub">/{pingHosts.length}</span>
-        </div>
-        <div class="muted">{$_('dashboard.ping_online')}</div>
-        {#each pingHosts.slice(0, 3) as h}
-          <div class="ping-row">
-            <span class="dot" class:green={h.current?.alive} class:red={h.current && !h.current.alive}></span>
-            <span class="mono">{h.ip}</span>
-            <span class="muted">{h.current?.latency_ms != null ? h.current.latency_ms + 'ms' : '—'}</span>
-          </div>
-        {/each}
+        <section class="panel ticks" aria-labelledby="h-hub">
+          <h2 id="h-hub">{$_('dashboard.hub')}</h2>
+          <!-- Trois états, trois conduites (voir `status.ts`) : injoignable se
+               répare seul, révoquée jamais, refusée se cherche côté proxy. -->
+          <p class="psub" title={hub.last_error ? `${hub.url} — ${hub.last_error}` : hub.url || undefined}>
+            <StateMark mark={hubMark(hub)} />
+          </p>
+          {#if hub.enrolled}
+            <dl class="kv">
+              <dt>{$_('dashboard.hub')}</dt><dd>{hub.url.replace(/^https?:\/\//, '')}</dd>
+              {#if hub.site}<dt>{$_('settings.hub.site')}</dt><dd>{hub.site}</dd>{/if}
+              <dt>{$_('dashboard.heartbeat')}</dt>
+              <dd class="num">
+                {beatAgo != null ? $_('dashboard.heartbeat_ago', { values: { n: beatAgo } }) : '—'}{#if hub.heartbeat_interval_secs}, {$_('dashboard.heartbeat_every', { values: { n: hub.heartbeat_interval_secs } })}{/if}
+              </dd>
+              <dt>{$_('dashboard.buffer')}</dt>
+              <dd>{hub.buffered_points > 0 ? $_('dashboard.hub_buffered', { values: { n: hub.buffered_points } }) : $_('dashboard.buffer_empty')}</dd>
+            </dl>
+          {:else}
+            <p class="muted">{$_('dashboard.hub_none')}</p>
+          {/if}
+        </section>
       </div>
+
+      <div class="sec-head">
+        <h2 class="sec">{$_('nav.monitoring')}</h2>
+        <span class="sub">{$_('dashboard.monitoring_window')}</span>
+        {#if navigate}<span class="acts"><button class="link" type="button" onclick={() => navigate('monitoring')}>{$_('dashboard.see_all')}</button></span>{/if}
+      </div>
+      {#if pingHosts.length === 0}
+        <div class="tbl-wrap"><div class="state"><p>{$_('dashboard.no_targets')}</p></div></div>
+      {:else}
+        <div class="tbl-wrap">
+          <table class="t">
+            <thead><tr><th>{$_('monitoring.col_target')}</th><th>{$_('monitoring.col_state')}</th><th>{$_('monitoring.col_recent')}</th><th class="num">{$_('monitoring.col_latency')}</th><th class="num">{$_('monitoring.col_loss')}</th></tr></thead>
+            <tbody>
+              {#each pingHosts as h, i (h.ip)}
+                {@const st = targetStats(h.history)}
+                <tr class:trouble={h.current && !h.current.alive}>
+                  <td><span class="nm m">{h.ip}</span></td>
+                  <td><StateMark mark={targetMark(h.current?.alive)} /></td>
+                  <td><LatencySpark history={h.history} series={(i % 3) + 1} /></td>
+                  <td class="num">{h.current?.alive ? fmtNum(h.current.latency_ms, lang) : '—'}{#if h.current?.alive}<span class="u">ms</span>{/if}</td>
+                  <td class="num">{fmtNum(st.loss, lang, 0)}{#if st.loss != null}<span class="u">%</span>{/if}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+
+      <div class="sec-head"><h2 class="sec">{$_('scheduler.auto_run')}</h2></div>
+      <div class="setrow" style="border:0;padding-top:0">
+        <div><div class="k">{$_('nav.discovery')}</div><div class="d">{$_('dashboard.auto_hint')}</div></div>
+        <SchedulerControl field="discovery_interval_min" />
+      </div>
+      <div class="setrow" style="border:0;padding-top:0">
+        <div><div class="k">{$_('nav.speedtest')}</div></div>
+        <SchedulerControl field="speedtest_interval_min" />
+      </div>
+
+      <div class="sec-head">
+        <h2 class="sec">{$_('dashboard.sections.live_hosts')}</h2>
+        <span class="sub">{$_('discovery.hosts_count', { values: { n: hostList.length } })}</span>
+      </div>
+      {#if hostList.length === 0}
+        <div class="tbl-wrap"><div class="state"><p>{$_('dashboard.sections.no_hosts')}</p></div></div>
+      {:else}
+        <div class="tbl-wrap">
+          <table class="t">
+            <thead><tr><th>{$_('discovery.table.ip')}</th><th>{$_('discovery.table.hostname')}</th><th class="opt">{$_('discovery.table.mac')}</th><th class="opt">{$_('discovery.table.vendor')}</th><th class="num">{$_('discovery.table.latency')}</th></tr></thead>
+            <tbody>
+              {#each hostList as h (h.ip)}
+                <tr>
+                  <td class="m">{h.ip}</td>
+                  <td>{h.hostname ?? '—'}</td>
+                  <td class="m muted opt">{h.mac ?? '—'}</td>
+                  <td class="opt">{h.vendor ?? '—'}</td>
+                  <td class="num">{h.latency_ms != null ? `${fmtNum(h.latency_ms, lang)} ms` : '—'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
     {/if}
   </div>
-
-  {#if !isSingle}
-  <section class="hosts-section">
-    <h2>{$_('dashboard.sections.live_hosts')}</h2>
-    {#if hostList.length === 0}
-      <p class="empty">{$_('dashboard.sections.no_hosts')}</p>
-    {:else}
-      <div class="table">
-        {#each hostList as h (h.ip)}
-          <HostRow
-            ip={h.ip}
-            hostname={h.hostname}
-            mac={h.mac}
-            vendor={h.vendor}
-            latencyMs={h.latency_ms ?? null}
-            history={[]}
-          />
-        {/each}
-      </div>
-    {/if}
-  </section>
-  {/if}
 </div>
-
-<style>
-  .hub-pill {
-    display: inline-flex; align-items: center; gap: 7px;
-    padding: 4px 10px; border-radius: 999px; font-size: 12px;
-    border: 1px solid var(--border, #333); margin-right: auto;
-  }
-  .hub-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; flex: none; }
-  /* La forme double la couleur : un anneau et un disque barré restent
-     distincts en niveaux de gris, et pour un daltonien. */
-  .hub-pill.ok .dot { background: #22c55e; }
-  .hub-pill.warn .dot { background: #f59e0b; box-shadow: inset 0 0 0 2px rgba(0,0,0,.45); }
-  .hub-pill.bad .dot { background: #ef4444; box-shadow: inset 0 0 0 2px rgba(0,0,0,.45); }
-  .hub-pill.warn { border-color: #f59e0b; }
-  .hub-pill.bad { border-color: #ef4444; }
-  .hub-state { opacity: .85; white-space: nowrap; }
-  .hub-buf { opacity: .9; font-variant-numeric: tabular-nums; }
-
-  .page { padding: 24px; }
-  .page-header { display: flex; gap: 12px; align-items: center; margin-bottom: 24px; }
-  h1 { font-size: 20px; font-weight: 700; }
-  button { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); cursor: pointer; font-size: 12px; }
-  button:disabled { opacity: .5; cursor: wait; }
-  .grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; }
-  .grid.grid-compact { grid-template-columns: 2fr 1fr; }
-  .grid.grid-single { grid-template-columns: 1fr; }
-  .card {
-    background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-lg);
-    padding: 18px;
-    transition: border-color 0.15s;
-  }
-  .card:hover { border-color: var(--ep-glass-border-strong); }
-  .card-label-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-  .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--ep-text-muted); }
-  /* Le sélecteur d'interface ne se lisait pas comme un contrôle : bordure
-     presque invisible, pas de chevron, rien qui dise « ça s'ouvre ». Or c'est
-     LE réglage qui décide de tout ce que l'app mesure — le rater, c'est
-     mesurer la mauvaise interface sans le savoir. On lui donne donc un
-     chevron, une bordure lisible et une réaction au survol. */
-  .iface-down {
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--ep-danger);
-  }
-  .iface-select {
-    -webkit-appearance: none;
-    appearance: none;
-    background: var(--ep-bg-tertiary);
-    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
-                      linear-gradient(135deg, currentColor 50%, transparent 50%);
-    background-position: calc(100% - 15px) 52%, calc(100% - 10px) 52%;
-    background-size: 5px 5px, 5px 5px;
-    background-repeat: no-repeat;
-    border: 1px solid var(--ep-border, var(--ep-glass-border));
-    color: var(--ep-text-primary);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 6px 30px 6px 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    max-width: 180px;
-    transition: border-color .12s ease, background-color .12s ease;
-  }
-  .iface-select:hover { border-color: var(--ep-accent); background-color: var(--ep-bg-secondary, var(--ep-bg-tertiary)); }
-  .iface-select:focus-visible { outline: 2px solid var(--ep-accent); outline-offset: 2px; }
-  .card-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 12px; }
-  .title-with-badge { display: flex; align-items: center; gap: 10px; min-width: 0; }
-  .card-title { font-size: 15px; font-weight: 700; }
-  .profile-badge {
-    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
-    padding: 3px 8px; border-radius: 10px; border: 1px solid transparent;
-    white-space: nowrap;
-  }
-  .profile-badge.dhcp { background: color-mix(in srgb, var(--ep-success) 15%, transparent); color: var(--ep-success); border-color: color-mix(in srgb, var(--ep-success) 30%, transparent); }
-  .profile-badge.profile { background: color-mix(in srgb, var(--ep-success) 15%, transparent); color: var(--ep-success); border-color: color-mix(in srgb, var(--ep-success) 30%, transparent); }
-  .profile-badge.custom { background: var(--ep-bg-tertiary); color: var(--ep-text-muted); border-color: var(--ep-border); }
-  .dhcp-btn { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); font-size: 11px; font-weight: 600; cursor: pointer; }
-  .dhcp-btn:hover:not(:disabled) { border-color: var(--ep-accent); color: var(--ep-accent); }
-  .dhcp-btn:disabled { opacity: .5; cursor: not-allowed; }
-  .dhcp-btn.on:disabled { opacity: 1; color: var(--ep-success); border-color: color-mix(in srgb, var(--ep-success) 40%, transparent); background: color-mix(in srgb, var(--ep-success) 12%, transparent); }
-  .info-val.dhcp-on { color: var(--ep-success); }
-  .status-line { margin-top: 10px; font-size: 12px; color: var(--ep-success); font-family: var(--ep-font-mono); }
-  .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .info-item { display: flex; flex-direction: column; gap: 2px; }
-  .info-label { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--ep-text-muted); }
-  .info-val { font-family: var(--ep-font-mono); font-size: 12px; font-weight: 600; }
-  .info-val.accent { color: var(--ep-accent); }
-  .info-val.muted-val { color: var(--ep-text-muted); }
-  .info-sub { font-size: 10px; color: var(--ep-text-muted); font-family: var(--ep-font-mono); margin-top: 1px; }
-  .public-ip-item { grid-column: span 2; }
-  .big-num { font-size: 40px; font-weight: 800; line-height: 1.1; }
-  .big-num.ok { color: var(--ep-success); }
-  .big-num.warn { color: #f59e0b; }
-  .big-num.bad { color: var(--ep-danger); }
-  .big-num-sub { font-size: 24px; color: var(--ep-text-muted); }
-  .muted { font-size: 12px; color: var(--ep-text-secondary); margin-top: 4px; }
-  .ping-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ep-text-muted); flex-shrink: 0; }
-  .dot.green { background: var(--ep-success); }
-  .dot.red { background: var(--ep-danger); }
-  .mono { font-family: var(--ep-font-mono); flex: 1; }
-  .hosts-section { margin-top: 24px; }
-  .hosts-section h2 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
-    color: var(--ep-text-dim); margin: 0 0 8px; font-weight: 600;
-  }
-  .table {
-    background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-lg);
-    overflow: hidden;
-    transition: border-color 0.15s;
-  }
-  .table:hover { border-color: var(--ep-glass-border-strong); }
-  .empty {
-    padding: 24px; text-align: center; color: var(--ep-text-muted);
-    background: var(--ep-glass-bg); border: 1px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-lg); font-size: 12px;
-  }
-</style>
