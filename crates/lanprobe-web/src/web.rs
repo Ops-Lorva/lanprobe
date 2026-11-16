@@ -3235,13 +3235,24 @@ fn resolve_enrollment_target(
     }
     // Le chemin scripté passe par les identifiants du compte et non par une
     // session : sans ce contrôle, il contournerait tous les rôles.
-    match state.db.role_of(username)? {
-        Some(role) if role >= Role::Operator => {}
+    let role = match state.db.role_of(username)? {
+        Some(role) if role >= Role::Operator => role,
         _ => {
             return Err(DbError::Forbidden(
                 "enrôler demande le rôle operator au minimum".into(),
             ))
         }
+    };
+    // 🔴 Et la portée (revue RSSI, N4) : un compte restreint n'enrôle que
+    // dans un site existant de sa portée, et n'en crée aucun. Même refus
+    // qu'un site existe ou non hors de sa portée : la réponse ne dit pas
+    // quels clients a le hub.
+    let scope = state.db.user_scope(username, role)?;
+    if let crate::db::Scope::Sites(_) = scope {
+        return match state.db.find_site_by_name(site_name)? {
+            Some(site) if scope.allows(&site.site_id) => Ok((site, false, None)),
+            _ => Err(DbError::Forbidden("ce site n'est pas dans la portée du compte".into())),
+        };
     }
     let (site, created) = state.db.resolve_or_create_site(site_name)?;
     Ok((site, created, None))
@@ -11364,6 +11375,42 @@ mod tests {
             ))
             .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_restricted_operator_enrolls_only_into_a_site_of_its_scope() {
+        // 🔴 Revue RSSI, N4 : l'enrôlement par identifiants ne regardait que
+        // le rôle. Un opérateur restreint au client A posait une sonde chez
+        // le client B, par son nom, et en polluait mesures et rapports.
+        let h = Harness::with_admin().await;
+        let a = h.state.db.create_site("Client A").unwrap();
+        h.state.db.create_site("Client B").unwrap();
+        h.state
+            .db
+            .create_user_scoped("olivier", PASSWORD, Role::Operator, Some(&[a.site_id.clone()]))
+            .unwrap();
+        let enroll = |site: &str, name: &str| {
+            json_request(
+                "POST",
+                "/api/probes/enroll",
+                serde_json::json!({
+                    "username": "olivier", "password": PASSWORD, "name": name, "site": site
+                }),
+            )
+        };
+
+        // Hors portée, existant ou non : refusé, et rien n'est créé.
+        for site in ["Client B", "Client C"] {
+            let (status, body, _) = h.call(enroll(site, "Intrus")).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{site} : {body}");
+        }
+        assert!(h.state.db.find_site_by_name("Client C").unwrap().is_none());
+        assert!(h.state.db.list_probes(None).unwrap().is_empty());
+
+        // Dans sa portée : permis, quelle que soit la casse.
+        let (status, body, _) = h.call(enroll("client a", "Paris")).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["site"], "Client A");
     }
 
     #[tokio::test]

@@ -194,7 +194,7 @@ ou, pour un usage scripté :
 ```
 Avec un code, le site vient du code ; il n'est pas à ressaisir.
 `site` est résolu par nom, insensible à la casse. S'il n'existe pas, le hub le
-crée et le signale par `site_created: true` — le champ existe pour que l'app
+crée (compte « tous les sites » seulement, voir § 17) et le signale par `site_created: true` — le champ existe pour que l'app
 affiche « nouveau site créé », faute de quoi une faute de frappe passerait
 inaperçue jusqu'à ce qu'on cherche une sonde dans le mauvais parc.
 
@@ -1265,6 +1265,9 @@ sessions en cours.
 L'enrôlement par identifiants de compte (`POST /api/probes/enroll` avec
 `username`/`password`/`site`) vérifie lui aussi le rôle : `403` en dessous
 d'`operator`. Sans ce contrôle, le chemin scripté contournait tous les autres.
+Et la portée (revue RSSI, N4) : un compte restreint à des sites n'enrôle que
+dans un site **existant de sa portée**, et n'en crée aucun — `403` sinon, que le
+site existe ou non, pour ne pas révéler les clients du hub.
 
 ### Comptes — `admin`
 
