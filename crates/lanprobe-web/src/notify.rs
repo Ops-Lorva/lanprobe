@@ -259,6 +259,20 @@ pub fn evaluate(db: &Db, now: i64, delay_secs: i64) -> DbResult<Vec<Alert>> {
     Ok(alerts)
 }
 
+/// L'échec d'envoi d'un webhook, SANS son URL : elle porte le droit
+/// d'écrire dans le salon (Slack, Discord…) et l'écran promet de ne jamais
+/// la réafficher. `reqwest` la met dans son message (« error sending request
+/// for url (…) »), qui finissait tel quel sous le bouton « Tester ».
+fn webhook_send_error(e: reqwest::Error) -> String {
+    if e.is_timeout() {
+        "le webhook n'a pas répondu à temps".to_string()
+    } else if e.is_connect() {
+        "connexion au webhook impossible".to_string()
+    } else {
+        "envoi au webhook impossible".to_string()
+    }
+}
+
 #[cfg(test)]
 mod evaluate_tests {
     use super::*;
@@ -587,7 +601,7 @@ impl Notifier {
             .json(&webhook_payload(cfg.template, alert))
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(webhook_send_error)?;
         let status = response.status();
         if status.is_success() {
             return Ok(());
@@ -1217,5 +1231,14 @@ mod tests {
 
         assert!(notifier.webhook_config().is_none());
         assert_eq!(notifier.status()["webhook"]["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn a_failed_webhook_never_echoes_its_secret_url() {
+        let url = "http://127.0.0.1:9/hooks/secret-token-123";
+        let e = reqwest::Client::new().post(url).send().await.unwrap_err();
+        let msg = webhook_send_error(e);
+        assert!(!msg.contains("secret-token-123"), "{msg}");
+        assert!(!msg.contains("127.0.0.1"), "{msg}");
     }
 }
