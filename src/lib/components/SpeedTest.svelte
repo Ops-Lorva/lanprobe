@@ -6,6 +6,17 @@
   import { settings } from '../stores/settings';
   import { scheduler } from '../stores/scheduler';
   import SchedulerControl from './SchedulerControl.svelte';
+  import ScreenHead from './ScreenHead.svelte';
+  import { locale } from 'svelte-i18n';
+  import { fmtNum } from '../format';
+  import { screenKind } from '../screen';
+
+  const isCell = screenKind() === 'cell';
+  const lang = $derived($locale ?? 'en');
+  let copied = $state(false);
+  async function copyLink(url: string) {
+    try { await navigator.clipboard.writeText(url); copied = true; setTimeout(() => (copied = false), 2000); } catch {}
+  }
 
   function openUrl(url: string) {
     invoke('cmd_open_url', { url }).catch((e) => console.error('open_url', e));
@@ -103,148 +114,110 @@
   }
 
   function fmt(ts: number) {
-    return new Date(ts * 1000).toLocaleString();
+    return new Date(ts * 1000).toLocaleString(lang, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  }
+  function hm(ts: number) {
+    return new Date(ts * 1000).toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' });
   }
 
-  // Au-delà de 1000 Mbps (test iperf3 10GbE typique) les chiffres deviennent
-  // illisibles en Mbps, on passe en Gbps avec 2 décimales.
+  // Au-delà de 1000 Mbit/s (test iperf3 10GbE typique) les chiffres deviennent
+  // illisibles en Mbit/s, on passe en Gbit/s avec 2 décimales.
   function fmtSpeed(mbps: number): { val: string; unit: string } {
-    if (mbps >= 1000) return { val: (mbps / 1000).toFixed(2), unit: 'Gbps' };
-    return { val: mbps.toFixed(2), unit: 'Mbps' };
+    if (mbps >= 1000) return { val: fmtNum(mbps / 1000, lang, 2), unit: 'Gbit/s' };
+    return { val: fmtNum(mbps, lang, mbps >= 100 ? 0 : 1), unit: 'Mbit/s' };
   }
 </script>
 
-<div class="page">
-  <div class="header">
-    <h1>{$_('speedtest.title')}</h1>
-    <div class="header-actions">
-      <SchedulerControl field="speedtest_interval_min" />
+<div class="screen">
+  <ScreenHead title={$_('speedtest.title')}>
+    {#snippet acts()}
       {#if running}
-        <button class="danger" onclick={cancelTest} disabled={cancelling}>
+        <button class="btn" class:sm={isCell} type="button" onclick={cancelTest} disabled={cancelling} aria-busy={cancelling}>
           {cancelling ? $_('speedtest.cancelling') : $_('speedtest.cancel')}
         </button>
       {:else}
-        <button class="primary" onclick={runTest}>{$_('speedtest.run')}</button>
+        <button class="btn primary" class:sm={isCell} type="button" onclick={runTest}>{isCell ? $_('speedtest.run_short') : $_('speedtest.run')}</button>
       {/if}
-    </div>
-  </div>
-  {#if error}<div class="error">{error}</div>{/if}
+    {/snippet}
+  </ScreenHead>
 
-  {#if running}
-    <div class="placeholder-card">
-      <div class="spinner"></div>
-      <div style="margin-top: 12px;">{$_('speedtest.measuring')}</div>
-      <button class="danger cancel-inline" onclick={cancelTest} disabled={cancelling}>
-        {cancelling ? $_('speedtest.cancelling') : $_('speedtest.cancel')}
-      </button>
+  <div class="screen-body">
+    <div class="filters">
+      <SchedulerControl field="speedtest_interval_min" />
+      <span class="grow"></span>
+      <span class="muted">{$settings.speedtestEngine === 'iperf3' ? `iperf3${$settings.iperfServer ? `, ${$settings.iperfServer}` : ''}` : 'Ookla'}</span>
     </div>
-  {:else if current}
-    <div class="result-card">
-      <div class="metric">
-        <div class="metric-value" style="color: var(--ep-accent)">↓ {fmtSpeed(current.download_mbps).val}</div>
-        <div class="metric-label">{fmtSpeed(current.download_mbps).unit} {$_('speedtest.down_suffix')}</div>
-      </div>
-      <div class="metric">
-        <div class="metric-value" style="color: var(--ep-success)">↑ {fmtSpeed(current.upload_mbps).val}</div>
-        <div class="metric-label">{fmtSpeed(current.upload_mbps).unit} {$_('speedtest.up_suffix')}</div>
-      </div>
-      <div class="metric">
-        <div class="metric-value">{current.latency_ms}</div>
-        <div class="metric-label">{$_('speedtest.latency_unit')}{current.jitter_ms != null ? ` / ±${current.jitter_ms.toFixed(1)}ms ${$_('speedtest.jitter_suffix')}` : ''}</div>
-      </div>
-    </div>
-    <div class="server-row">
-      <span class="server-name">🖥 {current.server_name}</span>
-      {#if current.result_url}
-        <button class="share-btn" type="button" onclick={() => openUrl(current!.result_url!)}>
-          {$_('speedtest.view_result')}
-        </button>
-      {/if}
-    </div>
-    {#if current.result_url}
-      <div class="url-box">
-        <span class="url-label">{$_('speedtest.share_link')}</span>
-        <code class="url-text">{current.result_url}</code>
-        <button class="copy-btn" onclick={() => navigator.clipboard.writeText(current!.result_url!)}>{$_('speedtest.copy')}</button>
+    {#if error}<div class="banner bad" role="alert"><span class="grow">{error}</span></div>{/if}
+
+    {#if running}
+      <div class="banner info" role="status">
+        <span class="grow">{$_('speedtest.measuring')}</span>
+        <span class="progress indet"><span></span></span>
       </div>
     {/if}
-  {:else}
-    <div class="placeholder-card">{$_('speedtest.placeholder')}</div>
-  {/if}
 
-  {#if history.length > 1}
-    <h2>{$_('speedtest.history')}</h2>
-    <table>
-      <thead><tr><th>{$_('speedtest.col_date')}</th><th>{$_('speedtest.col_down')}</th><th>{$_('speedtest.col_up')}</th><th>{$_('speedtest.col_latency')}</th><th>{$_('speedtest.col_link')}</th></tr></thead>
-      <tbody>
-        {#each history as r}
-          <tr>
-            <td class="secondary">{fmt(r.timestamp)}</td>
-            <td class="mono">{fmtSpeed(r.download_mbps).val} {fmtSpeed(r.download_mbps).unit}</td>
-            <td class="mono">{fmtSpeed(r.upload_mbps).val} {fmtSpeed(r.upload_mbps).unit}</td>
-            <td class="mono">{r.latency_ms} ms</td>
-            <td>{#if r.result_url}<button type="button" class="link link-btn" onclick={() => openUrl(r.result_url!)}>↗</button>{:else}—{/if}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  {/if}
+    {#if current}
+      {@const d = fmtSpeed(current.download_mbps)}
+      {@const u = fmtSpeed(current.upload_mbps)}
+      <div class="panel ticks result" class:stale={running}>
+        <div><div class="muted">{$_('speedtest.down')}</div><div class="big">{d.val}<span class="u">{d.unit}</span></div></div>
+        <div><div class="muted">{$_('speedtest.up')}</div><div class="big">{u.val}<span class="u">{u.unit}</span></div></div>
+        <div><div class="muted">{$_('speedtest.latency')}</div><div class="big">{fmtNum(current.latency_ms, lang)}<span class="u">ms</span></div></div>
+        {#if current.jitter_ms != null}
+          <div><div class="muted">{$_('speedtest.jitter')}</div><div class="big">{fmtNum(current.jitter_ms, lang)}<span class="u">ms</span></div></div>
+        {/if}
+        <div class="meta muted">
+          {hm(current.timestamp)}, {current.server_name}
+          {#if current.result_url}
+            <span class="links">
+              <button class="link" type="button" onclick={() => openUrl(current!.result_url!)}>{$_('speedtest.view_result')}</button>
+              <button class="link" type="button" onclick={() => copyLink(current!.result_url!)}>{copied ? $_('speedtest.copied') : $_('speedtest.copy')}</button>
+            </span>
+          {/if}
+        </div>
+      </div>
+    {:else if !running}
+      <div class="tbl-wrap"><div class="state"><p>{$_('speedtest.placeholder')}</p></div></div>
+    {/if}
+
+    {#if history.length > 0}
+      <div class="sec-head"><h2 class="sec">{$_('speedtest.history')}</h2></div>
+      <div class="tbl-wrap">
+        <table class="t">
+          <thead>
+            <tr>
+              <th>{$_('speedtest.col_date')}</th>
+              <th class="num">{$_('speedtest.col_down')}</th>
+              <th class="num">{$_('speedtest.col_up')}</th>
+              <th class="num opt">{$_('speedtest.col_latency')}</th>
+              <th class="num opt">{$_('speedtest.col_jitter')}</th>
+              <th class="opt">{$_('speedtest.col_server')}</th>
+              <th class="opt"><span class="visually-hidden">{$_('speedtest.col_link')}</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each history as r (r.timestamp)}
+              <tr>
+                <td class="num">{fmt(r.timestamp)}</td>
+                <td class="num">{fmtSpeed(r.download_mbps).val}<span class="u">{fmtSpeed(r.download_mbps).unit}</span></td>
+                <td class="num">{fmtSpeed(r.upload_mbps).val}<span class="u">{fmtSpeed(r.upload_mbps).unit}</span></td>
+                <td class="num opt">{fmtNum(r.latency_ms, lang)}</td>
+                <td class="num opt">{fmtNum(r.jitter_ms, lang)}</td>
+                <td class="opt">{r.server_name}</td>
+                <td class="act opt">{#if r.result_url}<button type="button" class="link" onclick={() => openUrl(r.result_url!)}>{$_('speedtest.col_link')}</button>{/if}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </div>
 </div>
 
 <style>
-  .page { padding: 24px; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-  h1 { font-size: 20px; font-weight: 700; }
-  h2 { font-size: 16px; font-weight: 600; margin: 24px 0 12px; }
-  .header-actions { display: flex; align-items: center; gap: 10px; }
-  button.primary { padding: 8px 18px; border-radius: 6px; background: var(--ep-accent); border: none; color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; }
-  button.danger { padding: 8px 18px; border-radius: 6px; background: var(--ep-danger); border: none; color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; }
-  .cancel-inline { margin-top: 16px; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .error { color: var(--ep-danger); font-size: 13px; margin-bottom: 12px; }
-  /* ⚠️ La carte vit dans une colonne étroite, pas sur toute la largeur.
-     En `flex: 1` seul, les trois mesures gardaient leur largeur de contenu
-     (`min-width: auto` par défaut) : la ligne débordait et le débit montant
-     se retrouvait coupé net au bord de la carte. D'où `min-width: 0`, un
-     retour à la ligne autorisé, et une taille de chiffre qui suit la
-     largeur disponible. */
-  .result-card {
-    display: flex; flex-wrap: wrap; gap: 20px 16px;
-    background: var(--ep-glass-bg);
-    border: 1px solid var(--ep-glass-border);
-    border-radius: var(--ep-radius-lg);
-    padding: 24px 20px; margin-bottom: 12px;
-    transition: border-color 0.15s;
-    container-type: inline-size;
-  }
-  .result-card:hover { border-color: var(--ep-glass-border-strong); }
-  .metric { flex: 1 1 132px; min-width: 0; text-align: center; }
-  .metric-value {
-    font-size: clamp(26px, 11cqw, 48px);
-    font-weight: 800; line-height: 1;
-    font-family: var(--ep-font-mono);
-    /* Le chiffre ne doit jamais dépasser sa colonne, même si `cqw` n'est pas
-       compris : l'ellipse vaut mieux qu'un débordement silencieux. */
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .metric-label { font-size: 12px; color: var(--ep-text-secondary); margin-top: 6px; }
-  .server-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding: 0 4px; }
-  .server-name { font-size: 12px; color: var(--ep-text-muted); }
-  .share-btn { font-size: 12px; color: var(--ep-accent); text-decoration: none; font-weight: 600; background: none; border: none; padding: 0; cursor: pointer; }
-  .share-btn:hover { text-decoration: underline; }
-  .link-btn { background: none; border: none; padding: 0; cursor: pointer; }
-  .url-box { background: var(--ep-glass-bg); border: 1px solid var(--ep-glass-border); border-radius: var(--ep-radius-md); padding: 10px 14px; display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
-  .url-label { font-size: 11px; color: var(--ep-text-muted); text-transform: uppercase; letter-spacing: .5px; white-space: nowrap; }
-  .url-text { font-family: var(--ep-font-mono); font-size: 12px; color: var(--ep-accent); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .copy-btn { padding: 4px 10px; border-radius: 5px; border: 1px solid var(--ep-border); background: var(--ep-bg-tertiary); color: var(--ep-text-primary); cursor: pointer; font-size: 11px; white-space: nowrap; }
-  .copy-btn:hover { background: var(--ep-border); }
-  .placeholder-card { background: var(--ep-glass-bg); border: 1px dashed var(--ep-glass-border); border-radius: var(--ep-radius-lg); padding: 48px; text-align: center; color: var(--ep-text-muted); font-size: 14px; margin-bottom: 24px; }
-  .spinner { width: 32px; height: 32px; border: 3px solid var(--ep-border); border-top-color: var(--ep-accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--ep-glass-border); color: var(--ep-text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
-  td { padding: 8px 12px; border-bottom: 1px solid var(--ep-glass-border); }
-  .mono { font-family: var(--ep-font-mono); }
-  .secondary { color: var(--ep-text-secondary); }
-  .link { color: var(--ep-accent); text-decoration: none; font-size: 14px; }
+  .result { display: flex; flex-wrap: wrap; gap: var(--space-lg) var(--space-2xl); padding: var(--space-lg); }
+  .result.stale { opacity: 0.55; }
+  .result .meta { align-self: end; margin-left: auto; display: grid; gap: var(--space-2xs); justify-items: end; text-align: right; }
+  .links { display: inline-flex; gap: var(--space-sm); }
+  :global(.cell) .result { gap: var(--space-md) var(--space-lg); padding: var(--space-md); }
 </style>
