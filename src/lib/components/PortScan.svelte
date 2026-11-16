@@ -150,7 +150,7 @@
 </script>
 
 {#snippet profileSelect(cls: string)}
-  <select class="select {cls}" style="width:auto;max-width:220px" value={activeId} aria-label={$_('port_scan.profile')}
+  <select class="select {cls}" style="width:auto;max-width:220px" value={activeProfile?.id ?? activeId} aria-label={$_('port_scan.profile')}
           onchange={(e) => portscanProfiles.setActive((e.currentTarget as HTMLSelectElement).value)}>
     {#each $visibleProfiles as p (p.id)}
       <option value={p.id}>{profileLabel(p)}</option>
@@ -236,7 +236,7 @@
             </p>
             <div class="input-row" style="margin-bottom:12px">
               <label class="muted" for="rescan-with">{$_('port_scan.rescan_with')}</label>
-              <select id="rescan-with" class="select" style="width:auto" value={current.profileId ?? activeId} disabled={current.scanning}
+              <select id="rescan-with" class="select" style="width:auto" value={$visibleProfiles.some((p) => p.id === current.profileId) ? current.profileId : (activeProfile?.id ?? activeId)} disabled={current.scanning}
                       onchange={(e) => rescanWith(current.ip, (e.currentTarget as HTMLSelectElement).value)}>
                 {#each $visibleProfiles as p (p.id)}
                   <option value={p.id}>{profileLabel(p)}</option>
