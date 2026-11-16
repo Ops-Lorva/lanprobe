@@ -9686,7 +9686,7 @@ mod tests {
     // ── Agrégation : nombre de points, jamais ancienneté ───────────────────
 
     #[test]
-    fn a_bare_duration_means_the_LAST_24h_not_the_next_ones() {
+    fn a_bare_duration_means_the_last_24h_not_the_next_ones() {
         // 🔴 `range=24h` produisait `range(start: 24h)`. En Flux une durée
         // POSITIVE part de maintenant vers l'AVANT : la fenêtre visait les
         // 24 h à venir, Influx refusait en 400, et le hub rendait 502 — donc
