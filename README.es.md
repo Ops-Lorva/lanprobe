@@ -215,7 +215,7 @@ El hub tiene **su propia versión**, independiente de la aplicación.
 
 #### Copia de seguridad
 
-El hub se respalda solo, al estilo Sonarr: un archivo completo en su carpeta de copias, y restaurar consiste en devolverle el archivo. Se configura en **Ajustes → Almacenamiento** (intervalo, archivos conservados).
+El hub se respalda solo: un archivo completo en su carpeta de copias, y restaurar consiste en devolverle el archivo. Se configura en **Ajustes → Almacenamiento** (intervalo, archivos conservados).
 
 **Un archivo contiene `secret.key`**, que descifra las contraseñas de notificación y las URL de webhook. Trate esa carpeta como un secreto.
 

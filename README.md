@@ -215,7 +215,7 @@ The hub carries **its own version**, independent of the app.
 
 #### Backup
 
-The hub backs itself up, Sonarr-style: a complete archive in its backup folder, and restoring means handing the file back. Configured under **Settings → Storage** (interval, archives kept).
+The hub backs itself up: a complete archive in its backup folder, and restoring means handing the file back. Configured under **Settings → Storage** (interval, archives kept).
 
 **An archive contains `secret.key`**, which decrypts notification passwords and webhook URLs. Treat that folder as a secret.
 

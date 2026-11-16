@@ -216,7 +216,7 @@ Le hub a **sa propre version**, indépendante de l'application.
 
 #### Sauvegarde
 
-Le hub sauvegarde tout seul, comme Sonarr : une archive complète dans son dossier de sauvegarde, et pour restaurer on redonne le fichier. Réglable dans **Réglages → Stockage** (cadence, nombre d'archives conservées).
+Le hub sauvegarde tout seul : une archive complète dans son dossier de sauvegarde, et pour restaurer on redonne le fichier. Réglable dans **Réglages → Stockage** (cadence, nombre d'archives conservées).
 
 **Une archive contient `secret.key`**, qui déchiffre les mots de passe de notification et les URL de webhook. Traitez ce dossier comme un secret.
 

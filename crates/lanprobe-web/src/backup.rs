@@ -14,7 +14,7 @@
 //!
 //! ## Ce que contient une archive
 //!
-//! Une archive par sauvegarde, nommée comme chez Sonarr pour qu'on sache ce
+//! Une archive par sauvegarde, nommée pour qu'on sache ce
 //! qu'on tient sans l'ouvrir :
 //!
 //! ```text
