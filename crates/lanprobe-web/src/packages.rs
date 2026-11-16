@@ -243,7 +243,12 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
         Router::new()
             .route("/api/packages", get(list_packages))
             .route("/api/packages/{platform}/fetch", post(fetch_package))
-            .route("/api/packages/{platform}/file", get(download_package)),
+            .route("/api/packages/{platform}/file", get(download_package))
+            // Session web seulement : l'app ne distribue pas d'installeur.
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::web::web_session_only,
+            )),
     )
 }
 

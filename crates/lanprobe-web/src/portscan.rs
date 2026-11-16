@@ -814,7 +814,12 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
             .route("/api/portscan-profiles", post(create_profile))
             .route("/api/portscan-profiles/{id}", patch(update_profile))
             .route("/api/portscan-profiles/{id}", delete(delete_profile))
-            .layer(axum::middleware::from_fn(all_sites_writer)),
+            .layer(axum::middleware::from_fn(all_sites_writer))
+            // Session web seulement : l'app lit les profils, ne les écrit pas.
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::web::web_session_only,
+            )),
     );
 
     lecture.merge(ecriture)

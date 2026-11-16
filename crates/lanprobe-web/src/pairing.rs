@@ -732,7 +732,13 @@ pub(crate) fn routes(state: &AppState) -> Router<AppState> {
             .route("/api/devices", get(list_all_devices))
             .route("/api/devices/{id}/revoke", post(revoke_any_device))
             .route("/api/devices/{id}/rotate", post(rotate_any_device))
-            .route("/api/devices/{id}/archive", post(archive_any_device)),
+            .route("/api/devices/{id}/archive", post(archive_any_device))
+            // Session web seulement : `rotate` rend un secret d'appareil neuf,
+            // un accès qui survivrait à la révocation de l'appelant.
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::web::web_session_only,
+            )),
     );
 
     ouvert.merge(les_siens).merge(ceux_de_tous)
@@ -2462,12 +2468,14 @@ mod routes_tests {
             .create_user("second-admin", MOT_DE_PASSE, Role::Admin)
             .unwrap();
         let (_device_id, _secret, token) = h.pair("admin").await;
+        let site = h.state.db.create_site("Durand").unwrap();
+        let code = serde_json::json!({ "site_id": site.site_id });
 
-        // Le téléphone d'un administrateur atteint une route d'administration.
-        let (status, comptes) = h
-            .bearer("GET", "/api/users", &token, serde_json::Value::Null)
-            .await;
-        assert_eq!(status, StatusCode::OK, "{comptes}");
+        // Le téléphone d'un administrateur atteint une route réservée aux
+        // opérateurs que l'app appelle. (Les routes d'administration, elles,
+        // exigent une session web, quel que soit le rôle.)
+        let (status, corps) = h.bearer("POST", "/api/enroll-codes", &token, code.clone()).await;
+        assert!(status.is_success(), "{status} {corps}");
 
         // Rétrogradation du COMPTE. L'accès tient, ce qu'il permet rétrécit —
         // et à la requête SUIVANTE, pas au prochain renouvellement.
@@ -2477,7 +2485,7 @@ mod routes_tests {
             .unwrap();
 
         assert_eq!(
-            h.bearer("GET", "/api/users", &token, serde_json::Value::Null).await.0,
+            h.bearer("POST", "/api/enroll-codes", &token, code).await.0,
             StatusCode::FORBIDDEN,
             "le rôle du jeton a survécu à la rétrogradation"
         );
@@ -2817,6 +2825,119 @@ mod routes_tests {
         let (_, _, token) = h.pair("admin").await;
         for path in ["/api/me", "/api/me/totp", "/api/me/passkeys", "/api/me/devices"] {
             let (status, body) = h.bearer("GET", path, &token, serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::OK, "{path} : {body}");
+        }
+    }
+
+    // ── Administration : session web seulement ────────────────────────────
+
+    /// Appelle une route d'administration avec le jeton d'un appareil de
+    /// l'admin, et attend le refus « session web exigée ».
+    ///
+    /// 🔴 Même classe que N2 : depuis le téléphone volé d'un admin, on créait
+    /// un compte admin, on réinitialisait un mot de passe, on frappait un
+    /// jeton Influx ou de sonde, on restaurait une sauvegarde — autant d'accès
+    /// qui survivaient à la révocation de l'appareil. L'app n'appelle aucune
+    /// de ces routes : `{site}`, `{probe}` et `{device}` sont de vrais
+    /// identifiants, pour que ce soit bien ce refus-là qui réponde et non une
+    /// garde de portée.
+    async fn an_admin_device_is_refused_on(method: &str, path: &str) {
+        let h = Harness::new();
+        let (device_id, _, token) = h.pair("admin").await;
+        let site = h.state.db.create_site("Durand").unwrap();
+        let (probe, _) = h.state.db.enroll_probe(&site.site_id, "Paris").unwrap();
+        let path = path
+            .replace("{site}", &site.site_id)
+            .replace("{probe}", &probe.probe_id)
+            .replace("{device}", &device_id);
+        let (status, answer) = h.bearer(method, &path, &token, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} : {answer}");
+        assert!(
+            answer["error"].as_str().unwrap_or_default().contains("session web"),
+            "{method} {path} : {answer}"
+        );
+        assert!(h.audit_actions().iter().any(|a| a == "access.denied"));
+    }
+
+    macro_rules! web_seulement {
+        ($($nom:ident: $method:literal $path:literal;)*) => {
+            $(
+                #[tokio::test]
+                async fn $nom() {
+                    an_admin_device_is_refused_on($method, $path).await;
+                }
+            )*
+        };
+    }
+
+    web_seulement! {
+        an_admin_device_cannot_reach_settings_put: "PUT" "/api/settings";
+        an_admin_device_cannot_reach_advertise_put: "PUT" "/api/settings/influx-advertise";
+        an_admin_device_cannot_reach_advertise_test: "POST" "/api/settings/influx-advertise/test";
+        an_admin_device_cannot_reach_read_token_create: "POST" "/api/influx/read-token";
+        an_admin_device_cannot_reach_read_tokens_list: "GET" "/api/influx/read-tokens";
+        an_admin_device_cannot_reach_read_token_revoke: "DELETE" "/api/influx/read-tokens/jeton-1";
+        an_admin_device_cannot_reach_users_list: "GET" "/api/users";
+        an_admin_device_cannot_reach_users_create: "POST" "/api/users";
+        an_admin_device_cannot_reach_user_update: "PATCH" "/api/users/admin";
+        an_admin_device_cannot_reach_user_password_reset: "POST" "/api/users/admin/password";
+        an_admin_device_cannot_reach_audit_read: "GET" "/api/audit";
+        an_admin_device_cannot_reach_notifications_read: "GET" "/api/notifications";
+        an_admin_device_cannot_reach_webhook_put: "PUT" "/api/notifications/webhook";
+        an_admin_device_cannot_reach_webhook_clear: "DELETE" "/api/notifications/webhook";
+        an_admin_device_cannot_reach_smtp_put: "PUT" "/api/notifications/smtp";
+        an_admin_device_cannot_reach_smtp_clear: "DELETE" "/api/notifications/smtp";
+        an_admin_device_cannot_reach_notification_test: "POST" "/api/notifications/test";
+        an_admin_device_cannot_reach_notification_test_channel: "POST" "/api/notifications/test/webhook";
+        an_admin_device_cannot_reach_subscription_put: "PUT" "/api/notifications/subscriptions";
+        an_admin_device_cannot_reach_backup_create: "POST" "/api/backup";
+        an_admin_device_cannot_reach_backups_list: "GET" "/api/backups";
+        an_admin_device_cannot_reach_backup_download: "GET" "/api/backups/archive.tar.gz";
+        an_admin_device_cannot_reach_backup_download_sealed: "POST" "/api/backups/archive.tar.gz";
+        an_admin_device_cannot_reach_backup_restore_named: "POST" "/api/backup/restore/archive.tar.gz";
+        an_admin_device_cannot_reach_backup_restore_upload: "POST" "/api/backup/restore";
+        an_admin_device_cannot_reach_site_create: "POST" "/api/sites";
+        an_admin_device_cannot_reach_enroll_codes_pending: "GET" "/api/enroll-codes/pending";
+        an_admin_device_cannot_reach_network_label: "PUT" "/api/networks/label";
+        an_admin_device_cannot_reach_site_rename: "PATCH" "/api/sites/{site}";
+        an_admin_device_cannot_reach_site_delete: "DELETE" "/api/sites/{site}";
+        an_admin_device_cannot_reach_site_archive: "POST" "/api/sites/{site}/archive";
+        an_admin_device_cannot_reach_probe_update: "PATCH" "/api/probes/{probe}";
+        an_admin_device_cannot_reach_probe_revoke: "DELETE" "/api/probes/{probe}";
+        an_admin_device_cannot_reach_probe_archive: "POST" "/api/probes/{probe}/archive";
+        an_admin_device_cannot_reach_probe_rotate: "POST" "/api/probes/{probe}/rotate";
+        an_admin_device_cannot_reach_probe_revoke_token: "POST" "/api/probes/{probe}/revoke-token";
+        an_admin_device_cannot_reach_probe_reenroll_code: "POST" "/api/probes/{probe}/reenroll-code";
+        an_admin_device_cannot_reach_devices_list_all: "GET" "/api/devices";
+        an_admin_device_cannot_reach_device_revoke_any: "POST" "/api/devices/{device}/revoke";
+        an_admin_device_cannot_reach_device_rotate_any: "POST" "/api/devices/{device}/rotate";
+        an_admin_device_cannot_reach_device_archive_any: "POST" "/api/devices/{device}/archive";
+        an_admin_device_cannot_reach_packages_list: "GET" "/api/packages";
+        an_admin_device_cannot_reach_package_fetch: "POST" "/api/packages/linux-amd64/fetch";
+        an_admin_device_cannot_reach_package_download: "GET" "/api/packages/linux-amd64/file";
+        an_admin_device_cannot_reach_portscan_profile_create: "POST" "/api/portscan-profiles";
+        an_admin_device_cannot_reach_portscan_profile_update: "PATCH" "/api/portscan-profiles/profil-1";
+        an_admin_device_cannot_reach_portscan_profile_delete: "DELETE" "/api/portscan-profiles/profil-1";
+    }
+
+    #[tokio::test]
+    async fn the_app_routes_stay_open_to_a_device() {
+        // Ce que l'app appelle (lanprobe-ios, `LanProbeCore/HubSession.swift`)
+        // reste ouvert au jeton d'appareil.
+        let h = Harness::new();
+        let (_, _, token) = h.pair("admin").await;
+        let site = h.state.db.create_site("Durand").unwrap();
+        let (probe, _) = h.state.db.enroll_probe(&site.site_id, "Paris").unwrap();
+        let (status, body) = h
+            .bearer("POST", "/api/enroll-codes", &token, serde_json::json!({ "site_id": site.site_id }))
+            .await;
+        assert!(status.is_success(), "enroll-codes : {status} {body}");
+        for path in [
+            "/api/probes".to_string(),
+            format!("/api/probes/{}/commands", probe.probe_id),
+            "/api/portscan-profiles".to_string(),
+        ] {
+            let (status, body) = h.bearer("GET", &path, &token, serde_json::json!({})).await;
             assert_eq!(status, StatusCode::OK, "{path} : {body}");
         }
     }

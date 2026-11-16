@@ -197,12 +197,19 @@ pub fn build_router(state: AppState) -> Router {
     // Conduite du parc. `GET /api/enroll-codes/pending` en fait partie et non
     // de la consultation : le code y figure **en clair** pendant sa validité,
     // c'est de quoi enrôler une sonde.
+    //
+    // 🔴 Session web seulement (revue RSSI, suite de N2), sauf
+    // `POST /api/enroll-codes`, que l'app appelle pour équiper un site.
+    let parc_app = guarded(
+        &state,
+        Role::Operator,
+        Router::new().route("/api/enroll-codes", post(create_enroll_code)),
+    );
     let parc = guarded(
         &state,
         Role::Operator,
         Router::new()
             .route("/api/sites", post(create_site))
-            .route("/api/enroll-codes", post(create_enroll_code))
             .route("/api/enroll-codes/pending", get(list_pending_codes))
             // Nommer un réseau est un acte de conduite du parc, pas une
             // consultation : le libellé se retrouve dans tous les rapports.
@@ -211,7 +218,8 @@ pub fn build_router(state: AppState) -> Router {
             .route(
                 "/api/notifications/subscriptions",
                 put(put_subscription),
-            ),
+            )
+            .layer(middleware::from_fn_with_state(state.clone(), web_session_only)),
     );
 
     // Les routes dont le `{id}` du chemin désigne UN SITE, derrière leur
@@ -227,7 +235,9 @@ pub fn build_router(state: AppState) -> Router {
         Role::Operator,
         Router::new()
             .route("/api/sites/{id}", patch(rename_site).delete(delete_site))
-            .route("/api/sites/{id}/archive", post(archive_site)),
+            .route("/api/sites/{id}/archive", post(archive_site))
+            // Session web seulement : l'app ne conduit pas les sites.
+            .layer(middleware::from_fn_with_state(state.clone(), web_session_only)),
     );
 
     // Les routes qui désignent UNE sonde vivent à part, derrière le garde de
@@ -246,7 +256,12 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/sla", get(probe_sla_samples)),
     );
 
-    let probe_write = guarded_probe_scope(
+    // Ce que l'app conduit depuis le terrain : temps réel, sondes de suivi,
+    // commandes. Le reste — renommer, déplacer, retirer, frapper un nouveau
+    // jeton ou un code de réenrôlement — est en session web seulement :
+    // depuis un téléphone volé, un jeton de sonde frais est un accès qui
+    // survit à la révocation de l'appareil (revue RSSI, suite de N2).
+    let probe_admin = guarded_probe_scope(
         &state,
         Role::Operator,
         Router::new()
@@ -255,6 +270,13 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/probes/{id}/rotate", post(rotate_token))
             .route("/api/probes/{id}/revoke-token", post(revoke_token_now))
             .route("/api/probes/{id}/reenroll-code", post(create_reenroll_code))
+            .layer(middleware::from_fn_with_state(state.clone(), web_session_only)),
+    );
+
+    let probe_write = guarded_probe_scope(
+        &state,
+        Role::Operator,
+        Router::new()
             .route("/api/probes/{id}/realtime", post(set_realtime))
             .route("/api/probes/{id}/monitors/revive", post(revive_monitor))
             .route("/api/probes/{id}/monitors/remove", post(remove_monitor_entry))
@@ -267,6 +289,11 @@ pub fn build_router(state: AppState) -> Router {
     // Administration : les comptes, les réglages, la rétention, le journal, et
     // les jetons de lecture — qui, eux, quittent le hub pour aller dans un
     // Grafana. **Aucune route de suppression du journal d'audit n'existe.**
+    //
+    // 🔴 **Session web seulement**, tout le groupe (revue RSSI, suite de
+    // N2) : depuis le téléphone volé d'un admin, un compte créé, un mot de
+    // passe réinitialisé, un jeton Influx frappé ou une sauvegarde restaurée
+    // survivaient à la révocation de l'appareil. L'app n'en appelle aucune.
     let administration = guarded(
         &state,
         Role::Admin,
@@ -317,7 +344,8 @@ pub fn build_router(state: AppState) -> Router {
                     // corps est écrit au fil de l'eau sur disque, jamais
                     // gardé en mémoire.
                     .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-            ),
+            )
+            .layer(middleware::from_fn_with_state(state.clone(), web_session_only)),
     );
 
     Router::new()
@@ -326,8 +354,10 @@ pub fn build_router(state: AppState) -> Router {
         .merge(read_only)
         .merge(own_settings)
         .merge(probe_read)
+        .merge(parc_app)
         .merge(parc)
         .merge(site_write)
+        .merge(probe_admin)
         .merge(probe_write)
         .merge(administration)
         // Les deux domaines de l'app mobile portent leurs routes eux-mêmes.
@@ -1670,12 +1700,16 @@ async fn demo_lock(
 
 /// Refuse toute identité venue d'un **jeton d'appareil** (revue RSSI, N2).
 ///
+/// Posée sur les réglages de sécurité du compte et sur toute route
+/// d'administration que l'app n'appelle pas (contrat, « Session web
+/// seulement »).
+///
 /// 🔴 Depuis un téléphone volé, on posait SA clé d'accès ou SON second
 /// facteur, on changeait le mot de passe : autant d'accès qui survivaient à la
 /// révocation de l'appareil — la persistance que A3 avait fermée pour les
 /// codes d'appairage. La sécurité du compte se règle depuis une session web,
 /// où le mot de passe a été tapé. L'app n'appelle aucune de ces routes.
-async fn web_session_only(
+pub(crate) async fn web_session_only(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: Next,
@@ -1697,7 +1731,7 @@ async fn web_session_only(
     );
     fail(
         StatusCode::FORBIDDEN,
-        "réglage de sécurité du compte : ouvrez une session web, un appareil appairé n'y a pas accès",
+        "réservé à une session web : un appareil appairé n'a pas accès à cette route",
     )
 }
 
