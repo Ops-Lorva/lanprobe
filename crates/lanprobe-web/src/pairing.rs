@@ -2737,6 +2737,90 @@ mod routes_tests {
         assert_eq!(status, StatusCode::OK, "la session web le peut toujours : {body}");
     }
 
+    // ── N2 : un jeton d'appareil ne touche pas à la sécurité du compte ─────
+
+    /// Appelle `path` avec le jeton d'un appareil de `admin` et attend `403`.
+    ///
+    /// 🔴 Revue RSSI, N2 : depuis un téléphone volé, `totp/start` et
+    /// `passkeys/start` répondaient `200` — l'attaquant posait SA clé d'accès
+    /// ou SON second facteur, qui survivaient à la révocation de l'appareil.
+    /// L'en-tête `Host: localhost` est celui de la preuve : un contexte
+    /// sécurisé sans HTTPS, où la cérémonie WebAuthn s'ouvre.
+    async fn a_device_token_is_refused_on(method: &str, path: &str, body: serde_json::Value) {
+        let h = Harness::new();
+        h.state.db.add_passkey("admin", "cle-1", "Yubikey", "{}").unwrap();
+        let (_, _, token) = h.pair("admin").await;
+        let (status, answer) = h
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::HOST, "localhost")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} : {answer}");
+        assert!(answer["secret"].is_null() && answer["publicKey"].is_null(), "{answer}");
+        // Rien n'a bougé sur le compte.
+        assert!(h.state.db.verify_credentials("admin", MOT_DE_PASSE).is_ok());
+        assert!(!h.state.db.totp_enabled("admin").unwrap());
+        assert_eq!(h.state.db.list_passkeys("admin").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_device_token_cannot_reach_password() {
+        a_device_token_is_refused_on("POST", "/api/me/password", serde_json::json!({ "current": MOT_DE_PASSE, "next": "un-autre-mot-de-passe" })).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_token_cannot_reach_lang() {
+        a_device_token_is_refused_on("POST", "/api/me/lang", serde_json::json!({ "lang": "en" })).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_token_cannot_reach_totp_disable() {
+        a_device_token_is_refused_on("DELETE", "/api/me/totp", serde_json::json!({ "password": MOT_DE_PASSE })).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_token_cannot_reach_totp_start() {
+        a_device_token_is_refused_on("POST", "/api/me/totp/start", serde_json::json!({})).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_token_cannot_reach_totp_confirm() {
+        a_device_token_is_refused_on("POST", "/api/me/totp/confirm", serde_json::json!({ "code": "123456" })).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_token_cannot_reach_passkey_start() {
+        a_device_token_is_refused_on("POST", "/api/me/passkeys/start", serde_json::json!({})).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_token_cannot_reach_passkey_finish() {
+        a_device_token_is_refused_on("POST", "/api/me/passkeys/finish", serde_json::json!({})).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_token_cannot_reach_passkey_delete() {
+        a_device_token_is_refused_on("DELETE", "/api/me/passkeys/cle-1", serde_json::json!({})).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_token_still_reads_its_own_account() {
+        // Lire n'ouvre rien : l'écran « Mon compte » de l'app reste possible.
+        let h = Harness::new();
+        let (_, _, token) = h.pair("admin").await;
+        for path in ["/api/me", "/api/me/totp", "/api/me/passkeys", "/api/me/devices"] {
+            let (status, body) = h.bearer("GET", path, &token, serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::OK, "{path} : {body}");
+        }
+    }
+
     // ── Mode démo : l'appareil appelant, et lui seul ───────────────────────
 
     #[tokio::test]

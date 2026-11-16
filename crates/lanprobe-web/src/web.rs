@@ -174,8 +174,10 @@ pub fn build_router(state: AppState) -> Router {
     // Ses propres réglages : mot de passe, second facteur, clés d'accès,
     // langue. Ouverts au rôle le plus bas — chacun gère son compte (§ 19) —
     // et **verrouillés pour un compte de démonstration** (§ 27) : partagé
-    // entre inconnus, il serait saboté par le premier venu. La couche est
-    // posée à l'intérieur de `guarded`, donc après l'authentification.
+    // entre inconnus, il serait saboté par le premier venu. Réservés aussi à
+    // une **session web** : un jeton d'appareil n'y touche pas (revue RSSI,
+    // N2). Les couches sont posées à l'intérieur de `guarded`, donc après
+    // l'authentification.
     let own_settings = guarded(
         &state,
         Role::Viewer,
@@ -188,7 +190,8 @@ pub fn build_router(state: AppState) -> Router {
             .route("/api/me/passkeys/start", post(start_passkey_registration))
             .route("/api/me/passkeys/finish", post(finish_passkey_registration))
             .route("/api/me/passkeys/{id}", axum::routing::delete(delete_own_passkey))
-            .layer(middleware::from_fn_with_state(state.clone(), demo_lock)),
+            .layer(middleware::from_fn_with_state(state.clone(), demo_lock))
+            .layer(middleware::from_fn_with_state(state.clone(), web_session_only)),
     );
 
     // Conduite du parc. `GET /api/enroll-codes/pending` en fait partie et non
@@ -1662,6 +1665,39 @@ async fn demo_lock(
     fail(
         StatusCode::FORBIDDEN,
         "compte de démonstration : ce réglage est verrouillé",
+    )
+}
+
+/// Refuse toute identité venue d'un **jeton d'appareil** (revue RSSI, N2).
+///
+/// 🔴 Depuis un téléphone volé, on posait SA clé d'accès ou SON second
+/// facteur, on changeait le mot de passe : autant d'accès qui survivaient à la
+/// révocation de l'appareil — la persistance que A3 avait fermée pour les
+/// codes d'appairage. La sécurité du compte se règle depuis une session web,
+/// où le mot de passe a été tapé. L'app n'appelle aucune de ces routes.
+async fn web_session_only(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let Some(identity) = req.extensions().get::<Identity>().cloned() else {
+        return fail(StatusCode::UNAUTHORIZED, "authentification requise");
+    };
+    let Some(device_id) = identity.device_id.as_deref() else {
+        return next.run(req).await;
+    };
+    let target = format!("{} {}", req.method(), req.uri().path());
+    audit(
+        &state,
+        Some(&identity.username),
+        "access.denied",
+        Some(&target),
+        Outcome::Failure,
+        Some(&format!("demandé depuis l'appareil {device_id} : session web exigée")),
+    );
+    fail(
+        StatusCode::FORBIDDEN,
+        "réglage de sécurité du compte : ouvrez une session web, un appareil appairé n'y a pas accès",
     )
 }
 

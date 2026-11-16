@@ -3756,6 +3756,16 @@ exigée, pour tous les comptes. Un téléphone volé émettait sinon un code ave
 son jeton, appairait un second appareil, et ce second survivait à la révocation
 du premier.
 
+**Ni les réglages de sécurité du compte (revue RSSI, N2).** Les mêmes routes que
+le verrou démo — `POST /api/me/password`, `POST /api/me/lang`,
+`POST /api/me/totp/start`, `/confirm`, `DELETE /api/me/totp`,
+`POST /api/me/passkeys/start`, `/finish`, `DELETE /api/me/passkeys/{id}` —
+répondent `403` (ligne `access.denied`) à un jeton d'appareil, pour tous les
+comptes. Un téléphone volé y posait sinon sa clé d'accès, son TOTP ou un
+nouveau mot de passe, qui survivaient à sa révocation. Restent ouverts à
+l'appareil : les lectures (`GET /api/me`, `/api/me/totp`, `/api/me/passkeys`)
+et `/api/me/devices*`, dont l'app se sert.
+
 ### Mode démo — un compte partagé entre inconnus
 
 Pour la review App Store : le relecteur se connecte au hub web avec le compte
