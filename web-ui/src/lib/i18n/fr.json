@@ -870,7 +870,29 @@
       "site_archive": "Site archivé",
       "site_unarchive": "Site remis dans le parc",
       "probe_archive": "Sonde archivée",
-      "probe_unarchive": "Sonde remise dans le parc"
+      "probe_unarchive": "Sonde remise dans le parc",
+      "auth_basic": "Authentification HTTP Basic",
+      "auth_throttled": "Tentatives freinées",
+      "backup_download": "Sauvegarde téléchargée",
+      "device_pair": "Appareil appairé",
+      "device_pair_code": "Code d'appairage émis",
+      "device_refused": "Appairage refusé",
+      "device_rename": "Appareil renommé",
+      "device_revoke": "Appareil révoqué",
+      "device_rotate": "Jeton d'appareil renouvelé",
+      "device_archive": "Appareil archivé",
+      "device_unarchive": "Appareil remis dans la liste",
+      "package_fetch": "Paquet de sonde récupéré",
+      "package_download": "Paquet de sonde téléchargé",
+      "portscan_profile_create": "Profil de scan créé",
+      "portscan_profile_update": "Profil de scan modifié",
+      "portscan_profile_delete": "Profil de scan supprimé",
+      "probe_monitor_remove": "Cible retirée",
+      "probe_monitor_revive": "Cible réactivée",
+      "report_request": "Rapport demandé",
+      "report_download": "Rapport téléchargé",
+      "user_demo": "Compte passé en démo",
+      "user_undemo": "Compte sorti du mode démo"
     },
     "family": {
       "access": "Accès",
@@ -882,7 +904,11 @@
       "probe": "Sondes",
       "settings": "Réglages",
       "site": "Sites",
-      "user": "Comptes"
+      "user": "Comptes",
+      "device": "Appareils",
+      "package": "Paquets",
+      "portscan_profile": "Profils de scan",
+      "report": "Rapports"
     }
   },
   "notify": {

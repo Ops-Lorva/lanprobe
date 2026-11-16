@@ -870,7 +870,29 @@
       "site_archive": "Site archived",
       "site_unarchive": "Site returned to the fleet",
       "probe_archive": "Probe archived",
-      "probe_unarchive": "Probe returned to the fleet"
+      "probe_unarchive": "Probe returned to the fleet",
+      "auth_basic": "HTTP Basic authentication",
+      "auth_throttled": "Attempts throttled",
+      "backup_download": "Backup downloaded",
+      "device_pair": "Device paired",
+      "device_pair_code": "Pairing code issued",
+      "device_refused": "Pairing refused",
+      "device_rename": "Device renamed",
+      "device_revoke": "Device revoked",
+      "device_rotate": "Device token rotated",
+      "device_archive": "Device archived",
+      "device_unarchive": "Device restored",
+      "package_fetch": "Probe package fetched",
+      "package_download": "Probe package downloaded",
+      "portscan_profile_create": "Scan profile created",
+      "portscan_profile_update": "Scan profile updated",
+      "portscan_profile_delete": "Scan profile deleted",
+      "probe_monitor_remove": "Target removed",
+      "probe_monitor_revive": "Target reactivated",
+      "report_request": "Report requested",
+      "report_download": "Report downloaded",
+      "user_demo": "Account set to demo",
+      "user_undemo": "Account removed from demo"
     },
     "family": {
       "access": "Access",
@@ -882,7 +904,11 @@
       "probe": "Probes",
       "settings": "Settings",
       "site": "Sites",
-      "user": "Accounts"
+      "user": "Accounts",
+      "device": "Devices",
+      "package": "Packages",
+      "portscan_profile": "Scan profiles",
+      "report": "Reports"
     }
   },
   "notify": {

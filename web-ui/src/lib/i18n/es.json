@@ -870,7 +870,29 @@
       "site_archive": "Sitio archivado",
       "site_unarchive": "Sitio devuelto al parque",
       "probe_archive": "Sonda archivada",
-      "probe_unarchive": "Sonda devuelta al parque"
+      "probe_unarchive": "Sonda devuelta al parque",
+      "auth_basic": "Autenticación HTTP Basic",
+      "auth_throttled": "Intentos limitados",
+      "backup_download": "Copia descargada",
+      "device_pair": "Dispositivo vinculado",
+      "device_pair_code": "Código de vinculación emitido",
+      "device_refused": "Vinculación rechazada",
+      "device_rename": "Dispositivo renombrado",
+      "device_revoke": "Dispositivo revocado",
+      "device_rotate": "Token del dispositivo renovado",
+      "device_archive": "Dispositivo archivado",
+      "device_unarchive": "Dispositivo restaurado",
+      "package_fetch": "Paquete de sonda obtenido",
+      "package_download": "Paquete de sonda descargado",
+      "portscan_profile_create": "Perfil de escaneo creado",
+      "portscan_profile_update": "Perfil de escaneo modificado",
+      "portscan_profile_delete": "Perfil de escaneo eliminado",
+      "probe_monitor_remove": "Objetivo retirado",
+      "probe_monitor_revive": "Objetivo reactivado",
+      "report_request": "Informe solicitado",
+      "report_download": "Informe descargado",
+      "user_demo": "Cuenta en modo demo",
+      "user_undemo": "Cuenta fuera del modo demo"
     },
     "family": {
       "access": "Acceso",
@@ -882,7 +904,11 @@
       "probe": "Sondas",
       "settings": "Ajustes",
       "site": "Sitios",
-      "user": "Cuentas"
+      "user": "Cuentas",
+      "device": "Dispositivos",
+      "package": "Paquetes",
+      "portscan_profile": "Perfiles de escaneo",
+      "report": "Informes"
     }
   },
   "notify": {
