@@ -50,13 +50,24 @@ fn measured(ip: &str, latency_ms: u64, timestamp: u64) -> PingResult {
 /// transforme en minutes d'indisponibilité imaginaires dans un rapport SLA.
 /// Un trou dans la courbe est honnête ; un point rouge inventé ne l'est pas.
 pub async fn ping_once_checked(ip: &str, src: Option<Ipv4Addr>) -> Option<PingResult> {
-    if icmp_attempt(ip, src, PING_TIMEOUT_MS).await == Attempt::NotSent {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // ⚠️ UN SEUL tir ICMP par relevé. Cette fonction tirait un premier ICMP
+    // pour savoir s'il partait, puis rappelait `ping_once`, qui en tirait un
+    // second : une cible muette coûtait deux délais d'une seconde avant même
+    // les replis, soit ~3 s par point contre ~1 s pour une cible qui répond.
+    // Le SLA compte des POINTS : les pannes y pesaient trois fois moins que
+    // leur durée réelle (50 % de panne affichaient ~75 % de dispo).
+    match icmp_attempt(ip, src, PING_TIMEOUT_MS).await {
+        Attempt::Reply(lat) => Some(measured(ip, lat, timestamp)),
         // Les chemins de repli (ping système, TCP) consomment les mêmes
         // ressources : si l'ICMP n'a pas pu partir, les essayer ne ferait
         // qu'aggraver la saturation qu'on est en train de subir.
-        return None;
+        Attempt::NotSent => None,
+        Attempt::NoReply => Some(fallbacks(ip, src, timestamp).await),
     }
-    Some(ping_once(ip, src).await)
 }
 
 pub async fn ping_once(ip: &str, src: Option<Ipv4Addr>) -> PingResult {
@@ -68,7 +79,12 @@ pub async fn ping_once(ip: &str, src: Option<Ipv4Addr>) -> PingResult {
     if let Some(lat) = icmp_ping(ip, src, PING_TIMEOUT_MS).await {
         return measured(ip, lat, timestamp);
     }
+    fallbacks(ip, src, timestamp).await
+}
 
+/// Replis quand l'ICMP n'a rien rendu : ping système (Windows, macOS), puis
+/// sondage TCP. Partagés par `ping_once` et `ping_once_checked`.
+async fn fallbacks(ip: &str, src: Option<Ipv4Addr>, timestamp: u64) -> PingResult {
     #[cfg(target_os = "windows")]
     if let Some(lat) = windows_ping_exe(ip, src, PING_TIMEOUT_MS).await {
         return measured(ip, lat, timestamp);

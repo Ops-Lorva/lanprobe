@@ -9,6 +9,16 @@ The hub has its own log: [CHANGELOG-hub.md](CHANGELOG-hub.md).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.11] - 2026-11-19
+
+### English
+
+- **Fixed: monitoring now takes one sample per second even for unreachable targets**, so SLA reports no longer under-count outages.
+
+### Français
+
+- **Corrigé : la surveillance prend un relevé par seconde, même sur une cible injoignable**, et les rapports SLA ne sous-estiment plus les pannes.
+
 ## [2.4.10] - 2026-11-19
 
 ### English

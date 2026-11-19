@@ -92,51 +92,87 @@ pub fn start_from_hub(state: &AppState, ip: &str) {
     // redémarrage de l'app. Émis ici et pas plus haut : la sortie anticipée
     // ci-dessus veut dire « rien n'a changé », et un événement l'annoncerait.
     state.emit("monitor:started", serde_json::json!({ "ip": ip }));
-    let state = state.clone();
-    let ip = ip.to_string();
-    tokio::spawn(async move {
-        loop {
+    tokio::spawn(run_loop(state.clone(), ip.to_string(), |ip, src| async move {
+        ping_once_checked(&ip, src).await
+    }));
+}
+
+/// Relevés en vol au plus, par cible. Une cible muette prend jusqu'à ~3 s
+/// (ICMP, ping système, TCP : une seconde chacun) : quatre relevés suffisent
+/// à garder un départ par seconde.
+const MAX_IN_FLIGHT: usize = 4;
+
+/// Boucle de surveillance d'une cible : **un départ par seconde, fixe**.
+///
+/// ⚠️ La boucle faisait « relevé, puis pause d'une seconde ». Sa cadence était
+/// donc *durée du relevé + 1 s* : ~1 s pour une cible qui répond, ~3 s pour une
+/// cible muette. Or le SLA compte des POINTS, pas du temps : une panne y pesait
+/// trois fois moins que sa durée réelle — 50 % de panne s'affichaient ~75 % de
+/// disponibilité, dans le rapport remis au client. Les départs suivent
+/// maintenant l'horloge, et un relevé lent ne retarde pas le suivant.
+async fn run_loop<P, F>(state: AppState, ip: String, ping: P)
+where
+    P: Fn(String, Option<Ipv4Addr>) -> F + Send + Sync + 'static,
+    F: std::future::Future<Output = Option<lanprobe_core::ping::PingResult>> + Send + 'static,
+{
+    let ping = std::sync::Arc::new(ping);
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT));
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Après une mise en veille, repartir de maintenant : rattraper les
+    // secondes perdues tirerait une rafale de relevés d'un coup.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        {
+            let Ok(map) = state.ping_stop.lock() else { break };
+            if *map.get(&ip).unwrap_or(&true) {
+                break;
+            }
+        }
+        // Pendant un changement de profil réseau, l'interface est
+        // brièvement absente : ne rien inscrire vaut mieux qu'inscrire une
+        // panne qui n'a pas eu lieu.
+        if state.is_monitoring_blackout() {
+            continue;
+        }
+        // ⚠️ Interface choisie sans IPv4 : on ne mesure pas. C'est le
+        // TROISIÈME échec local de cette boucle, et il se traite comme les
+        // deux autres — la bascule de profil juste au-dessus, et les
+        // sockets ICMP épuisés plus bas. Il était le seul à inventer une
+        // réponse : `alive: false` une fois par seconde et par cible, sur la
+        // foi d'un câble débranché chez nous.
+        let Ok(src) = source_address(&state) else { continue };
+        // Tous les relevés de cette cible sont encore en vol : on saute ce
+        // départ plutôt que d'empiler (rien n'est écrit, comme pour un
+        // échec local).
+        let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
+        let (state, ip, ping) = (state.clone(), ip.clone(), ping.clone());
+        tokio::spawn(async move {
+            let _slot = slot;
+            // ⚠️ `None` quand la machine n'a pas pu ÉMETTRE — sockets ICMP
+            // épuisés, typiquement par un scan réseau en cours. On saute
+            // alors le relevé au lieu d'écrire « hôte mort » : c'est un fait
+            // sur nous, pas sur la cible. Sans ça, un scan d'un /16
+            // fabriquait 22 % de fausse indisponibilité sur des cibles
+            // parfaitement joignables.
+            let Some(result) = ping(ip.clone(), src).await else { return };
+            // Une cible retirée pendant le relevé ne doit plus rien écrire :
+            // `stop` vient de purger son historique.
+            if state
+                .ping_stop
+                .lock()
+                .map(|m| *m.get(&ip).unwrap_or(&true))
+                .unwrap_or(true)
             {
-                let Ok(map) = state.ping_stop.lock() else { break };
-                if *map.get(&ip).unwrap_or(&true) {
-                    break;
-                }
+                return;
             }
-            // Pendant un changement de profil réseau, l'interface est
-            // brièvement absente : ne rien inscrire vaut mieux qu'inscrire une
-            // panne qui n'a pas eu lieu.
-            if state.is_monitoring_blackout() {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            // ⚠️ Interface choisie sans IPv4 : on ne mesure pas. C'est le
-            // TROISIÈME échec local de cette boucle, et il se traite comme les
-            // deux autres — la bascule de profil juste au-dessus, et les
-            // sockets ICMP épuisés juste en dessous. Il était le seul à
-            // inventer une réponse : `alive: false` une fois par seconde et
-            // par cible, sur la foi d'un câble débranché chez nous.
-            let Ok(src) = source_address(&state) else {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            };
-            // ⚠️ `ping_once_checked` rend `None` quand la machine n'a pas pu
-            // ÉMETTRE — sockets ICMP épuisés, typiquement par un scan réseau
-            // en cours. On saute alors le relevé au lieu d'écrire « hôte
-            // mort » : c'est un fait sur nous, pas sur la cible. Sans ça, un
-            // scan d'un /16 fabriquait 22 % de fausse indisponibilité sur des
-            // cibles parfaitement joignables.
-            let Some(result) = ping_once_checked(&ip, src).await else {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            };
             state.monitoring.push(result.clone());
             state.emit(
                 "ping:tick",
                 serde_json::to_value(&result).unwrap_or(serde_json::Value::Null),
             );
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
+        });
+    }
 }
 
 /// Arrête la surveillance et purge l'historique de la cible.
@@ -261,6 +297,43 @@ mod tests {
             .unwrap_or(0);
         stop(&state, "192.0.2.99");
         assert_eq!(ecrits, 0, "aucun échantillon ne doit être écrit, surtout pas un `alive: false`");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_target_gets_one_sample_per_second_like_a_responsive_one() {
+        // 🔴 Le SLA compte des points. Une cible muette prenait ~3 s par
+        // relevé (ICMP puis replis) et la boucle attendait encore 1 s après :
+        // ses pannes pesaient trois fois moins que leur durée. Ici le relevé
+        // dure 2,5 s : on doit quand même obtenir un point par seconde.
+        let state = state("cadence-fixe");
+        state.ping_stop.lock().unwrap().insert("192.0.2.50".into(), false);
+        let handle = tokio::spawn(run_loop(state.clone(), "192.0.2.50".into(), |ip, _src| async move {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            Some(lanprobe_core::ping::PingResult { ip, alive: false, latency_ms: None, timestamp: 0 })
+        }));
+        tokio::time::sleep(Duration::from_millis(12_600)).await;
+        let n = state.monitoring.snapshot().get("192.0.2.50").map(|v| v.len()).unwrap_or(0);
+        state.ping_stop.lock().unwrap().insert("192.0.2.50".into(), true);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        handle.abort();
+        // Départs à t = 0..=12 s, chacun rendu 2,5 s plus tard : 11 rendus à 12,6 s.
+        assert!((10..=11).contains(&n), "cadence attendue ~1/s, obtenu {n} points en 12,6 s");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_target_stopped_mid_sample_writes_nothing_more() {
+        let state = state("arret-en-vol");
+        state.ping_stop.lock().unwrap().insert("192.0.2.51".into(), false);
+        let handle = tokio::spawn(run_loop(state.clone(), "192.0.2.51".into(), |ip, _src| async move {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            Some(lanprobe_core::ping::PingResult { ip, alive: true, latency_ms: Some(5), timestamp: 0 })
+        }));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        state.ping_stop.lock().unwrap().insert("192.0.2.51".into(), true);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        handle.abort();
+        let n = state.monitoring.snapshot().get("192.0.2.51").map(|v| v.len()).unwrap_or(0);
+        assert_eq!(n, 0, "un relevé terminé après l'arrêt ne doit rien écrire");
     }
 
     #[tokio::test]

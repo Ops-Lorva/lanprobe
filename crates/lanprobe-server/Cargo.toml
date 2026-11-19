@@ -61,3 +61,7 @@ assets = [
     ["../../src-tauri/resources/linux/speedtest", "usr/lib/lanprobe/speedtest", "755"],
 ]
 maintainer-scripts = "packaging/debian"
+
+[dev-dependencies]
+# Horloge mise en pause dans les tests de cadence de la surveillance.
+tokio = { workspace = true, features = ["test-util"] }
