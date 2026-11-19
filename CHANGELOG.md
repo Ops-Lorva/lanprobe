@@ -9,6 +9,16 @@ The hub has its own log: [CHANGELOG-hub.md](CHANGELOG-hub.md).
 Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 `### English` et `### Français` par version. SemVer.
 
+## [2.4.10] - 2026-11-19
+
+### English
+
+- **Fixed: the DHCP row and its "Enable DHCP" button are back** in the single-page dashboard.
+
+### Français
+
+- **Corrigé : la ligne DHCP et son bouton « Activer le DHCP » sont de retour** dans le tableau de bord en vue une page.
+
 ## [2.4.9] - 2026-11-16
 
 ### English
