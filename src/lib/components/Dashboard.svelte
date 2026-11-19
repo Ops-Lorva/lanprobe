@@ -310,6 +310,18 @@
           <dt>{$_('dashboard.ip')}</dt><dd class="m">{activeInterface.ip ?? '—'}{activeInterface.subnet ? ` / ${activeInterface.subnet}` : ''}</dd>
           <dt>{$_('dashboard.gateway')}</dt><dd class="m">{activeInterface.gateway ?? '—'}</dd>
           <dt>{$_('dashboard.dns')}</dt><dd class="m">{activeInterface.dns.join(', ') || '—'}</dd>
+          <dt>{$_('dashboard.dhcp')}</dt>
+          <dd>
+            {#if activeInterface.dhcp_enabled}
+              <StateMark mark={{ tone: 'ok', shape: 'dot', key: 'dashboard.dhcp_active' }} />
+            {:else if readOnly}
+              {$_('dashboard.dhcp_no')}
+            {:else}
+              <button class="btn sm" type="button" onclick={enableDhcp} disabled={dhcpBusy} aria-busy={dhcpBusy}>
+                {dhcpBusy ? '…' : $_('dashboard.dhcp_enable')}
+              </button>
+            {/if}
+          </dd>
           <dt>{$_('dashboard.public_ip')}</dt><dd class="m">{publicIpLoading ? '…' : (publicIp?.ip ?? '—')}</dd>
           <dt>{$_('dashboard.hub')}</dt><dd><StateMark mark={hubMark(hub)} /></dd>
         </dl>
