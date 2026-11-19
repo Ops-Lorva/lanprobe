@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core';
 
 export interface PingEntry {
   timestamp: number;
+  /** Départ du relevé à la milliseconde ; absent des sondes plus anciennes. */
+  timestamp_ms?: number;
   alive: boolean;
   latency_ms: number | null;
 }
@@ -12,6 +14,27 @@ export interface HostMonitor {
   ip: string;
   current: { alive: boolean; latency_ms: number | null } | null;
   history: PingEntry[];
+}
+
+const HISTORY_MAX = 60;
+const departure = (e: PingEntry) => e.timestamp_ms ?? e.timestamp * 1000;
+
+/**
+ * Ajoute un relevé, rangé par DÉPART et non par arrivée.
+ *
+ * ⚠️ Plusieurs relevés sont en vol par cible : un relevé muet (~2,5 s) finit
+ * après celui lancé une seconde plus tard. Pris comme « dernier arrivé », il
+ * repeignait la ligne en rouge juste après le vert — l'état clignotait pendant
+ * une panne partielle. `current` est le plus récent par départ.
+ */
+export function withSample(host: HostMonitor, sample: PingEntry): HostMonitor {
+  const history = [...host.history];
+  let at = history.length;
+  while (at > 0 && departure(history[at - 1]) > departure(sample)) at--;
+  history.splice(at, 0, sample);
+  const kept = history.slice(-HISTORY_MAX);
+  const last = kept[kept.length - 1];
+  return { ...host, history: kept, current: { alive: last.alive, latency_ms: last.latency_ms } };
 }
 
 function createMonitoringStore() {
@@ -32,7 +55,7 @@ function createMonitoringStore() {
   const tombstones = new Map<string, number>(); // ip -> expiration (ms epoch)
   const TOMBSTONE_MS = 3000;
 
-  const record = (ip: string, alive: boolean, latency_ms: number | null, timestamp: number) => {
+  const record = (ip: string, alive: boolean, latency_ms: number | null, timestamp: number, timestamp_ms?: number) => {
     const until = tombstones.get(ip);
     if (until !== undefined) {
       if (Date.now() < until) return;      // tick tardif → ignoré
@@ -45,9 +68,7 @@ function createMonitoringStore() {
       // de dropper l'échantillon — sans ça le web ne verrait jamais les
       // monitorings initiés depuis la machine hôte.
       const host = map.get(ip) ?? { ip, current: null, history: [] as PingEntry[] };
-      host.current = { alive, latency_ms };
-      host.history = [...host.history.slice(-59), { timestamp, alive, latency_ms }];
-      map.set(ip, host);
+      map.set(ip, withSample(host, { timestamp, timestamp_ms, alive, latency_ms }));
       return new Map(map);
     });
   };
@@ -67,9 +88,9 @@ function createMonitoringStore() {
   async function init() {
     if (initPromise) return initPromise;
     initPromise = (async () => {
-      tickUnlisten = await listen<{ ip: string; alive: boolean; latency_ms: number | null; timestamp: number }>(
+      tickUnlisten = await listen<{ ip: string; alive: boolean; latency_ms: number | null; timestamp: number; timestamp_ms?: number }>(
         'ping:tick',
-        ({ payload: p }) => record(p.ip, p.alive, p.latency_ms, p.timestamp)
+        ({ payload: p }) => record(p.ip, p.alive, p.latency_ms, p.timestamp, p.timestamp_ms)
       );
       // 🔴 Les surveillances décidées AILLEURS — depuis le hub, donc depuis le
       // téléphone. Sans ces deux écoutes, une cible retirée restait affichée
@@ -88,7 +109,7 @@ function createMonitoringStore() {
       // (pour le cas d'un client web qui se connecte alors que des
       // monitorings tournent déjà, ou d'un rechargement de la webview).
       try {
-        const snap = await invoke<Record<string, { ip: string; alive: boolean; latency_ms: number | null; timestamp: number }[]>>(
+        const snap = await invoke<Record<string, { ip: string; alive: boolean; latency_ms: number | null; timestamp: number; timestamp_ms?: number }[]>>(
           'cmd_get_monitoring_snapshot'
         );
         if (snap && typeof snap === 'object') {
@@ -97,6 +118,7 @@ function createMonitoringStore() {
               if (!samples || samples.length === 0) continue;
               const history = samples.slice(-60).map(s => ({
                 timestamp: s.timestamp,
+                timestamp_ms: s.timestamp_ms,
                 alive: s.alive,
                 latency_ms: s.latency_ms,
               }));

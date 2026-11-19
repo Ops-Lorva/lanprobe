@@ -309,7 +309,7 @@ mod tests {
         state.ping_stop.lock().unwrap().insert("192.0.2.50".into(), false);
         let handle = tokio::spawn(run_loop(state.clone(), "192.0.2.50".into(), |ip, _src| async move {
             tokio::time::sleep(Duration::from_millis(2_500)).await;
-            Some(lanprobe_core::ping::PingResult { ip, alive: false, latency_ms: None, timestamp: 0 })
+            Some(lanprobe_core::ping::PingResult { ip, alive: false, latency_ms: None, timestamp: 0, timestamp_ms: 0 })
         }));
         tokio::time::sleep(Duration::from_millis(12_600)).await;
         let n = state.monitoring.snapshot().get("192.0.2.50").map(|v| v.len()).unwrap_or(0);
@@ -326,7 +326,7 @@ mod tests {
         state.ping_stop.lock().unwrap().insert("192.0.2.51".into(), false);
         let handle = tokio::spawn(run_loop(state.clone(), "192.0.2.51".into(), |ip, _src| async move {
             tokio::time::sleep(Duration::from_millis(2_500)).await;
-            Some(lanprobe_core::ping::PingResult { ip, alive: true, latency_ms: Some(5), timestamp: 0 })
+            Some(lanprobe_core::ping::PingResult { ip, alive: true, latency_ms: Some(5), timestamp: 0, timestamp_ms: 0 })
         }));
         tokio::time::sleep(Duration::from_millis(500)).await;
         state.ping_stop.lock().unwrap().insert("192.0.2.51".into(), true);

@@ -14,10 +14,12 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/), avec une section
 ### English
 
 - **Fixed: monitoring now takes one sample per second even for unreachable targets**, so SLA reports no longer under-count outages.
+- **Fixed: samples are dated and ordered by when they started**, so a target's status no longer flickers during a partial outage.
 
 ### Français
 
 - **Corrigé : la surveillance prend un relevé par seconde, même sur une cible injoignable**, et les rapports SLA ne sous-estiment plus les pannes.
+- **Corrigé : les relevés sont datés et rangés à leur départ**, et l'état d'une cible ne clignote plus pendant une panne partielle.
 
 ## [2.4.10] - 2026-11-19
 

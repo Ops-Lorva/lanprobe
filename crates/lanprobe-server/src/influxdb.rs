@@ -129,6 +129,16 @@ fn event_to_points(event: &BroadcastEvent, host: &str) -> Vec<String> {
 
     match event.event.as_str() {
         "ping:tick" => {
+            // ⚠️ Daté au DÉPART du relevé, pas à son arrivée ici : plusieurs
+            // relevés sont en vol par cible, une cible muette rend le sien
+            // ~2,5 s après, et daté à l'arrivée il passait derrière celui
+            // lancé une seconde plus tard. La milliseconde évite aussi que
+            // deux points de la même seconde s'écrasent dans Influx.
+            let ts = p["timestamp_ms"]
+                .as_u64()
+                .map(|ms| ms as u128 * 1_000_000)
+                .or_else(|| p["timestamp"].as_u64().map(|s| s as u128 * 1_000_000_000))
+                .unwrap_or(ts);
             let ip = p["ip"].as_str().unwrap_or("unknown");
             let alive = p["alive"].as_bool().unwrap_or(false);
             let alive_str = if alive { "true" } else { "false" };
@@ -536,6 +546,31 @@ mod tests {
         let points = event_to_points(&event, "testhost");
         assert_eq!(points.len(), 1);
         assert!(points[0].starts_with("ping_latency,host=testhost,ip=192.168.1.1 "));
+    }
+
+    #[test]
+    fn a_ping_point_is_dated_to_its_departure_not_its_arrival() {
+        // 🔴 Une cible muette rend son relevé ~2,5 s après son départ, et la
+        // boucle en lance un par seconde : daté à l'arrivée, un point tombait
+        // après celui lancé une seconde plus tard, et deux points pouvaient
+        // partager la même seconde — donc s'écraser dans Influx.
+        let event = make_event(
+            "ping:tick",
+            json!({ "ip": "10.0.0.1", "alive": false, "latency_ms": null,
+                    "timestamp": 1_700_000_000u64, "timestamp_ms": 1_700_000_000_123u64 }),
+        );
+        let points = event_to_points(&event, "h");
+        assert!(points[0].ends_with(" 1700000000123000000"), "{}", points[0]);
+    }
+
+    #[test]
+    fn a_ping_point_without_milliseconds_falls_back_to_its_second() {
+        let event = make_event(
+            "ping:tick",
+            json!({ "ip": "10.0.0.1", "alive": true, "latency_ms": 3, "timestamp": 1_700_000_000u64 }),
+        );
+        let points = event_to_points(&event, "h");
+        assert!(points[0].ends_with(" 1700000000000000000"), "{}", points[0]);
     }
 
     #[test]

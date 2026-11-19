@@ -13,7 +13,12 @@ pub struct PingResult {
     pub ip: String,
     pub alive: bool,
     pub latency_ms: Option<u64>,
+    /// Départ du relevé, en secondes. Contrat de la fenêtre et du hub.
     pub timestamp: u64,
+    /// Départ du relevé, à la milliseconde. Plusieurs relevés d'une même
+    /// cible sont en vol à la fois et finissent dans le désordre : c'est
+    /// cette valeur qui les range, et qui date le point dans Influx.
+    pub timestamp_ms: u64,
 }
 
 const PROBE_PORTS: &[u16] = &[80, 443, 22, 445, 8080, 21, 23, 8443, 139, 9100, 631, 3389];
@@ -36,11 +41,35 @@ pub const PING_TIMEOUT_MS: u64 = 1000;
 /// Décision de Benjamin : **au-delà du délai, l'hôte est considéré mort.** C'est
 /// d'ailleurs ce qu'il est du point de vue de la sonde, qui n'a rien reçu à
 /// temps. Mieux vaut un trou franc qu'une valeur plausible et fausse.
-fn measured(ip: &str, latency_ms: u64, timestamp: u64) -> PingResult {
+fn measured(ip: &str, latency_ms: u64, started_ms: u64) -> PingResult {
     if latency_ms > PING_TIMEOUT_MS {
-        return PingResult { ip: ip.to_string(), alive: false, latency_ms: None, timestamp };
+        return unanswered(ip, started_ms);
     }
-    PingResult { ip: ip.to_string(), alive: true, latency_ms: Some(latency_ms), timestamp }
+    PingResult {
+        ip: ip.to_string(),
+        alive: true,
+        latency_ms: Some(latency_ms),
+        timestamp: started_ms / 1000,
+        timestamp_ms: started_ms,
+    }
+}
+
+fn unanswered(ip: &str, started_ms: u64) -> PingResult {
+    PingResult {
+        ip: ip.to_string(),
+        alive: false,
+        latency_ms: None,
+        timestamp: started_ms / 1000,
+        timestamp_ms: started_ms,
+    }
+}
+
+/// Heure de départ d'un relevé, en millisecondes.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Comme [`ping_once`], mais rend `None` quand la machine **n'a pas pu
@@ -50,10 +79,7 @@ fn measured(ip: &str, latency_ms: u64, timestamp: u64) -> PingResult {
 /// transforme en minutes d'indisponibilité imaginaires dans un rapport SLA.
 /// Un trou dans la courbe est honnête ; un point rouge inventé ne l'est pas.
 pub async fn ping_once_checked(ip: &str, src: Option<Ipv4Addr>) -> Option<PingResult> {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let started_ms = now_ms();
     // ⚠️ UN SEUL tir ICMP par relevé. Cette fonction tirait un premier ICMP
     // pour savoir s'il partait, puis rappelait `ping_once`, qui en tirait un
     // second : une cible muette coûtait deux délais d'une seconde avant même
@@ -61,45 +87,42 @@ pub async fn ping_once_checked(ip: &str, src: Option<Ipv4Addr>) -> Option<PingRe
     // Le SLA compte des POINTS : les pannes y pesaient trois fois moins que
     // leur durée réelle (50 % de panne affichaient ~75 % de dispo).
     match icmp_attempt(ip, src, PING_TIMEOUT_MS).await {
-        Attempt::Reply(lat) => Some(measured(ip, lat, timestamp)),
+        Attempt::Reply(lat) => Some(measured(ip, lat, started_ms)),
         // Les chemins de repli (ping système, TCP) consomment les mêmes
         // ressources : si l'ICMP n'a pas pu partir, les essayer ne ferait
         // qu'aggraver la saturation qu'on est en train de subir.
         Attempt::NotSent => None,
-        Attempt::NoReply => Some(fallbacks(ip, src, timestamp).await),
+        Attempt::NoReply => Some(fallbacks(ip, src, started_ms).await),
     }
 }
 
 pub async fn ping_once(ip: &str, src: Option<Ipv4Addr>) -> PingResult {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let started_ms = now_ms();
 
     if let Some(lat) = icmp_ping(ip, src, PING_TIMEOUT_MS).await {
-        return measured(ip, lat, timestamp);
+        return measured(ip, lat, started_ms);
     }
-    fallbacks(ip, src, timestamp).await
+    fallbacks(ip, src, started_ms).await
 }
 
 /// Replis quand l'ICMP n'a rien rendu : ping système (Windows, macOS), puis
 /// sondage TCP. Partagés par `ping_once` et `ping_once_checked`.
-async fn fallbacks(ip: &str, src: Option<Ipv4Addr>, timestamp: u64) -> PingResult {
+async fn fallbacks(ip: &str, src: Option<Ipv4Addr>, started_ms: u64) -> PingResult {
     #[cfg(target_os = "windows")]
     if let Some(lat) = windows_ping_exe(ip, src, PING_TIMEOUT_MS).await {
-        return measured(ip, lat, timestamp);
+        return measured(ip, lat, started_ms);
     }
 
     #[cfg(target_os = "macos")]
     if let Some(lat) = macos_ping_exe(ip, src, PING_TIMEOUT_MS).await {
-        return measured(ip, lat, timestamp);
+        return measured(ip, lat, started_ms);
     }
 
     let start = Instant::now();
     if tcp_probe(ip, src, PING_TIMEOUT_MS).await {
-        measured(ip, start.elapsed().as_millis() as u64, timestamp)
+        measured(ip, start.elapsed().as_millis() as u64, started_ms)
     } else {
-        PingResult { ip: ip.to_string(), alive: false, latency_ms: None, timestamp }
+        unanswered(ip, started_ms)
     }
 }
 
@@ -371,6 +394,16 @@ mod tests {
         let r = measured("10.0.0.1", PING_TIMEOUT_MS + 1, 1000);
         assert!(!r.alive);
         assert_eq!(r.latency_ms, None);
+    }
+
+    #[test]
+    fn a_result_is_dated_to_the_millisecond_of_its_departure() {
+        // Deux relevés lancés dans la même seconde ne doivent ni s'écraser
+        // dans Influx (même série, même horodatage) ni se confondre quand on
+        // cherche le plus récent. `timestamp` reste en secondes : contrat.
+        let r = measured("10.0.0.1", 5, 1_700_000_000_123);
+        assert_eq!(r.timestamp, 1_700_000_000);
+        assert_eq!(r.timestamp_ms, 1_700_000_000_123);
     }
 }
 

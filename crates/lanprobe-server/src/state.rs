@@ -133,7 +133,12 @@ impl MonitoringStateInner {
     pub fn push(&self, result: PingResult) {
         if let Ok(mut g) = self.samples.lock() {
             let q = g.entry(result.ip.clone()).or_default();
-            q.push_back(result);
+            // ⚠️ Rangé par DÉPART, pas par arrivée : plusieurs relevés sont en
+            // vol par cible et un relevé muet finit après le suivant. Le
+            // dernier de la file est ce que la fenêtre et le hub affichent ;
+            // rangé à l'arrivée, l'état clignotait pendant une panne partielle.
+            let at = q.partition_point(|s| s.timestamp_ms <= result.timestamp_ms);
+            q.insert(at, result);
             while q.len() > MONITOR_MAX_SAMPLES {
                 q.pop_front();
             }
@@ -379,6 +384,36 @@ impl AppState {
             event: event.into(),
             payload,
         });
+    }
+}
+
+#[cfg(test)]
+mod monitoring_tests {
+    use super::*;
+
+    fn sample(timestamp_ms: u64, alive: bool) -> PingResult {
+        PingResult {
+            ip: "10.0.0.1".into(),
+            alive,
+            latency_ms: alive.then_some(3),
+            timestamp: timestamp_ms / 1000,
+            timestamp_ms,
+        }
+    }
+
+    /// 🔴 Un relevé muet (~2,5 s) finit après celui lancé une seconde plus
+    /// tard. Rangé à l'arrivée, le « dernier relevé » lu par le hub et par la
+    /// fenêtre était tantôt le vieux rouge, tantôt le récent vert : l'état
+    /// clignotait pendant une panne partielle.
+    #[test]
+    fn a_late_sample_is_filed_by_departure_not_arrival() {
+        let state = MonitoringStateInner::default();
+        state.push(sample(10_000, true));
+        state.push(sample(12_000, true));
+        state.push(sample(11_000, false)); // parti avant, arrivé après
+        let got: Vec<u64> = state.snapshot()["10.0.0.1"].iter().map(|s| s.timestamp_ms).collect();
+        assert_eq!(got, vec![10_000, 11_000, 12_000]);
+        assert!(state.snapshot()["10.0.0.1"].last().unwrap().alive, "le plus récent par départ est vert");
     }
 }
 
